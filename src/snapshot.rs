@@ -5,12 +5,10 @@
 //! deny rules applied. The request path asks a `HashSet` and never walks the
 //! RBAC graph — that is what keeps authorisation off the latency budget.
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
-
-#[cfg(feature = "control")]
-use serde::{Deserialize, Serialize};
 
 pub type PrincipalId = u64;
 
@@ -100,7 +98,12 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// Exists solely because `[u8; 32]` cannot be a serde map key; key hashes are
 /// hex strings here and nowhere else. See [`Snapshot::to_wire`].
-#[cfg(feature = "control")]
+///
+/// Unconditional: this is the contract between the control plane and the data
+/// plane, not control-plane-only code. `HttpSource` (`src/source/http.rs`)
+/// needs it in every build, including `--no-default-features`, which has no
+/// database driver at all but still has to poll `/snapshot` and cache the
+/// result to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireSnapshot {
     pub version: u64,
@@ -110,7 +113,6 @@ pub struct WireSnapshot {
     pub open: bool,
 }
 
-#[cfg(feature = "control")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireKeyEntry {
     pub principal: PrincipalId,
@@ -118,7 +120,6 @@ pub struct WireKeyEntry {
     pub disabled: bool,
 }
 
-#[cfg(feature = "control")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WirePrincipal {
     pub id: PrincipalId,
@@ -127,7 +128,6 @@ pub struct WirePrincipal {
     pub allow_all: bool,
 }
 
-#[cfg(feature = "control")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireBackendDef {
     pub api_base: String,
@@ -135,7 +135,6 @@ pub struct WireBackendDef {
     pub api_key: Option<String>,
 }
 
-#[cfg(feature = "control")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireModelDef {
     pub name: String,
@@ -193,7 +192,6 @@ impl Snapshot {
     /// `[u8; 32]` cannot be a serde map key, so key hashes are hex-encoded
     /// here rather than reworking the in-memory representation that the
     /// request path's `HashMap` lookup depends on.
-    #[cfg(feature = "control")]
     pub fn to_wire(&self) -> WireSnapshot {
         WireSnapshot {
             version: self.version,
@@ -247,7 +245,6 @@ impl Snapshot {
     /// panicking: this is untrusted-ish data crossing a process boundary
     /// (control plane -> disk or network -> proxy), and one malformed entry
     /// must not take the whole snapshot down.
-    #[cfg(feature = "control")]
     pub fn from_wire(w: WireSnapshot) -> Snapshot {
         let mut keys = HashMap::new();
         for (hex_hash, entry) in w.keys {
@@ -411,7 +408,6 @@ mod tests {
     /// Load-bearing for Task 7: the on-disk cache stores exactly this JSON,
     /// so anything lost here is lost on every cold start after a control
     /// plane outage.
-    #[cfg(feature = "control")]
     #[test]
     fn a_snapshot_survives_a_round_trip_through_the_wire_format() {
         let expiry = SystemTime::now() + Duration::from_secs(3600);
@@ -479,7 +475,6 @@ mod tests {
     /// Task 7 feeds `from_wire` whatever is on disk, and a truncated or
     /// otherwise corrupted cache file is an expected failure mode there, not
     /// a bug — it must degrade to "missing entry", never panic.
-    #[cfg(feature = "control")]
     #[test]
     fn from_wire_skips_corrupt_hashes_instead_of_panicking() {
         let valid_hash = hash_key("sk-good");

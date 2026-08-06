@@ -5,18 +5,13 @@
 //! about changes. Losing the control plane must not lose inference.
 
 use crate::snapshot::Snapshot;
-#[cfg(feature = "control")]
 use crate::source::SnapshotSource;
 use crate::upstream::Upstream;
-#[cfg(feature = "control")]
 use bytes::Bytes;
-#[cfg(feature = "control")]
 use http_body_util::{BodyExt, Full};
-#[cfg(feature = "control")]
 use hyper::{Request, StatusCode};
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "control")]
 use std::time::Duration;
 
 pub struct HttpSource {
@@ -40,14 +35,6 @@ impl HttpSource {
         }
     }
 
-    // The wire format (`Snapshot::to_wire`/`from_wire`) lives behind the
-    // `control` feature because it pulls in `hex` and `chrono`, which are
-    // otherwise control-plane-only dependencies. `HttpSource` itself stays
-    // unconditionally compiled — a `File`-only build still links this module
-    // — but its bodies need that format, so they are gated here rather than
-    // at the module level. A `--no-default-features` build gets a type that
-    // exists and says why it cannot do anything, not a missing module.
-    #[cfg(feature = "control")]
     pub fn write_cache(&self, snap: &Snapshot) -> anyhow::Result<()> {
         if let Some(dir) = self.cache_path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -60,26 +47,14 @@ impl HttpSource {
         Ok(())
     }
 
-    #[cfg(not(feature = "control"))]
-    pub fn write_cache(&self, _snap: &Snapshot) -> anyhow::Result<()> {
-        anyhow::bail!("HttpSource requires the `control` feature")
-    }
-
     /// Last-known-good, or `None` for absent, unreadable or corrupt.
-    #[cfg(feature = "control")]
     pub fn load_cached(&self) -> Option<Snapshot> {
         let bytes = std::fs::read(&self.cache_path).ok()?;
         let wire = serde_json::from_slice(&bytes).ok()?;
         Some(Snapshot::from_wire(wire))
     }
-
-    #[cfg(not(feature = "control"))]
-    pub fn load_cached(&self) -> Option<Snapshot> {
-        None
-    }
 }
 
-#[cfg(feature = "control")]
 impl SnapshotSource for HttpSource {
     async fn fetch(&self, have: Option<u64>) -> anyhow::Result<Option<Snapshot>> {
         let mut builder = Request::builder().method("GET").uri(&self.url).header(
