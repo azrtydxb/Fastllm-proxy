@@ -10,20 +10,27 @@
 //! only once, and the original bytes are what get forwarded. The body is only
 //! rebuilt when an alias means the upstream model name differs from the one the
 //! client asked for.
+//!
+//! Two body encodings show up on these endpoints: JSON everywhere, and
+//! `multipart/form-data` on the audio routes. Both are handled the same way —
+//! locate `model`, forward the original bytes — so an upload never gets
+//! re-encoded on its way through.
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Frame, Incoming};
-use hyper::header::{HeaderName, HeaderValue};
+use hyper::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use pin_project_lite::pin_project;
 use serde::Deserialize;
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tracing::{debug, warn};
 
+use crate::multipart;
 use crate::registry::{Backend, BackendUid, InflightGuard};
 use crate::state::AppState;
 
@@ -40,7 +47,7 @@ const PROXIED_SUFFIXES: &[&str] = &[
     "/audio/translations",
 ];
 
-/// Headers that must not be copied between hops.
+/// Per-connection headers, meaningless on the next hop in either direction.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
@@ -50,10 +57,18 @@ const HOP_BY_HOP: &[&str] = &[
     "trailer",
     "transfer-encoding",
     "upgrade",
-    "host",
-    "content-length",
-    "authorization",
 ];
+
+/// Additionally dropped from the client's request before it goes upstream.
+///
+/// `host` and `content-length` describe the old hop and are regenerated;
+/// `authorization` authenticates the client to *this* proxy and must never
+/// leak onward — the upstream gets the backend's own key or nothing.
+///
+/// Note that `content-length` is deliberately absent from the response side:
+/// the body is forwarded byte for byte, so an upstream length stays accurate
+/// and stripping it would force needless chunking on ordinary completions.
+const REQUEST_ONLY_STRIPPED: &[&str] = &["host", "content-length", "authorization"];
 
 pub async fn handle(
     req: Request<Incoming>,
@@ -94,6 +109,11 @@ pub async fn handle(
 
 /// Fields the router needs. Everything else in the body is skipped without
 /// being materialised.
+///
+/// Reading `model` off the front of the body with a hand-rolled scan was tried
+/// and reverted: it measured 67.2k vs 67.1k req/s on 64KiB bodies. `serde_json`
+/// skips what it does not want at ~16 B/ns, and the parse is ~3% of the work a
+/// request costs — not worth a bespoke parser on the routing path.
 #[derive(Deserialize)]
 struct BodyPeek {
     #[serde(default)]
@@ -111,36 +131,86 @@ async fn proxy_request(
 
     let collected = match Limited::new(body, state.max_body_bytes).collect().await {
         Ok(c) => c.to_bytes(),
-        Err(_) => {
-            return error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload_too_large",
-                &format!("request body exceeds {} bytes", state.max_body_bytes),
-            )
-        }
-    };
-
-    let peek: BodyPeek = match serde_json::from_slice(&collected) {
-        Ok(p) => p,
         Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("request body is not valid JSON: {e}"),
-            )
+            state.requests_failed.fetch_add(1, Ordering::Relaxed);
+            // A body that outgrew the cap and a client that vanished mid-upload
+            // are different failures and deserve different statuses.
+            return if e
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some()
+            {
+                error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    &format!("request body exceeds {} bytes", state.max_body_bytes),
+                )
+            } else {
+                error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &format!("could not read the request body: {e}"),
+                )
+            };
         }
     };
 
-    let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "request body is missing the 'model' field",
-        );
+    let content_type = parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    let (model, model_field, streaming) = match multipart::boundary(content_type) {
+        // Multipart: the audio routes. `model` is a form field, and the rest of
+        // the body — the upload — must not be touched.
+        Some(boundary) => {
+            let Some(range) = multipart::find_field(&collected, &boundary, "model") else {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "multipart body is missing the 'model' field",
+                );
+            };
+            match multipart::field_value(&collected, range.clone()).filter(|m| !m.is_empty()) {
+                Some(model) => (model.to_string(), Some(range), false),
+                None => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "the 'model' form field is empty or not valid UTF-8",
+                    );
+                }
+            }
+        }
+        None => {
+            let peek: BodyPeek = match serde_json::from_slice(&collected) {
+                Ok(p) => p,
+                Err(e) => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        &format!("request body is not valid JSON: {e}"),
+                    );
+                }
+            };
+            let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "request body is missing the 'model' field",
+                );
+            };
+            (model, None, peek.stream.unwrap_or(false))
+        }
     };
 
     let registry = state.registry.load();
     let Some(pool) = registry.pool(&model) else {
+        state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let known = registry.model_names().join(", ");
         return error_response(
             StatusCode::NOT_FOUND,
@@ -163,27 +233,33 @@ async fn proxy_request(
         };
         tried.push(backend.uid);
 
-        let upstream_body =
-            match rewrite_model_if_needed(&collected, &model, &backend.upstream_model) {
-                Ok(b) => b,
-                Err(e) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        &format!("could not rewrite model name for alias: {e}"),
-                    )
-                }
-            };
+        let upstream_body = match rewrite_model_if_needed(
+            &collected,
+            &model,
+            &backend.upstream_model,
+            model_field.clone(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &format!("could not rewrite model name for alias: {e}"),
+                );
+            }
+        };
 
         let upstream_req =
             match build_upstream_request(&parts.headers, &backend, &subpath, upstream_body) {
                 Ok(r) => r,
                 Err(e) => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_error",
                         &format!("could not build upstream request: {e}"),
-                    )
+                    );
                 }
             };
 
@@ -208,22 +284,30 @@ async fn proxy_request(
         match result {
             Ok(resp) => {
                 let status = resp.status();
-                // A 5xx before any bytes were forwarded is worth another node.
-                // 4xx is the client's fault and retrying just multiplies it.
-                if status.is_server_error() && attempt < state.max_retries {
-                    backend.note_error();
-                    last_error = Some(format!("upstream {} returned {}", backend.api_base, status));
-                    debug!(backend = %backend.api_base, %status, "retrying on another backend");
-                    continue;
-                }
                 if status.is_server_error() {
                     backend.note_error();
+                    // A 5xx before any bytes were forwarded is worth another
+                    // node — but only if there *is* another node. Retrying into
+                    // an empty candidate set would discard this response and
+                    // answer with a synthetic 502, throwing away the upstream's
+                    // own diagnostics; on a single-node pool that is every 5xx.
+                    // 4xx is the client's fault and retrying just multiplies it.
+                    if attempt < state.max_retries && state.router.has_candidate(&pool, &tried) {
+                        last_error =
+                            Some(format!("upstream {} returned {}", backend.api_base, status));
+                        debug!(backend = %backend.api_base, %status, "retrying on another backend");
+                        continue;
+                    }
                 }
-                state.requests_ok.fetch_add(1, Ordering::Relaxed);
+                if status.is_client_error() || status.is_server_error() {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    state.requests_ok.fetch_add(1, Ordering::Relaxed);
+                }
                 debug!(
                     backend = %backend.api_base,
                     model = %model,
-                    stream = peek.stream.unwrap_or(false),
+                    stream = streaming,
                     %status,
                     "proxied"
                 );
@@ -247,14 +331,20 @@ async fn proxy_request(
 /// bytes when the names already match.
 ///
 /// The common case is a straight `Bytes` clone (a refcount bump). Only aliases
-/// pay for a parse and re-serialise.
+/// pay for a rewrite — and for multipart, `model_field` is the already-located
+/// range of the field value, so even that is a splice rather than a re-encode
+/// of the upload.
 fn rewrite_model_if_needed(
     body: &Bytes,
     requested: &str,
     upstream: &str,
+    model_field: Option<Range<usize>>,
 ) -> Result<Bytes, serde_json::Error> {
     if requested == upstream {
         return Ok(body.clone());
+    }
+    if let Some(range) = model_field {
+        return Ok(multipart::replace_range(body, range, upstream));
     }
     let mut value: serde_json::Value = serde_json::from_slice(body)?;
     if let Some(obj) = value.as_object_mut() {
@@ -277,20 +367,20 @@ fn build_upstream_request(
 
     let headers = builder.headers_mut().expect("builder has no error yet");
     for (name, value) in client_headers.iter() {
-        if HOP_BY_HOP.contains(&name.as_str()) {
+        let name_str = name.as_str();
+        if HOP_BY_HOP.contains(&name_str) || REQUEST_ONLY_STRIPPED.contains(&name_str) {
             continue;
         }
         headers.insert(name.clone(), value.clone());
     }
-    headers.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    if let Some(key) = &backend.api_key {
-        headers.insert(
-            HeaderName::from_static("authorization"),
-            HeaderValue::from_str(&format!("Bearer {key}"))?,
-        );
+    // The client's content-type is carried through untouched — a multipart
+    // upload's boundary parameter lives there, and overwriting it would make
+    // the body unparseable upstream. JSON is only assumed when nothing was set.
+    if !headers.contains_key(CONTENT_TYPE) {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    if let Some(auth) = &backend.auth {
+        headers.insert(HeaderName::from_static("authorization"), auth.clone());
     }
 
     Ok(builder.body(Full::new(body))?)
@@ -300,6 +390,8 @@ fn build_upstream_request(
 /// for as long as the body is still streaming.
 fn finish_response(resp: Response<Incoming>, guard: InflightGuard) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
+    // Hop-by-hop only: the response body is passed through byte for byte, so
+    // an upstream `content-length` remains correct and is worth keeping.
     for name in HOP_BY_HOP {
         parts.headers.remove(*name);
     }
@@ -308,6 +400,12 @@ fn finish_response(resp: Response<Incoming>, guard: InflightGuard) -> Response<R
 
 pin_project! {
     /// Passthrough body that releases an [`InflightGuard`] when the stream ends.
+    ///
+    /// Deliberately not batching: merging frames that have already arrived was
+    /// measured at a 1.000 merge ratio, because hyper's pooled client hands the
+    /// body over one chunk per want/give round trip and a second chunk is never
+    /// already waiting. The cost per frame is that handoff, not this wrapper,
+    /// so a coalescing buffer here only adds a poll and a branch.
     struct TrackedBody {
         #[pin]
         inner: Incoming,
@@ -358,8 +456,7 @@ fn check_auth(req: &Request<Incoming>, state: &AppState) -> Option<Response<ResB
         .headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim);
+        .and_then(bearer_token);
 
     match presented {
         Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => None,
@@ -371,7 +468,21 @@ fn check_auth(req: &Request<Incoming>, state: &AppState) -> Option<Response<ResB
     }
 }
 
-/// Length-independent comparison, so a wrong key cannot be probed byte by byte.
+/// Token out of an `Authorization` value, if the scheme is Bearer.
+///
+/// RFC 7235 makes the auth scheme case-insensitive, and clients do send
+/// `bearer`; matching only the capitalised form rejects a valid key.
+fn bearer_token(header: &str) -> Option<&str> {
+    let (scheme, token) = header.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|t| !t.is_empty())
+}
+
+/// Comparison that does not short-circuit on the first differing byte, so a
+/// wrong key cannot be recovered one byte at a time. The length itself is not
+/// hidden — for a bearer token that is not the secret.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -454,14 +565,14 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
     let registry = state.registry.load();
     let mut out = String::with_capacity(1024);
 
-    out.push_str("# HELP fastllm_requests_total Requests proxied successfully.\n");
+    out.push_str("# HELP fastllm_requests_total Requests answered with a success status.\n");
     out.push_str("# TYPE fastllm_requests_total counter\n");
     out.push_str(&format!(
         "fastllm_requests_total {}\n",
         state.requests_ok.load(Ordering::Relaxed)
     ));
 
-    out.push_str("# HELP fastllm_requests_failed_total Requests that exhausted every backend.\n");
+    out.push_str("# HELP fastllm_requests_failed_total Requests rejected here, answered with an error status, or that exhausted every backend.\n");
     out.push_str("# TYPE fastllm_requests_failed_total counter\n");
     out.push_str(&format!(
         "fastllm_requests_failed_total {}\n",
@@ -527,7 +638,7 @@ mod tests {
     #[test]
     fn identical_model_names_avoid_a_reserialise() {
         let body = Bytes::from_static(br#"{"model":"m","messages":[]}"#);
-        let out = rewrite_model_if_needed(&body, "m", "m").unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", None).unwrap();
         // Same allocation, not a copy.
         assert_eq!(out.as_ptr(), body.as_ptr());
     }
@@ -535,11 +646,46 @@ mod tests {
     #[test]
     fn alias_rewrites_the_model_field() {
         let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[],"temperature":0.7}"#);
-        let out = rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B").unwrap();
+        let out = rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B", None).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(parsed["model"], "Qwen/Qwen3-30B-A3B");
         // Other parameters must survive the round trip.
         assert_eq!(parsed["temperature"], 0.7);
+    }
+
+    #[test]
+    fn alias_rewrites_a_multipart_model_without_touching_the_upload() {
+        let body = Bytes::from(
+            "--xy\r\n\
+             Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+             whisper-1\r\n\
+             --xy\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n\
+             RIFF\x00\x00audio\r\n\
+             --xy--\r\n",
+        );
+        let range = multipart::find_field(&body, "xy", "model").unwrap();
+        let out =
+            rewrite_model_if_needed(&body, "whisper-1", "Systran/faster-whisper", Some(range))
+                .unwrap();
+
+        let model = multipart::find_field(&out, "xy", "model").unwrap();
+        assert_eq!(
+            multipart::field_value(&out, model),
+            Some("Systran/faster-whisper")
+        );
+        let file = multipart::find_field(&out, "xy", "file").unwrap();
+        assert_eq!(out.slice(file), Bytes::from_static(b"RIFF\x00\x00audio"));
+    }
+
+    #[test]
+    fn multipart_body_is_forwarded_verbatim_when_no_alias() {
+        let body = Bytes::from_static(
+            b"--xy\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm\r\n--xy--\r\n",
+        );
+        let range = multipart::find_field(&body, "xy", "model").unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", Some(range)).unwrap();
+        assert_eq!(out.as_ptr(), body.as_ptr());
     }
 
     #[test]
@@ -559,11 +705,36 @@ mod tests {
     }
 
     #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        assert_eq!(bearer_token("Bearer sk-abc"), Some("sk-abc"));
+        assert_eq!(bearer_token("bearer sk-abc"), Some("sk-abc"));
+        assert_eq!(bearer_token("BEARER  sk-abc "), Some("sk-abc"));
+        assert_eq!(bearer_token("Basic sk-abc"), None);
+        assert_eq!(bearer_token("Bearer "), None);
+        assert_eq!(bearer_token("sk-abc"), None);
+    }
+
+    #[test]
     fn authorization_is_not_forwarded_from_the_client() {
         // The client's key authenticates it to the proxy; the upstream gets the
         // backend's own key or none at all.
-        assert!(HOP_BY_HOP.contains(&"authorization"));
-        assert!(HOP_BY_HOP.contains(&"content-length"));
-        assert!(HOP_BY_HOP.contains(&"host"));
+        assert!(REQUEST_ONLY_STRIPPED.contains(&"authorization"));
+        assert!(REQUEST_ONLY_STRIPPED.contains(&"content-length"));
+        assert!(REQUEST_ONLY_STRIPPED.contains(&"host"));
+    }
+
+    #[test]
+    fn response_content_length_survives_the_hop() {
+        // Stripping it would force chunked encoding on every non-streaming
+        // completion that arrived with a perfectly good length.
+        assert!(!HOP_BY_HOP.contains(&"content-length"));
+        assert!(HOP_BY_HOP.contains(&"transfer-encoding"));
+    }
+
+    #[test]
+    fn audio_routes_are_proxied() {
+        for route in ["/audio/transcriptions", "/audio/translations"] {
+            assert!(PROXIED_SUFFIXES.contains(&route));
+        }
     }
 }

@@ -16,10 +16,15 @@
 //! rebalance. `balance_abs` / `balance_rel` set how much imbalance is tolerated
 //! before cache locality is given up.
 
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::registry::{Backend, BackendUid, Pool};
+
+/// Candidate list for one routing decision. Pools are a handful of nodes, so
+/// this stays on the stack and the hot path allocates nothing.
+type Candidates<'a> = SmallVec<[&'a Arc<Backend>; 8]>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Policy {
@@ -82,7 +87,7 @@ impl Router {
     ///
     /// Returns `None` when every healthy backend has been exhausted.
     pub fn pick(&self, pool: &Pool, prefix: u64, exclude: &[BackendUid]) -> Option<Arc<Backend>> {
-        let candidates: Vec<&Arc<Backend>> = pool
+        let mut candidates: Candidates = pool
             .iter()
             .filter(|b| b.is_healthy() && !exclude.contains(&b.uid))
             .collect();
@@ -90,16 +95,12 @@ impl Router {
         // Everything healthy has already failed — fall back to unhealthy
         // backends rather than returning an error. A stale health flag should
         // not turn a recoverable request into a 503.
-        let candidates = if candidates.is_empty() {
-            let fallback: Vec<&Arc<Backend>> =
-                pool.iter().filter(|b| !exclude.contains(&b.uid)).collect();
-            if fallback.is_empty() {
+        if candidates.is_empty() {
+            candidates = pool.iter().filter(|b| !exclude.contains(&b.uid)).collect();
+            if candidates.is_empty() {
                 return None;
             }
-            fallback
-        } else {
-            candidates
-        };
+        }
 
         if candidates.len() == 1 {
             return Some(Arc::clone(candidates[0]));
@@ -118,6 +119,16 @@ impl Router {
             self.affinity.put(prefix, chosen.uid);
         }
         Some(Arc::clone(chosen))
+    }
+
+    /// Would [`pick`](Self::pick) still find a backend if these were excluded?
+    ///
+    /// Answers the retry question — "is there anywhere else to send this?" —
+    /// without the side effects of actually picking (claiming a prefix,
+    /// advancing the round-robin cursor). Mirrors `pick`'s last-resort rule
+    /// that an unhealthy backend still counts as somewhere to go.
+    pub fn has_candidate(&self, pool: &Pool, exclude: &[BackendUid]) -> bool {
+        pool.iter().any(|b| !exclude.contains(&b.uid))
     }
 
     /// Returns the chosen backend and whether it should claim this prefix.
@@ -158,35 +169,36 @@ impl Router {
 /// deterministic — the same prefix picks the same node even before it is
 /// cached — while distributing distinct prefixes across the cluster.
 fn least_loaded_for<'a>(candidates: &[&'a Arc<Backend>], prefix: u64) -> &'a Arc<Backend> {
-    let min = candidates.iter().map(|b| b.inflight()).min().unwrap_or(0);
-    let tied: Vec<&'a Arc<Backend>> = candidates
-        .iter()
-        .copied()
-        .filter(|b| b.inflight() == min)
-        .collect();
-    let tied = if tied.is_empty() {
-        candidates
-    } else {
-        &tied[..]
-    };
-    tied[(prefix % tied.len() as u64) as usize]
+    pick_tied(candidates, prefix as usize)
 }
 
 /// Least loaded, with ties broken by rotation. Used by the cache-blind policy,
 /// where there is no prefix to spread on.
 fn least_loaded<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a Arc<Backend> {
+    pick_tied(candidates, rr.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The `selector`-th of the least-loaded candidates.
+///
+/// Two scans over a handful of relaxed atomics and no allocation — this runs
+/// per request. In-flight counts can move between the scans, so the tail
+/// return covers the case where the minimum no longer matches anything; any
+/// candidate is a defensible answer at that point.
+fn pick_tied<'a>(candidates: &[&'a Arc<Backend>], selector: usize) -> &'a Arc<Backend> {
     let min = candidates.iter().map(|b| b.inflight()).min().unwrap_or(0);
-    let tied: Vec<&'a Arc<Backend>> = candidates
-        .iter()
-        .copied()
-        .filter(|b| b.inflight() == min)
-        .collect();
-    let tied = if tied.is_empty() {
-        candidates
-    } else {
-        &tied[..]
-    };
-    tied[rr.fetch_add(1, Ordering::Relaxed) % tied.len()]
+    let tied = candidates.iter().filter(|b| b.inflight() == min).count();
+    if tied > 0 {
+        let mut nth = selector % tied;
+        for b in candidates {
+            if b.inflight() == min {
+                if nth == 0 {
+                    return b;
+                }
+                nth -= 1;
+            }
+        }
+    }
+    candidates[selector % candidates.len()]
 }
 
 /// Direct-mapped, lock-free prefix -> backend cache.
@@ -196,9 +208,10 @@ fn least_loaded<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a Ar
 /// has to sit on the per-request hot path. One relaxed atomic load and one
 /// relaxed store beats any map with a lock in front of it.
 ///
-/// Slot encoding: `(tag << 16) | uid`, where `tag` is the upper 48 bits of the
+/// Slot encoding: `(tag << 32) | uid`, where `tag` is the upper 32 bits of the
 /// hash. Zero means empty, so the one hash that would encode to zero is simply
-/// never cached.
+/// never cached. A 32-bit tag leaves a 2^-32 chance that a colliding prefix is
+/// mistaken for a hit, which costs one misrouted request and no correctness.
 struct AffinityCache {
     slots: Box<[AtomicU64]>,
     mask: usize,
@@ -216,7 +229,7 @@ impl AffinityCache {
 
     #[inline]
     fn encode(hash: u64, uid: BackendUid) -> u64 {
-        ((hash >> 16) << 16) | uid as u64
+        ((hash >> 32) << 32) | uid as u64
     }
 
     #[inline]
@@ -226,8 +239,8 @@ impl AffinityCache {
             return None;
         }
         // Confirm the slot belongs to this hash and not a colliding one.
-        if slot >> 16 == hash >> 16 {
-            Some(slot as u16)
+        if slot >> 32 == hash >> 32 {
+            Some(slot as BackendUid)
         } else {
             None
         }
@@ -393,7 +406,7 @@ model_list:
         cache.put(0x1234_5678_9abc_def0, 7);
         assert_eq!(cache.get(0x1234_5678_9abc_def0), Some(7));
         // Same slot index, different tag => miss, not a wrong answer.
-        let colliding = 0x1234_5678_9abc_def0u64 ^ (1 << 20);
+        let colliding = 0x1234_5678_9abc_def0u64 ^ (1 << 40);
         assert_eq!(
             colliding as usize & cache.mask,
             0x1234_5678_9abc_def0usize & cache.mask

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-proxy
+  namespace: fastllm
+  labels: { app: fastllm-proxy }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: fastllm-proxy }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: fastllm-proxy }
+    spec:
+      # Two replicas on different nodes: a gateway that dies with one node is
+      # not a gateway. Prefix affinity is per-process, so two replicas means a
+      # prefix can land on either — acceptable at one backend, worth revisiting
+      # if the backend pool grows and cache locality starts to matter.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: fastllm-proxy }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: proxy
+          image: 192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main
+          imagePullPolicy: Always
+          args:
+            - --policy=cache-affinity
+            # spark2 holds 262k context and generations run long; bound only
+            # time-to-first-byte, never the generation itself.
+            - --upstream-timeout=120
+            - --health-interval=10
+          ports:
+            - { name: http, containerPort: 4000 }
+          env:
+            - name: FASTLLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: fastllm-proxy-auth, key: master-key }
+            - name: FASTLLM_LOG
+              value: info
+          volumeMounts:
+            - { name: config, mountPath: /etc/fastllm, readOnly: true }
+          # Readiness tracks backends: /health is 503 with none healthy, which
+          # correctly pulls this pod out of the Service. Liveness must NOT use
+          # it — spark2 being down would then restart-loop a perfectly healthy
+          # proxy — so it probes /metrics, which answers whenever the process
+          # is alive.
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /metrics, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /metrics, port: http }
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "2", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap: { name: fastllm-proxy-config }

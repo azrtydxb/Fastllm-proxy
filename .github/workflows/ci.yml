@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: 192.168.10.123:5000
+  IMAGE: 192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy
+
+jobs:
+  test:
+    runs-on: arc-azrtydxb
+    # The runner image ships no Rust, so the toolchain comes from a container —
+    # same base as the Dockerfile, so CI and the image agree on the compiler.
+    container:
+      image: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup component add rustfmt clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  publish:
+    # Only what lands on main or a tag becomes an image; a PR just gets tested.
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: arc-azrtydxb-publish
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every build gets an immutable sha- tag. The moving `main` tag and a
+      # semver tag are only added when the ref actually warrants them, so a
+      # workflow_dispatch on a branch cannot quietly redefine what `:main` is.
+      - name: Compute tags
+        id: meta
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:sha-${GITHUB_SHA::7}"
+            [ "${GITHUB_REF}" = "refs/heads/main" ] && echo "${IMAGE}:main"
+            [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${IMAGE}:${GITHUB_REF_NAME#v}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+
+      - name: Set up buildx (zot insecure, Docker Hub via cluster mirror)
+        run: |
+          cat > /tmp/buildkitd.toml <<'EOF'
+          [registry."192.168.10.123:5000"]
+            insecure = true
+          # Pull base images through the cluster's Zot pull-through cache rather
+          # than hitting Docker Hub anonymously and collecting 429s.
+          [registry."docker.io"]
+            mirrors = ["192.168.10.123:5000"]
+          EOF
+          docker buildx create --name fastllm --driver docker-container \
+            --platform linux/arm64 --buildkitd-config /tmp/buildkitd.toml --use
+          docker buildx inspect --bootstrap
+
+      - name: Build & push (arm64 → zot)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          builder: fastllm
+          # arm64 only: every node in kw is arm64, and a Rust release build
+          # under QEMU is not worth the wall clock.
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64,mode=max,image-manifest=true

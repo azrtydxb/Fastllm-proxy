@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fastllm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-proxy
+  namespace: fastllm
+  labels: { app: fastllm-proxy }
+  annotations:
+    # kube-vip, matching how the other VIPs on this cluster are requested.
+    # .120-.125 were taken; .126 was free.
+    kube-vip.io/loadbalancerIPs: "192.168.10.126"
+spec:
+  type: LoadBalancer
+  selector: { app: fastllm-proxy }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+    - { name: api, port: 4000, targetPort: http }

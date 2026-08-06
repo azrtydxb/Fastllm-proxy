@@ -2,6 +2,7 @@
 
 mod config;
 mod health;
+mod multipart;
 mod proxy;
 mod registry;
 mod router;
@@ -12,6 +13,7 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -81,6 +83,11 @@ struct Cli {
     #[arg(long)]
     workers: Option<usize>,
 
+    /// Seconds between checks for an edited config file. 0 disables the watch,
+    /// leaving SIGHUP as the only way to reload.
+    #[arg(long, default_value_t = 5, env = "FASTLLM_CONFIG_POLL")]
+    config_poll: u64,
+
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 }
@@ -128,12 +135,15 @@ async fn run(cli: Cli) -> Result<()> {
     connector.set_nodelay(true);
     connector.set_connect_timeout(Some(Duration::from_secs(5)));
     connector.set_keepalive(Some(Duration::from_secs(60)));
+    // hyper-rustls requires the wrapped connector to permit non-HTTPS URIs; the
+    // https_or_http() policy below is what actually decides per request.
+    connector.enforce_http(false);
 
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(cli.pool_max_idle)
         .retry_canceled_requests(false)
-        .build(connector);
+        .build(https_connector(connector)?);
 
     let master_key = cli
         .master_key
@@ -171,6 +181,9 @@ async fn run(cli: Cli) -> Result<()> {
         Duration::from_secs(cli.health_timeout.max(1)),
     );
     spawn_reload_listener(Arc::clone(&state));
+    if cli.config_poll > 0 {
+        spawn_config_watcher(Arc::clone(&state), Duration::from_secs(cli.config_poll));
+    }
 
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
         .parse()
@@ -222,6 +235,82 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Wrap the TCP connector so `https://` api_bases work.
+///
+/// The typical deployment is plain HTTP to nodes on a private network, but the
+/// config schema accepts `https://` and a hosted or TLS-terminated endpoint is
+/// a legitimate backend — accepting the URL and then failing to connect is the
+/// worst of both.
+///
+/// System roots are preferred so an internal CA already trusted by the host
+/// works without extra configuration; the bundled Mozilla set is the fallback
+/// for minimal containers that ship no root store at all.
+fn https_connector(http: HttpConnector) -> Result<HttpsConnector<HttpConnector>> {
+    // Exactly one provider is compiled in, but installing it explicitly keeps
+    // this deterministic rather than dependent on rustls' defaulting rules.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let builder = hyper_rustls::HttpsConnectorBuilder::new();
+    let tls = match builder.with_native_roots() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "no system root certificates; falling back to the bundled Mozilla set");
+            hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
+        }
+    };
+    Ok(tls.https_or_http().enable_http1().wrap_connector(http))
+}
+
+/// Reload when the config file's contents change on disk.
+///
+/// Under Kubernetes the config arrives as a ConfigMap, and nothing sends
+/// SIGHUP when it is edited: the kubelet swaps the mount's `..data` symlink
+/// underneath the process and the container never hears about it. Without this
+/// the only way to apply a change is a rollout restart, which drops every
+/// generation in flight — exactly what the SIGHUP path exists to avoid.
+///
+/// Contents are hashed rather than stat'd because that symlink swap does not
+/// reliably move the mtime of the path we opened, and because it makes a
+/// rewrite with identical contents a no-op.
+fn spawn_config_watcher(state: Arc<AppState>, interval: Duration) {
+    tokio::spawn(async move {
+        let hash_now = |path: &std::path::Path| -> Option<u64> {
+            let bytes = std::fs::read(path).ok()?;
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for b in &bytes {
+                hash = (hash ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            Some(hash)
+        };
+
+        let mut last = hash_now(&state.config_path);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let Some(current) = hash_now(&state.config_path) else {
+                // A ConfigMap update is not atomic from the reader's side; a
+                // transiently missing file is normal and the next tick retries.
+                continue;
+            };
+            if last == Some(current) {
+                continue;
+            }
+            // Advance on failure too, so an edit that leaves the file invalid
+            // is reported once rather than every tick. A half-written file is
+            // still retried: the completed write hashes differently and comes
+            // back round as a fresh change.
+            last = Some(current);
+            match state.reload() {
+                Ok(n) => info!(backends = n, "config file changed, reloaded"),
+                Err(e) => {
+                    error!(error = %e, "config file changed but is invalid; keeping previous")
+                }
+            }
+        }
+    });
 }
 
 /// SIGHUP reloads the config in place.
