@@ -70,10 +70,19 @@ rand = { version = "0.9", optional = true }
 # `src/control/secrets.rs` can call `ring::aead` for encryption at rest,
 # without adding a new crate to the dependency tree.
 ring = { version = "0.17", optional = true }
+# Embeds the management UI's built `web/dist/` into the binary (P4). Points
+# at a directory that may not exist yet in a plain `cargo build` — see
+# `src/control/ui.rs` for how a missing/empty `web/dist/` degrades to "UI not
+# available" instead of failing the build. `default-features = false`: the
+# default `debug-embed`-adjacent watch/compression machinery is irrelevant
+# here, `mime-guess` is what lets served files carry a real `Content-Type`,
+# and `axum` gives `Cow<[u8]>`/embedded-file conversions this crate's own
+# axum handlers use directly instead of hand-rolling them.
+rust-embed = { version = "8", default-features = false, features = ["mime-guess", "axum"], optional = true }
 
 [features]
 default = ["control"]
-control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring"]
+control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring", "dep:rust-embed"]
 
 [dev-dependencies]
 tempfile = "3"
