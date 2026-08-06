@@ -17,8 +17,10 @@ use tracing::{error, info, warn};
 use fastllm_proxy::config::FileConfig;
 use fastllm_proxy::registry::{Interner, Registry};
 use fastllm_proxy::router::{Policy, Router};
+use fastllm_proxy::snapshot::Snapshot;
 use fastllm_proxy::source::file::FileSource;
-use fastllm_proxy::source::SnapshotSource;
+use fastllm_proxy::source::http::HttpSource;
+use fastllm_proxy::source::{spawn_poller, SnapshotSource, WithLegacyMasterKey};
 use fastllm_proxy::state::AppState;
 use fastllm_proxy::{health, proxy, upstream};
 
@@ -75,13 +77,56 @@ struct Cli {
     #[arg(long)]
     workers: Option<usize>,
 
-    /// Seconds between checks for an edited config file. 0 disables the watch,
-    /// leaving SIGHUP as the only way to reload.
+    /// Seconds between snapshot refreshes: a `File`-mode check for an edited
+    /// config file, or an `Http`-mode poll of the control plane. 0 disables
+    /// the watch; in `File` mode SIGHUP is then the only way to reload.
     #[arg(long, default_value_t = 5, env = "FASTLLM_CONFIG_POLL")]
     config_poll: u64,
 
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
+
+    /// Control plane and forwarding in one process (default), the admin API
+    /// and database only, or forwarding only against a control plane or a
+    /// config file.
+    #[arg(long, value_enum, default_value_t = Role::All, env = "FASTLLM_ROLE")]
+    role: Role,
+
+    /// Required for `--role all` and `--role control`; unused by `--role proxy`.
+    #[arg(long, env = "FASTLLM_DATABASE_URL")]
+    database_url: Option<String>,
+
+    /// Control plane to poll in `--role proxy` mode. Omitted means `File`
+    /// mode: no control plane at all, policy comes from `--config` alone.
+    #[arg(long, env = "FASTLLM_CONTROL_URL")]
+    control_url: Option<String>,
+
+    /// Bearer token this process presents to a control plane (`--role
+    /// proxy`), or requires of callers of its own admin API (`--role
+    /// all`/`control`).
+    #[arg(long, env = "FASTLLM_PROXY_TOKEN")]
+    proxy_token: Option<String>,
+
+    /// Where `Http` mode keeps its last-known-good snapshot, so a control
+    /// plane outage degrades to "stop learning about changes" rather than
+    /// "stop serving".
+    #[arg(long, default_value = "/var/lib/fastllm/snapshot.json")]
+    snapshot_cache: PathBuf,
+
+    /// Bind port for the admin API (`--role all`/`control`).
+    #[arg(long, default_value_t = 4001)]
+    admin_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Role {
+    /// Control plane and forwarding in one process. The default, and what a
+    /// single container runs.
+    All,
+    /// Database, admin API and `/snapshot` only — no proxy listener.
+    Control,
+    /// Forwarding only, against a control plane or a config file.
+    Proxy,
 }
 
 fn main() -> Result<()> {
@@ -104,35 +149,108 @@ fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    match cli.role {
+        Role::Control => run_control(cli).await,
+        Role::Proxy => run_data_plane(cli, None).await,
+        Role::All => run_all(cli).await,
+    }
+}
+
+/// `--role control`: database and admin API, no proxy listener at all.
+///
+/// Not gated behind `cfg(feature = "control")` at the call site — that would
+/// make `--role control` silently do nothing on a `--no-default-features`
+/// build. It fails loudly instead, at the one place that knows why.
+async fn run_control(cli: Cli) -> Result<()> {
+    #[cfg(feature = "control")]
+    {
+        let db_url = cli
+            .database_url
+            .clone()
+            .context("--role control requires --database-url")?;
+        let pool = fastllm_proxy::control::db::connect(&db_url).await?;
+        let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
+        let cache = Arc::new(ArcSwap::from_pointee(snap));
+        let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
+            .parse()
+            .with_context(|| {
+                format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
+            })?;
+        info!(%addr, "control plane admin API listening");
+        fastllm_proxy::control::api::serve(pool, addr, cli.proxy_token.unwrap_or_default(), cache)
+            .await
+    }
+    #[cfg(not(feature = "control"))]
+    {
+        let _ = cli;
+        anyhow::bail!("--role control requires the `control` feature; this binary was built with --no-default-features")
+    }
+}
+
+/// `--role all`: the control plane and the proxy in one process, sharing one
+/// snapshot in memory. This is what makes `admin_port` writes visible to the
+/// very next proxied request with no HTTP round trip back into the same
+/// process and no poll delay — `control::api::serve`'s `refresh()` stores
+/// into the exact `ArcSwap` `run_data_plane` reads on the request path.
+async fn run_all(cli: Cli) -> Result<()> {
+    #[cfg(feature = "control")]
+    {
+        let db_url = cli
+            .database_url
+            .clone()
+            .context("--role all requires --database-url")?;
+        let pool = fastllm_proxy::control::db::connect(&db_url).await?;
+        let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
+        let cache = Arc::new(ArcSwap::from_pointee(snap));
+
+        let admin_addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
+            .parse()
+            .with_context(|| {
+                format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
+            })?;
+        let admin_pool = pool.clone();
+        let admin_cache = Arc::clone(&cache);
+        let admin_token = cli.proxy_token.clone().unwrap_or_default();
+        tokio::spawn(async move {
+            if let Err(e) =
+                fastllm_proxy::control::api::serve(admin_pool, admin_addr, admin_token, admin_cache)
+                    .await
+            {
+                error!(error = %e, "control plane admin API exited");
+            }
+        });
+        info!(%admin_addr, "control plane admin API listening");
+
+        run_data_plane(cli, Some(cache)).await
+    }
+    #[cfg(not(feature = "control"))]
+    {
+        let _ = cli;
+        anyhow::bail!("--role all requires the `control` feature; this binary was built with --no-default-features")
+    }
+}
+
+/// The proxy listener, common to `--role all` and `--role proxy`.
+///
+/// `shared_snapshot` is `Some` only for `--role all`: the cell the control
+/// plane above already owns and keeps current by itself, so no poller is
+/// spawned here for that case. `--role proxy` builds and owns its own cell,
+/// filled from a config file (`File` mode) or a control plane (`Http` mode),
+/// and *does* spawn a poller — that poller, and SIGHUP in `File` mode, are
+/// what makes editing keys or grants live rather than requiring a restart.
+async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>>) -> Result<()> {
     let file_config = FileConfig::load(&cli.config)?;
     let tuning = file_config.fastllm.clone();
-
     let interner = Interner::default();
-    let registry = Registry::build(&file_config, &interner, None)?;
-    if registry.backends().is_empty() {
-        warn!("config lists no backends; every request will 404 until it is reloaded");
-    }
-    info!(
-        models = registry.model_names().len(),
-        backends = registry.backends().len(),
-        policy = ?cli.policy,
-        "loaded {}",
-        cli.config.display()
-    );
 
-    let client = upstream::Upstream::new(
+    let client = Arc::new(upstream::Upstream::new(
         upstream::Config {
             max_idle_per_host: cli.pool_max_idle,
             idle_timeout: Duration::from_secs(90),
             connect_timeout: Duration::from_secs(5),
         },
         tls_config()?,
-    );
-
-    let mut snapshot = FileSource::new(cli.config.clone())
-        .fetch(None)
-        .await?
-        .context("config produced no snapshot on first load")?;
+    ));
 
     // Deprecated: a single shared key is exactly what this release replaces,
     // but silently breaking a running deployment is worse than a warning.
@@ -141,13 +259,71 @@ async fn run(cli: Cli) -> Result<()> {
         .clone()
         .or_else(|| file_config.general_settings.master_key.clone())
         .filter(|k| !k.is_empty());
-    if let Some(key) = &master_key {
+    if master_key.is_some() {
         warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
-        snapshot.add_legacy_master_key(key);
     }
-    if snapshot.open {
+
+    // `mode` records which poller (if any) to start once `state` exists —
+    // decided here, once, rather than re-inspecting `cli` after the fact.
+    enum Mode {
+        /// `--role all`: no poller; the admin API keeps `cache` current.
+        Shared,
+        /// `File`: no control plane. SIGHUP and a poll both apply.
+        File,
+        /// `Http`: polls a control plane; falls back to its disk cache (and
+        /// then to empty) if that control plane is unreachable at startup.
+        Http { url: String, token: String },
+    }
+
+    let (cell, mode): (Arc<ArcSwap<Snapshot>>, Mode) = if let Some(cache) = shared_snapshot {
+        (cache, Mode::Shared)
+    } else if let Some(url) = cli.control_url.clone() {
+        let token = cli.proxy_token.clone().unwrap_or_default();
+        let http_src = HttpSource::new(
+            url.clone(),
+            token.clone(),
+            cli.snapshot_cache.clone(),
+            Arc::clone(&client),
+        );
+        // A proxy that starts with nothing must still start. Refusing to
+        // boot would turn a control-plane outage into a crash-loop, which is
+        // exactly the failure this architecture exists to prevent.
+        let snap = match http_src.fetch(None).await {
+            Ok(Some(s)) => s,
+            Ok(None) => http_src.load_cached().unwrap_or_default(),
+            Err(e) => {
+                warn!(error = %e, "control plane unreachable at startup; falling back to the disk cache");
+                http_src.load_cached().unwrap_or_default()
+            }
+        };
+        (
+            Arc::new(ArcSwap::from_pointee(snap)),
+            Mode::Http { url, token },
+        )
+    } else {
+        let file_src =
+            WithLegacyMasterKey::new(FileSource::new(cli.config.clone()), master_key.clone());
+        let snap = file_src
+            .fetch(None)
+            .await?
+            .context("config produced no snapshot on first load")?;
+        (Arc::new(ArcSwap::from_pointee(snap)), Mode::File)
+    };
+
+    if cell.load().open {
         warn!("no keys configured; the proxy accepts unauthenticated requests");
     }
+    let registry = Registry::build_from_snapshot(&cell.load(), &interner, None)?;
+    if registry.backends().is_empty() {
+        warn!("no backends in the snapshot; every request will 404 until it is reloaded");
+    }
+    info!(
+        models = registry.model_names().len(),
+        backends = registry.backends().len(),
+        policy = ?cli.policy,
+        role = ?cli.role,
+        "starting"
+    );
 
     let state = Arc::new(AppState {
         registry: ArcSwap::from_pointee(registry),
@@ -161,7 +337,8 @@ async fn run(cli: Cli) -> Result<()> {
         client,
         interner,
         config_path: cli.config.clone(),
-        snapshot: ArcSwap::from_pointee(snapshot),
+        legacy_master_key: master_key,
+        snapshot: cell,
         max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
         max_retries: cli.max_retries,
         upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),
@@ -176,9 +353,44 @@ async fn run(cli: Cli) -> Result<()> {
         Duration::from_secs(cli.health_interval.max(1)),
         Duration::from_secs(cli.health_timeout.max(1)),
     );
-    spawn_reload_listener(Arc::clone(&state));
-    if cli.config_poll > 0 {
-        spawn_config_watcher(Arc::clone(&state), Duration::from_secs(cli.config_poll));
+
+    match mode {
+        Mode::Shared => {
+            // The admin API already stores into this exact cell on every
+            // write; nothing here would have anything to poll.
+        }
+        Mode::File => {
+            spawn_reload_listener(Arc::clone(&state));
+            if cli.config_poll > 0 {
+                let source = WithLegacyMasterKey::new(
+                    FileSource::new(cli.config.clone()),
+                    state.legacy_master_key.clone(),
+                );
+                spawn_poller(
+                    source,
+                    Arc::clone(&state),
+                    Duration::from_secs(cli.config_poll),
+                );
+            }
+        }
+        Mode::Http { url, token } => {
+            // SIGHUP has no defined job here: re-reading `--config` would
+            // reload the wrong source of truth. The poll interval is the
+            // only reload path, same as any other control-plane consumer.
+            if cli.config_poll > 0 {
+                let source = HttpSource::new(
+                    url,
+                    token,
+                    cli.snapshot_cache.clone(),
+                    Arc::clone(&state.client),
+                );
+                spawn_poller(
+                    source,
+                    Arc::clone(&state),
+                    Duration::from_secs(cli.config_poll),
+                );
+            }
+        }
     }
 
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
@@ -272,61 +484,20 @@ fn tls_config() -> Result<rustls::ClientConfig> {
     Ok(config)
 }
 
-/// Reload when the config file's contents change on disk.
-///
-/// Under Kubernetes the config arrives as a ConfigMap, and nothing sends
-/// SIGHUP when it is edited: the kubelet swaps the mount's `..data` symlink
-/// underneath the process and the container never hears about it. Without this
-/// the only way to apply a change is a rollout restart, which drops every
-/// generation in flight — exactly what the SIGHUP path exists to avoid.
-///
-/// Contents are hashed rather than stat'd because that symlink swap does not
-/// reliably move the mtime of the path we opened, and because it makes a
-/// rewrite with identical contents a no-op.
-fn spawn_config_watcher(state: Arc<AppState>, interval: Duration) {
-    tokio::spawn(async move {
-        let hash_now = |path: &std::path::Path| -> Option<u64> {
-            let bytes = std::fs::read(path).ok()?;
-            let mut hash = 0xcbf2_9ce4_8422_2325u64;
-            for b in &bytes {
-                hash = (hash ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            Some(hash)
-        };
-
-        let mut last = hash_now(&state.config_path);
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            let Some(current) = hash_now(&state.config_path) else {
-                // A ConfigMap update is not atomic from the reader's side; a
-                // transiently missing file is normal and the next tick retries.
-                continue;
-            };
-            if last == Some(current) {
-                continue;
-            }
-            // Advance on failure too, so an edit that leaves the file invalid
-            // is reported once rather than every tick. A half-written file is
-            // still retried: the completed write hashes differently and comes
-            // back round as a fresh change.
-            last = Some(current);
-            match state.reload() {
-                Ok(n) => info!(backends = n, "config file changed, reloaded"),
-                Err(e) => {
-                    error!(error = %e, "config file changed but is invalid; keeping previous")
-                }
-            }
-        }
-    });
-}
-
-/// SIGHUP reloads the config in place.
+/// SIGHUP reloads the config in place, in `File` mode.
 ///
 /// This is the whole point of owning the process: the model set changes when a
 /// workload is launched or stopped, and applying that should not mean tearing
-/// down a gateway that has generations in flight.
+/// down a gateway that has generations in flight. `main.rs` only calls this
+/// for `File`-mode `run_data_plane`; see `AppState::reload`'s doc comment for
+/// why `Http` and `all` deployments do not wire it up.
+///
+/// The interval-based watch this used to leave to a separate function
+/// (`spawn_config_watcher`) is now `source::spawn_poller` on the same
+/// `FileSource`: one hash-based change check that updates the snapshot *and*
+/// rebuilds the registry, instead of two independent reload paths that could
+/// disagree about what "changed" means. SIGHUP still exists alongside it
+/// purely to apply an edit immediately rather than waiting for the next tick.
 fn spawn_reload_listener(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -338,7 +509,7 @@ fn spawn_reload_listener(state: Arc<AppState>) {
             }
         };
         while hangup.recv().await.is_some() {
-            match state.reload() {
+            match state.reload().await {
                 Ok(n) => info!(backends = n, "config reloaded"),
                 Err(e) => error!(error = %e, "config reload failed; keeping previous config"),
             }

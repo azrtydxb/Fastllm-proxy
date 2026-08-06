@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::Arc;
 
 use crate::config::FileConfig;
+use crate::snapshot::Snapshot;
 
 /// Stable identifier for a backend across config reloads.
 ///
@@ -196,16 +197,60 @@ impl Registry {
         interner: &Interner,
         previous: Option<&Registry>,
     ) -> Result<Self> {
-        let mut pools: HashMap<String, Vec<Arc<Backend>>> = HashMap::new();
-        let mut by_uid: HashMap<BackendUid, Arc<Backend>> = HashMap::new();
-
-        for entry in &cfg.model_list {
+        let entries = cfg.model_list.iter().map(|entry| {
             let api_base = entry
                 .litellm_params
                 .api_base
                 .trim_end_matches('/')
                 .to_string();
             let upstream_model = entry.litellm_params.upstream_model(&entry.model_name);
+            (
+                entry.model_name.clone(),
+                api_base,
+                upstream_model,
+                entry.litellm_params.effective_api_key(),
+            )
+        });
+        Self::build_from_entries(entries, interner, previous)
+    }
+
+    /// Build a registry straight from a control-plane (or `File`-derived)
+    /// [`Snapshot`] rather than the YAML config.
+    ///
+    /// `Snapshot::models` already carries exactly what a backend needs
+    /// (`api_base`, `upstream_model`, `api_key`), because `FileSource` builds
+    /// one from the same YAML `build` reads and the control plane builds one
+    /// from Postgres. Routing from the snapshot means there is one place that
+    /// turns model data into the routing table regardless of where the data
+    /// came from, which is what lets [`spawn_poller`](crate::source::spawn_poller)
+    /// keep both the snapshot and the registry current from a single fetch.
+    pub fn build_from_snapshot(
+        snapshot: &Snapshot,
+        interner: &Interner,
+        previous: Option<&Registry>,
+    ) -> Result<Self> {
+        let entries = snapshot.models.iter().flat_map(|model| {
+            model.backends.iter().map(move |b| {
+                (
+                    model.name.clone(),
+                    b.api_base.trim_end_matches('/').to_string(),
+                    b.upstream_model.clone(),
+                    b.api_key.clone(),
+                )
+            })
+        });
+        Self::build_from_entries(entries, interner, previous)
+    }
+
+    fn build_from_entries(
+        entries: impl Iterator<Item = (String, String, String, Option<String>)>,
+        interner: &Interner,
+        previous: Option<&Registry>,
+    ) -> Result<Self> {
+        let mut pools: HashMap<String, Vec<Arc<Backend>>> = HashMap::new();
+        let mut by_uid: HashMap<BackendUid, Arc<Backend>> = HashMap::new();
+
+        for (model_name, api_base, upstream_model, api_key) in entries {
             let uid = interner.intern(&api_base, &upstream_model)?;
 
             // Reuse the live object when we already made one this pass, or when
@@ -222,14 +267,14 @@ impl Registry {
                         uid,
                         api_base.clone(),
                         upstream_model.clone(),
-                        entry.litellm_params.effective_api_key(),
+                        api_key,
                     )?),
                 };
                 by_uid.insert(uid, Arc::clone(&backend));
                 backend
             };
 
-            let pool = pools.entry(entry.model_name.clone()).or_default();
+            let pool = pools.entry(model_name).or_default();
             // The same backend can legitimately be listed twice for one model
             // (e.g. an alias resolving onto it); only route to it once.
             if !pool.iter().any(|b: &Arc<Backend>| b.uid == uid) {
