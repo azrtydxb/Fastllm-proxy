@@ -29,6 +29,14 @@ fn encryption_key() -> String {
 }
 
 fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
+    // The child's stderr goes to a file rather than being inherited so that a
+    // startup *failure* and mere startup *slowness* stop looking identical.
+    // Without this, a process that exited immediately (a bad env var, a
+    // migration error) and one that is simply still booting both surfaced as
+    // the same bare "did not answer /health" timeout, which is unactionable
+    // from a CI log.
+    let log_path = std::env::temp_dir().join(format!("fastllm-admin-auth-{port}.log"));
+    let log = std::fs::File::create(&log_path).expect("create child log");
     let child = Command::new(env!("CARGO_BIN_EXE_fastllm-proxy"))
         .args([
             "--role",
@@ -41,10 +49,14 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         .env("FASTLLM_DATABASE_URL", database_url)
         .env("FASTLLM_PROXY_TOKEN", PROXY_TOKEN)
         .env("FASTLLM_ENCRYPTION_KEY", encryption_key())
+        .stderr(std::process::Stdio::from(log))
         .spawn()
         .expect("failed to spawn fastllm-proxy --role all");
-    let proc = Proc(child);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut proc = Proc(child);
+    // Generous, because these tests run concurrently: each spawns its own
+    // `--role all`, and they serialise behind one another on the migration
+    // advisory lock against a shared database.
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if ureq::get(&format!("http://127.0.0.1:{port}/health"))
             .call()
@@ -52,8 +64,16 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         {
             return proc;
         }
+        if let Ok(Some(status)) = proc.0.try_wait() {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("fastllm-proxy --role all on port {port} exited early ({status}):\n{log}");
+        }
         if Instant::now() >= deadline {
-            panic!("fastllm-proxy --role all on port {port} did not answer /health within 20s");
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!(
+                "fastllm-proxy --role all on port {port} did not answer /health within 90s; \
+                 child stderr:\n{log}"
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
