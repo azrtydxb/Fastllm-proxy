@@ -8,6 +8,7 @@ pub mod multipart;
 pub mod proxy;
 pub mod registry;
 pub mod router;
+pub mod routing;
 pub mod snapshot;
 pub mod source;
 pub mod state;

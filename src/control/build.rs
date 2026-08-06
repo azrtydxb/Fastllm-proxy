@@ -5,6 +5,7 @@
 //! model names, and wildcards expanded against the known model list.
 
 use crate::control::secrets::{self, EncryptionKey};
+use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
 use crate::snapshot::{BackendDef, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -139,7 +140,26 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         .bind(id)
         .fetch_all(pool)
         .await?;
+        // Deliberately *not* widened to include virtual model names — see
+        // the authorisation decision in `proxy::resolve_target_model`'s doc
+        // comment: a virtual model routes access, it does not grant it, so
+        // `allowed_models` only ever needs to answer "may this principal
+        // invoke this *concrete* model", the same question it has always
+        // answered.
         let (allowed_models, allow_all) = flatten_grants(&perms, &all_names);
+
+        // The raw role names, separate from `allowed_models`: a routing
+        // rule's caller condition (`crate::routing::CallerMatch`) matches on
+        // "does this principal hold role X", which flattening would throw
+        // away.
+        let role_names: Vec<String> = sqlx::query_scalar(
+            "SELECT r.name FROM principal_roles pr JOIN roles r ON r.id = pr.role_id
+             WHERE pr.principal_id = $1",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+
         principals.insert(
             id as u64,
             Principal {
@@ -147,9 +167,12 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
                 name,
                 allowed_models,
                 allow_all,
+                roles: role_names.into_iter().collect(),
             },
         );
     }
+
+    let virtual_models = build_virtual_models(pool).await?;
 
     type KeyRow = (Vec<u8>, i64, Option<chrono::DateTime<chrono::Utc>>, bool);
     let key_rows: Vec<KeyRow> =
@@ -182,8 +205,116 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         keys,
         principals,
         models,
+        virtual_models,
         open: false,
     })
+}
+
+/// Resolve `virtual_models`/`routing_rules`/`rule_targets`/
+/// `virtual_model_defaults` into the pre-evaluated form `crate::routing`
+/// consumes.
+///
+/// Three flat queries rather than one deep join, same rationale as the
+/// per-principal permissions query above: this runs once per snapshot
+/// rebuild against a handful of rows, and three queries assembled in memory
+/// stay far easier to follow than one join across five tables with `weight`
+/// and `position` columns that would otherwise need disambiguating aliases.
+async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, VirtualModelDef>> {
+    let vm_rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM virtual_models")
+        .fetch_all(pool)
+        .await?;
+
+    type RuleRow = (i64, i64, serde_json::Value);
+    let rule_rows: Vec<RuleRow> = sqlx::query_as(
+        "SELECT id, virtual_model_id, match_json FROM routing_rules ORDER BY virtual_model_id, position",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // `model_id` is resolved to the model's *name* here, once, rather than
+    // carried as an id into `crate::routing`: the request path matches
+    // targets by the same string it already has (the model name off the
+    // wire/body), and routing types staying name-based is what lets
+    // `VirtualModelDef::resolve` hand a target straight to
+    // `Registry::pool_has_healthy` with no id-to-name lookup on the hot path.
+    type TargetRow = (i64, String, i32, i32); // owning id (rule_id or virtual_model_id), model name, weight, position
+    let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
+        "SELECT rt.rule_id, m.name, rt.weight, rt.position
+         FROM rule_targets rt JOIN models m ON m.id = rt.model_id
+         ORDER BY rt.rule_id, rt.position",
+    )
+    .fetch_all(pool)
+    .await?;
+    let default_target_rows: Vec<TargetRow> = sqlx::query_as(
+        "SELECT vd.virtual_model_id, m.name, vd.weight, vd.position
+         FROM virtual_model_defaults vd JOIN models m ON m.id = vd.model_id
+         ORDER BY vd.virtual_model_id, vd.position",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let targets_for = |owner_id: i64, rows: &[TargetRow]| -> Vec<WeightedTarget> {
+        rows.iter()
+            .filter(|(id, ..)| *id == owner_id)
+            .map(|(_, model, weight, _)| WeightedTarget {
+                model: model.clone(),
+                // `weight` is `INT` in Postgres (see the migration) and this
+                // schema never writes it negative; a value that somehow is
+                // (hand-written SQL, a future bug) is clamped to 0 rather
+                // than panicking on the cast — a zero-weight target is
+                // simply never chosen by `choose_weighted`, which is a safe
+                // degradation for a routing decision to make on its own.
+                weight: (*weight).max(0) as u32,
+            })
+            .collect()
+    };
+
+    let mut virtual_models = HashMap::new();
+    for (vm_id, vm_name) in vm_rows {
+        let rules = rule_rows
+            .iter()
+            .filter(|(_, virtual_model_id, _)| *virtual_model_id == vm_id)
+            .filter_map(|(rule_id, _, match_json)| {
+                let parsed: MatchConditionJson = match serde_json::from_value(match_json.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        // Dropped, not defaulted to "matches everyone": a
+                        // rule whose condition failed to parse must not
+                        // silently become the rule that matches every
+                        // request — see the module doc comment on
+                        // `build_snapshot` for the same "contain the
+                        // failure to the one bad row" pattern applied to an
+                        // undecryptable backend.
+                        tracing::error!(
+                            error = %e,
+                            virtual_model = %vm_name,
+                            rule_id,
+                            "dropping routing rule: match_json failed to parse; excluded from \
+                             this snapshot rather than matching every request or failing the \
+                             whole rebuild"
+                        );
+                        return None;
+                    }
+                };
+                let (caller, shape) = parsed.into_caller_and_shape();
+                Some(RoutingRule {
+                    caller,
+                    shape,
+                    targets: targets_for(*rule_id, &rule_target_rows),
+                })
+            })
+            .collect();
+        let default_targets = targets_for(vm_id, &default_target_rows);
+        virtual_models.insert(
+            vm_name.clone(),
+            VirtualModelDef {
+                name: vm_name,
+                rules,
+                default_targets,
+            },
+        );
+    }
+    Ok(virtual_models)
 }
 
 #[cfg(test)]
@@ -344,5 +475,151 @@ mod tests {
             snapshot.models.iter().any(|m| m.name == other_model),
             "an unrelated model must be unaffected"
         );
+    }
+
+    /// `build_virtual_models` (via `build_snapshot`) resolves all four P1
+    /// tables — `virtual_models`, `routing_rules`, `rule_targets`,
+    /// `virtual_model_defaults` — into the pre-evaluated form
+    /// `crate::routing` reads. This exercises every one of them together,
+    /// against the real schema from `migrations/0008_virtual_models_and_routing_rules.sql`.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn virtual_models_rules_and_targets_are_resolved_into_the_snapshot() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let primary = unique_name("vm-primary");
+        let secondary = unique_name("vm-secondary");
+        let fallback = unique_name("vm-fallback");
+        for name in [&primary, &secondary, &fallback] {
+            sqlx::query("INSERT INTO models (name) VALUES ($1)")
+                .bind(name)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let model_id: HashMap<String, i64> = {
+            let rows: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, name FROM models WHERE name = ANY($1)")
+                    .bind(vec![primary.clone(), secondary.clone(), fallback.clone()])
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            rows.into_iter().map(|(id, name)| (name, id)).collect()
+        };
+
+        let vm_name = unique_name("vm-canary");
+        let vm_id: i64 =
+            sqlx::query_scalar("INSERT INTO virtual_models (name) VALUES ($1) RETURNING id")
+                .bind(&vm_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let match_json = serde_json::json!({ "roles": ["canary"] });
+        let rule_id: i64 = sqlx::query_scalar(
+            "INSERT INTO routing_rules (virtual_model_id, position, match_json)
+             VALUES ($1, 0, $2) RETURNING id",
+        )
+        .bind(vm_id)
+        .bind(&match_json)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rule_targets (rule_id, model_id, weight, position) VALUES ($1, $2, 70, 0)",
+        )
+        .bind(rule_id)
+        .bind(model_id[&primary])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rule_targets (rule_id, model_id, weight, position) VALUES ($1, $2, 30, 1)",
+        )
+        .bind(rule_id)
+        .bind(model_id[&secondary])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position)
+             VALUES ($1, $2, 100, 0)",
+        )
+        .bind(vm_id)
+        .bind(model_id[&fallback])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let vm = snapshot
+            .virtual_models
+            .get(&vm_name)
+            .expect("the virtual model must be in the snapshot");
+
+        assert_eq!(vm.rules.len(), 1);
+        let rule = &vm.rules[0];
+        assert_eq!(
+            rule.caller.roles,
+            ["canary".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            rule.targets,
+            vec![
+                crate::routing::WeightedTarget {
+                    model: primary.clone(),
+                    weight: 70
+                },
+                crate::routing::WeightedTarget {
+                    model: secondary.clone(),
+                    weight: 30
+                },
+            ]
+        );
+        assert_eq!(
+            vm.default_targets,
+            vec![crate::routing::WeightedTarget {
+                model: fallback.clone(),
+                weight: 100
+            }]
+        );
+    }
+
+    /// A principal's role *names*, not just its flattened `allowed_models`,
+    /// must reach the snapshot: `crate::routing::CallerMatch` matches rules
+    /// by role, and that information has nowhere else to come from on the
+    /// request path.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_principals_roles_reach_the_snapshot() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let principal_name = unique_name("roles-reach-snapshot");
+        let principal_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&principal_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO principal_roles (principal_id, role_id)
+             SELECT $1, id FROM roles WHERE name = 'inference'",
+        )
+        .bind(principal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let principal = snapshot
+            .principals
+            .get(&(principal_id as u64))
+            .expect("the principal must be in the snapshot");
+        assert!(principal.roles.contains("inference"));
     }
 }

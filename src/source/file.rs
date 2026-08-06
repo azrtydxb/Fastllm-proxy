@@ -4,7 +4,7 @@
 use crate::config::FileConfig;
 use crate::snapshot::{hash_key, BackendDef, KeyEntry, ModelDef, Principal, Snapshot};
 use crate::source::SnapshotSource;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub struct FileSource {
@@ -67,6 +67,11 @@ impl SnapshotSource for FileSource {
                     name: k.name.clone(),
                     allowed_models: k.models.iter().filter(|m| *m != "*").cloned().collect(),
                     allow_all,
+                    // `File` mode's `auth.keys` schema has no role concept —
+                    // routing rules that match by role are a control-plane
+                    // (P1) feature and `File` mode carries no virtual models
+                    // to evaluate them against anyway.
+                    roles: HashSet::new(),
                 },
             );
             keys.insert(
@@ -85,6 +90,9 @@ impl SnapshotSource for FileSource {
             keys,
             principals,
             models,
+            // `File` mode has no database to store rules in — see the field
+            // doc comment on `Snapshot::virtual_models`.
+            virtual_models: HashMap::new(),
             open,
         }))
     }

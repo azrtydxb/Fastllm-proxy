@@ -6,6 +6,7 @@
 
 use crate::control::build::build_snapshot;
 use crate::control::secrets::EncryptionKey;
+use crate::routing::MatchConditionJson;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
 use crate::usage::UsageEvent;
 use arc_swap::ArcSwap;
@@ -602,6 +603,25 @@ struct NewModel {
     description: String,
 }
 
+/// A model and a virtual model sharing a name would make the `model` field
+/// in a request body ambiguous about which one a client meant — rather than
+/// pick a silent precedence order between them, creation of either is
+/// refused while the other name is taken. See `post_virtual_model`'s mirror
+/// check.
+async fn virtual_model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM virtual_models WHERE name = $1)")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+}
+
+async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM models WHERE name = $1)")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+}
+
 async fn post_model(
     State(ctx): State<Ctx>,
     Json(body): Json<NewModel>,
@@ -610,6 +630,19 @@ async fn post_model(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "name must not be empty; it is the name clients address this model by",
+        ));
+    }
+    if virtual_model_name_exists(&ctx.pool, &body.name)
+        .await
+        .map_err(|e| db_error("model creation", &e))?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "a virtual model named {:?} already exists; a model and a virtual model cannot \
+                 share a name, since a client request naming it would be ambiguous",
+                body.name
+            ),
         ));
     }
     let id: i64 =
@@ -753,6 +786,417 @@ async fn delete_backend(
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!("no backend with id {id}; GET /admin/models lists each model's backend ids"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- Virtual models, routing rules and their targets ------------------
+//
+// Same CRUD shape as models/backends above: one route per table, every
+// mutating one ending in `refresh(&ctx)` so a write reaches the published
+// snapshot through the one path every other admin route uses (see
+// `refresh`'s doc comment). `crate::routing`/`control::build::build_virtual_models`
+// is what actually resolves these four tables into the pre-evaluated form
+// the request path reads; the routes here only ever write rows.
+
+#[derive(Serialize)]
+struct TargetView {
+    id: i64,
+    model_id: i64,
+    model: String,
+    weight: i32,
+    position: i32,
+}
+
+#[derive(Serialize)]
+struct RuleView {
+    id: i64,
+    position: i32,
+    #[serde(flatten)]
+    match_condition: MatchConditionJson,
+    targets: Vec<TargetView>,
+}
+
+#[derive(Serialize)]
+struct VirtualModelView {
+    id: i64,
+    name: String,
+    description: String,
+    rules: Vec<RuleView>,
+    /// Used when no rule matches; see the migration's comment on
+    /// `virtual_model_defaults` for why this is its own table rather than an
+    /// always-true rule.
+    default_targets: Vec<TargetView>,
+}
+
+// (id, owner_id, model_id, model_name, weight, position) — `owner_id` is
+// `rule_id` for a rule's own targets and `virtual_model_id` for a virtual
+// model's defaults; the two queries below share this shape so `to_targets`
+// works for either without duplicating it.
+type TargetRow = (i64, i64, i64, String, i32, i32);
+
+async fn list_virtual_models(
+    State(ctx): State<Ctx>,
+) -> Result<Json<Vec<VirtualModelView>>, ApiError> {
+    let vms: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, name, description FROM virtual_models ORDER BY name")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("listing virtual models", &e))?;
+    let rules: Vec<(i64, i64, i32, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, virtual_model_id, position, match_json FROM routing_rules
+         ORDER BY virtual_model_id, position",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing routing rules", &e))?;
+    let rule_targets: Vec<TargetRow> = sqlx::query_as(
+        "SELECT rt.id, rt.rule_id, rt.model_id, m.name, rt.weight, rt.position
+         FROM rule_targets rt JOIN models m ON m.id = rt.model_id
+         ORDER BY rt.rule_id, rt.position",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing rule targets", &e))?;
+    let default_targets: Vec<TargetRow> = sqlx::query_as(
+        "SELECT vd.id, vd.virtual_model_id, vd.model_id, m.name, vd.weight, vd.position
+         FROM virtual_model_defaults vd JOIN models m ON m.id = vd.model_id
+         ORDER BY vd.virtual_model_id, vd.position",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing virtual model defaults", &e))?;
+
+    let to_targets = |owner: i64, rows: &[TargetRow]| -> Vec<TargetView> {
+        rows.iter()
+            .filter(|(_, o, ..)| *o == owner)
+            .map(|(id, _, model_id, model, weight, position)| TargetView {
+                id: *id,
+                model_id: *model_id,
+                model: model.clone(),
+                weight: *weight,
+                position: *position,
+            })
+            .collect()
+    };
+
+    Ok(Json(
+        vms.into_iter()
+            .map(|(vm_id, name, description)| {
+                let rule_views = rules
+                    .iter()
+                    .filter(|(_, virtual_model_id, ..)| *virtual_model_id == vm_id)
+                    .map(|(rule_id, _, position, match_json)| {
+                        // A rule whose `match_json` cannot parse is still
+                        // listed rather than hidden — an operator diagnosing
+                        // why `build_snapshot` dropped it (see that
+                        // function's doc comment) needs to see it exists,
+                        // not have it vanish from both the database view
+                        // and the runtime snapshot.
+                        let match_condition: MatchConditionJson =
+                            serde_json::from_value(match_json.clone()).unwrap_or_default();
+                        RuleView {
+                            id: *rule_id,
+                            position: *position,
+                            match_condition,
+                            targets: to_targets(*rule_id, &rule_targets),
+                        }
+                    })
+                    .collect();
+                VirtualModelView {
+                    id: vm_id,
+                    name,
+                    description,
+                    rules: rule_views,
+                    default_targets: to_targets(vm_id, &default_targets),
+                }
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct NewVirtualModel {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+async fn post_virtual_model(
+    State(ctx): State<Ctx>,
+    Json(body): Json<NewVirtualModel>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    if body.name.trim().is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name must not be empty; it is the name clients address this virtual model by",
+        ));
+    }
+    if model_name_exists(&ctx.pool, &body.name)
+        .await
+        .map_err(|e| db_error("virtual model creation", &e))?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "a model named {:?} already exists; a model and a virtual model cannot share a \
+                 name, since a client request naming it would be ambiguous",
+                body.name
+            ),
+        ));
+    }
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO virtual_models (name, description) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(&body.name)
+    .bind(&body.description)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("a virtual model named {:?} already exists", body.name),
+            )
+        } else {
+            db_error("virtual model creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": body.name })),
+    ))
+}
+
+async fn delete_virtual_model(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    // ON DELETE CASCADE (migrations/0008) takes this virtual model's rules
+    // and defaults with it, same reasoning as a principal's keys/grants.
+    let done = sqlx::query("DELETE FROM virtual_models WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("virtual model deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "no virtual model with id {id}; GET /admin/virtual-models lists the ids that exist"
+            ),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct NewRule {
+    /// Where this rule sits in its virtual model's evaluation order —
+    /// load-bearing, not cosmetic: the first matching rule wins.
+    position: i32,
+    #[serde(flatten)]
+    match_condition: MatchConditionJson,
+}
+
+async fn post_rule(
+    State(ctx): State<Ctx>,
+    Path(virtual_model_id): Path<i64>,
+    Json(body): Json<NewRule>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let match_json = serde_json::to_value(&body.match_condition)
+        .expect("MatchConditionJson has no non-serialisable field");
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO routing_rules (virtual_model_id, position, match_json)
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(virtual_model_id)
+    .bind(body.position)
+    .bind(match_json)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no virtual model with id {virtual_model_id}; GET /admin/virtual-models \
+                     lists the ids that exist"
+                ),
+            )
+        } else if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "virtual model {virtual_model_id} already has a rule at position {}",
+                    body.position
+                ),
+            )
+        } else {
+            db_error("routing rule creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            serde_json::json!({ "id": id, "virtual_model_id": virtual_model_id, "position": body.position }),
+        ),
+    ))
+}
+
+async fn delete_rule(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM routing_rules WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("routing rule deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no rule with id {id}; GET /admin/virtual-models lists each rule's id"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct NewTarget {
+    model_id: i64,
+    #[serde(default = "default_target_weight")]
+    weight: i32,
+    /// Failover order within the chain — see
+    /// `crate::routing::VirtualModelDef::resolve`'s doc comment.
+    position: i32,
+}
+
+/// A single target with no sibling has nothing to split against, so a
+/// sensible default lets the common "one rule, one target" case omit
+/// `weight` entirely rather than requiring a caller to always write `100`.
+fn default_target_weight() -> i32 {
+    100
+}
+
+async fn post_rule_target(
+    State(ctx): State<Ctx>,
+    Path(rule_id): Path<i64>,
+    Json(body): Json<NewTarget>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_targets (rule_id, model_id, weight, position)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(rule_id)
+    .bind(body.model_id)
+    .bind(body.weight)
+    .bind(body.position)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no rule with id {rule_id} or no model with id {}; a target needs both to exist",
+                    body.model_id
+                ),
+            )
+        } else if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "rule {rule_id} already has a target at position {}",
+                    body.position
+                ),
+            )
+        } else {
+            db_error("rule target creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
+}
+
+async fn delete_rule_target(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM rule_targets WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("rule target deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no rule target with id {id}; GET /admin/virtual-models lists each one's id"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn post_default_target(
+    State(ctx): State<Ctx>,
+    Path(virtual_model_id): Path<i64>,
+    Json(body): Json<NewTarget>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(virtual_model_id)
+    .bind(body.model_id)
+    .bind(body.weight)
+    .bind(body.position)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no virtual model with id {virtual_model_id} or no model with id {}; a \
+                     default target needs both to exist",
+                    body.model_id
+                ),
+            )
+        } else if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "virtual model {virtual_model_id} already has a default target at position {}",
+                    body.position
+                ),
+            )
+        } else {
+            db_error("default target creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
+}
+
+async fn delete_default_target(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM virtual_model_defaults WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("default target deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "no default target with id {id}; GET /admin/virtual-models lists each one's id"
+            ),
         ));
     }
     refresh(&ctx).await;
@@ -1117,6 +1561,23 @@ pub async fn serve(
         .route("/admin/models/{id}", delete(delete_model))
         .route("/admin/models/{id}/backends", post(post_backend))
         .route("/admin/backends/{id}", delete(delete_backend))
+        .route(
+            "/admin/virtual-models",
+            get(list_virtual_models).post(post_virtual_model),
+        )
+        .route("/admin/virtual-models/{id}", delete(delete_virtual_model))
+        .route("/admin/virtual-models/{id}/rules", post(post_rule))
+        .route("/admin/rules/{id}", delete(delete_rule))
+        .route("/admin/rules/{id}/targets", post(post_rule_target))
+        .route("/admin/rule-targets/{id}", delete(delete_rule_target))
+        .route(
+            "/admin/virtual-models/{id}/defaults",
+            post(post_default_target),
+        )
+        .route(
+            "/admin/virtual-model-defaults/{id}",
+            delete(delete_default_target),
+        )
         .route("/admin/roles", get(list_roles))
         .route("/admin/health", get(admin_health))
         .route("/snapshot", get(get_snapshot))
@@ -1532,6 +1993,185 @@ mod tests {
             .any(|p| p.verb == "model:invoke" && p.resource == "model/*"));
         let admin = roles.0.iter().find(|r| r.name == "admin").unwrap();
         assert!(admin.permissions.len() > inference.permissions.len());
+    }
+
+    /// Every virtual-model route, end to end: creating a virtual model, a
+    /// rule on it, a target on that rule, and a default target all publish
+    /// through the same `refresh()` -> `SnapshotSink::store_snapshot` path
+    /// every other admin route uses — same invariant
+    /// `every_mutating_route_publishes_through_the_one_write_path` pins for
+    /// keys/models/principals, applied to the P1 tables.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn virtual_model_routes_publish_rules_and_targets_to_the_snapshot() {
+        let (ctx, cache) = test_ctx().await;
+        let primary_name = unique_name("vm-route-primary");
+        let secondary_name = unique_name("vm-route-secondary");
+
+        let (_, primary) = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: primary_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let primary_id = primary.0["id"].as_i64().unwrap();
+
+        let (_, secondary) = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: secondary_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let secondary_id = secondary.0["id"].as_i64().unwrap();
+
+        let vm_name = unique_name("vm-route-canary");
+        let (status, vm) = post_virtual_model(
+            State(ctx.clone()),
+            Json(NewVirtualModel {
+                name: vm_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let vm_id = vm.0["id"].as_i64().unwrap();
+
+        let (_, rule) = post_rule(
+            State(ctx.clone()),
+            Path(vm_id),
+            Json(NewRule {
+                position: 0,
+                match_condition: MatchConditionJson {
+                    roles: vec!["canary".into()],
+                    ..Default::default()
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        let rule_id = rule.0["id"].as_i64().unwrap();
+
+        let _ = post_rule_target(
+            State(ctx.clone()),
+            Path(rule_id),
+            Json(NewTarget {
+                model_id: primary_id,
+                weight: 100,
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = post_default_target(
+            State(ctx.clone()),
+            Path(vm_id),
+            Json(NewTarget {
+                model_id: secondary_id,
+                weight: 100,
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let snap = cache.current_snapshot();
+        let published = snap
+            .virtual_models
+            .get(&vm_name)
+            .expect("the virtual model created over the admin API must be in the snapshot");
+        assert_eq!(published.rules.len(), 1);
+        assert_eq!(
+            published.rules[0].caller.roles,
+            ["canary".to_string()].into_iter().collect()
+        );
+        assert_eq!(published.rules[0].targets[0].model, primary_name);
+        assert_eq!(published.default_targets[0].model, secondary_name);
+
+        // `GET /admin/virtual-models` mirrors the same rows.
+        let listed = list_virtual_models(State(ctx.clone())).await.unwrap();
+        let listed_vm = listed.0.iter().find(|v| v.name == vm_name).unwrap();
+        assert_eq!(listed_vm.rules.len(), 1);
+        assert_eq!(listed_vm.rules[0].targets[0].model, primary_name);
+        assert_eq!(listed_vm.default_targets[0].model, secondary_name);
+
+        // Deleting the virtual model cascades its rules and targets, and the
+        // deletion reaches the published snapshot the same way creation did.
+        delete_virtual_model(State(ctx.clone()), Path(vm_id))
+            .await
+            .unwrap();
+        assert!(
+            !cache
+                .current_snapshot()
+                .virtual_models
+                .contains_key(&vm_name),
+            "a deleted virtual model must leave the published snapshot"
+        );
+    }
+
+    /// The privilege-escalation trap this design explicitly calls out: a
+    /// model and a virtual model must never be allowed to share a name,
+    /// because the ambiguity would make `authorize`/`resolve_target_model`'s
+    /// decision (see that function's doc comment) apply to the wrong one —
+    /// whichever table happens to win a lookup, silently.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_model_and_a_virtual_model_cannot_share_a_name() {
+        let (ctx, _cache) = test_ctx().await;
+        let name = unique_name("vm-collision");
+
+        let (status, _) = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        let err = post_virtual_model(
+            State(ctx.clone()),
+            Json(NewVirtualModel {
+                name: name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        // And the reverse direction.
+        let other_name = unique_name("vm-collision-reverse");
+        let (status, _) = post_virtual_model(
+            State(ctx.clone()),
+            Json(NewVirtualModel {
+                name: other_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        let err = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: other_name,
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
     }
 
     /// The regression this task's Critical review finding described:

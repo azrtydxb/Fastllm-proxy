@@ -5,6 +5,7 @@
 //! deny rules applied. The request path asks a `HashSet` and never walks the
 //! RBAC graph — that is what keeps authorisation off the latency budget.
 
+use crate::routing::{CallerMatch, RoutingRule, ShapeMatch, VirtualModelDef, WeightedTarget};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,13 @@ pub struct Principal {
     /// Already flattened from roles, wildcards and deny rules.
     pub allowed_models: HashSet<String>,
     pub allow_all: bool,
+    /// Role *names* this principal holds, for the "caller" match condition on
+    /// a routing rule (`crate::routing::CallerMatch`). Unlike
+    /// `allowed_models`, this is not further flattened — a rule asks "does
+    /// this principal hold role X", never "what can role X invoke" (that
+    /// question is already answered by `allowed_models`), so the raw role
+    /// name set is exactly what the request path needs.
+    pub roles: HashSet<String>,
 }
 
 impl Principal {
@@ -61,6 +69,12 @@ pub struct Snapshot {
     pub keys: HashMap<[u8; 32], KeyEntry>,
     pub principals: HashMap<PrincipalId, Principal>,
     pub models: Vec<ModelDef>,
+    /// Virtual models, keyed by their client-facing name for an O(1) lookup
+    /// on the request path before falling back to treating the requested
+    /// name as a concrete model (`proxy::resolve_model`). Empty in `File`
+    /// mode: virtual models are a control-plane-only feature (P1 depends on
+    /// P0's database), and a bare YAML config has nowhere to store rules.
+    pub virtual_models: HashMap<String, VirtualModelDef>,
     /// When true the proxy serves without authenticating, matching today's
     /// behaviour when no master key is configured.
     pub open: bool,
@@ -110,6 +124,12 @@ pub struct WireSnapshot {
     pub keys: HashMap<String, WireKeyEntry>,
     pub principals: Vec<WirePrincipal>,
     pub models: Vec<WireModelDef>,
+    /// Absent from a snapshot cached on disk before this field existed —
+    /// `#[serde(default)]` is what lets an `Http`-mode proxy read an
+    /// old last-known-good cache written by a previous version rather than
+    /// failing to deserialise it outright.
+    #[serde(default)]
+    pub virtual_models: Vec<WireVirtualModel>,
     pub open: bool,
 }
 
@@ -126,6 +146,8 @@ pub struct WirePrincipal {
     pub name: String,
     pub allowed_models: Vec<String>,
     pub allow_all: bool,
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +161,48 @@ pub struct WireBackendDef {
 pub struct WireModelDef {
     pub name: String,
     pub backends: Vec<WireBackendDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireWeightedTarget {
+    pub model: String,
+    pub weight: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WireCallerMatch {
+    #[serde(default)]
+    pub principals: Vec<PrincipalId>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WireShapeMatch {
+    #[serde(default)]
+    pub min_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub min_max_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WireRoutingRule {
+    #[serde(default)]
+    pub caller: WireCallerMatch,
+    #[serde(default)]
+    pub shape: WireShapeMatch,
+    pub targets: Vec<WireWeightedTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireVirtualModel {
+    pub name: String,
+    pub rules: Vec<WireRoutingRule>,
+    pub default_targets: Vec<WireWeightedTarget>,
 }
 
 impl Snapshot {
@@ -155,6 +219,7 @@ impl Snapshot {
         self.keys == other.keys
             && self.principals == other.principals
             && self.models == other.models
+            && self.virtual_models == other.virtual_models
             && self.open == other.open
     }
 
@@ -189,6 +254,7 @@ impl Snapshot {
                 name: "legacy-master-key".into(),
                 allowed_models: HashSet::new(),
                 allow_all: true,
+                roles: HashSet::new(),
             },
         );
         self.keys.insert(
@@ -233,6 +299,7 @@ impl Snapshot {
                     name: p.name.clone(),
                     allowed_models: p.allowed_models.iter().cloned().collect(),
                     allow_all: p.allow_all,
+                    roles: p.roles.iter().cloned().collect(),
                 })
                 .collect(),
             models: self
@@ -247,6 +314,45 @@ impl Snapshot {
                             api_base: b.api_base.clone(),
                             upstream_model: b.upstream_model.clone(),
                             api_key: b.api_key.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            virtual_models: self
+                .virtual_models
+                .values()
+                .map(|vm| WireVirtualModel {
+                    name: vm.name.clone(),
+                    rules: vm
+                        .rules
+                        .iter()
+                        .map(|r| WireRoutingRule {
+                            caller: WireCallerMatch {
+                                principals: r.caller.principals.iter().copied().collect(),
+                                roles: r.caller.roles.iter().cloned().collect(),
+                            },
+                            shape: WireShapeMatch {
+                                min_prompt_tokens: r.shape.min_prompt_tokens,
+                                max_prompt_tokens: r.shape.max_prompt_tokens,
+                                min_max_tokens: r.shape.min_max_tokens,
+                                max_max_tokens: r.shape.max_max_tokens,
+                            },
+                            targets: r
+                                .targets
+                                .iter()
+                                .map(|t| WireWeightedTarget {
+                                    model: t.model.clone(),
+                                    weight: t.weight,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    default_targets: vm
+                        .default_targets
+                        .iter()
+                        .map(|t| WireWeightedTarget {
+                            model: t.model.clone(),
+                            weight: t.weight,
                         })
                         .collect(),
                 })
@@ -293,6 +399,7 @@ impl Snapshot {
                             name: p.name,
                             allowed_models: p.allowed_models.into_iter().collect(),
                             allow_all: p.allow_all,
+                            roles: p.roles.into_iter().collect(),
                         },
                     )
                 })
@@ -311,6 +418,50 @@ impl Snapshot {
                             api_key: b.api_key,
                         })
                         .collect(),
+                })
+                .collect(),
+            virtual_models: w
+                .virtual_models
+                .into_iter()
+                .map(|vm| {
+                    (
+                        vm.name.clone(),
+                        VirtualModelDef {
+                            name: vm.name,
+                            rules: vm
+                                .rules
+                                .into_iter()
+                                .map(|r| RoutingRule {
+                                    caller: CallerMatch {
+                                        principals: r.caller.principals.into_iter().collect(),
+                                        roles: r.caller.roles.into_iter().collect(),
+                                    },
+                                    shape: ShapeMatch {
+                                        min_prompt_tokens: r.shape.min_prompt_tokens,
+                                        max_prompt_tokens: r.shape.max_prompt_tokens,
+                                        min_max_tokens: r.shape.min_max_tokens,
+                                        max_max_tokens: r.shape.max_max_tokens,
+                                    },
+                                    targets: r
+                                        .targets
+                                        .into_iter()
+                                        .map(|t| WeightedTarget {
+                                            model: t.model,
+                                            weight: t.weight,
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                            default_targets: vm
+                                .default_targets
+                                .into_iter()
+                                .map(|t| WeightedTarget {
+                                    model: t.model,
+                                    weight: t.weight,
+                                })
+                                .collect(),
+                        },
+                    )
                 })
                 .collect(),
             open: w.open,
@@ -340,6 +491,7 @@ impl Snapshot {
                 .collect(),
             principals: principals.into_iter().map(|p| (p.id, p)).collect(),
             models,
+            virtual_models: HashMap::new(),
             open: false,
         }
     }
@@ -356,6 +508,7 @@ mod tests {
             name: "eval-team".into(),
             allowed_models: allowed.iter().map(|s| s.to_string()).collect(),
             allow_all: false,
+            roles: HashSet::new(),
         };
         Snapshot::for_test(
             vec![(key.to_string(), 1, expires, false)],
@@ -545,6 +698,7 @@ mod tests {
             keys,
             principals: vec![],
             models: vec![],
+            virtual_models: vec![],
             open: false,
         };
 

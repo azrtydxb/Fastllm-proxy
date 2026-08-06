@@ -32,7 +32,7 @@ use std::task::{Context, Poll};
 use tracing::{debug, warn};
 
 use crate::multipart;
-use crate::registry::{Backend, BackendUid, InflightGuard};
+use crate::registry::{Backend, BackendUid, InflightGuard, Registry};
 use crate::snapshot::{AuthError, Principal, Snapshot};
 use crate::state::AppState;
 use std::time::SystemTime;
@@ -107,13 +107,13 @@ pub async fn handle(
     };
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
-        return Ok(models_response(&state));
+        return Ok(models_response(&state, &snapshot));
     }
 
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
-        return Ok(proxy_request(req, state, subpath, principal).await);
+        return Ok(proxy_request(req, state, subpath, principal, &snapshot).await);
     }
 
     Ok(error_response(
@@ -136,6 +136,73 @@ struct BodyPeek {
     model: Option<String>,
     #[serde(default)]
     stream: Option<bool>,
+    /// Read for virtual-model routing rules that match on requested
+    /// generation length (`crate::routing::ShapeMatch`) — already sitting in
+    /// the same JSON object `model` is parsed out of, so this costs nothing
+    /// beyond one more field in a struct `serde_json` already skips past
+    /// everything else in.
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+/// Resolve the client-requested model name to the concrete model that will
+/// actually be routed to, evaluating a virtual model's rules
+/// (`crate::routing`) when the name is a virtual one.
+///
+/// **Authorisation decision**, pinned by
+/// `tests::a_virtual_models_grant_does_not_reach_its_targets_and_vice_versa`:
+/// the caller is authorised against the *resolved concrete model*
+/// (`proxy_request` checks `principal.may_invoke(&target_model)` on what
+/// this function returns), never against the virtual name by itself. A
+/// virtual model routes access; it must never be able to grant it. The
+/// alternative — authorising the virtual name and letting its rules
+/// silently decide which concrete model actually serves the request —
+/// would let a virtual model's configuration (or the weighted split, or a
+/// health-driven failover) expand a principal's reach beyond whatever it
+/// was actually granted, with no grant on record for the model that ends up
+/// serving the request. Requiring the concrete grant means adding a virtual
+/// model in front of existing models never changes who can reach what; it
+/// only changes how an already-authorised request gets routed.
+///
+/// Returns the resolved model name, or an error response when the requested
+/// name — virtual or concrete — does not resolve to anything at all. This
+/// runs *before* authorisation, mirroring the existing "resolve, then
+/// authorise" order for concrete models (an unknown name is a 404
+/// regardless of what the caller may invoke — see `tests/rbac.rs`): a
+/// caller who names a virtual model with no viable target learns "no such
+/// model", not "you may not use the model this routes to", which would leak
+/// routing internals to someone the very next check might reject anyway.
+///
+/// `Response<ResBody>` in the `Err` variant is large, same tradeoff
+/// `authorize` already makes and documents: a boxed error would save stack
+/// space on the rare rejection path at the cost of an allocation on every
+/// call, which is the wrong trade for an interface shared with the rest of
+/// the request path's error responses.
+#[allow(clippy::result_large_err)]
+fn resolve_target_model(
+    requested_model: &str,
+    snapshot: &Snapshot,
+    principal: Option<&Principal>,
+    body_len: usize,
+    max_tokens: Option<u64>,
+    prefix: u64,
+    registry: &Registry,
+) -> Result<String, Response<ResBody>> {
+    let Some(vm) = snapshot.virtual_models.get(requested_model) else {
+        return Ok(requested_model.to_string());
+    };
+    let prompt_tokens = crate::routing::estimate_prompt_tokens(body_len);
+    vm.resolve(principal, prompt_tokens, max_tokens, prefix, registry)
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                &format!(
+                    "virtual model {requested_model:?} has no viable target for this request; \
+                     check its routing rules and defaults"
+                ),
+            )
+        })
 }
 
 async fn proxy_request(
@@ -143,6 +210,7 @@ async fn proxy_request(
     state: Arc<AppState>,
     subpath: String,
     principal: Option<&Principal>,
+    snapshot: &Snapshot,
 ) -> Response<ResBody> {
     let (parts, body) = req.into_parts();
 
@@ -177,80 +245,108 @@ async fn proxy_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
 
-    let (model, model_field, streaming) = match multipart::boundary(content_type) {
-        // Multipart: the audio routes. `model` is a form field, and the rest of
-        // the body — the upload — must not be touched.
-        Some(boundary) => {
-            let Some(range) = multipart::find_field(&collected, &boundary, "model") else {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "multipart body is missing the 'model' field",
-                );
-            };
-            match multipart::field_value(&collected, range.clone()).filter(|m| !m.is_empty()) {
-                Some(model) => (model.to_string(), Some(range), false),
-                None => {
+    let (requested_model, model_field, streaming, max_tokens) =
+        match multipart::boundary(content_type) {
+            // Multipart: the audio routes. `model` is a form field, and the rest of
+            // the body — the upload — must not be touched. Virtual-model routing
+            // rules that key on `max_tokens` have nothing to read here (it is not
+            // a multipart field on these routes), so it is simply `None`.
+            Some(boundary) => {
+                let Some(range) = multipart::find_field(&collected, &boundary, "model") else {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
-                        "the 'model' form field is empty or not valid UTF-8",
+                        "multipart body is missing the 'model' field",
                     );
+                };
+                match multipart::field_value(&collected, range.clone()).filter(|m| !m.is_empty()) {
+                    Some(model) => (model.to_string(), Some(range), false, None),
+                    None => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            "the 'model' form field is empty or not valid UTF-8",
+                        );
+                    }
                 }
             }
-        }
-        None => {
-            let peek: BodyPeek = match serde_json::from_slice(&collected) {
-                Ok(p) => p,
-                Err(e) => {
+            None => {
+                let peek: BodyPeek = match serde_json::from_slice(&collected) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            &format!("request body is not valid JSON: {e}"),
+                        );
+                    }
+                };
+                let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
-                        &format!("request body is not valid JSON: {e}"),
+                        "request body is missing the 'model' field",
                     );
-                }
-            };
-            let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "request body is missing the 'model' field",
-                );
-            };
-            (model, None, peek.stream.unwrap_or(false))
+                };
+                (model, None, peek.stream.unwrap_or(false), peek.max_tokens)
+            }
+        };
+
+    let registry = state.registry.load();
+    // Same hash the backend router uses for prefix affinity, computed once
+    // and reused for the virtual-model weighted split below — see
+    // `crate::routing`'s module doc comment for why reusing it (rather than
+    // a second, independent hash) is what makes the split deterministic
+    // *and* keeps cache locality once a concrete model is chosen.
+    let prefix = state.router.prefix_key(&collected);
+
+    let target_model = match resolve_target_model(
+        &requested_model,
+        snapshot,
+        principal,
+        collected.len(),
+        max_tokens,
+        prefix,
+        &registry,
+    ) {
+        Ok(m) => m,
+        Err(rejection) => {
+            state.requests_failed.fetch_add(1, Ordering::Relaxed);
+            return rejection;
         }
     };
 
-    let registry = state.registry.load();
-    let Some(pool) = registry.pool(&model) else {
+    let Some(pool) = registry.pool(&target_model) else {
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let known = registry.model_names().join(", ");
         return error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
-            &format!("model {model:?} is not served here; available: [{known}]"),
+            &format!("model {target_model:?} is not served here; available: [{known}]"),
         );
     };
     let pool = Arc::clone(pool);
 
     // Authorisation is a set lookup against the pre-flattened grant list, not
-    // a walk of the RBAC graph, and costs nothing measurable.
+    // a walk of the RBAC graph, and costs nothing measurable. Checked against
+    // `target_model` — see `resolve_target_model`'s doc comment for why a
+    // virtual model's *resolved* concrete target is what gets authorised,
+    // never the virtual name by itself.
     if let Some(principal) = principal {
-        if !principal.may_invoke(&model) {
+        if !principal.may_invoke(&target_model) {
             state.requests_failed.fetch_add(1, Ordering::Relaxed);
             return error_response(
                 StatusCode::FORBIDDEN,
                 "model_access_denied",
-                &format!("key is not permitted to use model {model:?}"),
+                &format!("key is not permitted to use model {target_model:?}"),
             );
         }
     }
 
-    let prefix = state.router.prefix_key(&collected);
     let mut tried: Vec<BackendUid> = Vec::new();
     let mut last_error: Option<String> = None;
 
@@ -265,7 +361,7 @@ async fn proxy_request(
 
         let upstream_body = match rewrite_model_if_needed(
             &collected,
-            &model,
+            &requested_model,
             &backend.upstream_model,
             model_field.clone(),
         ) {
@@ -336,7 +432,8 @@ async fn proxy_request(
                 }
                 debug!(
                     backend = %backend.api_base,
-                    model = %model,
+                    requested_model = %requested_model,
+                    model = %target_model,
                     stream = streaming,
                     %status,
                     "proxied"
@@ -353,7 +450,8 @@ async fn proxy_request(
     }
 
     state.requests_failed.fetch_add(1, Ordering::Relaxed);
-    let detail = last_error.unwrap_or_else(|| format!("no healthy backend for model {model:?}"));
+    let detail =
+        last_error.unwrap_or_else(|| format!("no healthy backend for model {target_model:?}"));
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
 }
 
@@ -552,10 +650,26 @@ fn error_response(status: StatusCode, kind: &str, message: &str) -> Response<Res
 }
 
 /// OpenAI-shaped model list, aggregated over every pool.
-fn models_response(state: &AppState) -> Response<ResBody> {
+/// OpenAI-shaped model list.
+///
+/// **Lists both concrete and virtual models.** `/v1/models` has never been
+/// filtered by what the caller may invoke — it enumerates what is
+/// *configured*, same as today's behaviour for concrete models — so leaving
+/// virtual models out would make them undiscoverable except by already
+/// knowing their name, without adding any actual access control: a caller
+/// with no grant for a listed model already gets 403 from `/v1/chat/completions`
+/// regardless of whether that model appeared here. Concrete models are kept
+/// in the list too, even ones that exist only as a virtual model's target —
+/// removing them would break any client still addressing them directly,
+/// which is a legitimate and unrestricted thing to do unless someone
+/// deliberately revokes the grant.
+fn models_response(state: &AppState, snapshot: &Snapshot) -> Response<ResBody> {
     let registry = state.registry.load();
-    let data: Vec<serde_json::Value> = registry
-        .model_names()
+    let mut names: Vec<&str> = registry.model_names();
+    names.extend(snapshot.virtual_models.keys().map(String::as_str));
+    names.sort_unstable();
+    names.dedup();
+    let data: Vec<serde_json::Value> = names
         .into_iter()
         .map(|name| {
             serde_json::json!({
@@ -687,7 +801,7 @@ fn full(bytes: Bytes) -> ResBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn snap(key: &str, models: &[&str]) -> Snapshot {
         Snapshot::for_test(
@@ -697,6 +811,7 @@ mod tests {
                 name: "t".into(),
                 allowed_models: models.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
                 allow_all: false,
+                roles: HashSet::new(),
             }],
             vec![],
         )
@@ -823,5 +938,106 @@ mod tests {
         for route in ["/audio/transcriptions", "/audio/translations"] {
             assert!(PROXIED_SUFFIXES.contains(&route));
         }
+    }
+
+    fn registry_with_two_models() -> crate::registry::Registry {
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(
+            r#"
+model_list:
+  - model_name: concrete-a
+    litellm_params: { api_base: "http://10.0.0.1:8000/v1" }
+  - model_name: concrete-b
+    litellm_params: { api_base: "http://10.0.0.2:8000/v1" }
+"#,
+        )
+        .unwrap();
+        crate::registry::Registry::build(&cfg, &crate::registry::Interner::default(), None).unwrap()
+    }
+
+    /// **Authorisation decision, pinned.** A virtual model resolves to a
+    /// concrete target (`resolve_target_model`), and what gets checked
+    /// against a principal's grants is that *resolved* concrete name, never
+    /// the virtual one — see that function's doc comment for the full
+    /// reasoning. This test proves both directions of the consequence
+    /// directly, without a database:
+    ///
+    /// - A principal granted only the *concrete* model that a virtual model
+    ///   happens to resolve to reaches it, despite never being granted the
+    ///   virtual name itself.
+    /// - A principal granted only the *virtual* name is refused, because
+    ///   the grant recorded is for a name that is never actually checked —
+    ///   this is the escalation path the design doc warns about, and it must
+    ///   not exist: being granted a virtual model must never, by itself,
+    ///   unlock whatever concrete model it happens to route to today.
+    #[test]
+    fn authorisation_checks_the_resolved_concrete_model_not_the_virtual_name() {
+        let registry = registry_with_two_models();
+        let mut virtual_models = HashMap::new();
+        virtual_models.insert(
+            "vm".to_string(),
+            crate::routing::VirtualModelDef {
+                name: "vm".into(),
+                rules: vec![],
+                default_targets: vec![crate::routing::WeightedTarget {
+                    model: "concrete-a".into(),
+                    weight: 100,
+                }],
+            },
+        );
+        let snapshot = Snapshot {
+            virtual_models,
+            ..Snapshot::default()
+        };
+
+        let granted_concrete_only = Principal {
+            id: 1,
+            name: "granted-concrete".into(),
+            allowed_models: ["concrete-a".to_string()].into_iter().collect(),
+            allow_all: false,
+            roles: HashSet::new(),
+        };
+        let granted_virtual_only = Principal {
+            id: 2,
+            name: "granted-virtual".into(),
+            allowed_models: ["vm".to_string()].into_iter().collect(),
+            allow_all: false,
+            roles: HashSet::new(),
+        };
+
+        let target = resolve_target_model(
+            "vm",
+            &snapshot,
+            Some(&granted_concrete_only),
+            0,
+            None,
+            0,
+            &registry,
+        )
+        .expect("the virtual model has a viable default target");
+        assert_eq!(target, "concrete-a");
+
+        assert!(
+            granted_concrete_only.may_invoke(&target),
+            "a grant on the concrete model the virtual model resolves to must be honoured"
+        );
+        assert!(
+            !granted_virtual_only.may_invoke(&target),
+            "a grant on only the virtual NAME must not, by itself, unlock the concrete model \
+             it happens to route to — that would let a virtual model's configuration silently \
+             expand a principal's reach beyond what was actually granted"
+        );
+    }
+
+    /// A virtual model whose name collides with nothing still resolves
+    /// straight through: `resolve_target_model` on a name that is not in
+    /// `snapshot.virtual_models` is the identity function, so ordinary
+    /// (concrete) routing is completely unaffected by this feature existing.
+    #[test]
+    fn a_concrete_model_name_resolves_to_itself() {
+        let registry = registry_with_two_models();
+        let snapshot = Snapshot::default();
+        let target =
+            resolve_target_model("concrete-a", &snapshot, None, 0, None, 0, &registry).unwrap();
+        assert_eq!(target, "concrete-a");
     }
 }

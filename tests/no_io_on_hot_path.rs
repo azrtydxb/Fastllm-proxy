@@ -161,6 +161,7 @@ fn authorisation_reads_only_the_snapshot() {
             name: "p".into(),
             allowed_models: ["m".to_string()].into_iter().collect(),
             allow_all: false,
+            roles: std::collections::HashSet::new(),
         },
     );
     let snap = Snapshot {
@@ -168,6 +169,7 @@ fn authorisation_reads_only_the_snapshot() {
         keys,
         principals,
         models: vec![],
+        virtual_models: HashMap::new(),
         open: false,
     };
 

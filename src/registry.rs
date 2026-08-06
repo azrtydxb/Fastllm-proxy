@@ -308,6 +308,20 @@ impl Registry {
     pub fn healthy_count(&self) -> usize {
         self.all.iter().filter(|b| b.is_healthy()).count()
     }
+
+    /// Whether `model_name` has a pool with at least one backend currently in
+    /// rotation.
+    ///
+    /// Used by virtual-model target selection (`crate::routing`) to decide
+    /// whether a target is "unhealthy or saturated" enough to fall through to
+    /// the next one in its chain. A model with no pool at all (misconfigured
+    /// target, or a name that does not exist) counts the same as one with
+    /// every backend down: nothing here can serve the request.
+    pub fn pool_has_healthy(&self, model_name: &str) -> bool {
+        self.pools
+            .get(model_name)
+            .is_some_and(|pool| pool.iter().any(|b| b.is_healthy()))
+    }
 }
 
 #[cfg(test)]

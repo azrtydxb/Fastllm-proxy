@@ -78,6 +78,12 @@ control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring"]
 [dev-dependencies]
 tempfile = "3"
 ureq = { version = "2", features = ["json"] }
+# Unconditional (not gated on the `control` feature): `tests/virtual_models.rs`
+# reaches into Postgres directly to set up a fine-grained RBAC fixture no
+# admin route grants (see that file's doc comment). Dev-dependencies are
+# never compiled by a plain `cargo build`, so this does not affect the
+# `--no-default-features` library/binary build.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono"] }
 
 [profile.release]
 opt-level = 3
