@@ -19,7 +19,7 @@ pub enum AuthError {
     Disabled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     pub id: PrincipalId,
     pub name: String,
@@ -35,21 +35,21 @@ impl Principal {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyEntry {
     pub principal: PrincipalId,
     pub expires_at: Option<SystemTime>,
     pub disabled: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendDef {
     pub api_base: String,
     pub upstream_model: String,
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDef {
     pub name: String,
     pub backends: Vec<BackendDef>,
@@ -142,6 +142,22 @@ pub struct WireModelDef {
 }
 
 impl Snapshot {
+    /// Whether two snapshots carry the same policy, ignoring `version`.
+    ///
+    /// `version` is the database's clock (`EXTRACT(EPOCH FROM now())`), not a
+    /// content hash — it advances on every rebuild regardless of whether any
+    /// row actually changed. A periodic rebuilder that published on every
+    /// tick would therefore always look "changed" and defeat the point of
+    /// comparing at all (every tick would rebuild the routing `Registry` and
+    /// spam an info log). This is what lets the rebuilder tell "the database
+    /// was polled" apart from "the database actually changed".
+    pub fn content_eq(&self, other: &Snapshot) -> bool {
+        self.keys == other.keys
+            && self.principals == other.principals
+            && self.models == other.models
+            && self.open == other.open
+    }
+
     pub fn authenticate(&self, token: &str, now: SystemTime) -> Result<&Principal, AuthError> {
         let entry = self.keys.get(&hash_key(token)).ok_or(AuthError::Unknown)?;
         if entry.disabled {
@@ -389,6 +405,26 @@ mod tests {
         snap.principals.get_mut(&1).unwrap().allow_all = true;
         let p = snap.authenticate("sk-admin", SystemTime::now()).unwrap();
         assert!(p.may_invoke("anything-at-all"));
+    }
+
+    /// `version` is a timestamp, not a content hash — the periodic control
+    /// plane rebuilder (`control::api::rebuild_once`) relies on `content_eq`
+    /// to tell "the database was polled" apart from "the database actually
+    /// changed" without that clock forcing every tick to look like a change.
+    #[test]
+    fn content_eq_ignores_version_but_not_policy() {
+        let mut a = snapshot_with("sk-good", &["qwen3"], None);
+        a.version = 1;
+        let mut b = snapshot_with("sk-good", &["qwen3"], None);
+        b.version = 999;
+        assert!(a.content_eq(&b), "only the timestamp differs");
+
+        let mut c = snapshot_with("sk-good", &["qwen3", "llama"], None);
+        c.version = 1;
+        assert!(
+            !a.content_eq(&c),
+            "a real grant change must not compare equal"
+        );
     }
 
     #[test]
