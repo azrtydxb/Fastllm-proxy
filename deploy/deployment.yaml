@@ -30,7 +30,10 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: proxy
-          image: 192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main
+          # Port 443, not the :5000 that CI pushes to. Zot serves both, but
+          # every other workload on this cluster pulls via 443 and that is what
+          # containerd is configured to trust.
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:main
           imagePullPolicy: Always
           args:
             - --policy=cache-affinity
