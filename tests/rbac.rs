@@ -115,10 +115,24 @@ fn authorisation_allows_denies_and_expires() {
         401,
         "expired key"
     );
+    // The discriminator this whole test exists for: these two must land on
+    // opposite sides of authorisation. A narrow key against a model that
+    // EXISTS but isn't granted is 403 (the model resolved; the grant check
+    // rejected it). The same key against a model that does NOT exist is 404
+    // (resolution fails before authorisation is even consulted) — a caller
+    // must not be able to use "403 vs 404" to enumerate which models exist
+    // by testing keys it isn't granted for. Keep both assertions here,
+    // together: deleting one leaves the other looking sufficient when it
+    // proves nothing about ordering on its own.
     assert_eq!(
         post(14411, Some("sk-narrow"), "other-model"),
         403,
-        "ungranted model"
+        "ungranted model that exists"
+    );
+    assert_eq!(
+        post(14411, Some("sk-narrow"), "no-such-model"),
+        404,
+        "ungranted key against a model that does not exist at all"
     );
     // Granted: reaches routing and fails at the (absent) upstream, not at
     // authz — anything but 403 proves the grant was honoured.
