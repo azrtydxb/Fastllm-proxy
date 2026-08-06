@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::registry::{Interner, Registry};
 use crate::router::Router;
+use crate::snapshot::Snapshot;
 
 /// Speaks both schemes: cluster-local vLLM nodes are plain HTTP, but a config
 /// may equally point at a TLS-terminated or hosted endpoint.
@@ -21,7 +22,8 @@ pub struct AppState {
     pub interner: Interner,
     pub config_path: PathBuf,
 
-    pub master_key: Option<String>,
+    /// Swapped wholesale whenever the source produces a new version.
+    pub snapshot: ArcSwap<Snapshot>,
     pub max_body_bytes: usize,
     pub max_retries: usize,
     /// Bounds time-to-first-byte only. Generation itself is unbounded — a long

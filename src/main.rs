@@ -17,6 +17,8 @@ use tracing::{error, info, warn};
 use fastllm_proxy::config::FileConfig;
 use fastllm_proxy::registry::{Interner, Registry};
 use fastllm_proxy::router::{Policy, Router};
+use fastllm_proxy::source::file::FileSource;
+use fastllm_proxy::source::SnapshotSource;
 use fastllm_proxy::state::AppState;
 use fastllm_proxy::{health, proxy, upstream};
 
@@ -127,12 +129,24 @@ async fn run(cli: Cli) -> Result<()> {
         tls_config()?,
     );
 
+    let mut snapshot = FileSource::new(cli.config.clone())
+        .fetch(None)
+        .await?
+        .context("config produced no snapshot on first load")?;
+
+    // Deprecated: a single shared key is exactly what this release replaces,
+    // but silently breaking a running deployment is worse than a warning.
     let master_key = cli
         .master_key
+        .clone()
         .or_else(|| file_config.general_settings.master_key.clone())
         .filter(|k| !k.is_empty());
-    if master_key.is_none() {
-        warn!("no master key configured; the proxy accepts unauthenticated requests");
+    if let Some(key) = &master_key {
+        warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
+        snapshot.add_legacy_master_key(key);
+    }
+    if snapshot.open {
+        warn!("no keys configured; the proxy accepts unauthenticated requests");
     }
 
     let state = Arc::new(AppState {
@@ -147,7 +161,7 @@ async fn run(cli: Cli) -> Result<()> {
         client,
         interner,
         config_path: cli.config.clone(),
-        master_key,
+        snapshot: ArcSwap::from_pointee(snapshot),
         max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
         max_retries: cli.max_retries,
         upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),

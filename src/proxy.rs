@@ -33,7 +33,9 @@ use tracing::{debug, warn};
 
 use crate::multipart;
 use crate::registry::{Backend, BackendUid, InflightGuard};
+use crate::snapshot::{AuthError, Principal, Snapshot};
 use crate::state::AppState;
+use std::time::SystemTime;
 
 pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
@@ -87,9 +89,14 @@ pub async fn handle(
         _ => {}
     }
 
-    if let Some(rejection) = check_auth(&req, &state) {
-        return Ok(rejection);
-    }
+    let snapshot = state.snapshot.load();
+    let principal = match authorize(&req, &snapshot) {
+        Ok(p) => p.cloned(),
+        Err(rejection) => return Ok(rejection),
+    };
+    // The guard borrows the snapshot; drop it before the request moves on so
+    // nothing here holds up a swap from a concurrent reload.
+    drop(snapshot);
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
         return Ok(models_response(&state));
@@ -98,7 +105,7 @@ pub async fn handle(
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
-        return Ok(proxy_request(req, state, subpath).await);
+        return Ok(proxy_request(req, state, subpath, principal).await);
     }
 
     Ok(error_response(
@@ -127,6 +134,7 @@ async fn proxy_request(
     req: Request<Incoming>,
     state: Arc<AppState>,
     subpath: String,
+    principal: Option<Principal>,
 ) -> Response<ResBody> {
     let (parts, body) = req.into_parts();
 
@@ -220,6 +228,19 @@ async fn proxy_request(
         );
     };
     let pool = Arc::clone(pool);
+
+    // Authorisation is a set lookup against the pre-flattened grant list, not
+    // a walk of the RBAC graph, and costs nothing measurable.
+    if let Some(principal) = &principal {
+        if !principal.may_invoke(&model) {
+            state.requests_failed.fetch_add(1, Ordering::Relaxed);
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "model_access_denied",
+                &format!("key is not permitted to use model {model:?}"),
+            );
+        }
+    }
 
     let prefix = state.router.prefix_key(&collected);
     let mut tried: Vec<BackendUid> = Vec::new();
@@ -450,18 +471,44 @@ impl Body for TrackedBody {
     }
 }
 
-/// Returns a rejection response when the request may not proceed.
-fn check_auth(req: &Request<Incoming>, state: &AppState) -> Option<Response<ResBody>> {
-    let expected = state.master_key.as_ref()?;
-    let presented = req
+/// Authenticate the caller and return their principal.
+///
+/// `Ok(None)` means the snapshot is open — no keys configured — which is the
+/// same permissive behaviour as running without a master key today.
+///
+/// The `Err` variant is a full `Response`, which clippy flags as large; a
+/// boxed error would save stack space on the (rare) rejection path at the
+/// cost of an allocation on every one, which is the wrong trade for an
+/// interface shared with the rest of the request path's error responses.
+#[allow(clippy::result_large_err)]
+fn authorize<'a>(
+    req: &Request<Incoming>,
+    snapshot: &'a Snapshot,
+) -> Result<Option<&'a Principal>, Response<ResBody>> {
+    if snapshot.open {
+        return Ok(None);
+    }
+    let token = req
         .headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token);
 
-    match presented {
-        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => None,
-        _ => Some(error_response(
+    let Some(token) = token else {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "missing or invalid bearer token",
+        ));
+    };
+    match snapshot.authenticate(token, SystemTime::now()) {
+        Ok(p) => Ok(Some(p)),
+        Err(AuthError::Expired) => Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "expired_api_key",
+            "this api key has expired",
+        )),
+        Err(_) => Err(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_api_key",
             "missing or invalid bearer token",
@@ -479,16 +526,6 @@ fn bearer_token(header: &str) -> Option<&str> {
         .eq_ignore_ascii_case("bearer")
         .then(|| token.trim())
         .filter(|t| !t.is_empty())
-}
-
-/// Comparison that does not short-circuit on the first differing byte, so a
-/// wrong key cannot be recovered one byte at a time. The length itself is not
-/// hidden — for a bearer token that is not the secret.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn json_response(status: StatusCode, body: String) -> Response<ResBody> {
@@ -635,6 +672,48 @@ fn full(bytes: Bytes) -> ResBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn snap(key: &str, models: &[&str]) -> Snapshot {
+        Snapshot::for_test(
+            vec![(key.to_string(), 1, None, false)],
+            vec![Principal {
+                id: 1,
+                name: "t".into(),
+                allowed_models: models.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+                allow_all: false,
+            }],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_valid_key_authorises_a_granted_model() {
+        let s = snap("sk-ok", &["m"]);
+        let p = s
+            .authenticate("sk-ok", std::time::SystemTime::now())
+            .unwrap();
+        assert!(p.may_invoke("m"));
+    }
+
+    #[test]
+    fn a_valid_key_is_forbidden_from_an_ungranted_model() {
+        // 403, not 404: the model exists, this caller may not use it. Returning
+        // 404 would leak nothing but would also mislead.
+        let s = snap("sk-ok", &["m"]);
+        let p = s
+            .authenticate("sk-ok", std::time::SystemTime::now())
+            .unwrap();
+        assert!(!p.may_invoke("secret-model"));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn an_open_snapshot_needs_no_key() {
+        let mut s = Snapshot::default();
+        s.open = true;
+        assert!(s.open);
+    }
 
     #[test]
     fn identical_model_names_avoid_a_reserialise() {
@@ -695,14 +774,6 @@ mod tests {
         let peek: BodyPeek = serde_json::from_slice(body).unwrap();
         assert_eq!(peek.model.as_deref(), Some("m"));
         assert_eq!(peek.stream, Some(true));
-    }
-
-    #[test]
-    fn constant_time_eq_matches_semantics() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
-        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]

@@ -88,6 +88,37 @@ impl Snapshot {
             .ok_or(AuthError::Unknown)
     }
 
+    /// Synthesise a single allow-all principal from a `--master-key`/
+    /// `general_settings.master_key` value.
+    ///
+    /// This is the compatibility path: a running deployment upgraded in place
+    /// still has exactly the one shared key it always had, and it must keep
+    /// working — silently breaking it on upgrade would be worse than the
+    /// deprecation warning that comes with this call.
+    pub fn add_legacy_master_key(&mut self, key: &str) {
+        // Id 0 is reserved for the legacy key so it can never collide with a
+        // control-plane-assigned principal id, which starts at 1.
+        const LEGACY_PRINCIPAL: PrincipalId = 0;
+        self.principals.insert(
+            LEGACY_PRINCIPAL,
+            Principal {
+                id: LEGACY_PRINCIPAL,
+                name: "legacy-master-key".into(),
+                allowed_models: HashSet::new(),
+                allow_all: true,
+            },
+        );
+        self.keys.insert(
+            hash_key(key),
+            KeyEntry {
+                principal: LEGACY_PRINCIPAL,
+                expires_at: None,
+                disabled: false,
+            },
+        );
+        self.open = false;
+    }
+
     #[cfg(test)]
     pub fn for_test(
         keys: Vec<(String, PrincipalId, Option<SystemTime>, bool)>,
