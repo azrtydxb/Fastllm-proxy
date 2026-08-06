@@ -43,7 +43,7 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 |---|---|---|
 | `proxy` (default) | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
 | `all` | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
-| `control` | Database, admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
+| `control` | Database, admin API (`/admin/*` — keys, principals, roles, models, backends) and `/snapshot` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
 
 `proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
 
@@ -57,7 +57,11 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
 ```
 
-Idempotent — seeds `models`/`model_backends`/keys from a LiteLLM-format config and can be run more than once safely. Point `--role=all`/`control` at the same database afterward.
+Idempotent — seeds `models`/`model_backends` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely. Point `--role=all`/`control` at the same database afterward and the same keys keep working, with the same per-model authorisation they had in `File` mode.
+
+Each imported key gets its own role, `import:<name>`, holding just that key's grants — `models: ['*']` becomes `model:invoke` on `model/*` (i.e. allow-all), a named list becomes one grant per model. Re-importing an edited file converges: grants dropped from the file are revoked, not merely left behind. `import` never prints a key back; the config file is the only copy of the plaintext.
+
+Day-to-day changes after the initial seed go through the admin API below rather than another `import` run or hand-written SQL, so they reach a running control plane immediately instead of on its next periodic rebuild.
 
 ### Quickstart with docker-compose
 
@@ -71,6 +75,19 @@ FASTLLM_ENCRYPTION_KEY=000000000000000000000000000000000000000000000000000000000
   --database-url postgres://fastllm:fastllm@localhost:5432/fastllm
 curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
   -d '{"name":"local","principal_id":1}'
+```
+
+Principal `1` is the `bootstrap` service account the migrations seed, already
+holding the `inference` role. For anything beyond a first key, create your own:
+
+```bash
+# A principal, then a role for it, then a key against it.
+curl -XPOST localhost:4001/admin/principals -H 'content-type: application/json' \
+  -d '{"name":"ci-pipeline"}'                       # -> {"id":2,...}
+curl -XPOST localhost:4001/admin/principals/2/roles -H 'content-type: application/json' \
+  -d '{"role":"inference"}'
+curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
+  -d '{"name":"ci","principal_id":2,"expires_at":"2027-01-01T00:00:00Z"}'
 ```
 
 (`import`, run here on the host rather than inside the container, needs the
@@ -106,10 +123,33 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `GET /v1/models` | Aggregated across every pool |
 | `GET /health` | Per-backend health, in-flight, request and error counts. No auth required. Exposes backend addresses — keep it off the public interface |
 | `GET /metrics` | Prometheus text. No auth required |
-| `POST /admin/keys`, `DELETE /admin/keys/{id}` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See below |
+| `/admin/*` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See the table below and the warning under it |
 | `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
 
-**`/admin/*` has no authentication of any kind.** `POST /admin/keys` and `DELETE /admin/keys/{id}` check nothing — no header, no token, no session — so anyone who can reach the admin port can mint or revoke an API key. `--proxy-token` gates `/snapshot` only; it is not, and never was, a check that `/admin/*` also performs (an earlier version of this README claimed otherwise). Sessions and passwords for real admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, network isolation is the *only* control: **never** put the admin port on a network-reachable listener — bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them, and do not treat `--proxy-token` as covering `/admin/*` when deciding what is safe to expose.
+#### Admin API
+
+Everything an operator needs to run the control plane, so that neither raw SQL nor a second `import` run is the documented way to change policy. Every mutating route rebuilds and republishes the snapshot on the spot, so a change reaches `--role proxy` within one `--config-poll` interval rather than waiting on the control plane's own periodic rebuild.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/principals` | Principals with their roles |
+| `POST /admin/principals` | `{"name":..., "kind":..., "email":...}`. `kind` is `service_account` (the default) or `user` |
+| `DELETE /admin/principals/{id}` | Cascades to that principal's keys and role grants |
+| `POST /admin/principals/{id}/roles` | `{"role":"inference"}`. Idempotent |
+| `DELETE /admin/principals/{id}/roles/{role}` | Revoke one role |
+| `GET /admin/keys` | Prefix, name, principal, expiry, disabled. **Never** the key or its hash |
+| `POST /admin/keys` | `{"name":..., "principal_id":..., "expires_at":...}`. Returns the plaintext key once |
+| `DELETE /admin/keys/{id}` | Revoke (sets `disabled`; the row stays for audit) |
+| `GET /admin/models` | Models and their backends. Reports *whether* a backend has an upstream credential, never the credential |
+| `POST /admin/models` | `{"name":..., "description":...}` |
+| `DELETE /admin/models/{id}` | Cascades to that model's backends |
+| `POST /admin/models/{id}/backends` | `{"api_base":..., "upstream_model":..., "upstream_api_key":...}`. The credential is encrypted before it reaches Postgres and cannot be read back |
+| `DELETE /admin/backends/{id}` | Remove one backend from a pool |
+| `GET /admin/roles` | Roles and the permissions each one grants |
+
+**No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
+
+**`/admin/*` has no authentication of any kind.** None of the routes above check anything — no header, no token, no session — so anyone who can reach the admin port can mint a key, grant a role, or repoint a backend. `--proxy-token` gates `/snapshot` only; it is not, and never was, a check that `/admin/*` also performs (an earlier version of this README claimed otherwise). Sessions and passwords for real admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, network isolation is the *only* control: **never** put the admin port on a network-reachable listener — bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them, and do not treat `--proxy-token` as covering `/admin/*` when deciding what is safe to expose.
 
 ### Encryption at rest
 
@@ -178,11 +218,12 @@ auth:
   keys:
     - key: sk-...
       name: ci-pipeline
-      models: ["qwen3-6-35b-a3b-nvfp4"]   # or omit/`["*"]` for every model
+      models: ["qwen3-6-35b-a3b-nvfp4"]   # `["*"]` for every model; an empty
+                                          # or omitted list grants nothing
       expires_at: "2027-01-01T00:00:00Z"  # RFC 3339, optional
 ```
 
-Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead (`POST /admin/keys`, `DELETE /admin/keys/{id}`).
+Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move.
 
 ### Tuning affinity
 

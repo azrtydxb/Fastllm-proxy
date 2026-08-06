@@ -184,8 +184,8 @@ fn key_creation_error(e: &sqlx::Error, principal_id: i64) -> (StatusCode, Json<s
             Json(serde_json::json!({
                 "error": format!(
                     "no principal with id {principal_id}; the bootstrap principal seeded by \
-                     migrations is id 1 — create another with INSERT INTO principals before \
-                     minting a key against it"
+                     migrations is id 1 — GET /admin/principals lists the rest, and \
+                     POST /admin/principals creates one"
                 )
             })),
         )
@@ -836,9 +836,11 @@ async fn rebuild_once(
 
 /// Keep a running control plane's snapshot current with rows changed by
 /// anything *other* than its own admin API — `fastllm-proxy import` (a
-/// separate process) or a hand-written `UPDATE`/`INSERT` against Postgres,
-/// both of which the outage-recovery procedure in `deploy/README.md`
-/// documents as valid ways to fix a moved backend. Before this existed,
+/// separate process, and still the documented way to seed or re-seed from a
+/// config file), or a hand-written `UPDATE`/`INSERT` against Postgres, which
+/// `deploy/README.md` no longer recommends now that every model, backend,
+/// principal and role change has a route, but which remains reachable and
+/// must not silently do nothing. Before this existed,
 /// `build_snapshot` only ran at process startup and after the admin API's own
 /// writes (`refresh`, above), so neither of those reached a running control
 /// plane at all: the documented procedure silently did nothing until the pod

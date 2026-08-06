@@ -13,16 +13,16 @@ Plain manifests — this does not earn a Helm chart.
 
 Two Deployments, one Postgres, since Task 12:
 
-- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot`. A `ClusterIP` Service on port 4001, **not** on the LoadBalancer VIP.
+- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table) and `/snapshot`. A `ClusterIP` Service on port 4001, **not** on the LoadBalancer VIP.
 - **`fastllm-proxy`** (`deployment.yaml`) — `--role=proxy`. Polls `fastllm-control`'s `/snapshot` over `FASTLLM_CONTROL_URL`, authenticating with `FASTLLM_PROXY_TOKEN`. Caches the last snapshot it received to an `emptyDir` at `/var/lib/fastllm`, so a pod restart while the control plane is down still comes up serving the last-known model/key set instead of crash-looping or refusing traffic.
 
 ### ⚠️ The admin API has no authentication — keep it off the VIP
 
-`fastllm-control`'s `/admin/*` (`POST /admin/keys`, `DELETE /admin/keys/{id}`) has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` checks `--proxy-token`, and that token is a shared secret for machine-to-machine polling (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
+`fastllm-control`'s `/admin/*` — every route: keys, principals, role grants, models, backends — has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` checks `--proxy-token`, and that token is a shared secret for machine-to-machine polling (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
 
 **Network isolation — the `ClusterIP` Service below — is therefore the only control `/admin/*` has.** Do not read the token requirement on `/snapshot` as implying `/admin/*` is protected too; it is not, and this document previously said otherwise.
 
-**That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN. Putting `/admin/keys` on it turns "reachable from any machine on the network" into "can mint an API key for this proxy from any machine on the network" — unauthenticated key creation, not a probe-and-metrics exposure like `/health`. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
+**That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN. Putting `/admin/*` on it turns "reachable from any machine on the network" into "can mint an API key, grant itself a role, or repoint a backend at a machine it controls, from anywhere on the network" — unauthenticated administration, not a probe-and-metrics exposure like `/health`. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
 
 ## First install
 
@@ -72,6 +72,33 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
 
 Revocation reaches the proxy within one poll interval (`--config-poll`, default 5s).
 
+`principal_id: 1` above is the `bootstrap` service account the migrations seed,
+which holds the `inference` role (every model). A key that should reach only
+some models needs its own principal and a role that grants only those — all
+through the same API, no SQL:
+
+```bash
+E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
+
+E curl -s localhost:4001/admin/principals            # who exists, and their roles
+E curl -s localhost:4001/admin/roles                 # what each role grants
+E curl -s localhost:4001/admin/keys                  # prefix/name/principal/expiry only
+
+E curl -s -XPOST localhost:4001/admin/principals -H 'content-type: application/json' \
+  -d '{"name":"eval-team"}'
+# {"id":4,"name":"eval-team","kind":"service_account"}
+E curl -s -XPOST localhost:4001/admin/principals/4/roles -H 'content-type: application/json' \
+  -d '{"role":"inference"}'
+E curl -s -XDELETE localhost:4001/admin/principals/4/roles/inference
+E curl -s -XDELETE localhost:4001/admin/principals/4   # also drops its keys and grants
+```
+
+`GET /admin/keys` never returns a key or its hash — the plaintext exists only in
+the `POST` response above. A key granted narrower-than-`inference` access needs a
+role holding just the models in question; `fastllm-proxy import` creates exactly
+that shape (`import:<name>`) from a config file's `auth:` block, and
+`GET /admin/roles` shows the result.
+
 ## Using it
 
 ```bash
@@ -109,13 +136,39 @@ section) — running it via `kubectl exec` against `fastllm-control` picks that
 up from the pod's own environment automatically, since `control.yaml` sets
 it. Running `import` from anywhere else needs the same env var set by hand.
 
-(There is no admin-API route for model/backend CRUD yet — `import` and direct
-SQL against `models`/`model_backends` are the only two ways today.) Neither
-goes through the admin API, so `fastllm-control` only picks either up on its
-own periodic rebuild (`--snapshot-rebuild-interval`, default 5s) rather than
-immediately the way an admin API write does. A change lands on `fastllm-proxy`
-within that interval plus one `--config-poll` interval (default 5s each, so
-worst case ~10s) — no rollout, no dropped generations.
+`import` runs in its own process, so `fastllm-control` picks its writes up on
+the next periodic rebuild (`--snapshot-rebuild-interval`, default 5s) rather
+than immediately. A change therefore lands on `fastllm-proxy` within that
+interval plus one `--config-poll` interval (default 5s each, so worst case
+~10s) — no rollout, no dropped generations.
+
+### One-off changes, without a config file
+
+For a single model or backend, the admin API is the supported route — it
+publishes a rebuilt snapshot on the spot, so only `fastllm-proxy`'s poll
+interval stands between the write and the change taking effect. Direct SQL
+against `models`/`model_backends` is no longer the documented way to do any of
+this; it bypasses the write path and waits on the periodic rebuild.
+
+```bash
+E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
+
+E curl -s localhost:4001/admin/models     # models, backend ids, api_bases
+
+E curl -s -XPOST localhost:4001/admin/models -H 'content-type: application/json' \
+  -d '{"name":"qwen3-6-35b-a3b-nvfp4"}'
+# {"id":3,"name":"qwen3-6-35b-a3b-nvfp4"}
+
+# Add a backend to that pool. upstream_model defaults to the model's own name;
+# upstream_api_key is encrypted before it reaches Postgres and can never be
+# read back — GET /admin/models reports only whether one is set.
+E curl -s -XPOST localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+  -d '{"api_base":"http://192.168.10.245:40045/v1"}'
+# {"id":9,...}
+
+E curl -s -XDELETE localhost:4001/admin/backends/9   # drop one replica
+E curl -s -XDELETE localhost:4001/admin/models/3     # drop the model and its backends
+```
 
 ## When spark2's port changes
 
@@ -127,7 +180,23 @@ curl -H "Authorization: Bearer $GPUSTACK_KEY" \
   http://192.168.10.125/v2/model-instances
 ```
 
-then update `model_backends.api_base` for that row (re-run `import` against an
-updated config file, or `UPDATE` it directly) and wait for `fastllm-control`'s
-next periodic rebuild plus `fastllm-proxy`'s next poll (see above). This is
-the main thing a discovery source would automate later.
+then repoint the backend. `api_base` is not editable in place — a backend is
+identified by where it is, and the routing registry keys health and in-flight
+state off that — so replace it: find the stale backend's id, delete it, and add
+one at the new address.
+
+```bash
+E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
+
+E curl -s localhost:4001/admin/models          # find the model id and the stale backend id
+E curl -s -XDELETE localhost:4001/admin/backends/9
+E curl -s -XPOST localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+  -d '{"api_base":"http://192.168.10.245:40118/v1"}'
+```
+
+Both writes publish a rebuilt snapshot immediately, so this lands on
+`fastllm-proxy` within one `--config-poll` interval (default 5s). Re-running
+`import` against an updated config file also works and is the better choice
+when several backends moved at once, at the cost of waiting for
+`--snapshot-rebuild-interval` as well. This is the main thing a discovery
+source would automate later.
