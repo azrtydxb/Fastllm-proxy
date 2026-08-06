@@ -2,5 +2,6 @@
 //!
 //! Feature-gated so a `--role=proxy` build links no database driver at all.
 
+pub mod api;
 pub mod build;
 pub mod db;
