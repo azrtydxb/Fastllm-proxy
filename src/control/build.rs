@@ -6,7 +6,6 @@
 
 use crate::control::secrets::{self, EncryptionKey};
 use crate::snapshot::{BackendDef, KeyEntry, ModelDef, Principal, Snapshot};
-use anyhow::Context;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
@@ -77,15 +76,40 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         let mut backends = Vec::new();
         for (_, base, upstream, encrypted_key) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
-            let api_key = encrypted_key
-                .as_ref()
-                .map(|blob| secrets::decrypt(key, blob))
-                .transpose()
-                .with_context(|| {
-                    format!(
-                        "failed to decrypt upstream_api_key for model {name:?}, backend {base:?}"
-                    )
-                })?;
+            // A decrypt failure here is contained to this one backend, not
+            // propagated as a `build_snapshot` error. It used to be: one row
+            // that failed to decrypt (a partially completed key rotation, a
+            // row `reencrypt_plaintext_backends` never reached, anything not
+            // matching `key`) failed the *entire* snapshot — a hard exit on
+            // the startup path (`main.rs`'s `EncryptionKey::from_env`
+            // sibling calls all propagate `?`), crash-looping the whole
+            // control plane and taking every model offline over one bad row.
+            // Dropping just the affected backend and logging it loudly is
+            // fail-closed on the credential that actually cannot be used,
+            // without failing closed on every model that has nothing to do
+            // with it. If this was a model's only backend, that model ends
+            // up with none, which is exactly the "no healthy backend" case
+            // the proxy already has to handle for other reasons (every
+            // backend down, none configured).
+            let api_key = match encrypted_key.as_ref() {
+                None => None,
+                Some(blob) => match secrets::decrypt(key, blob) {
+                    Ok(plaintext) => Some(plaintext),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            model = %name,
+                            api_base = %base,
+                            "dropping backend: upstream_api_key failed to decrypt; excluded from \
+                             this snapshot rather than failing the whole rebuild. Re-encrypt it \
+                             with the current FASTLLM_ENCRYPTION_KEY (see \
+                             `reencrypt-backends`/`is_encrypted`) or delete and recreate it \
+                             through the admin API."
+                        );
+                        continue;
+                    }
+                },
+            };
             backends.push(BackendDef {
                 api_base: base.trim_end_matches('/').to_string(),
                 upstream_model: upstream.clone(),
@@ -218,6 +242,107 @@ mod tests {
         assert_eq!(
             set,
             ["a".to_string(), "b".to_string()].into_iter().collect()
+        );
+    }
+
+    fn unique_name(tag: &str) -> String {
+        format!(
+            "{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    /// Regression for the review finding: one row that fails to decrypt (a
+    /// partially completed key rotation, a row never migrated) used to fail
+    /// `build_snapshot` outright — a hard exit on the startup path,
+    /// crash-looping the control plane and taking every model offline over
+    /// one bad backend. It must instead drop just that backend and let the
+    /// snapshot build carry every other backend, including a sibling backend
+    /// on the very same model.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn one_undecryptable_backend_is_dropped_and_the_rest_of_the_snapshot_still_builds() {
+        use crate::control::secrets::test_key;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = test_key();
+
+        let broken_model = unique_name("undecryptable-model");
+        let model_id: i64 =
+            sqlx::query_scalar("INSERT INTO models (name) VALUES ($1) RETURNING id")
+                .bind(&broken_model)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // A backend whose `upstream_api_key` cannot possibly decrypt: not
+        // `encrypt`-produced ciphertext at all, so `secrets::decrypt` fails
+        // on the version byte, the same shape a partially completed key
+        // rotation or an unmigrated pre-encryption row would take. Valid
+        // UTF-8 (unlike, say, `0xFF` bytes) deliberately: this row is never
+        // cleaned up — this whole module's tests share one scratch
+        // database with `control::import`'s, including its
+        // `reencrypt_migrates_a_plaintext_row_and_is_idempotent`, which
+        // scans *every* `model_backends` row with a non-null
+        // `upstream_api_key` and treats "does not decrypt" as "must be a
+        // pre-migration plaintext row" (`reencrypt_plaintext_backends`'s
+        // documented contract) — bytes that are not valid UTF-8 would trip
+        // that function's own refuse-to-guess `bail!` on a row this test
+        // left behind, in a run where both tests share the table.
+        sqlx::query(
+            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
+             VALUES ($1, 'http://broken:8000/v1', 'broken', $2)",
+        )
+        .bind(model_id)
+        .bind(b"not-an-encrypt-produced-ciphertext-blob-at-all".to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A healthy sibling backend on the *same* model, so the test proves
+        // containment at backend granularity, not merely "other models
+        // survive".
+        sqlx::query(
+            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
+             VALUES ($1, 'http://healthy:8000/v1', 'healthy', NULL)",
+        )
+        .bind(model_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // An unrelated model, to prove the failure does not take down the
+        // rest of the snapshot either.
+        let other_model = unique_name("unrelated-model");
+        sqlx::query("INSERT INTO models (name) VALUES ($1)")
+            .bind(&other_model)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key)
+            .await
+            .expect("one undecryptable backend must not fail the whole snapshot");
+
+        let model = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == broken_model)
+            .expect("the model itself must still be in the snapshot");
+        assert_eq!(
+            model.backends.len(),
+            1,
+            "the undecryptable backend must be dropped, the healthy one kept"
+        );
+        assert_eq!(model.backends[0].api_base, "http://healthy:8000/v1");
+
+        assert!(
+            snapshot.models.iter().any(|m| m.name == other_model),
+            "an unrelated model must be unaffected"
         );
     }
 }
