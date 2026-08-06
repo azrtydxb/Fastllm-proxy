@@ -12,3 +12,4 @@ pub mod snapshot;
 pub mod source;
 pub mod state;
 pub mod upstream;
+pub mod usage;

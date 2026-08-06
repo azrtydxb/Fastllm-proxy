@@ -625,6 +625,13 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         state.requests_failed.load(Ordering::Relaxed)
     ));
 
+    out.push_str("# HELP fastllm_usage_reports_dropped_total Usage events discarded because the reporting queue to the control plane was full — see crate::usage.\n");
+    out.push_str("# TYPE fastllm_usage_reports_dropped_total counter\n");
+    out.push_str(&format!(
+        "fastllm_usage_reports_dropped_total {}\n",
+        state.usage.dropped()
+    ));
+
     out.push_str("# HELP fastllm_backend_inflight Requests currently streaming from a backend.\n");
     out.push_str("# TYPE fastllm_backend_inflight gauge\n");
     for b in registry.backends() {

@@ -7,6 +7,7 @@
 use crate::control::build::build_snapshot;
 use crate::control::secrets::EncryptionKey;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
+use crate::usage::UsageEvent;
 use arc_swap::ArcSwap;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -868,20 +869,28 @@ pub fn spawn_snapshot_rebuilder(
     });
 }
 
-async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResponse {
+/// Shared by every route gated on the proxy's own bootstrap token —
+/// `/snapshot` and `/usage` alike. One implementation so a second, subtly
+/// different bearer-check (a `==` that forgot why `constant_time_eq` exists,
+/// say) can never be written for the route added after this one.
+///
+/// `/snapshot` discloses every key hash and usable upstream backend
+/// credentials (see the schema comment on `model_backends.upstream_api_key`);
+/// `/usage` accepts writes from anything holding this token. Both are worth
+/// paying for a non-short-circuiting compare rather than plain `==`.
+fn proxy_token_authorised(headers: &HeaderMap, expected: &str) -> bool {
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    // `/snapshot` is gated on this comparison alone, and what it discloses
-    // (every key hash, plus usable upstream backend credentials per the
-    // schema comment on `model_backends.upstream_api_key`) makes it worth
-    // paying for a non-short-circuiting compare rather than plain `==`.
-    let authorised = match presented {
-        Some(token) => constant_time_eq(token.as_bytes(), ctx.proxy_token.as_bytes()),
+    match presented {
+        Some(token) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
         None => false,
-    };
-    if !authorised {
+    }
+}
+
+async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResponse {
+    if !proxy_token_authorised(&headers, &ctx.proxy_token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let snap = ctx.cache.current_snapshot();
@@ -892,12 +901,123 @@ async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoRe
     ([("etag", etag)], Json(snap.as_ref().to_wire())).into_response()
 }
 
+#[derive(Deserialize)]
+struct UsageBatchRequest {
+    events: Vec<UsageEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageBatchResponse {
+    accepted: usize,
+    /// Rows whose `principal_id` or `model` did not resolve to a live row —
+    /// see `post_usage`'s doc comment for why this is a silent per-row drop
+    /// rather than a failed batch.
+    dropped: usize,
+}
+
+/// `POST /usage`: the Snapshot protocol's reverse channel (design doc,
+/// "Snapshot protocol"). Batched, fire-and-forget, gated by the same proxy
+/// bootstrap token as `/snapshot` — a stolen proxy token can already read
+/// every key hash and usable backend credential, so letting it also write
+/// usage rows grants nothing new.
+///
+/// Defined in P0 even though nothing sends to it until P2
+/// (`usage::UsageReporter`, currently unwired) sends anything, so the wire
+/// shape does not have to change once something does.
+///
+/// **A malformed batch must not 500 the control plane.** Two distinct kinds
+/// of "malformed" are handled differently on purpose:
+/// - A body that is not valid JSON, or is missing a required field, fails
+///   `Json` extraction before this function runs and axum answers 400 — the
+///   caller's mistake, reported as such, no partial processing possible.
+/// - A structurally valid record whose `principal_id` or `model` name does
+///   not match a live row (a key revoked and its principal deleted, or a
+///   model renamed, between the request being made and the batch flushing)
+///   is dropped from the batch rather than failing the whole thing. The
+///   alternative — one bad id from a stale replica poisoning a whole
+///   flush interval's worth of otherwise-good usage rows from every other
+///   principal — is worse than losing the one row, and losing the one row
+///   is already the design's stated tradeoff for usage in general ("dropping
+///   usage rather than blocking a request is deliberate").
+///
+/// The `JOIN` below is what implements the per-row drop: a `principal_id` or
+/// `model` name that does not match is simply absent from the joined result,
+/// so it never reaches the `INSERT`, and every other row in the same batch is
+/// unaffected.
+async fn post_usage(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Json(body): Json<UsageBatchRequest>,
+) -> Result<Json<UsageBatchResponse>, ApiError> {
+    if !proxy_token_authorised(&headers, &ctx.proxy_token) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "bad or missing proxy token",
+        ));
+    }
+
+    let submitted = body.events.len();
+    if body.events.is_empty() {
+        return Ok(Json(UsageBatchResponse {
+            accepted: 0,
+            dropped: 0,
+        }));
+    }
+
+    let mut principal_ids = Vec::with_capacity(submitted);
+    let mut models = Vec::with_capacity(submitted);
+    let mut prompt_tokens = Vec::with_capacity(submitted);
+    let mut completion_tokens = Vec::with_capacity(submitted);
+    let mut at = Vec::with_capacity(submitted);
+    for e in &body.events {
+        principal_ids.push(e.principal_id as i64);
+        models.push(e.model.clone());
+        prompt_tokens.push(e.prompt_tokens as i64);
+        completion_tokens.push(e.completion_tokens as i64);
+        at.push(e.at);
+    }
+
+    // `UNNEST` turns the five parallel arrays back into rows, positionally —
+    // this is what lets one round trip insert a whole batch instead of one
+    // query per event. The `JOIN`s against `principals`/`models` (rather than
+    // a `NOT NULL` foreign key the `INSERT` could violate) are what makes an
+    // unresolvable row silently absent from `RETURNING` instead of failing
+    // the statement outright.
+    let accepted_ids: Vec<i64> = sqlx::query_scalar(
+        "WITH input AS (
+            SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], $5::timestamptz[])
+                AS t(principal_id, model_name, prompt_tokens, completion_tokens, at)
+         )
+         INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at)
+         SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at
+         FROM input i
+         JOIN principals p ON p.id = i.principal_id
+         JOIN models m ON m.name = i.model_name
+         RETURNING id",
+    )
+    .bind(&principal_ids)
+    .bind(&models)
+    .bind(&prompt_tokens)
+    .bind(&completion_tokens)
+    .bind(&at)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("usage ingestion", &e))?;
+
+    let accepted = accepted_ids.len();
+    Ok(Json(UsageBatchResponse {
+        accepted,
+        dropped: submitted - accepted,
+    }))
+}
+
 pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
     proxy_token: String,
     cache: Arc<dyn SnapshotSink>,
     key: Arc<EncryptionKey>,
+    tls: Option<rustls::ServerConfig>,
 ) -> anyhow::Result<()> {
     let ctx = Ctx {
         pool,
@@ -928,9 +1048,32 @@ pub async fn serve(
         .route("/admin/backends/{id}", delete(delete_backend))
         .route("/admin/roles", get(list_roles))
         .route("/snapshot", get(get_snapshot))
+        .route("/usage", post(post_usage))
         .with_state(ctx);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    match tls {
+        Some(server_config) => {
+            let tcp = tokio::net::TcpListener::bind(addr).await?;
+            let listener = crate::control::tls::TlsListener::new(tcp, server_config);
+            axum::serve(listener, app).await?;
+        }
+        None => {
+            // `/snapshot` carries usable upstream credentials (see the schema
+            // comment on `model_backends.upstream_api_key`) and `/usage`
+            // accepts writes gated by the same bearer token — plain HTTP
+            // means both travel, and the token that gates them, in the
+            // clear. Not fatal: a dev deployment with no real backend
+            // credentials is legitimate, so this warns loudly instead of
+            // refusing to start.
+            tracing::warn!(
+                "no --tls-cert/--tls-key configured; /snapshot and /usage are being served over \
+                 plain HTTP. /snapshot carries usable upstream backend credentials — this must \
+                 not be used wherever a backend has a real credential."
+            );
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, app).await?;
+        }
+    }
     Ok(())
 }
 
@@ -1372,5 +1515,194 @@ mod tests {
             after.models.iter().any(|m| m.name == name),
             "a model inserted outside the admin API must reach a running control plane's snapshot"
         );
+    }
+
+    fn auth_header(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        h
+    }
+
+    fn usage_event(principal_id: i64, model: &str) -> UsageEvent {
+        UsageEvent {
+            principal_id: principal_id as u64,
+            model: model.to_string(),
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            at: chrono::Utc::now(),
+        }
+    }
+
+    /// `POST /usage` is the Snapshot protocol's reverse channel: a valid
+    /// batch persists to `usage_events`, and — same as `/snapshot` — the
+    /// route is gated on the proxy's bootstrap token, absent or wrong, with
+    /// nothing persisted in either rejected case.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_valid_usage_batch_persists_and_the_route_is_gated_by_the_proxy_token() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_name = unique_name("usage-principal");
+        let (_, created) = post_principal(
+            State(ctx.clone()),
+            Json(NewPrincipal {
+                name: principal_name.clone(),
+                kind: None,
+                email: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let principal_id = created.0["id"].as_i64().unwrap();
+
+        let model_name = unique_name("usage-model");
+        let _ = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Wrong token: rejected, nothing persisted.
+        let err = post_usage(
+            State(ctx.clone()),
+            auth_header("not-the-token"),
+            Json(UsageBatchRequest {
+                events: vec![usage_event(principal_id, &model_name)],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        // Absent token: same result.
+        let err = post_usage(
+            State(ctx.clone()),
+            HeaderMap::new(),
+            Json(UsageBatchRequest {
+                events: vec![usage_event(principal_id, &model_name)],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        let count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_events WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count_before, 0,
+            "a rejected batch must not have written anything"
+        );
+
+        // The right token: accepted and persisted.
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![usage_event(principal_id, &model_name)],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.accepted, 1);
+        assert_eq!(resp.0.dropped, 0);
+
+        let count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_events WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(count_after, 1);
+    }
+
+    /// The design's stated tradeoff, exercised directly: a batch containing a
+    /// row for a principal that does not (or no longer) exist must not 500
+    /// the control plane or fail the rows around it — the bad row is dropped
+    /// and every other row in the same batch is still persisted.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_batch_with_an_unknown_principal_survives_and_only_that_row_is_dropped() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_name = unique_name("usage-principal-survives");
+        let (_, created) = post_principal(
+            State(ctx.clone()),
+            Json(NewPrincipal {
+                name: principal_name.clone(),
+                kind: None,
+                email: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let principal_id = created.0["id"].as_i64().unwrap();
+
+        let model_name = unique_name("usage-model-survives");
+        let _ = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Comfortably outside any id a bootstrap-seeded test database will
+        // ever assign.
+        let unknown_principal_id = -424_242;
+
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![
+                    usage_event(principal_id, &model_name),
+                    usage_event(unknown_principal_id, &model_name),
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.0.accepted, 1, "the row for a real principal must land");
+        assert_eq!(
+            resp.0.dropped, 1,
+            "the row naming a nonexistent principal must be dropped, not fail the batch"
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_events WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// An empty batch is a no-op, not an error — a proxy with nothing to
+    /// report should not have to special-case that before calling this.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn an_empty_usage_batch_is_accepted_and_does_nothing() {
+        let (ctx, _cache) = test_ctx().await;
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest { events: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.accepted, 0);
+        assert_eq!(resp.0.dropped, 0);
     }
 }
