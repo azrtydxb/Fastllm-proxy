@@ -89,14 +89,22 @@ pub async fn handle(
         _ => {}
     }
 
-    let snapshot = state.snapshot.load();
+    // An owned `Arc<Snapshot>`, not an `ArcSwap` guard: `authorize` hands back
+    // a `&Principal` borrowed from it, and that borrow has to survive through
+    // `proxy_request`'s `.await` below — a guard held that long is exactly
+    // the thing that blocks a concurrent reload from reclaiming the old
+    // snapshot, which is what the previous `state.snapshot.load()` +
+    // `drop(snapshot)` dance existed to avoid. `load_full()` sidesteps the
+    // question entirely: it is a plain refcounted pointer, cheap to hold for
+    // as long as the request needs it, and correspondingly this is also what
+    // saves the per-request `Principal` clone (name `String` +
+    // `allowed_models: HashSet<String>`) that used to happen on every
+    // authenticated request via `.cloned()`.
+    let snapshot = state.snapshot.load_full();
     let principal = match authorize(&req, &snapshot) {
-        Ok(p) => p.cloned(),
+        Ok(p) => p,
         Err(rejection) => return Ok(rejection),
     };
-    // The guard borrows the snapshot; drop it before the request moves on so
-    // nothing here holds up a swap from a concurrent reload.
-    drop(snapshot);
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
         return Ok(models_response(&state));
@@ -134,7 +142,7 @@ async fn proxy_request(
     req: Request<Incoming>,
     state: Arc<AppState>,
     subpath: String,
-    principal: Option<Principal>,
+    principal: Option<&Principal>,
 ) -> Response<ResBody> {
     let (parts, body) = req.into_parts();
 
@@ -231,7 +239,7 @@ async fn proxy_request(
 
     // Authorisation is a set lookup against the pre-flattened grant list, not
     // a walk of the RBAC graph, and costs nothing measurable.
-    if let Some(principal) = &principal {
+    if let Some(principal) = principal {
         if !principal.may_invoke(&model) {
             state.requests_failed.fetch_add(1, Ordering::Relaxed);
             return error_response(
