@@ -180,8 +180,11 @@ mod tests {
     #[test]
     fn permissions_other_than_model_invoke_are_ignored_here() {
         // Admin permissions are not inference permissions and must never leak
-        // into the request path's grant set.
-        let perms = vec![("config:write".to_string(), "*".to_string())];
+        // into the request path's grant set. The resource is deliberately
+        // "model/*" (rather than "*") so that if the verb guard were ever
+        // removed, this would match the wildcard branch and set allow_all —
+        // making the test fail instead of passing vacuously.
+        let perms = vec![("config:write".to_string(), "model/*".to_string())];
         let (set, all) = flatten_grants(&perms, &["a".into()]);
         assert!(!all);
         assert!(set.is_empty());
