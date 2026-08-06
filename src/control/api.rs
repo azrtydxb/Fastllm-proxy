@@ -26,6 +26,33 @@ pub fn generate_key() -> String {
     format!("sk-{}", hex::encode(bytes))
 }
 
+/// Where a freshly built snapshot lands when the admin API writes one.
+///
+/// One trait, one implementor per role, so it is impossible to update the
+/// snapshot without also updating whatever else must never be allowed to
+/// drift from it. `--role control` has nothing else to keep in sync, so
+/// `ArcSwap<Snapshot>` alone is a sink. `--role all` implements this on
+/// `AppState`, where storing a snapshot always also rebuilds the routing
+/// `Registry` from it (see `AppState::apply_snapshot`). There is
+/// deliberately no second call site here that also has to remember to
+/// rebuild the registry — `refresh` below only ever calls this one method.
+pub trait SnapshotSink: Send + Sync {
+    fn store_snapshot(&self, snap: Snapshot) -> Arc<Snapshot>;
+    fn current_snapshot(&self) -> Arc<Snapshot>;
+}
+
+impl SnapshotSink for ArcSwap<Snapshot> {
+    fn store_snapshot(&self, snap: Snapshot) -> Arc<Snapshot> {
+        let arc = Arc::new(snap);
+        self.store(Arc::clone(&arc));
+        arc
+    }
+
+    fn current_snapshot(&self) -> Arc<Snapshot> {
+        self.load_full()
+    }
+}
+
 /// Enough to identify a key in a list, far too little to guess it.
 pub fn display_prefix(key: &str) -> String {
     key.chars().take(11).collect()
@@ -56,7 +83,7 @@ pub async fn create_key(
 struct Ctx {
     pool: PgPool,
     proxy_token: String,
-    cache: Arc<ArcSwap<Snapshot>>,
+    cache: Arc<dyn SnapshotSink>,
 }
 
 #[derive(Deserialize)]
@@ -98,7 +125,7 @@ async fn revoke_key(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Statu
 /// poll interval alone, not by poll interval plus rebuild interval.
 async fn refresh(ctx: &Ctx) {
     if let Ok(snap) = build_snapshot(&ctx.pool).await {
-        ctx.cache.store(Arc::new(snap));
+        ctx.cache.store_snapshot(snap);
     }
 }
 
@@ -118,7 +145,7 @@ async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoRe
     if !authorised {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let snap = ctx.cache.load();
+    let snap = ctx.cache.current_snapshot();
     let etag = format!("\"{}\"", snap.version);
     if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
         return StatusCode::NOT_MODIFIED.into_response();
@@ -130,7 +157,7 @@ pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
     proxy_token: String,
-    cache: Arc<ArcSwap<Snapshot>>,
+    cache: Arc<dyn SnapshotSink>,
 ) -> anyhow::Result<()> {
     let ctx = Ctx {
         pool,

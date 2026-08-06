@@ -79,9 +79,14 @@ pub async fn poll_once(
 /// This is the fix for the gap left by Task 3: a `Registry` reload and a
 /// `Snapshot` reload used to be two different, unconnected code paths, so
 /// only the routing table ever lived-reloaded and key/grant edits needed a
-/// restart. Driving both from the same fetch means a `File`-mode ConfigMap
-/// edit takes effect the same way a Kubernetes rollout of the model list
-/// always did — no restart, no dropped in-flight generations.
+/// restart. Every fetch that returns a new snapshot goes straight into
+/// `AppState::apply_snapshot`, which is the *only* place that may write
+/// `state.snapshot` and always rebuilds `state.registry` from it in the same
+/// call — so, unlike an earlier version of this function, there is no
+/// separate "did it change, then rebuild" step here for a future edit to
+/// forget. A `File`-mode ConfigMap edit takes effect the same way a
+/// Kubernetes rollout of the model list always did: no restart, no dropped
+/// in-flight generations.
 pub fn spawn_poller<S: SnapshotSource + 'static>(
     source: S,
     state: Arc<AppState>,
@@ -92,20 +97,20 @@ pub fn spawn_poller<S: SnapshotSource + 'static>(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let before = state.snapshot.load().version;
-            if let Err(e) = poll_once(&source, &state.snapshot).await {
-                // Expected whenever the control plane is down. The cached
-                // snapshot keeps serving, so this is a warning, not an error.
-                tracing::warn!(error = %e, "snapshot refresh failed; serving the cached policy");
-                continue;
-            }
-            if state.snapshot.load().version != before {
-                match state.rebuild_registry_from_snapshot() {
+            let have = Some(state.snapshot.load().version).filter(|v| *v != 0);
+            match source.fetch(have).await {
+                Ok(Some(next)) => match state.apply_snapshot(next) {
                     Ok(n) => tracing::info!(backends = n, "snapshot changed, registry rebuilt"),
                     Err(e) => tracing::error!(
                         error = %e,
                         "snapshot changed but registry rebuild failed; keeping previous routing table"
                     ),
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    // Expected whenever the control plane is down. The cached
+                    // snapshot keeps serving, so this is a warning, not an error.
+                    tracing::warn!(error = %e, "snapshot refresh failed; serving the cached policy");
                 }
             }
         }

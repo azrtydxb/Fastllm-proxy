@@ -32,8 +32,15 @@ use fastllm_proxy::{health, proxy, upstream};
 )]
 struct Cli {
     /// Path to the model config. LiteLLM-format configs are accepted as-is.
+    ///
+    /// Required in `File` mode (`--role proxy` with no `--control-url`),
+    /// where it is the only source of models and keys. Optional everywhere
+    /// else — `--role all`/`control` and `Http`-mode `--role proxy` get
+    /// models and keys from a database or control plane, and use this file
+    /// (if given) only for the `fastllm:`/`general_settings.master_key`
+    /// tuning knobs below.
     #[arg(short, long, env = "FASTLLM_CONFIG")]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// Address to bind. Defaults to loopback; set 0.0.0.0 deliberately.
     #[arg(long, default_value = "127.0.0.1", env = "FASTLLM_HOST")]
@@ -151,8 +158,22 @@ fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     match cli.role {
         Role::Control => run_control(cli).await,
-        Role::Proxy => run_data_plane(cli, None).await,
+        Role::Proxy => run_data_plane(cli).await,
         Role::All => run_all(cli).await,
+    }
+}
+
+/// `--config` supplies tuning (`fastllm:`/`general_settings.master_key`) in
+/// every role, but is only the source of truth for models and keys in `File`
+/// mode. Roles that do not need it that way (`control`, `all`, `Http`-mode
+/// `proxy`) treat an absent file as "use defaults", not an error — requiring
+/// a meaningless YAML file for a control-plane-only deployment would be its
+/// own bug. `File` mode enforces its own stricter requirement at its call
+/// site in `run_data_plane`.
+fn load_tuning_config(path: Option<&PathBuf>) -> Result<FileConfig> {
+    match path {
+        Some(p) => FileConfig::load(p),
+        None => Ok(FileConfig::default()),
     }
 }
 
@@ -170,7 +191,8 @@ async fn run_control(cli: Cli) -> Result<()> {
             .context("--role control requires --database-url")?;
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
-        let cache = Arc::new(ArcSwap::from_pointee(snap));
+        let cache: Arc<dyn fastllm_proxy::control::api::SnapshotSink> =
+            Arc::new(ArcSwap::from_pointee(snap));
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
             .with_context(|| {
@@ -188,10 +210,12 @@ async fn run_control(cli: Cli) -> Result<()> {
 }
 
 /// `--role all`: the control plane and the proxy in one process, sharing one
-/// snapshot in memory. This is what makes `admin_port` writes visible to the
-/// very next proxied request with no HTTP round trip back into the same
-/// process and no poll delay — `control::api::serve`'s `refresh()` stores
-/// into the exact `ArcSwap` `run_data_plane` reads on the request path.
+/// `AppState`. `state` itself is handed to the admin API as its
+/// `control::api::SnapshotSink` (see that trait, and `AppState::apply_snapshot`),
+/// so a key or model write over the admin API reaches the routing `Registry`
+/// through the exact same call the proxy's request path reads from — no HTTP
+/// round trip back into the same process, no poll delay, and no separate
+/// "also rebuild the registry" step to forget.
 async fn run_all(cli: Cli) -> Result<()> {
     #[cfg(feature = "control")]
     {
@@ -201,7 +225,28 @@ async fn run_all(cli: Cli) -> Result<()> {
             .context("--role all requires --database-url")?;
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
-        let cache = Arc::new(ArcSwap::from_pointee(snap));
+
+        let tuning_cfg = load_tuning_config(cli.config.as_ref())?;
+        let tuning = tuning_cfg.fastllm.clone();
+        let interner = Interner::default();
+        let client = Arc::new(upstream::Upstream::new(
+            upstream::Config {
+                max_idle_per_host: cli.pool_max_idle,
+                idle_timeout: Duration::from_secs(90),
+                connect_timeout: Duration::from_secs(5),
+            },
+            tls_config()?,
+        ));
+        let master_key = cli
+            .master_key
+            .clone()
+            .or_else(|| tuning_cfg.general_settings.master_key.clone())
+            .filter(|k| !k.is_empty());
+        if master_key.is_some() {
+            warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
+        }
+
+        let state = build_app_state(&cli, client, interner, &tuning, None, master_key, snap)?;
 
         let admin_addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -209,11 +254,11 @@ async fn run_all(cli: Cli) -> Result<()> {
                 format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
             })?;
         let admin_pool = pool.clone();
-        let admin_cache = Arc::clone(&cache);
+        let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
         let admin_token = cli.proxy_token.clone().unwrap_or_default();
         tokio::spawn(async move {
             if let Err(e) =
-                fastllm_proxy::control::api::serve(admin_pool, admin_addr, admin_token, admin_cache)
+                fastllm_proxy::control::api::serve(admin_pool, admin_addr, admin_token, admin_sink)
                     .await
             {
                 error!(error = %e, "control plane admin API exited");
@@ -221,7 +266,7 @@ async fn run_all(cli: Cli) -> Result<()> {
         });
         info!(%admin_addr, "control plane admin API listening");
 
-        run_data_plane(cli, Some(cache)).await
+        serve_proxy(&cli, state).await
     }
     #[cfg(not(feature = "control"))]
     {
@@ -230,17 +275,13 @@ async fn run_all(cli: Cli) -> Result<()> {
     }
 }
 
-/// The proxy listener, common to `--role all` and `--role proxy`.
-///
-/// `shared_snapshot` is `Some` only for `--role all`: the cell the control
-/// plane above already owns and keeps current by itself, so no poller is
-/// spawned here for that case. `--role proxy` builds and owns its own cell,
-/// filled from a config file (`File` mode) or a control plane (`Http` mode),
-/// and *does* spawn a poller — that poller, and SIGHUP in `File` mode, are
-/// what makes editing keys or grants live rather than requiring a restart.
-async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>>) -> Result<()> {
-    let file_config = FileConfig::load(&cli.config)?;
-    let tuning = file_config.fastllm.clone();
+/// `--role proxy`: forwarding only, against a config file (`File` mode) or a
+/// control plane (`Http` mode). Builds and owns its own snapshot cell, and
+/// *does* spawn a poller — that poller, and SIGHUP in `File` mode, are what
+/// makes editing keys or grants live rather than requiring a restart.
+async fn run_data_plane(cli: Cli) -> Result<()> {
+    let tuning_cfg = load_tuning_config(cli.config.as_ref())?;
+    let tuning = tuning_cfg.fastllm.clone();
     let interner = Interner::default();
 
     let client = Arc::new(upstream::Upstream::new(
@@ -257,27 +298,23 @@ async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>
     let master_key = cli
         .master_key
         .clone()
-        .or_else(|| file_config.general_settings.master_key.clone())
+        .or_else(|| tuning_cfg.general_settings.master_key.clone())
         .filter(|k| !k.is_empty());
     if master_key.is_some() {
         warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
     }
 
-    // `mode` records which poller (if any) to start once `state` exists —
-    // decided here, once, rather than re-inspecting `cli` after the fact.
     enum Mode {
-        /// `--role all`: no poller; the admin API keeps `cache` current.
-        Shared,
-        /// `File`: no control plane. SIGHUP and a poll both apply.
+        /// No control plane. SIGHUP and a poll both apply.
         File,
-        /// `Http`: polls a control plane; falls back to its disk cache (and
-        /// then to empty) if that control plane is unreachable at startup.
+        /// Polls a control plane; falls back to its disk cache (and then to
+        /// empty) if that control plane is unreachable at startup.
         Http { url: String, token: String },
     }
 
-    let (cell, mode): (Arc<ArcSwap<Snapshot>>, Mode) = if let Some(cache) = shared_snapshot {
-        (cache, Mode::Shared)
-    } else if let Some(url) = cli.control_url.clone() {
+    let (snap, mode, config_path): (Snapshot, Mode, Option<PathBuf>) = if let Some(url) =
+        cli.control_url.clone()
+    {
         let token = cli.proxy_token.clone().unwrap_or_default();
         let http_src = HttpSource::new(
             url.clone(),
@@ -286,8 +323,8 @@ async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>
             Arc::clone(&client),
         );
         // A proxy that starts with nothing must still start. Refusing to
-        // boot would turn a control-plane outage into a crash-loop, which is
-        // exactly the failure this architecture exists to prevent.
+        // boot would turn a control-plane outage into a crash-loop, which
+        // is exactly the failure this architecture exists to prevent.
         let snap = match http_src.fetch(None).await {
             Ok(Some(s)) => s,
             Ok(None) => http_src.load_cached().unwrap_or_default(),
@@ -296,74 +333,40 @@ async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>
                 http_src.load_cached().unwrap_or_default()
             }
         };
-        (
-            Arc::new(ArcSwap::from_pointee(snap)),
-            Mode::Http { url, token },
-        )
+        (snap, Mode::Http { url, token }, cli.config.clone())
     } else {
-        let file_src =
-            WithLegacyMasterKey::new(FileSource::new(cli.config.clone()), master_key.clone());
+        let path = cli
+            .config
+            .clone()
+            .context("File mode (no --control-url) requires --config")?;
+        let file_src = WithLegacyMasterKey::new(FileSource::new(path.clone()), master_key.clone());
         let snap = file_src
             .fetch(None)
             .await?
             .context("config produced no snapshot on first load")?;
-        (Arc::new(ArcSwap::from_pointee(snap)), Mode::File)
+        (snap, Mode::File, Some(path))
     };
 
-    if cell.load().open {
-        warn!("no keys configured; the proxy accepts unauthenticated requests");
-    }
-    let registry = Registry::build_from_snapshot(&cell.load(), &interner, None)?;
-    if registry.backends().is_empty() {
-        warn!("no backends in the snapshot; every request will 404 until it is reloaded");
-    }
-    info!(
-        models = registry.model_names().len(),
-        backends = registry.backends().len(),
-        policy = ?cli.policy,
-        role = ?cli.role,
-        "starting"
-    );
-
-    let state = Arc::new(AppState {
-        registry: ArcSwap::from_pointee(registry),
-        router: Router::new(
-            cli.policy,
-            tuning.affinity_slots,
-            tuning.prefix_bytes,
-            tuning.balance_abs,
-            tuning.balance_rel,
-        ),
+    let state = build_app_state(
+        &cli,
         client,
         interner,
-        config_path: cli.config.clone(),
-        legacy_master_key: master_key,
-        snapshot: cell,
-        max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
-        max_retries: cli.max_retries,
-        upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),
-        unhealthy_after: tuning.unhealthy_after.max(1),
-        started: Instant::now(),
-        requests_ok: AtomicU64::new(0),
-        requests_failed: AtomicU64::new(0),
-    });
-
-    health::spawn(
-        Arc::clone(&state),
-        Duration::from_secs(cli.health_interval.max(1)),
-        Duration::from_secs(cli.health_timeout.max(1)),
-    );
+        &tuning,
+        config_path,
+        master_key,
+        snap,
+    )?;
 
     match mode {
-        Mode::Shared => {
-            // The admin API already stores into this exact cell on every
-            // write; nothing here would have anything to poll.
-        }
         Mode::File => {
             spawn_reload_listener(Arc::clone(&state));
             if cli.config_poll > 0 {
+                let path = state
+                    .config_path
+                    .clone()
+                    .expect("File mode always sets config_path");
                 let source = WithLegacyMasterKey::new(
-                    FileSource::new(cli.config.clone()),
+                    FileSource::new(path),
                     state.legacy_master_key.clone(),
                 );
                 spawn_poller(
@@ -392,6 +395,71 @@ async fn run_data_plane(cli: Cli, shared_snapshot: Option<Arc<ArcSwap<Snapshot>>
             }
         }
     }
+
+    serve_proxy(&cli, state).await
+}
+
+/// Build the shared process state from an already-obtained initial snapshot.
+/// Common to `--role all` and `--role proxy`, so there is exactly one place
+/// that turns a snapshot into a `Registry` and logs what was loaded.
+fn build_app_state(
+    cli: &Cli,
+    client: fastllm_proxy::state::HttpClient,
+    interner: Interner,
+    tuning: &fastllm_proxy::config::FastllmSettings,
+    config_path: Option<PathBuf>,
+    legacy_master_key: Option<String>,
+    snapshot: Snapshot,
+) -> Result<Arc<AppState>> {
+    if snapshot.open {
+        warn!("no keys configured; the proxy accepts unauthenticated requests");
+    }
+    let registry = Registry::build_from_snapshot(&snapshot, &interner, None)?;
+    if registry.backends().is_empty() {
+        warn!("no backends in the snapshot; every request will 404 until it is reloaded");
+    }
+    info!(
+        models = registry.model_names().len(),
+        backends = registry.backends().len(),
+        policy = ?cli.policy,
+        role = ?cli.role,
+        "starting"
+    );
+
+    Ok(Arc::new(AppState {
+        registry: ArcSwap::from_pointee(registry),
+        router: Router::new(
+            cli.policy,
+            tuning.affinity_slots,
+            tuning.prefix_bytes,
+            tuning.balance_abs,
+            tuning.balance_rel,
+        ),
+        client,
+        interner,
+        config_path,
+        legacy_master_key,
+        snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
+        max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
+        max_retries: cli.max_retries,
+        upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),
+        unhealthy_after: tuning.unhealthy_after.max(1),
+        started: Instant::now(),
+        requests_ok: AtomicU64::new(0),
+        requests_failed: AtomicU64::new(0),
+    }))
+}
+
+/// Health sweeps and the proxy listener's accept loop. Common to `--role
+/// all` and `--role proxy` — everything role-specific (building `state`,
+/// wiring a poller/SIGHUP/the admin API) has already happened by the time
+/// this is called.
+async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
+    health::spawn(
+        Arc::clone(&state),
+        Duration::from_secs(cli.health_interval.max(1)),
+        Duration::from_secs(cli.health_timeout.max(1)),
+    );
 
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
         .parse()
