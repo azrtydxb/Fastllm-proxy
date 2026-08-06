@@ -1,0 +1,32 @@
+[package]
+name = "fastllm-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+description = "Low-latency OpenAI-compatible inference gateway for multi-node LLM serving"
+repository = "https://github.com/azrtydxb/Fastllm-proxy"
+readme = "README.md"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+arc-swap = "1"
+parking_lot = "0.12"
+pin-project-lite = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
