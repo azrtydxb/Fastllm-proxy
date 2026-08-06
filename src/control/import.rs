@@ -13,10 +13,17 @@ use sqlx::PgPool;
 /// was wrong and has been fixed. Re-running the same or an edited file over
 /// an already-seeded database should now print zeroes for anything that was
 /// already there.
+///
+/// No `keys` field: a LiteLLM-format config has no key material to import —
+/// `import` seeds `models`/`model_backends` only, never `api_keys` — so a
+/// field that could only ever read zero would just be a second thing to keep
+/// truthful for no information gained. An earlier revision carried one
+/// anyway and printed it as "0 new key(s)" on every run, which read as a
+/// claim that key import was attempted and always finds nothing, rather
+/// than what was actually true: it was never attempted at all.
 pub struct ImportSummary {
     pub models: usize,
     pub backends: usize,
-    pub keys: usize,
 }
 
 /// Seed `models`/`model_backends` from a LiteLLM-format config.
@@ -84,11 +91,7 @@ pub async fn import(pool: &PgPool, cfg: &FileConfig) -> anyhow::Result<ImportSum
     }
 
     tx.commit().await?;
-    Ok(ImportSummary {
-        models,
-        backends,
-        keys: 0,
-    })
+    Ok(ImportSummary { models, backends })
 }
 
 #[cfg(test)]
