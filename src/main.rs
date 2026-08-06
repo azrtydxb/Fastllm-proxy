@@ -83,6 +83,11 @@ struct Cli {
     #[arg(long)]
     workers: Option<usize>,
 
+    /// Seconds between checks for an edited config file. 0 disables the watch,
+    /// leaving SIGHUP as the only way to reload.
+    #[arg(long, default_value_t = 5, env = "FASTLLM_CONFIG_POLL")]
+    config_poll: u64,
+
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 }
@@ -176,6 +181,9 @@ async fn run(cli: Cli) -> Result<()> {
         Duration::from_secs(cli.health_timeout.max(1)),
     );
     spawn_reload_listener(Arc::clone(&state));
+    if cli.config_poll > 0 {
+        spawn_config_watcher(Arc::clone(&state), Duration::from_secs(cli.config_poll));
+    }
 
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
         .parse()
@@ -253,6 +261,56 @@ fn https_connector(http: HttpConnector) -> Result<HttpsConnector<HttpConnector>>
         }
     };
     Ok(tls.https_or_http().enable_http1().wrap_connector(http))
+}
+
+/// Reload when the config file's contents change on disk.
+///
+/// Under Kubernetes the config arrives as a ConfigMap, and nothing sends
+/// SIGHUP when it is edited: the kubelet swaps the mount's `..data` symlink
+/// underneath the process and the container never hears about it. Without this
+/// the only way to apply a change is a rollout restart, which drops every
+/// generation in flight — exactly what the SIGHUP path exists to avoid.
+///
+/// Contents are hashed rather than stat'd because that symlink swap does not
+/// reliably move the mtime of the path we opened, and because it makes a
+/// rewrite with identical contents a no-op.
+fn spawn_config_watcher(state: Arc<AppState>, interval: Duration) {
+    tokio::spawn(async move {
+        let hash_now = |path: &std::path::Path| -> Option<u64> {
+            let bytes = std::fs::read(path).ok()?;
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for b in &bytes {
+                hash = (hash ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            Some(hash)
+        };
+
+        let mut last = hash_now(&state.config_path);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let Some(current) = hash_now(&state.config_path) else {
+                // A ConfigMap update is not atomic from the reader's side; a
+                // transiently missing file is normal and the next tick retries.
+                continue;
+            };
+            if last == Some(current) {
+                continue;
+            }
+            // Advance on failure too, so an edit that leaves the file invalid
+            // is reported once rather than every tick. A half-written file is
+            // still retried: the completed write hashes differently and comes
+            // back round as a fresh change.
+            last = Some(current);
+            match state.reload() {
+                Ok(n) => info!(backends = n, "config file changed, reloaded"),
+                Err(e) => {
+                    error!(error = %e, "config file changed but is invalid; keeping previous")
+                }
+            }
+        }
+    });
 }
 
 /// SIGHUP reloads the config in place.
