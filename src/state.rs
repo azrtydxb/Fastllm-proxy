@@ -22,7 +22,12 @@ pub struct AppState {
     pub interner: Interner,
     pub config_path: PathBuf,
 
-    /// Swapped wholesale whenever the source produces a new version.
+    /// Set once from `FileSource` at startup and only ever `.load()`ed on the
+    /// request path since. Unlike `registry` above, nothing currently calls
+    /// `.store()` on this: SIGHUP and the config-poll watcher still only
+    /// rebuild the routing `Registry`, so key and grant changes need a
+    /// process restart today. Wiring a snapshot source into that same reload
+    /// path is what will make them live.
     pub snapshot: ArcSwap<Snapshot>,
     pub max_body_bytes: usize,
     pub max_retries: usize,
