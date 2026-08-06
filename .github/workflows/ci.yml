@@ -14,6 +14,10 @@ env:
 jobs:
   test:
     runs-on: arc-azrtydxb
+    # The runner image ships no Rust, so the toolchain comes from a container —
+    # same base as the Dockerfile, so CI and the image agree on the compiler.
+    container:
+      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
