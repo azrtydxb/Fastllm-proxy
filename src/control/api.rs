@@ -5,7 +5,7 @@
 //! — key hashes, never plaintext — and grants nothing else.
 
 use crate::control::build::build_snapshot;
-use crate::snapshot::{hash_key, Snapshot};
+use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
 use arc_swap::ArcSwap;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -107,7 +107,15 @@ async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoRe
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if presented != Some(ctx.proxy_token.as_str()) {
+    // `/snapshot` is gated on this comparison alone, and what it discloses
+    // (every key hash, plus usable upstream backend credentials per the
+    // schema comment on `model_backends.upstream_api_key`) makes it worth
+    // paying for a non-short-circuiting compare rather than plain `==`.
+    let authorised = match presented {
+        Some(token) => constant_time_eq(token.as_bytes(), ctx.proxy_token.as_bytes()),
+        None => false,
+    };
+    if !authorised {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let snap = ctx.cache.load();

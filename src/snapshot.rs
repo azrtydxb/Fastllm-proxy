@@ -77,6 +77,25 @@ pub fn hash_key(token: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Comparison that does not short-circuit on the first differing byte, so a
+/// wrong secret cannot be recovered one byte at a time via response timing.
+/// Used for the proxy's own bootstrap token (the sole gate on `/snapshot`,
+/// which discloses every key hash and usable upstream backend credentials),
+/// not for user API keys — those go through `hash_key` and a `HashMap`
+/// lookup, which is already constant-time in the relevant sense.
+///
+/// Do not simplify this back to `==`: length is compared without branching
+/// on it either, so neither the length nor any byte position leaks through
+/// timing.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let len_ok = (a.len() == b.len()) as u8;
+    let byte_diff = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    len_ok & ((byte_diff == 0) as u8) == 1
+}
+
 /// JSON-safe mirror of [`Snapshot`].
 ///
 /// Exists solely because `[u8; 32]` cannot be a serde map key; key hashes are
@@ -381,6 +400,14 @@ mod tests {
         assert_ne!(hash_key("sk-a"), hash_key("sk-b"));
     }
 
+    #[test]
+    fn constant_time_eq_matches_semantics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
     /// Load-bearing for Task 7: the on-disk cache stores exactly this JSON,
     /// so anything lost here is lost on every cold start after a control
     /// plane outage.
@@ -447,5 +474,52 @@ mod tests {
             model.backends[0].api_key.as_deref(),
             Some("upstream-secret")
         );
+    }
+
+    /// Task 7 feeds `from_wire` whatever is on disk, and a truncated or
+    /// otherwise corrupted cache file is an expected failure mode there, not
+    /// a bug — it must degrade to "missing entry", never panic.
+    #[cfg(feature = "control")]
+    #[test]
+    fn from_wire_skips_corrupt_hashes_instead_of_panicking() {
+        let valid_hash = hash_key("sk-good");
+        let mut keys = HashMap::new();
+        keys.insert(
+            "not-hex-at-all!!".to_string(),
+            WireKeyEntry {
+                principal: 1,
+                expires_at: None,
+                disabled: false,
+            },
+        );
+        keys.insert(
+            hex::encode([0u8; 4]), // valid hex, far short of 32 bytes
+            WireKeyEntry {
+                principal: 1,
+                expires_at: None,
+                disabled: false,
+            },
+        );
+        keys.insert(
+            hex::encode(valid_hash),
+            WireKeyEntry {
+                principal: 1,
+                expires_at: None,
+                disabled: false,
+            },
+        );
+
+        let wire = WireSnapshot {
+            version: 1,
+            keys,
+            principals: vec![],
+            models: vec![],
+            open: false,
+        };
+
+        let snap = Snapshot::from_wire(wire);
+
+        assert_eq!(snap.keys.len(), 1, "only the valid entry should survive");
+        assert!(snap.keys.contains_key(&valid_hash));
     }
 }
