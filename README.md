@@ -126,6 +126,7 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `/admin/*` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See the table below and the warning under it |
 | `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
 | `POST /usage` | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot` |
+| `POST /limits/reconcile` | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token` |
 
 #### Admin API
 
@@ -147,6 +148,9 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `POST /admin/models/{id}/backends` | `{"api_base":..., "upstream_model":..., "upstream_api_key":...}`. The credential is encrypted before it reaches Postgres and cannot be read back |
 | `DELETE /admin/backends/{id}` | Remove one backend from a pool |
 | `GET /admin/roles` | Roles and the permissions each one grants |
+| `GET /admin/limits` | Every principal with a configured rate limit |
+| `PUT /admin/principals/{id}/limits` | `{"requests_per_min":..., "tokens_per_min":...}`. Either or both; upserts the one row this principal may have |
+| `DELETE /admin/principals/{id}/limits` | Remove the limit — the principal becomes unlimited, not limited to zero |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
 
@@ -172,6 +176,16 @@ Defined now so the wire protocol never has to reshape later, even though nothing
 
 On the control-plane side, `POST /usage` accepts a batch and persists it to `usage_events`. A record naming a `principal_id` or model that no longer exists is dropped from the batch rather than failing the whole request — one stale id from one replica must not poison every other principal's usage in the same flush interval.
 
+### Rate limits
+
+Limits attach to a principal, not a key: `requests_per_min` and `tokens_per_min`, either or both, set via `PUT /admin/principals/{id}/limits` (or, in `File` mode, a `limits:` block under an `auth.keys` entry — see "Per-key RBAC in `File` mode" below). A principal with no configured limit is unlimited, not limited to zero.
+
+Enforcement is a local token bucket per principal per replica (`src/limiter.rs`): one hash lookup and a short, synchronous decrement, no I/O, no allocation once the principal's bucket exists. `tokens_per_min` is charged against an estimate — the same prompt-size estimate the P1 routing rules use, plus the client's requested `max_tokens` — since actual usage is not known until the response completes. Exceeding either dimension answers `429` with `Retry-After` (whole seconds).
+
+A single replica enforcing the full configured limit locally would, with N replicas, admit N× the intended traffic. Accuracy comes from periodic **reconciliation** instead of a shared counter: every `--rate-limit-reconcile-interval` seconds (default 5) each `--role proxy` reports its locally observed request/token counts to `POST /limits/reconcile`, which aggregates across every replica that has reported recently and returns each one's *share* — proportional to how much of a principal's traffic it is actually handling — of that principal's configured limit for the next window. The reporting client (`src/reconcile.rs`) reuses the same pooled `Upstream` client and bearer-token pattern as `POST /usage`, but it is not fire-and-forget like that route: the whole point is the allowance in the response body. Before a replica's first successful reconciliation (at startup, or after a control-plane outage) it enforces the *full* configured limit locally, which is the design's accepted cost: **a limit can be exceeded by up to one reconciliation window's worth of traffic during a sharp spike**, in exchange for never putting a network round trip on the request path.
+
+`--role all` never spawns the reconciliation client at all — one process's local counters already are the global counters, so there is nothing to reconcile, and the machinery is inert rather than merely harmless: no background task, no timer, no socket.
+
 ### Options
 
 | Flag | Default | Notes |
@@ -186,6 +200,7 @@ On the control-plane side, `POST /usage` accepts a batch and persists it to `usa
 | `--max-body-mb` | `64` | Request body ceiling |
 | `--pool-max-idle` | `256` | Idle upstream connections per backend |
 | `--workers` | core count | Tokio worker threads |
+| `--rate-limit-reconcile-interval` | `5` | Seconds between rate-limit reconciliation reports in `Http`-mode `--role proxy`. `0` disables it |
 
 ## Configuration
 
@@ -236,9 +251,12 @@ auth:
       models: ["qwen3-6-35b-a3b-nvfp4"]   # `["*"]` for every model; an empty
                                           # or omitted list grants nothing
       expires_at: "2027-01-01T00:00:00Z"  # RFC 3339, optional
+      limits:                             # optional; absent means unlimited
+        requests_per_min: 60
+        tokens_per_min: 100000
 ```
 
-Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move.
+Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move. `limits` is `File` mode's mirror of the control plane's `limits` table (see "Rate limits" above) — either field alone, both, or neither.
 
 ### Tuning affinity
 
@@ -254,6 +272,7 @@ Absent `auth:` means open (no key required) — today's behaviour when no master
 - **A backend that fails every probe is still used as a last resort** rather than returning 503. A stale health flag should not turn a recoverable request into an outage.
 - **The client's `Authorization` header is never forwarded.** It authenticates the client to the proxy; the upstream gets the backend's own key or none.
 - **Affinity keys hash the raw request prefix**, not parsed fields. JSON does not guarantee field order, but order is stable per client, which is all affinity needs — a client that reorders per request degrades to least-loaded rather than misrouting.
+- **A rate-limited request gets `429` with `Retry-After`**, checked after authorisation and model resolution but before the request is dispatched upstream — nothing is forwarded on a rejected request. See "Rate limits" above.
 
 ## Development
 
