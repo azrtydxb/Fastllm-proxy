@@ -38,10 +38,17 @@ fn start(config: &str, port: u16) -> Proc {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if ureq::get(&format!("http://127.0.0.1:{port}/health"))
-            .call()
-            .is_ok()
-        {
+        // Any HTTP answer proves the listener is up, including 503:
+        // `/health` reports 503 when no backend is healthy, which is the
+        // normal state for a control plane whose database has no models
+        // yet. Treating only 2xx as "started" made these tests pass on a
+        // database that happened to hold a model and hang for the full
+        // timeout on an empty one — the server was listening and
+        // answering the entire time.
+        if !matches!(
+            ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
+            Err(ureq::Error::Transport(_))
+        ) {
             return proc;
         }
         if Instant::now() >= deadline {

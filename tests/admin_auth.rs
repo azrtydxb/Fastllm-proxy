@@ -78,10 +78,17 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
     // advisory lock against a shared database.
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        if ureq::get(&format!("http://127.0.0.1:{port}/health"))
-            .call()
-            .is_ok()
-        {
+        // Any HTTP answer proves the listener is up, including 503:
+        // `/health` reports 503 when no backend is healthy, which is the
+        // normal state for a control plane whose database has no models
+        // yet. Treating only 2xx as "started" made these tests pass on a
+        // database that happened to hold a model and hang for the full
+        // timeout on an empty one — the server was listening and
+        // answering the entire time.
+        if !matches!(
+            ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
+            Err(ureq::Error::Transport(_))
+        ) {
             return proc;
         }
         if let Ok(Some(status)) = proc.0.try_wait() {
@@ -330,10 +337,17 @@ async fn the_management_ui_route_exists_on_the_admin_port_and_not_on_the_proxy_p
     let _proxy = Proc(child);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if ureq::get(&format!("http://127.0.0.1:{proxy_port}/health"))
-            .call()
-            .is_ok()
-        {
+        // Any HTTP answer proves the listener is up, including 503:
+        // `/health` reports 503 when no backend is healthy, which is the
+        // normal state for a control plane whose database has no models
+        // yet. Treating only 2xx as "started" made these tests pass on a
+        // database that happened to hold a model and hang for the full
+        // timeout on an empty one — the server was listening and
+        // answering the entire time.
+        if !matches!(
+            ureq::get(&format!("http://127.0.0.1:{proxy_port}/health")).call(),
+            Err(ureq::Error::Transport(_))
+        ) {
             break;
         }
         if Instant::now() >= deadline {
