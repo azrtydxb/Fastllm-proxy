@@ -40,6 +40,13 @@ pin-project-lite = "0.2"
 smallvec = "1"
 sha2 = "0.10"
 humantime = "2"
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "macros", "migrate", "chrono"] }
+axum = { version = "0.8", optional = true }
+argon2 = { version = "0.5", optional = true }
+
+[features]
+default = ["control"]
+control = ["dep:sqlx", "dep:axum", "dep:argon2"]
 
 [dev-dependencies]
 tempfile = "3"

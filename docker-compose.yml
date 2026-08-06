@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: fastllm
+      POSTGRES_PASSWORD: fastllm
+      POSTGRES_DB: fastllm
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastllm"]
+      interval: 5s
+      retries: 10
+
+  fastllm:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      FASTLLM_ROLE: all
+      FASTLLM_DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+      FASTLLM_HOST: 0.0.0.0
+    ports: ["4000:4000", "4001:4001"]
+
+volumes:
+  pgdata:

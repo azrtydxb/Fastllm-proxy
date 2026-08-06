@@ -1,6 +1,8 @@
 //! fastllm-proxy — a low-latency OpenAI-compatible gateway for multi-node LLM serving.
 
 pub mod config;
+#[cfg(feature = "control")]
+pub mod control;
 pub mod health;
 pub mod multipart;
 pub mod proxy;
