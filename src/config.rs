@@ -38,6 +38,31 @@ pub struct FileConfig {
     /// fastllm-proxy specific tuning. Ignored by LiteLLM.
     #[serde(default)]
     pub fastllm: FastllmSettings,
+    /// Per-key RBAC for `File` mode. Absent means open, matching today's
+    /// behaviour when no master key is set.
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+/// Keys for `File` mode. The control plane replaces this entirely; it exists
+/// so a proxy with no control plane still has real authorisation rather than
+/// one shared secret.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub keys: Vec<KeyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyConfig {
+    pub key: String,
+    pub name: String,
+    /// Model names, or `*` for every model.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// RFC 3339, e.g. `2027-01-01T00:00:00Z`.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,7 +152,7 @@ impl FileConfig {
         Ok(cfg)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         for entry in &self.model_list {
             if entry.model_name.trim().is_empty() {
                 bail!("model_list entry has an empty model_name");
