@@ -1,0 +1,357 @@
+//! Backend inventory: who is serving what, and how loaded are they.
+//!
+//! A [`Registry`] is immutable once built. Reloading the config builds a fresh
+//! one and swaps it in atomically, so request handling never takes a lock to
+//! read the routing table. Live counters (in-flight, health) live behind atomics
+//! on [`Backend`], which is shared by `Arc` and therefore survives a swap when
+//! the same backend appears in both generations.
+
+use anyhow::{Context, Result};
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use crate::config::FileConfig;
+
+/// Stable identifier for a backend across config reloads.
+///
+/// The prefix-affinity cache stores these rather than array indices, so a
+/// reload that reorders or resizes the model list does not silently
+/// re-point warm prefixes at the wrong node.
+pub type BackendUid = u16;
+
+/// Assigns a stable [`BackendUid`] to each distinct `(api_base, upstream_model)`.
+#[derive(Default)]
+pub struct Interner {
+    map: Mutex<HashMap<String, BackendUid>>,
+}
+
+impl Interner {
+    pub fn intern(&self, api_base: &str, upstream_model: &str) -> Result<BackendUid> {
+        let key = format!("{api_base}|{upstream_model}");
+        let mut map = self.map.lock();
+        if let Some(uid) = map.get(&key) {
+            return Ok(*uid);
+        }
+        let next = map.len();
+        let uid: BackendUid = next
+            .try_into()
+            .context("more than 65536 distinct backends seen over this process's lifetime")?;
+        map.insert(key, uid);
+        Ok(uid)
+    }
+}
+
+/// One upstream inference server serving one model.
+#[derive(Debug)]
+pub struct Backend {
+    pub uid: BackendUid,
+    /// Base URL without trailing slash, e.g. `http://10.0.0.1:8000/v1`.
+    pub api_base: String,
+    /// Model name to put in the request body sent upstream.
+    pub upstream_model: String,
+    pub api_key: Option<String>,
+
+    healthy: AtomicBool,
+    consecutive_failures: AtomicU32,
+    inflight: AtomicUsize,
+    requests_total: AtomicU64,
+    errors_total: AtomicU64,
+}
+
+impl Backend {
+    fn new(
+        uid: BackendUid,
+        api_base: String,
+        upstream_model: String,
+        api_key: Option<String>,
+    ) -> Self {
+        Self {
+            uid,
+            api_base,
+            upstream_model,
+            api_key,
+            // Optimistic: a backend serves traffic until a health check says
+            // otherwise. Starting unhealthy would blackhole every request in
+            // the window before the first sweep completes.
+            healthy: AtomicBool::new(true),
+            consecutive_failures: AtomicU32::new(0),
+            inflight: AtomicUsize::new(0),
+            requests_total: AtomicU64::new(0),
+            errors_total: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn inflight(&self) -> usize {
+        self.inflight.load(Ordering::Relaxed)
+    }
+
+    pub fn requests_total(&self) -> u64 {
+        self.requests_total.load(Ordering::Relaxed)
+    }
+
+    pub fn errors_total(&self) -> u64 {
+        self.errors_total.load(Ordering::Relaxed)
+    }
+
+    pub fn note_error(&self) {
+        self.errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a successful health probe.
+    pub fn mark_probe_ok(&self) -> bool {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        !self.healthy.swap(true, Ordering::Relaxed)
+    }
+
+    /// Record a failed health probe. Returns true if this transitioned the
+    /// backend out of rotation.
+    pub fn mark_probe_failed(&self, threshold: u32) -> bool {
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= threshold {
+            return self.healthy.swap(false, Ordering::Relaxed);
+        }
+        false
+    }
+
+    /// URL for a sub-path of the OpenAI API, e.g. `/chat/completions`.
+    pub fn url_for(&self, subpath: &str) -> String {
+        format!("{}{}", self.api_base, subpath)
+    }
+}
+
+/// Increments a backend's in-flight count for as long as it is alive.
+///
+/// Held by the response body wrapper, so the count only drops when the last
+/// token has been streamed to the client — not when the upstream headers
+/// arrive. Getting this wrong makes every streaming backend look idle and
+/// collapses least-loaded routing into round-robin.
+pub struct InflightGuard(Arc<Backend>);
+
+impl InflightGuard {
+    pub fn acquire(backend: Arc<Backend>) -> Self {
+        backend.inflight.fetch_add(1, Ordering::Relaxed);
+        backend.requests_total.fetch_add(1, Ordering::Relaxed);
+        Self(backend)
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The set of backends serving one client-facing model name.
+pub type Pool = Arc<Vec<Arc<Backend>>>;
+
+/// Immutable routing table.
+#[derive(Default)]
+pub struct Registry {
+    pools: HashMap<String, Pool>,
+    /// Every distinct backend, for health sweeps and metrics.
+    all: Vec<Arc<Backend>>,
+}
+
+impl Registry {
+    /// Build a registry from a parsed config.
+    ///
+    /// `previous` is consulted so that a backend which survives a reload keeps
+    /// its live counters and health state instead of being reset to optimistic.
+    pub fn build(
+        cfg: &FileConfig,
+        interner: &Interner,
+        previous: Option<&Registry>,
+    ) -> Result<Self> {
+        let mut pools: HashMap<String, Vec<Arc<Backend>>> = HashMap::new();
+        let mut by_uid: HashMap<BackendUid, Arc<Backend>> = HashMap::new();
+
+        for entry in &cfg.model_list {
+            let api_base = entry
+                .litellm_params
+                .api_base
+                .trim_end_matches('/')
+                .to_string();
+            let upstream_model = entry.litellm_params.upstream_model(&entry.model_name);
+            let uid = interner.intern(&api_base, &upstream_model)?;
+
+            // Reuse the live object when we already made one this pass, or when
+            // the previous generation had it — preserving in-flight and health.
+            let backend = if let Some(existing) = by_uid.get(&uid) {
+                Arc::clone(existing)
+            } else {
+                let carried = previous
+                    .and_then(|p| p.all.iter().find(|b| b.uid == uid))
+                    .cloned();
+                let backend = carried.unwrap_or_else(|| {
+                    Arc::new(Backend::new(
+                        uid,
+                        api_base.clone(),
+                        upstream_model.clone(),
+                        entry.litellm_params.effective_api_key(),
+                    ))
+                });
+                by_uid.insert(uid, Arc::clone(&backend));
+                backend
+            };
+
+            let pool = pools.entry(entry.model_name.clone()).or_default();
+            // The same backend can legitimately be listed twice for one model
+            // (e.g. an alias resolving onto it); only route to it once.
+            if !pool.iter().any(|b: &Arc<Backend>| b.uid == uid) {
+                pool.push(backend);
+            }
+        }
+
+        let mut all: Vec<Arc<Backend>> = by_uid.into_values().collect();
+        all.sort_by_key(|b| b.uid);
+
+        Ok(Self {
+            pools: pools.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
+            all,
+        })
+    }
+
+    pub fn pool(&self, model_name: &str) -> Option<&Pool> {
+        self.pools.get(model_name)
+    }
+
+    pub fn model_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.pools.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    pub fn backends(&self) -> &[Arc<Backend>] {
+        &self.all
+    }
+
+    pub fn healthy_count(&self) -> usize {
+        self.all.iter().filter(|b| b.is_healthy()).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(yaml: &str) -> FileConfig {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    const TWO_REPLICAS: &str = r#"
+model_list:
+  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.1:8000/v1
+  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.2:8000/v1
+"#;
+
+    #[test]
+    fn same_model_name_forms_one_pool() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        assert_eq!(reg.pool("Qwen/Qwen3-1.7B").unwrap().len(), 2);
+        assert_eq!(reg.backends().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_entry_is_not_routed_to_twice() {
+        let dup = format!(
+            "{TWO_REPLICAS}{}",
+            r#"  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.1:8000/v1
+"#
+        );
+        let reg = Registry::build(&config(&dup), &Interner::default(), None).unwrap();
+        assert_eq!(reg.pool("Qwen/Qwen3-1.7B").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn alias_shares_the_backend_object_with_its_target() {
+        let yaml = r#"
+model_list:
+  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.1:8000/v1
+  - model_name: gpt-4
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.1:8000/v1
+"#;
+        let reg = Registry::build(&config(yaml), &Interner::default(), None).unwrap();
+        let real = &reg.pool("Qwen/Qwen3-1.7B").unwrap()[0];
+        let alias = &reg.pool("gpt-4").unwrap()[0];
+        assert!(Arc::ptr_eq(real, alias));
+        assert_eq!(alias.upstream_model, "Qwen/Qwen3-1.7B");
+        // One physical backend, listed under two client-facing names.
+        assert_eq!(reg.backends().len(), 1);
+    }
+
+    #[test]
+    fn reload_preserves_health_and_inflight() {
+        let interner = Interner::default();
+        let old = Registry::build(&config(TWO_REPLICAS), &interner, None).unwrap();
+        let b = Arc::clone(&old.backends()[0]);
+        b.mark_probe_failed(1);
+        let _guard = InflightGuard::acquire(Arc::clone(&b));
+        assert!(!b.is_healthy());
+        assert_eq!(b.inflight(), 1);
+
+        let new = Registry::build(&config(TWO_REPLICAS), &interner, Some(&old)).unwrap();
+        let carried = new.backends().iter().find(|x| x.uid == b.uid).unwrap();
+        assert!(
+            Arc::ptr_eq(carried, &b),
+            "reload must carry the live object over"
+        );
+        assert!(!carried.is_healthy());
+        assert_eq!(carried.inflight(), 1);
+    }
+
+    #[test]
+    fn uid_is_stable_across_reload() {
+        let interner = Interner::default();
+        let a = Registry::build(&config(TWO_REPLICAS), &interner, None).unwrap();
+        let uids_a: Vec<_> = a.backends().iter().map(|b| b.uid).collect();
+        // Same two backends, reversed order in the file.
+        let reversed = r#"
+model_list:
+  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.2:8000/v1
+  - model_name: Qwen/Qwen3-1.7B
+    litellm_params:
+      model: openai/Qwen/Qwen3-1.7B
+      api_base: http://10.0.0.1:8000/v1
+"#;
+        let b = Registry::build(&config(reversed), &interner, Some(&a)).unwrap();
+        let uids_b: Vec<_> = b.backends().iter().map(|x| x.uid).collect();
+        assert_eq!(uids_a, uids_b);
+    }
+
+    #[test]
+    fn guard_releases_inflight_on_drop() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        {
+            let _g = InflightGuard::acquire(Arc::clone(&b));
+            assert_eq!(b.inflight(), 1);
+        }
+        assert_eq!(b.inflight(), 0);
+        assert_eq!(b.requests_total(), 1);
+    }
+}
