@@ -192,6 +192,11 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
 /// like every other `/admin/*` route — it does not (and must not) offer a
 /// second, unauthenticated way to set a password, or `require_session`'s
 /// whole point would be moot.
+// `ureq::Error` is a large enum and clippy's `result_large_err` fires on
+// the `or_else` below. Boxing it in a test helper buys nothing, and CI's
+// toolchain is newer than most local ones, so this has to be silenced
+// explicitly rather than relying on the lint not firing locally.
+#[allow(clippy::result_large_err)]
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn setting_a_password_over_the_admin_api_requires_a_session_too() {
@@ -234,6 +239,11 @@ async fn setting_a_password_over_the_admin_api_requires_a_session_too() {
 /// property under test is that route existing at all, not its content, and
 /// asserting one specific body would make this test depend on whether the
 /// frontend happens to be built in whatever environment runs it.
+// `ureq::Error` is a large enum and clippy's `result_large_err` fires on
+// the `or_else` below. Boxing it in a test helper buys nothing, and CI's
+// toolchain is newer than most local ones, so this has to be silenced
+// explicitly rather than relying on the lint not firing locally.
+#[allow(clippy::result_large_err)]
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn the_management_ui_route_exists_on_the_admin_port_and_not_on_the_proxy_port() {
