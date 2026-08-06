@@ -1,15 +1,18 @@
 # The control plane: database, admin API (`POST /admin/keys`, `DELETE
-# /admin/keys/{id}`) and `/snapshot` for the proxy to poll. No proxy listener
-# lives here — that is deploy/deployment.yaml, `--role=proxy`.
+# /admin/keys/{id}`), the management UI (`/`, `/ui/*`) and `/snapshot` for the
+# proxy to poll. No proxy listener lives here — that is deploy/deployment.yaml,
+# `--role=proxy`.
 #
-# SECURITY: the admin API has NO authentication of its own today (sessions
-# and passwords land later, with the management UI — see TODO.md and the
-# design spec). Anyone who can reach port 4001 can mint an API key. The
-# Service below is therefore ClusterIP only, and MUST NOT be merged into
-# fastllm-proxy's LoadBalancer Service in deploy/service.yaml, which is
-# reachable from the whole LAN at 192.168.10.126. Putting /admin on that VIP
-# means unauthenticated key creation from anywhere on the network. See
-# deploy/README.md.
+# SECURITY: `/admin/*` and the UI now require a session cookie (`POST
+# /login`, Argon2id-checked against principals.password_hash — see
+# src/control/auth.rs and README.md's "Admin authentication" section). That
+# is not a reason to put this Service on a public listener: a login screen on
+# the LAN-reachable VIP is still an unauthenticated-until-guessed target, not
+# an authenticated one. The Service below is therefore ClusterIP only, and
+# MUST NOT be merged into fastllm-proxy's LoadBalancer Service in
+# deploy/service.yaml, which is reachable from the whole LAN at
+# 192.168.10.126. See deploy/README.md, including "Bootstrapping the first
+# admin login" for how to get a working session in the first place.
 # CREDENTIALS ARE NOT IN THIS FILE, DELIBERATELY.
 #
 # fastllm-proxy-token and fastllm-encryption-key are created imperatively, the
@@ -106,14 +109,15 @@ spec:
             # this has to be an explicit volume, same reasoning as
             # deployment.yaml's snapshot-cache mount.
             - { name: tls, mountPath: /etc/fastllm/tls, readOnly: true }
-          # `/admin/*` (POST/DELETE) has no authentication at all, but it's a
-          # mutating endpoint, not a health check, so it's not a valid probe
-          # target either. `/snapshot` requires the proxy token, which the
-          # kubelet doesn't have. There is no `/health`/`/metrics` here the
-          # way the proxy role has. A TCP check on the admin port is the
-          # honest probe until this role grows a dedicated `/healthz` — it
-          # stays a plain TCP check even now that the port is TLS, since a
-          # kubelet probe has no simple way to speak TLS with a private CA.
+          # `/admin/*` (POST/DELETE) is session-gated and mutating, not a
+          # health check, so it's not a valid probe target. `/snapshot`
+          # requires the proxy token, which the kubelet doesn't have, and
+          # `/login` would mean handing the kubelet a real password just to
+          # probe liveness. There is no `/health`/`/metrics` here the way the
+          # proxy role has. A TCP check on the admin port is the honest probe
+          # until this role grows a dedicated `/healthz` — it stays a plain
+          # TCP check even now that the port is TLS, since a kubelet probe
+          # has no simple way to speak TLS with a private CA.
           readinessProbe:
             tcpSocket: { port: admin }
             periodSeconds: 10

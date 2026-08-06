@@ -11,11 +11,15 @@ and the CI/deployment/docs wiring in this task. Design and self-review:
 
 Known gaps carried forward rather than silently fixed:
 
-- **The admin API has no authentication of its own.** `/admin/*` and
-  `/snapshot` are gated on the shared proxy token alone. Real admin auth
-  (principals with Argon2id passwords, sessions) is specified but deferred to
-  the management-UI phase below. Until then, `/admin` must never be exposed
-  outside the cluster — see `deploy/README.md`.
+- ~~**The admin API has no authentication of its own.**~~ Fixed in P4:
+  `/admin/*` now requires a session cookie (`POST /login`, Argon2id against
+  `principals.password_hash`; see `src/control/auth.rs` and README.md's
+  "Admin authentication" section). `/snapshot`, `/usage` and
+  `/limits/reconcile` remain gated on the proxy token, deliberately — those
+  are proxy processes authenticating to the control plane, not humans with
+  passwords. `/admin` should still never be exposed outside the cluster: a
+  login screen on a public listener is still the wrong default. See
+  `deploy/README.md`.
 - ~~`model_backends.upstream_api_key` is stored unencrypted at rest.~~ Fixed:
   `src/control/secrets.rs` encrypts it with AES-256-GCM before
   `import`/the admin API write it, `build_snapshot` decrypts it back on read,
@@ -32,7 +36,15 @@ virtual models and routing (P1), the management UI (P4), and `POST /usage`
 
 ## Features
 
-### Embedded management and monitoring UI
+### Embedded management and monitoring UI — done (P4)
+
+Implemented: a small React dashboard (`web/`), embedded into the binary and
+served by `--role=control`/`all` only (`src/control/ui.rs`), gated behind the
+session-cookie login described in README.md's "Admin authentication"
+section. The rest of this section is the original design note, left as-is
+for the reasoning behind the choices it made (`rust-embed` over
+`include_dir!`, the Dockerfile `node` stage over a `build.rs`) — those
+tradeoffs are exactly what got built.
 
 Serve a small React dashboard from the binary itself, the way Go's `embed.FS`
 is normally used.

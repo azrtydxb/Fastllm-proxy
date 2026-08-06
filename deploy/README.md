@@ -24,17 +24,29 @@ The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `n
 
 If `--tls-cert`/`--tls-key` are ever both removed (a dev cluster with no real backend credentials, say), `fastllm-control` falls back to plain HTTP rather than refusing to start — but it logs a startup warning every time, precisely because that fallback is silent otherwise and this is data that should not travel in the clear by accident.
 
-### ⚠️ The admin API has no authentication — keep it off the VIP
+### ⚠️ Keep the admin API and UI off the VIP
 
-`fastllm-control`'s `/admin/*` — every route: keys, principals, role grants, models, backends — has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` and `/usage` check `--proxy-token`, and that token is a shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
+`fastllm-control`'s `/admin/*` requires a session cookie (`POST /login`, checked against `principals.password_hash` with Argon2id — see README.md's "Admin authentication" section and `src/control/auth.rs`). `/snapshot` and `/usage` are unchanged: they check `--proxy-token`, a separate shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not a human login.
 
-**Network isolation — the `ClusterIP` Service below — is therefore the only control `/admin/*` has.** Do not read the token requirement on `/snapshot` as implying `/admin/*` is protected too; it is not, and this document previously said otherwise.
+**Network isolation is still the right default even with a real login in front of `/admin/*`.** A session cookie stops an anonymous request; it does not make brute-forcing a weak password, a leaked cookie, or a compromised pod on the same network segment a non-issue. Treat the login the same way you would treat any other internal admin tool's login: necessary, not sufficient, and no reason to put it on a public listener.
 
-**That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN. Putting `/admin/*` on it turns "reachable from any machine on the network" into "can mint an API key, grant itself a role, or repoint a backend at a machine it controls, from anywhere on the network" — unauthenticated administration, not a probe-and-metrics exposure like `/health`. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
+**That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN, and `fastllm-control` now also serves the management UI (`/`, `/ui/*`) on the same listener — another reason it belongs off the VIP, not fewer. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
+
+### Bootstrapping the first admin login
+
+A freshly migrated database has no session anyone can obtain — every `principals` row starts with `password_hash IS NULL`, so there is no way to `POST /login` successfully yet. Run once, from inside the cluster (same trust boundary as minting a key below):
+
+```bash
+kubectl -n fastllm exec deploy/fastllm-control -- \
+  fastllm-proxy set-password --name admin --password "$(openssl rand -hex 16)" \
+  --database-url "$FASTLLM_DATABASE_URL"
+```
+
+(`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role if it has no role at all yet. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
 
 ## First install
 
-Generate the proxy token — shared between `fastllm-control` and `fastllm-proxy`, checked only by `/snapshot` (the data plane's read of policy). It protects nothing on `/admin/*`, which has no authentication at all:
+Generate the proxy token — shared between `fastllm-control` and `fastllm-proxy`, checked only by `/snapshot`/`/usage`/`/limits/reconcile` (the machine-to-machine routes). It is not what protects `/admin/*` — that is the session-cookie login described below:
 
 ```bash
 kubectl create namespace fastllm --dry-run=client -o yaml | kubectl apply -f -
@@ -67,20 +79,28 @@ kubectl -n fastllm rollout status deploy/fastllm-proxy --timeout=240s
 
 ## Creating and using an API key
 
-Keys are minted through the control plane's admin API, reachable only from inside the cluster (see the warning above) — `kubectl exec` into a pod that can reach the ClusterIP Service, or `kubectl -n fastllm exec` into `fastllm-control` itself:
+Keys are minted through the control plane's admin API, reachable only from inside the cluster (see the warning above) — `kubectl exec` into a pod that can reach the ClusterIP Service, or `kubectl -n fastllm exec` into `fastllm-control` itself. Log in first (see "Bootstrapping the first admin login" above for the very first one) to get a session cookie, then reuse it:
 
 ```bash
-kubectl -n fastllm exec deploy/fastllm-control -- \
-  curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/keys -H 'content-type: application/json' \
-  -d '{"name":"my-client","principal_id":1}'
+kubectl -n fastllm exec deploy/fastllm-control -- sh -c '
+  curl -s --cacert /etc/fastllm/tls/ca.crt -c /tmp/cookie -XPOST https://localhost:4001/login \
+    -H "content-type: application/json" -d "{\"name\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" \
+  && curl -s --cacert /etc/fastllm/tls/ca.crt -b /tmp/cookie -XPOST https://localhost:4001/admin/keys \
+    -H "content-type: application/json" -d "{\"name\":\"my-client\",\"principal_id\":1}"
+'
 # {"id":7,"key":"sk-..."}
 ```
 
-The response is the only time the plaintext key is ever shown — the database stores a SHA-256 hash, not the key, so read it now. Revoke the same way:
+Or use the management UI at `https://fastllm-control.fastllm.svc:4001/` (port-forward it) instead of hand-writing `curl` — same admin API underneath, a form instead of JSON.
+
+The response is the only time the plaintext key is ever shown — the database stores a SHA-256 hash, not the key, so read it now. Revoke the same way, cookie and all:
 
 ```bash
-kubectl -n fastllm exec deploy/fastllm-control -- \
-  curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/keys/7
+kubectl -n fastllm exec deploy/fastllm-control -- sh -c '
+  curl -s --cacert /etc/fastllm/tls/ca.crt -c /tmp/cookie -XPOST https://localhost:4001/login \
+    -H "content-type: application/json" -d "{\"name\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" \
+  && curl -s --cacert /etc/fastllm/tls/ca.crt -b /tmp/cookie -XDELETE https://localhost:4001/admin/keys/7
+'
 ```
 
 Revocation reaches the proxy within one poll interval (`--config-poll`, default 5s).

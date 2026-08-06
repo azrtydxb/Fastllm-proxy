@@ -47,7 +47,7 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 
 `proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
 
-`control` and `proxy` split for a cluster deployment where the admin API — which has **no authentication of its own yet** (see below) — needs to stay off the public listener while the proxy scales out independently. See `deploy/` for the manifests that wire this up on Kubernetes.
+`control` and `proxy` split for a cluster deployment where the admin API and management UI need to stay off the public listener while the proxy scales out independently — network isolation is still the right default even now that `/admin/*` has its own session-cookie authentication (see below), the same way keeping a login-gated internal tool off a public LoadBalancer is good practice regardless of the login. See `deploy/` for the manifests that wire this up on Kubernetes.
 
 `Http` mode degrades gracefully: a `proxy` that cannot reach its control plane at startup, or loses it later, falls back to the last snapshot it wrote to `--snapshot-cache` (default `/var/lib/fastllm/snapshot.json`) rather than refusing to start or dropping traffic.
 
@@ -123,7 +123,9 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `GET /v1/models` | Aggregated across every pool |
 | `GET /health` | Per-backend health, in-flight, request and error counts. No auth required. Exposes backend addresses — keep it off the public interface |
 | `GET /metrics` | Prometheus text. No auth required |
-| `/admin/*` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See the table below and the warning under it |
+| `/admin/*` | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it |
+| `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires |
+| `/`, `/ui/*` (management UI) | `--role all`/`control` only. The embedded SPA — see "Management UI" below |
 | `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
 | `POST /usage` | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot` |
 | `POST /limits/reconcile` | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token` |
@@ -139,6 +141,7 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `DELETE /admin/principals/{id}` | Cascades to that principal's keys and role grants |
 | `POST /admin/principals/{id}/roles` | `{"role":"inference"}`. Idempotent |
 | `DELETE /admin/principals/{id}/roles/{role}` | Revoke one role |
+| `PUT /admin/principals/{id}/password` | `{"password":...}`. Argon2id-hashes it and promotes the principal to `kind = 'user'` if it was not already |
 | `GET /admin/keys` | Prefix, name, principal, expiry, disabled. **Never** the key or its hash |
 | `POST /admin/keys` | `{"name":..., "principal_id":..., "expires_at":...}`. Returns the plaintext key once |
 | `DELETE /admin/keys/{id}` | Revoke (sets `disabled`; the row stays for audit) |
@@ -157,7 +160,27 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
 
-**`/admin/*` has no authentication of any kind.** None of the routes above check anything — no header, no token, no session — so anyone who can reach the admin port can mint a key, grant a role, or repoint a backend. `--proxy-token` gates `/snapshot` only; it is not, and never was, a check that `/admin/*` also performs (an earlier version of this README claimed otherwise). Sessions and passwords for real admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, network isolation is the *only* control: **never** put the admin port on a network-reachable listener — bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them, and do not treat `--proxy-token` as covering `/admin/*` when deciding what is safe to expose.
+### Admin authentication
+
+Every `/admin/*` route (including `PUT /admin/principals/{id}/password` below) requires a valid session cookie, checked by `require_session` in `src/control/api.rs`. `POST /login` verifies a `{"name":..., "password":...}` body against `principals.password_hash` (Argon2id — see `src/control/auth.rs`'s doc comment for why this is a different hash from `api_keys.hash`'s SHA-256, deliberately: a password is low-entropy and human-chosen, an API key or session token is high-entropy random) and, on success, sets `fastllm_session` (`HttpOnly`, `SameSite=Strict`, `Secure` when TLS is on) valid for 12 hours. `POST /logout` deletes the session and clears the cookie.
+
+`--proxy-token` still gates `/snapshot`, `/usage` and `/limits/reconcile` — those are proxy *processes* authenticating to the control plane, not humans, and have no password to present; sessions and the proxy token are deliberately separate mechanisms for separate callers.
+
+**Bootstrapping the first login.** A freshly migrated database has no session anyone can obtain — every `principals` row starts with `password_hash IS NULL`. Run this once, with the same database access `import` already requires:
+
+```bash
+fastllm-proxy set-password --name admin --password '...' --database-url postgres://...
+```
+
+Creates the named principal if it does not exist yet (as `kind = 'user'`), sets its password, and grants it the `admin` role if it has no role at all yet. Safe to run again later to reset a forgotten password. `PUT /admin/principals/{id}/password` (session-gated, for every login *after* the first) does the same password-setting step through the admin API/UI once at least one session exists.
+
+Network isolation is still the right default even with a login in front of `/admin/*` — the same reason a login-gated internal tool still belongs on an internal network rather than a public LoadBalancer. **Keep the admin port off the public listener**: bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them.
+
+### Management UI
+
+`--role all`/`control` serve a small React dashboard from `/` and `/ui/*` — models and backends, virtual models and their rule chains, keys (create/revoke), principals/roles/grants, limits and budgets with consumption, and a usage overview, all driven by the admin API above (`src/control/ui.rs`; frontend source in `web/`). `--role proxy` serves no UI at all; `control::api::serve`, where the UI's fallback route is mounted, is never called for that role.
+
+Embedded into the binary with [`rust-embed`](https://docs.rs/rust-embed) reading `web/dist/` at compile time — one container image, no second artefact to deploy. Built by the `Dockerfile`'s dedicated `node` stage, not a `build.rs` that shells out to `npm`, so `cargo build`/`cargo test` never require Node — a `web/dist/` empty at compile time (the normal state outside the Docker build) degrades to a plain "UI not available" response rather than failing the build. See `web/dist/.gitkeep`'s neighbour, `src/control/ui.rs`'s module doc comment, for the full mechanics.
 
 ### Encryption at rest
 
