@@ -16,8 +16,24 @@
 //! `version_byte || nonce (12 bytes) || ciphertext_and_tag`. The version
 //! byte is checked on every decrypt and a blob whose byte we don't
 //! recognise is rejected outright rather than guessed at — that is what
-//! lets a future key-rotation or algorithm change add `version_byte == 2`
-//! without ambiguity against rows written under `1`.
+//! lets a future key-rotation or algorithm change add a new version byte
+//! without ambiguity against rows written under an earlier one.
+//!
+//! Two versions currently exist. `1` binds the version byte to nothing —
+//! AES-GCM's authenticated-data input is empty (`Aad::empty()`) — so the one
+//! byte that selects which code path decrypts a blob is itself unauthenticated
+//! and attacker-malleable: nothing before `2` stopped a byte for byte
+//! flip of just that leading byte on a `1` blob from being handed to a
+//! different decrypt path (unexploitable while `1` is the only version that
+//! exists, but not a property to leave standing once a second version does).
+//! `2` fixes that by passing the version byte itself as AEAD associated data
+//! (`Aad::from([VERSION_V2])`), so tampering with it now fails the
+//! authentication check the same way tampering with the ciphertext already
+//! did. [`encrypt`] only ever writes `2`; [`decrypt`] still reads `1` (with
+//! empty AAD, exactly as it always did) so every already-encrypted row in a
+//! live database keeps decrypting without a re-encryption pass — the two
+//! version bytes select two different AAD inputs to the same tag check, not
+//! two different ciphertexts to migrate between.
 //!
 //! AES-256-GCM via `ring::aead`, which is already in the dependency tree
 //! (rustls pulls it in for TLS) — this module promotes it to a direct
@@ -50,10 +66,15 @@ use ring::rand::{SecureRandom, SystemRandom};
 pub const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 
-/// The only format this build understands. A blob whose leading byte is
-/// anything else is rejected by [`decrypt`] rather than interpreted — see
-/// the module doc comment.
+/// The original format: `Aad::empty()`. Still decrypted (never written by
+/// [`encrypt`] anymore) so existing rows keep working — see the module doc
+/// comment.
 const VERSION_V1: u8 = 1;
+
+/// Current format: identical to `V1` except the version byte itself is
+/// authenticated as AEAD associated data (`Aad::from([VERSION_V2])`) rather
+/// than left outside the tag. [`encrypt`] always writes this version now.
+const VERSION_V2: u8 = 2;
 
 /// A loaded 32-byte AES-256-GCM key. Holds the raw bytes only long enough to
 /// construct a `ring` key object; never printed, never serialized.
@@ -115,6 +136,10 @@ impl EncryptionKey {
 
 /// Encrypt `plaintext` under `key`, returning `version || nonce || ciphertext+tag`.
 ///
+/// Always writes [`VERSION_V2`] — the version byte is bound in as AEAD
+/// associated data, so it is authenticated the same way the ciphertext is;
+/// see the module doc comment. There is no code path left that writes `V1`.
+///
 /// A fresh random nonce is drawn for every call — never reuse a nonce
 /// across two `encrypt` calls under the same key, which is why the nonce is
 /// generated here rather than accepted as a parameter.
@@ -129,11 +154,11 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &str) -> Result<Vec<u8>> {
 
     let mut in_out = plaintext.as_bytes().to_vec();
     less_safe
-        .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        .seal_in_place_append_tag(nonce, Aad::from([VERSION_V2]), &mut in_out)
         .map_err(|_| anyhow::anyhow!("encryption failed"))?;
 
     let mut out = Vec::with_capacity(1 + NONCE_LEN + in_out.len());
-    out.push(VERSION_V1);
+    out.push(VERSION_V2);
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&in_out);
     Ok(out)
@@ -143,13 +168,27 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &str) -> Result<Vec<u8>> {
 /// an empty or truncated blob, an unrecognised version byte, and — via
 /// AES-GCM's authentication tag — any blob that was tampered with or
 /// encrypted under a different key.
+///
+/// Understands both versions: `1` (empty AAD — every row written before
+/// `VERSION_V2` existed) and `2` (the version byte bound in as AAD, current
+/// and the only version [`encrypt`] writes). Which AAD is used is picked
+/// from the version byte and is *not* itself a guess protected by anything
+/// — under `2` a flipped version byte fails the tag check same as flipped
+/// ciphertext would; under `1` it never carried that protection and still
+/// does not, which is the whole reason `1` is being retired for new writes
+/// rather than kept indefinitely.
 pub fn decrypt(key: &EncryptionKey, blob: &[u8]) -> Result<String> {
     let Some(&version) = blob.first() else {
         bail!("empty ciphertext blob");
     };
-    if version != VERSION_V1 {
-        bail!("unrecognised encryption format version byte {version}; this build only understands version {VERSION_V1}");
-    }
+    let aad = match version {
+        VERSION_V1 => Aad::from(&[][..]),
+        VERSION_V2 => Aad::from(&[VERSION_V2][..]),
+        other => bail!(
+            "unrecognised encryption format version byte {other}; this build only understands \
+             versions {VERSION_V1} and {VERSION_V2}"
+        ),
+    };
     if blob.len() < 1 + NONCE_LEN {
         bail!("ciphertext blob too short to contain a nonce");
     }
@@ -162,7 +201,7 @@ pub fn decrypt(key: &EncryptionKey, blob: &[u8]) -> Result<String> {
     let less_safe = key.less_safe_key()?;
     let nonce = Nonce::assume_unique_for_key(nonce_bytes);
     let plaintext = less_safe
-        .open_in_place(nonce, Aad::empty(), &mut in_out)
+        .open_in_place(nonce, aad, &mut in_out)
         .map_err(|_| {
             anyhow::anyhow!(
                 "decryption failed: authentication check failed (tampered ciphertext, wrong \
@@ -240,6 +279,79 @@ mod tests {
         let blob = encrypt(&key, "sk-super-secret-upstream-token").unwrap();
         let err = decrypt(&other_key(), &blob).unwrap_err();
         assert!(err.to_string().contains("authentication"));
+    }
+
+    /// Builds a blob in the pre-fix `V1` shape directly (`Aad::empty()`,
+    /// leading byte `VERSION_V1`), the same way every row [`encrypt`] wrote
+    /// before this fix existed. [`encrypt`] itself only ever produces `V2`
+    /// blobs now, so a test proving `V1` blobs already in a database still
+    /// decrypt has to construct one by hand rather than through `encrypt`.
+    fn legacy_v1_blob(key: &EncryptionKey, plaintext: &str) -> Vec<u8> {
+        let less_safe = key.less_safe_key().unwrap();
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        SystemRandom::new().fill(&mut nonce_bytes).unwrap();
+        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+        let mut in_out = plaintext.as_bytes().to_vec();
+        less_safe
+            .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+            .unwrap();
+        let mut out = Vec::with_capacity(1 + NONCE_LEN + in_out.len());
+        out.push(VERSION_V1);
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&in_out);
+        out
+    }
+
+    /// Regression for the review finding: nothing may silently break rows
+    /// already in the database. Every row written before this fix is a `V1`
+    /// blob under empty AAD — those must keep decrypting exactly as before,
+    /// with no re-encryption pass required.
+    #[test]
+    fn a_legacy_v1_blob_still_decrypts() {
+        let key = test_key();
+        let blob = legacy_v1_blob(&key, "sk-legacy-row-written-before-the-fix");
+        assert_eq!(blob[0], VERSION_V1);
+        assert_eq!(
+            decrypt(&key, &blob).unwrap(),
+            "sk-legacy-row-written-before-the-fix"
+        );
+    }
+
+    /// `encrypt` must not still be writing the format the review finding
+    /// flagged.
+    #[test]
+    fn encrypt_writes_v2_not_v1() {
+        let key = test_key();
+        let blob = encrypt(&key, "sk-whatever").unwrap();
+        assert_eq!(blob[0], VERSION_V2);
+    }
+
+    /// The actual fix, proven directly: under `V2`, the version byte is
+    /// bound into the AEAD tag as associated data, so flipping it — the
+    /// exact malleability the review finding described, "the byte that
+    /// selects the code path is attacker-malleable" — now fails
+    /// authentication instead of silently being reinterpreted. Contrast
+    /// with `V1` (`Aad::empty()`), where the version byte was never
+    /// authenticated at all and this same flip only fails today because
+    /// `1` is the only version `V1`'s decrypt path recognises — a
+    /// distinction that stops holding the moment a second `V1`-shaped
+    /// version could ever exist, which is exactly why `V2` exists instead of
+    /// leaving `V1` as the permanent format.
+    #[test]
+    fn the_v2_version_byte_is_authenticated_not_just_checked() {
+        let key = test_key();
+        let mut blob = encrypt(&key, "sk-super-secret-upstream-token").unwrap();
+        assert_eq!(blob[0], VERSION_V2);
+        // Flip it to the *other* version byte this build understands, not
+        // to noise: this is the case that matters, because it is the one a
+        // pre-fix implementation (version byte outside the tag) could not
+        // tell apart from a legitimate `V1` blob at all.
+        blob[0] = VERSION_V1;
+        let err = decrypt(&key, &blob).unwrap_err();
+        assert!(
+            err.to_string().contains("authentication"),
+            "a tampered version byte on a V2 blob must fail the AEAD tag check: {err}"
+        );
     }
 
     #[test]
