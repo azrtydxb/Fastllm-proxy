@@ -159,6 +159,18 @@ enum Command {
         #[arg(long, env = "FASTLLM_DATABASE_URL")]
         database_url: String,
     },
+
+    /// One-shot migration: re-encrypt any `model_backends.upstream_api_key`
+    /// rows still holding pre-encryption plaintext (see
+    /// `migrations/0004_encrypted_upstream_api_key.sql`). Safe to run more
+    /// than once — an already-migrated row is left alone.
+    ReencryptBackends {
+        /// Database to migrate. Distinct from `--database-url` on `Cli` for
+        /// the same reason `Import::database_url` is: this never has to be
+        /// issued alongside `--role`.
+        #[arg(long, env = "FASTLLM_DATABASE_URL")]
+        database_url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -219,6 +231,7 @@ async fn run_command(command: &Command) -> Result<()> {
             config,
             database_url,
         } => run_import(config, database_url).await,
+        Command::ReencryptBackends { database_url } => run_reencrypt_backends(database_url).await,
     }
 }
 
@@ -228,9 +241,15 @@ async fn run_command(command: &Command) -> Result<()> {
 async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> {
     #[cfg(feature = "control")]
     {
+        // Loaded before any I/O, so a missing/malformed key fails fast
+        // rather than after a database round trip. `import` writes
+        // `upstream_api_key`, so it needs the key exactly like `--role
+        // control`/`all` do — see `EncryptionKey::from_env` for why there is
+        // no fallback to storing plaintext.
+        let key = fastllm_proxy::control::secrets::EncryptionKey::from_env()?;
         let cfg = FileConfig::load(config)?;
         let pool = fastllm_proxy::control::db::connect(database_url).await?;
-        let summary = fastllm_proxy::control::import::import(&pool, &cfg).await?;
+        let summary = fastllm_proxy::control::import::import(&pool, &cfg, &key).await?;
         // No key count: `import` never touches `api_keys` (a LiteLLM config
         // has no key material in it), so there is nothing truthful to report
         // there. An earlier revision printed a permanently-zero "0 new
@@ -246,6 +265,28 @@ async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> 
     {
         let _ = (config, database_url);
         anyhow::bail!("import requires the `control` feature; this binary was built with --no-default-features")
+    }
+}
+
+/// `fastllm-proxy reencrypt-backends --database-url <url>`: the one-shot
+/// migration for rows written before encryption-at-rest existed. See
+/// `control::import::reencrypt_plaintext_backends` for the detection
+/// strategy and why this is a command an operator runs once rather than a
+/// format the read path has to tolerate forever.
+async fn run_reencrypt_backends(database_url: &str) -> Result<()> {
+    #[cfg(feature = "control")]
+    {
+        let key = fastllm_proxy::control::secrets::EncryptionKey::from_env()?;
+        let pool = fastllm_proxy::control::db::connect(database_url).await?;
+        let migrated =
+            fastllm_proxy::control::import::reencrypt_plaintext_backends(&pool, &key).await?;
+        println!("reencrypt-backends complete: {migrated} row(s) migrated to ciphertext");
+        Ok(())
+    }
+    #[cfg(not(feature = "control"))]
+    {
+        let _ = database_url;
+        anyhow::bail!("reencrypt-backends requires the `control` feature; this binary was built with --no-default-features")
     }
 }
 
@@ -271,18 +312,25 @@ fn load_tuning_config(path: Option<&PathBuf>) -> Result<FileConfig> {
 async fn run_control(cli: Cli) -> Result<()> {
     #[cfg(feature = "control")]
     {
+        // Loaded before the database connection: `--role control` always
+        // reads (and, via the admin API, never writes) `upstream_api_key`,
+        // so it needs the key exactly as unconditionally as `import` does.
+        // See `EncryptionKey::from_env` for why a missing/malformed key is a
+        // hard startup failure rather than a plaintext fallback.
+        let key = Arc::new(fastllm_proxy::control::secrets::EncryptionKey::from_env()?);
         let db_url = cli
             .database_url
             .clone()
             .context("--role control requires --database-url")?;
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
-        let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
+        let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
         let cache: Arc<dyn fastllm_proxy::control::api::SnapshotSink> =
             Arc::new(ArcSwap::from_pointee(snap));
         fastllm_proxy::control::api::spawn_snapshot_rebuilder(
             pool.clone(),
             Arc::clone(&cache),
             Duration::from_secs(cli.snapshot_rebuild_interval),
+            Arc::clone(&key),
         );
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -290,8 +338,14 @@ async fn run_control(cli: Cli) -> Result<()> {
                 format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
             })?;
         info!(%addr, "control plane admin API listening");
-        fastllm_proxy::control::api::serve(pool, addr, cli.proxy_token.unwrap_or_default(), cache)
-            .await
+        fastllm_proxy::control::api::serve(
+            pool,
+            addr,
+            cli.proxy_token.unwrap_or_default(),
+            cache,
+            key,
+        )
+        .await
     }
     #[cfg(not(feature = "control"))]
     {
@@ -310,12 +364,17 @@ async fn run_control(cli: Cli) -> Result<()> {
 async fn run_all(cli: Cli) -> Result<()> {
     #[cfg(feature = "control")]
     {
+        // See the matching comment in `run_control`: `--role all` reads
+        // *and* writes `upstream_api_key` (admin API key/model writes go
+        // through the same database), so it needs the key just as
+        // unconditionally.
+        let key = Arc::new(fastllm_proxy::control::secrets::EncryptionKey::from_env()?);
         let db_url = cli
             .database_url
             .clone()
             .context("--role all requires --database-url")?;
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
-        let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
+        let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
 
         let tuning_cfg = load_tuning_config(cli.config.as_ref())?;
         let tuning = tuning_cfg.fastllm.clone();
@@ -363,11 +422,17 @@ async fn run_all(cli: Cli) -> Result<()> {
             pool.clone(),
             Arc::clone(&admin_sink),
             Duration::from_secs(cli.snapshot_rebuild_interval),
+            Arc::clone(&key),
         );
         tokio::spawn(async move {
-            if let Err(e) =
-                fastllm_proxy::control::api::serve(admin_pool, admin_addr, admin_token, admin_sink)
-                    .await
+            if let Err(e) = fastllm_proxy::control::api::serve(
+                admin_pool,
+                admin_addr,
+                admin_token,
+                admin_sink,
+                key,
+            )
+            .await
             {
                 error!(error = %e, "control plane admin API exited");
             }

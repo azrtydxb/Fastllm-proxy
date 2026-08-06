@@ -4,7 +4,9 @@
 //! path is a set lookup: roles are resolved to permissions, permissions to
 //! model names, and wildcards expanded against the known model list.
 
+use crate::control::secrets::{self, EncryptionKey};
 use crate::snapshot::{BackendDef, KeyEntry, ModelDef, Principal, Snapshot};
+use anyhow::Context;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +51,15 @@ pub fn flatten_grants(
 /// oversight: this runs once per change (never on the request path) against
 /// tens of principals, so the N+1 shape costs nothing that matters and stays
 /// far easier to read than the joined equivalent.
-pub async fn build_snapshot(pool: &PgPool) -> anyhow::Result<Snapshot> {
+///
+/// `key` decrypts `model_backends.upstream_api_key` (see `control::secrets`
+/// for the format and exactly what encryption at rest here does and does
+/// not protect). The snapshot this returns still carries the credential in
+/// usable plaintext form — the proxy has to present it to the backend — so
+/// this decrypts the database's copy, it does not add protection to the
+/// snapshot itself. `/snapshot` must be TLS wherever a backend has a real
+/// credential, same as before this module existed.
+pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Result<Snapshot> {
     let model_rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, name FROM models ORDER BY name")
             .fetch_all(pool)
@@ -64,19 +74,27 @@ pub async fn build_snapshot(pool: &PgPool) -> anyhow::Result<Snapshot> {
 
     let mut models = Vec::new();
     for (id, name) in &model_rows {
+        let mut backends = Vec::new();
+        for (_, base, upstream, encrypted_key) in backend_rows.iter().filter(|(mid, ..)| mid == id)
+        {
+            let api_key = encrypted_key
+                .as_ref()
+                .map(|blob| secrets::decrypt(key, blob))
+                .transpose()
+                .with_context(|| {
+                    format!(
+                        "failed to decrypt upstream_api_key for model {name:?}, backend {base:?}"
+                    )
+                })?;
+            backends.push(BackendDef {
+                api_base: base.trim_end_matches('/').to_string(),
+                upstream_model: upstream.clone(),
+                api_key,
+            });
+        }
         models.push(ModelDef {
             name: name.clone(),
-            backends: backend_rows
-                .iter()
-                .filter(|(mid, ..)| mid == id)
-                .map(|(_, base, upstream, key)| BackendDef {
-                    api_base: base.trim_end_matches('/').to_string(),
-                    upstream_model: upstream.clone(),
-                    api_key: key
-                        .as_ref()
-                        .map(|k| String::from_utf8_lossy(k).into_owned()),
-                })
-                .collect(),
+            backends,
         });
     }
 

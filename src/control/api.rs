@@ -5,6 +5,7 @@
 //! — key hashes, never plaintext — and grants nothing else.
 
 use crate::control::build::build_snapshot;
+use crate::control::secrets::EncryptionKey;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
 use arc_swap::ArcSwap;
 use axum::extract::{Path, State};
@@ -88,6 +89,7 @@ struct Ctx {
     pool: PgPool,
     proxy_token: String,
     cache: Arc<dyn SnapshotSink>,
+    key: Arc<EncryptionKey>,
 }
 
 #[derive(Deserialize)]
@@ -160,7 +162,7 @@ async fn revoke_key(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Statu
 /// Rebuild immediately after a write so revocation is bounded by the proxy's
 /// poll interval alone, not by poll interval plus rebuild interval.
 async fn refresh(ctx: &Ctx) {
-    if let Ok(snap) = build_snapshot(&ctx.pool).await {
+    if let Ok(snap) = build_snapshot(&ctx.pool, &ctx.key).await {
         ctx.cache.store_snapshot(snap);
     }
 }
@@ -176,8 +178,12 @@ async fn refresh(ctx: &Ctx) {
 /// maintains (in `--role all`, "storing a snapshot always rebuilds the
 /// routing `Registry` from it") holds here too — there is no second,
 /// almost-identical write path for this to drift from.
-async fn rebuild_once(pool: &PgPool, cache: &dyn SnapshotSink) -> anyhow::Result<()> {
-    let next = build_snapshot(pool).await?;
+async fn rebuild_once(
+    pool: &PgPool,
+    cache: &dyn SnapshotSink,
+    key: &EncryptionKey,
+) -> anyhow::Result<()> {
+    let next = build_snapshot(pool, key).await?;
     let current = cache.current_snapshot();
     if current.content_eq(&next) {
         tracing::debug!(version = current.version, "snapshot rebuild: no changes");
@@ -204,6 +210,7 @@ pub fn spawn_snapshot_rebuilder(
     pool: PgPool,
     cache: Arc<dyn SnapshotSink>,
     interval: std::time::Duration,
+    key: Arc<EncryptionKey>,
 ) {
     if interval.is_zero() {
         return;
@@ -213,7 +220,7 @@ pub fn spawn_snapshot_rebuilder(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if let Err(e) = rebuild_once(&pool, cache.as_ref()).await {
+            if let Err(e) = rebuild_once(&pool, cache.as_ref(), &key).await {
                 tracing::warn!(error = %e, "periodic snapshot rebuild failed; keeping previous snapshot");
             }
         }
@@ -249,11 +256,13 @@ pub async fn serve(
     addr: SocketAddr,
     proxy_token: String,
     cache: Arc<dyn SnapshotSink>,
+    key: Arc<EncryptionKey>,
 ) -> anyhow::Result<()> {
     let ctx = Ctx {
         pool,
         proxy_token,
         cache,
+        key,
     };
     let app = Router::new()
         .route("/admin/keys", post(post_key))
@@ -268,6 +277,11 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shared with `control::import::tests` — see `secrets::test_key` for
+    /// why every DB-backed test in `control::*` must use the same key
+    /// rather than each picking its own.
+    use crate::control::secrets::test_key;
 
     #[test]
     fn a_generated_key_is_random_prefixed_and_long_enough() {
@@ -365,7 +379,9 @@ mod tests {
         let cache: Arc<dyn SnapshotSink> = Arc::new(ArcSwap::from_pointee(Snapshot::default()));
 
         // Establish a baseline as of right now.
-        rebuild_once(&pool, cache.as_ref()).await.unwrap();
+        rebuild_once(&pool, cache.as_ref(), &test_key())
+            .await
+            .unwrap();
         let before = cache.current_snapshot();
 
         // Simulate `import` (a separate process) or the manual `UPDATE`
@@ -384,7 +400,9 @@ mod tests {
             .await
             .unwrap();
 
-        rebuild_once(&pool, cache.as_ref()).await.unwrap();
+        rebuild_once(&pool, cache.as_ref(), &test_key())
+            .await
+            .unwrap();
         let after = cache.current_snapshot();
 
         // Not `assert_ne!(before.version, after.version)`: `version` is
