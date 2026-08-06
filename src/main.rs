@@ -152,6 +152,21 @@ struct Cli {
     #[arg(long, env = "FASTLLM_TLS_KEY")]
     tls_key: Option<PathBuf>,
 
+    /// Seconds between this replica reporting locally observed rate-limit
+    /// counts to the control plane and applying the allowance it hands
+    /// back (P2 reconciliation, `crate::reconcile`). Only meaningful in
+    /// `Http`-mode `--role proxy` (`--control-url` set) — `File` mode has no
+    /// control plane to reconcile with, and `--role all` needs no
+    /// reconciliation at all (see `crate::limiter`'s doc comment). 0
+    /// disables it, same convention as `--config-poll` and
+    /// `--snapshot-rebuild-interval`.
+    #[arg(
+        long,
+        default_value_t = 5,
+        env = "FASTLLM_RATE_LIMIT_RECONCILE_INTERVAL"
+    )]
+    rate_limit_reconcile_interval: u64,
+
     /// Extra CA certificate(s) (PEM, one or more concatenated) trusted in
     /// addition to the system root store, for a `https://` control plane or
     /// backend whose certificate was not issued by a public CA — the normal
@@ -689,8 +704,8 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             // only reload path, same as any other control-plane consumer.
             if cli.config_poll > 0 {
                 let source = HttpSource::new(
-                    url,
-                    token,
+                    url.clone(),
+                    token.clone(),
                     cli.snapshot_cache.clone(),
                     Arc::clone(&state.client),
                 );
@@ -698,6 +713,22 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
                     source,
                     Arc::clone(&state),
                     Duration::from_secs(cli.config_poll),
+                );
+            }
+            // P2 reconciliation: only `Http`-mode `--role proxy` has a
+            // control plane to reconcile with at all. See
+            // `crate::reconcile`'s doc comment for why `File` mode and
+            // `--role all` never reach this branch.
+            if cli.rate_limit_reconcile_interval > 0 {
+                fastllm_proxy::reconcile::spawn(
+                    fastllm_proxy::reconcile::ReconcileConfig {
+                        url: reconcile_url(&url),
+                        token,
+                        replica_id: replica_id(),
+                        interval: Duration::from_secs(cli.rate_limit_reconcile_interval),
+                    },
+                    Arc::clone(&state.limiter),
+                    Arc::clone(&state.client),
                 );
             }
         }
@@ -764,6 +795,7 @@ fn build_app_state(
         requests_ok: AtomicU64::new(0),
         requests_failed: AtomicU64::new(0),
         usage,
+        limiter: Arc::new(fastllm_proxy::limiter::Limiter::new()),
     }))
 }
 
@@ -776,6 +808,38 @@ fn usage_url(control_url: &str) -> String {
         "{}/usage",
         control_url.strip_suffix("/snapshot").unwrap_or(control_url)
     )
+}
+
+/// Derive `POST /limits/reconcile`'s URL the same way `usage_url` derives
+/// `/usage`'s -- a sibling route on the same control plane, from the one
+/// `--control-url` flag, rather than a second flag that could drift.
+fn reconcile_url(control_url: &str) -> String {
+    format!(
+        "{}/limits/reconcile",
+        control_url.strip_suffix("/snapshot").unwrap_or(control_url)
+    )
+}
+
+/// A per-process identifier for P2 reconciliation
+/// (`crate::control::reconcile::ReconcileState` keys reports by this), not
+/// parsed by anything -- only ever used as a map key on the control plane,
+/// so uniqueness for this process's lifetime is all that is required. Built
+/// from the PID plus a startup timestamp rather than pulling in a UUID
+/// dependency (or `rand`, which is behind the `control` feature and
+/// unavailable to a `--no-default-features` data-plane build) for a value
+/// with no other purpose.
+fn replica_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    // The counter, not just the timestamp, is what guarantees distinctness:
+    // `main.rs` only ever calls this once per process, but a low-resolution
+    // system clock could otherwise produce the same nanosecond value twice
+    // in a tight loop (as the unit test below does).
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{nanos}-{n}", std::process::id())
 }
 
 /// Health sweeps and the proxy listener's accept loop. Common to `--role
@@ -988,5 +1052,26 @@ mod tests {
             usage_url("https://fastllm-control.fastllm.svc:4001"),
             "https://fastllm-control.fastllm.svc:4001/usage"
         );
+    }
+
+    #[test]
+    fn reconcile_url_is_a_sibling_of_the_snapshot_url() {
+        assert_eq!(
+            reconcile_url("https://fastllm-control.fastllm.svc:4001/snapshot"),
+            "https://fastllm-control.fastllm.svc:4001/limits/reconcile"
+        );
+    }
+
+    #[test]
+    fn reconcile_url_tolerates_a_bare_base_url() {
+        assert_eq!(
+            reconcile_url("https://fastllm-control.fastllm.svc:4001"),
+            "https://fastllm-control.fastllm.svc:4001/limits/reconcile"
+        );
+    }
+
+    #[test]
+    fn replica_ids_are_distinct_across_calls() {
+        assert_ne!(replica_id(), replica_id());
     }
 }

@@ -347,6 +347,37 @@ async fn proxy_request(
         }
     }
 
+    // Rate limiting (P2): one hash lookup and a short, synchronous
+    // decrement — see `crate::limiter`'s doc comment for why this stays off
+    // the I/O path the same way authorisation does. `Principal::limits ==
+    // None` (an open snapshot, or a principal with nothing configured) never
+    // even reaches `Limiter::check`; unlimited must cost nothing, not merely
+    // decide nothing.
+    if let Some(principal) = principal {
+        if let Some(limits) = &principal.limits {
+            // The proxy cannot know actual token usage until the response
+            // completes (see the design doc's P3 section), so the tokens/min
+            // dimension is charged against an estimate: the same prompt-size
+            // estimate P1's shape-matching routing rules already compute,
+            // plus the client's requested `max_tokens` if it gave one. This
+            // is honestly an estimate, not a measurement — a request that
+            // asks for less than `max_tokens` and gets it is charged for the
+            // budget it reserved, not the tokens it turned out to use.
+            let prompt_tokens = crate::routing::estimate_prompt_tokens(collected.len());
+            let token_cost = prompt_tokens
+                .saturating_add(max_tokens.unwrap_or(0))
+                .min(u32::MAX as u64) as u32;
+            if let crate::limiter::Decision::Exceeded { retry_after } =
+                state
+                    .limiter
+                    .check(principal.id, limits, token_cost, std::time::Instant::now())
+            {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return rate_limited_response(retry_after);
+            }
+        }
+    }
+
     let mut tried: Vec<BackendUid> = Vec::new();
     let mut last_error: Option<String> = None;
 
@@ -649,6 +680,26 @@ fn error_response(status: StatusCode, kind: &str, message: &str) -> Response<Res
     json_response(status, body.to_string())
 }
 
+/// 429 with `Retry-After` (whole seconds, rounded up, at least 1 — a `0`
+/// would tell a client to retry immediately, which is what got it rate
+/// limited in the first place).
+fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> {
+    let secs = retry_after.as_secs_f64().ceil().max(1.0) as u64;
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("rate limit exceeded; retry after {secs}s"),
+            "type": "rate_limit_exceeded",
+            "code": StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        }
+    });
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "application/json")
+        .header("retry-after", secs.to_string())
+        .body(full(Bytes::from(body.to_string())))
+        .expect("static response is well-formed")
+}
+
 /// OpenAI-shaped model list, aggregated over every pool.
 /// OpenAI-shaped model list.
 ///
@@ -812,6 +863,7 @@ mod tests {
                 allowed_models: models.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
                 allow_all: false,
                 roles: HashSet::new(),
+                limits: None,
             }],
             vec![],
         )
@@ -995,6 +1047,7 @@ model_list:
             allowed_models: ["concrete-a".to_string()].into_iter().collect(),
             allow_all: false,
             roles: HashSet::new(),
+            limits: None,
         };
         let granted_virtual_only = Principal {
             id: 2,
@@ -1002,6 +1055,7 @@ model_list:
             allowed_models: ["vm".to_string()].into_iter().collect(),
             allow_all: false,
             roles: HashSet::new(),
+            limits: None,
         };
 
         let target = resolve_target_model(

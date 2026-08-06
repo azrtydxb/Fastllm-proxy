@@ -61,6 +61,15 @@ pub struct AppState {
     /// `usage.dropped()`, in every mode including `File`, where it is a
     /// `UsageReporter::disabled()` that would drop anything recorded on it.
     pub usage: crate::usage::UsageReporter,
+
+    /// P2 rate limiting: per-principal token buckets, one instance for the
+    /// life of the process. Deliberately not swapped alongside `snapshot` —
+    /// see `crate::limiter::Limiter`'s doc comment for why a bucket must
+    /// survive a snapshot reload instead of resetting to full every time an
+    /// unrelated admin write triggers one. `Arc`-wrapped so `crate::reconcile`'s
+    /// background task (spawned in `Http`-mode `--role proxy` only, see
+    /// `main.rs`) can hold its own handle without holding all of `AppState`.
+    pub limiter: Arc<crate::limiter::Limiter>,
 }
 
 impl AppState {
@@ -185,6 +194,7 @@ mod tests {
             requests_ok: AtomicU64::new(0),
             requests_failed: AtomicU64::new(0),
             usage: crate::usage::UsageReporter::disabled(),
+            limiter: Arc::new(crate::limiter::Limiter::new()),
         }
     }
 
