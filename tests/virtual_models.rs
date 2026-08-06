@@ -82,9 +82,14 @@ fn start(port: u16, admin_port: u16, database_url: &str) -> Proc {
     }
 }
 
-fn admin_post(admin_port: u16, path: &str, body: serde_json::Value) -> serde_json::Value {
+fn admin_post(
+    admin_port: u16,
+    cookie: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
     let resp = ureq::post(&format!("http://127.0.0.1:{admin_port}{path}"))
-        .set("authorization", &format!("Bearer {PROXY_TOKEN}"))
+        .set("cookie", cookie)
         .send_json(body.clone());
     match resp {
         Ok(r) => r.into_json().unwrap_or(serde_json::Value::Null),
@@ -96,9 +101,9 @@ fn admin_post(admin_port: u16, path: &str, body: serde_json::Value) -> serde_jso
     }
 }
 
-fn admin_get(admin_port: u16, path: &str) -> serde_json::Value {
+fn admin_get(admin_port: u16, cookie: &str, path: &str) -> serde_json::Value {
     let resp = ureq::get(&format!("http://127.0.0.1:{admin_port}{path}"))
-        .set("authorization", &format!("Bearer {PROXY_TOKEN}"))
+        .set("cookie", cookie)
         .call();
     match resp {
         Ok(r) => r.into_json().unwrap(),
@@ -226,18 +231,26 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .track_suffix("principals", "name", suffix.clone())
         .track_suffix("roles", "name", suffix.clone());
 
+    // `/admin/*` is session-gated (P4): log in as a throwaway admin user
+    // (also covered by the suffix-based cleanup above) before any
+    // `admin_post`/`admin_get` call below.
+    support::bootstrap_login_user(&pool, &name("vm-e2e-admin")).await;
+    let cookie = support::login_cookie(admin_port, &name("vm-e2e-admin"));
+
     // Two concrete models, each with one backend at an address nothing is
     // listening on — the point is not a successful completion, it is
     // *which* backend's address ends up in the failure.
     let model_a_name = name("vm-e2e-backend-a");
     let model_a = admin_post(
         admin_port,
+        &cookie,
         "/admin/models",
         serde_json::json!({ "name": model_a_name }),
     );
     let model_a_id = model_a["id"].as_i64().unwrap();
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/models/{model_a_id}/backends"),
         serde_json::json!({ "api_base": "http://127.0.0.1:19301/v1" }),
     );
@@ -245,12 +258,14 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let model_b_name = name("vm-e2e-backend-b");
     let model_b = admin_post(
         admin_port,
+        &cookie,
         "/admin/models",
         serde_json::json!({ "name": model_b_name }),
     );
     let model_b_id = model_b["id"].as_i64().unwrap();
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/models/{model_b_id}/backends"),
         serde_json::json!({ "api_base": "http://127.0.0.1:19302/v1" }),
     );
@@ -261,6 +276,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let vm_name = name("vm-e2e-canary-vm");
     let vm = admin_post(
         admin_port,
+        &cookie,
         "/admin/virtual-models",
         serde_json::json!({ "name": vm_name }),
     );
@@ -268,17 +284,20 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     let rule = admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/virtual-models/{vm_id}/rules"),
         serde_json::json!({ "position": 0, "roles": [canary_role] }),
     );
     let rule_id = rule["id"].as_i64().unwrap();
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/rules/{rule_id}/targets"),
         serde_json::json!({ "model_id": model_b_id, "weight": 100, "position": 0 }),
     );
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/virtual-models/{vm_id}/defaults"),
         serde_json::json!({ "model_id": model_a_id, "weight": 100, "position": 0 }),
     );
@@ -288,6 +307,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     // model), and one granted only the virtual name itself.
     let canary_principal = admin_post(
         admin_port,
+        &cookie,
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-canary-caller") }),
     );
@@ -298,6 +318,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     let normal_principal = admin_post(
         admin_port,
+        &cookie,
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-normal-caller") }),
     );
@@ -312,6 +333,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     let virtual_only_principal = admin_post(
         admin_port,
+        &cookie,
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-virtual-only-caller") }),
     );
@@ -326,6 +348,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     let canary_key = admin_post(
         admin_port,
+        &cookie,
         "/admin/keys",
         serde_json::json!({ "name": "canary-key", "principal_id": canary_principal_id }),
     )["key"]
@@ -334,6 +357,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .to_string();
     let normal_key = admin_post(
         admin_port,
+        &cookie,
         "/admin/keys",
         serde_json::json!({ "name": "normal-key", "principal_id": normal_principal_id }),
     )["key"]
@@ -342,6 +366,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .to_string();
     let virtual_only_key = admin_post(
         admin_port,
+        &cookie,
         "/admin/keys",
         serde_json::json!({ "name": "virtual-only-key", "principal_id": virtual_only_principal_id }),
     )["key"]
@@ -408,7 +433,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     // `GET /admin/virtual-models` reflects the same rule and targets that
     // were just exercised over the data plane.
-    let admin_view = admin_get(admin_port, "/admin/virtual-models");
+    let admin_view = admin_get(admin_port, &cookie, "/admin/virtual-models");
     let vm_view = admin_view
         .as_array()
         .unwrap()

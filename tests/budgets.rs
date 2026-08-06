@@ -153,9 +153,18 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
     proc
 }
 
-fn admin_post(admin_port: u16, path: &str, body: serde_json::Value) -> serde_json::Value {
+// `/admin/*` is session-gated (P4), not proxy-token-gated — see
+// `support::login_cookie`. `PROXY_TOKEN` below is still what `/usage`
+// requires, since that route (a proxy process reporting to the control
+// plane) is deliberately unchanged.
+fn admin_post(
+    admin_port: u16,
+    cookie: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
     let resp = ureq::post(&format!("http://127.0.0.1:{admin_port}{path}"))
-        .set("authorization", &format!("Bearer {PROXY_TOKEN}"))
+        .set("cookie", cookie)
         .send_json(body.clone());
     match resp {
         Ok(r) => r.into_json().unwrap_or(serde_json::Value::Null),
@@ -167,18 +176,18 @@ fn admin_post(admin_port: u16, path: &str, body: serde_json::Value) -> serde_jso
     }
 }
 
-fn admin_put(admin_port: u16, path: &str, body: serde_json::Value) {
+fn admin_put(admin_port: u16, cookie: &str, path: &str, body: serde_json::Value) {
     let resp = ureq::put(&format!("http://127.0.0.1:{admin_port}{path}"))
-        .set("authorization", &format!("Bearer {PROXY_TOKEN}"))
+        .set("cookie", cookie)
         .send_json(body.clone());
     if let Err(e) = resp {
         panic!("admin PUT {path} with {body} failed: {e}");
     }
 }
 
-fn admin_get(admin_port: u16, path: &str) -> serde_json::Value {
+fn admin_get(admin_port: u16, cookie: &str, path: &str) -> serde_json::Value {
     let resp = ureq::get(&format!("http://127.0.0.1:{admin_port}{path}"))
-        .set("authorization", &format!("Bearer {PROXY_TOKEN}"))
+        .set("cookie", cookie)
         .call();
     match resp {
         Ok(r) => r.into_json().unwrap(),
@@ -260,31 +269,44 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     let admin_port = 14622;
     let upstream_port = 14623;
 
-    // Deletes the model and principal this test creates (and, by cascade,
-    // the backend/budget/key/usage rows hanging off them) even if one of
-    // the `panic!`s below fires — this suite runs against the shared kw dev
-    // database, which has no per-run reset, so a cleanup line placed after
-    // the assertions instead of in a `Drop` guard would leave rows behind
-    // on every failing run. Tracked by the same literal tag `unique_name`
-    // below prefixes each name with, since (unlike `virtual_models.rs`)
-    // each call mints its own timestamp rather than sharing one suffix.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let admin_user = unique_name("budget-e2e-admin");
+    support::bootstrap_login_user(&pool, &admin_user).await;
+
+    // Deletes the model, principal and login user this test creates (and,
+    // by cascade, the backend/budget/key/usage/session rows hanging off
+    // them) even if one of the `panic!`s below fires — this suite runs
+    // against the shared kw dev database, which has no per-run reset, so a
+    // cleanup line placed after the assertions instead of in a `Drop` guard
+    // would leave rows behind on every failing run. Tracked by the same
+    // literal tag `unique_name` below prefixes each name with, since
+    // (unlike `virtual_models.rs`) each call mints its own timestamp rather
+    // than sharing one suffix.
     let _cleanup = TestCleanup::new()
         .track_prefix("models", "name", "budget-e2e-model")
-        .track_prefix("principals", "name", "budget-e2e-principal");
+        .track_prefix("principals", "name", "budget-e2e-principal")
+        .track_prefix("principals", "name", "budget-e2e-admin");
 
     // 3 + 4 = 7 tokens per completed request.
     spawn_mock_upstream(upstream_port, 3, 4).await;
     let _p = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_user);
 
     let model_name = unique_name("budget-e2e-model");
     let model = admin_post(
         admin_port,
+        &cookie,
         "/admin/models",
         serde_json::json!({ "name": model_name }),
     );
     let model_id = model["id"].as_i64().unwrap();
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/models/{model_id}/backends"),
         serde_json::json!({ "api_base": format!("http://127.0.0.1:{upstream_port}/v1") }),
     );
@@ -292,12 +314,14 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     let principal_name = unique_name("budget-e2e-principal");
     let principal = admin_post(
         admin_port,
+        &cookie,
         "/admin/principals",
         serde_json::json!({ "name": principal_name }),
     );
     let principal_id = principal["id"].as_i64().unwrap();
     admin_post(
         admin_port,
+        &cookie,
         &format!("/admin/principals/{principal_id}/roles"),
         serde_json::json!({ "role": "inference" }),
     );
@@ -308,12 +332,14 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     // after-the-fact, so a request that blows the budget is not cut short.
     admin_put(
         admin_port,
+        &cookie,
         &format!("/admin/principals/{principal_id}/budget"),
         serde_json::json!({ "tokens_total": 5, "window": "daily" }),
     );
 
     let key_resp = admin_post(
         admin_port,
+        &cookie,
         "/admin/keys",
         serde_json::json!({ "name": "budget-e2e-key", "principal_id": principal_id }),
     );
@@ -335,7 +361,7 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     // synchronised with this test.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let budgets = admin_get(admin_port, "/admin/budgets");
+        let budgets = admin_get(admin_port, &cookie, "/admin/budgets");
         let mine = budgets
             .as_array()
             .unwrap()

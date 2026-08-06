@@ -27,6 +27,47 @@
 // Not every test in this module needs every tracking method.
 #![allow(dead_code)]
 
+/// A fixed password and its precomputed Argon2id hash (P4), shared by every
+/// integration test that needs a real admin session to call `/admin/*` —
+/// which, since `require_session` (`src/control/api.rs`) started gating
+/// every one of those routes, is now all of them. Precomputed rather than
+/// calling `control::auth::hash_password` at test time: this whole file
+/// works through plain `sqlx`, never `fastllm_proxy::control::*` directly
+/// (see the module doc comment above), which is what keeps it compiling
+/// under `cargo build --no-default-features`. Regenerate with that function
+/// if this password ever changes.
+pub const TEST_PASSWORD: &str = "correct horse battery staple";
+pub const TEST_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO4tt+y8yYwgA$b9DCigRtGIAy9y9xRa9Lip7A9pBHRU+4AMK9lJkXDOA";
+
+/// Create a `kind = 'user'` principal named `name` with [`TEST_PASSWORD`]
+/// already set, so a caller can immediately `login_cookie` as it. No role
+/// grant: `require_session` (the only check `/admin/*` performs today) asks
+/// only "is this a valid session", not "does this principal hold a
+/// particular role" — the same all-or-nothing shape the proxy-token gate it
+/// replaced had.
+pub async fn bootstrap_login_user(pool: &sqlx::PgPool, name: &str) {
+    sqlx::query("INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2)")
+        .bind(name)
+        .bind(TEST_PASSWORD_HASH)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// `POST /login` as `name`/[`TEST_PASSWORD`] against a running admin API and
+/// return the `Cookie`-ready `fastllm_session=...` value — call
+/// `bootstrap_login_user` first so the principal (and its password) exist.
+pub fn login_cookie(admin_port: u16, name: &str) -> String {
+    let resp = ureq::post(&format!("http://127.0.0.1:{admin_port}/login"))
+        .send_json(ureq::json!({ "name": name, "password": TEST_PASSWORD }))
+        .expect("test admin login must succeed");
+    let raw = resp
+        .header("set-cookie")
+        .expect("login must set a session cookie")
+        .to_string();
+    raw.split(';').next().unwrap().trim().to_string()
+}
+
 /// Deletes tracked rows on drop. Foreign keys from `model_backends`,
 /// `virtual_model`-family tables, `api_keys`, `principal_roles`, `limits`,
 /// `budgets` and `usage_events` are all `ON DELETE CASCADE` back to
