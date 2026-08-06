@@ -139,6 +139,28 @@ struct Cli {
     /// the rebuild, same convention as `--config-poll`.
     #[arg(long, default_value_t = 5, env = "FASTLLM_SNAPSHOT_REBUILD_INTERVAL")]
     snapshot_rebuild_interval: u64,
+
+    /// PEM certificate (chain) for the admin API's `/snapshot` and `/usage`
+    /// listener (`--role all`/`control`). Requires `--tls-key`. Absent means
+    /// plain HTTP, which is legitimate for a dev deployment with no real
+    /// backend credentials but not otherwise — see the design doc's Snapshot
+    /// protocol section: `/snapshot` carries usable upstream credentials.
+    #[arg(long, env = "FASTLLM_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM private key matching `--tls-cert`.
+    #[arg(long, env = "FASTLLM_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// Extra CA certificate(s) (PEM, one or more concatenated) trusted in
+    /// addition to the system root store, for a `https://` control plane or
+    /// backend whose certificate was not issued by a public CA — the normal
+    /// case for an in-cluster cert-manager-issued certificate. Without this,
+    /// a self-signed or privately-issued control-plane cert cannot be
+    /// verified and `Http`-mode `--control-url https://...` fails the TLS
+    /// handshake.
+    #[arg(long, env = "FASTLLM_CA_BUNDLE")]
+    ca_bundle: Option<PathBuf>,
 }
 
 /// One-shot maintenance commands, as opposed to `Cli`'s server-starting flags.
@@ -314,6 +336,26 @@ fn load_tuning_config(path: Option<&PathBuf>) -> Result<FileConfig> {
     }
 }
 
+/// TLS for the admin API's `/snapshot` + `/usage` listener, from
+/// `--tls-cert`/`--tls-key`. `None` means plain HTTP — `control::api::serve`
+/// is the one place that turns that into the startup warning the design
+/// requires, so a caller here does not have to remember to log anything.
+///
+/// Requiring both flags together (rather than treating a lone `--tls-key` as
+/// "ignore it") turns a half-supplied pair into a startup error instead of a
+/// silent fall-back to plain HTTP that a `--tls-cert`-only typo would
+/// otherwise produce.
+#[cfg(feature = "control")]
+fn admin_tls_config(cli: &Cli) -> Result<Option<rustls::ServerConfig>> {
+    match (&cli.tls_cert, &cli.tls_key) {
+        (Some(cert), Some(key)) => Ok(Some(fastllm_proxy::control::tls::load_server_config(
+            cert, key,
+        )?)),
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("--tls-cert and --tls-key must be given together; only one was set"),
+    }
+}
+
 /// `--role control`: database and admin API, no proxy listener at all.
 ///
 /// Not gated behind `cfg(feature = "control")` at the call site — that would
@@ -342,18 +384,20 @@ async fn run_control(cli: Cli) -> Result<()> {
             Duration::from_secs(cli.snapshot_rebuild_interval),
             Arc::clone(&key),
         );
+        let tls = admin_tls_config(&cli)?;
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
             .with_context(|| {
                 format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
             })?;
-        info!(%addr, "control plane admin API listening");
+        info!(%addr, tls = tls.is_some(), "control plane admin API listening");
         fastllm_proxy::control::api::serve(
             pool,
             addr,
             cli.proxy_token.unwrap_or_default(),
             cache,
             key,
+            tls,
         )
         .await
     }
@@ -395,7 +439,7 @@ async fn run_all(cli: Cli) -> Result<()> {
                 idle_timeout: Duration::from_secs(90),
                 connect_timeout: Duration::from_secs(5),
             },
-            tls_config()?,
+            tls_config(cli.ca_bundle.as_deref())?,
         ));
         let master_key = cli
             .master_key
@@ -418,7 +462,20 @@ async fn run_all(cli: Cli) -> Result<()> {
             );
         }
 
-        let state = build_app_state(&cli, client, interner, &tuning, None, master_key, snap)?;
+        // `disabled()`: see `usage::UsageReporter::disabled`'s doc comment
+        // for why `--role all` does not loop a `POST /usage` HTTP request
+        // back into its own process here — that decision belongs to whatever
+        // P2 wiring actually calls `record`, not to this scaffolding.
+        let state = build_app_state(
+            &cli,
+            client,
+            interner,
+            &tuning,
+            None,
+            master_key,
+            snap,
+            fastllm_proxy::usage::UsageReporter::disabled(),
+        )?;
 
         let admin_addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -428,12 +485,14 @@ async fn run_all(cli: Cli) -> Result<()> {
         let admin_pool = pool.clone();
         let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
         let admin_token = cli.proxy_token.clone().unwrap_or_default();
+        let admin_tls = admin_tls_config(&cli)?;
         fastllm_proxy::control::api::spawn_snapshot_rebuilder(
             pool.clone(),
             Arc::clone(&admin_sink),
             Duration::from_secs(cli.snapshot_rebuild_interval),
             Arc::clone(&key),
         );
+        let admin_tls_enabled = admin_tls.is_some();
         tokio::spawn(async move {
             if let Err(e) = fastllm_proxy::control::api::serve(
                 admin_pool,
@@ -441,13 +500,14 @@ async fn run_all(cli: Cli) -> Result<()> {
                 admin_token,
                 admin_sink,
                 key,
+                admin_tls,
             )
             .await
             {
                 error!(error = %e, "control plane admin API exited");
             }
         });
-        info!(%admin_addr, "control plane admin API listening");
+        info!(%admin_addr, tls = admin_tls_enabled, "control plane admin API listening");
 
         serve_proxy(&cli, state).await
     }
@@ -473,7 +533,7 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             idle_timeout: Duration::from_secs(90),
             connect_timeout: Duration::from_secs(5),
         },
-        tls_config()?,
+        tls_config(cli.ca_bundle.as_deref())?,
     ));
 
     // Deprecated: a single shared key is exactly what this release replaces,
@@ -494,6 +554,12 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
         Http { url: String, token: String },
     }
 
+    // `disabled()` unless `Http` mode sets up the real thing below — `File`
+    // mode has no control plane to report usage to at all. See
+    // `usage::UsageReporter::disabled`'s doc comment for why this is the
+    // same type either way rather than an `Option`.
+    let mut usage = fastllm_proxy::usage::UsageReporter::disabled();
+
     let (snap, mode, config_path): (Snapshot, Mode, Option<PathBuf>) = if let Some(url) =
         cli.control_url.clone()
     {
@@ -502,6 +568,20 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             url.clone(),
             token.clone(),
             cli.snapshot_cache.clone(),
+            Arc::clone(&client),
+        );
+        // Nothing calls `usage.record(...)` yet (see `crate::usage`'s doc
+        // comment — P2 wires token counting in), but the reporter is spawned
+        // now so `/metrics`' drop counter is meaningful from the start and P2
+        // has nothing left to plumb beyond calling `record`.
+        usage = fastllm_proxy::usage::spawn(
+            fastllm_proxy::usage::ReporterConfig {
+                url: usage_url(&url),
+                token: token.clone(),
+                queue_capacity: 10_000,
+                batch_max: 500,
+                flush_interval: Duration::from_secs(5),
+            },
             Arc::clone(&client),
         );
         // A proxy that starts with nothing must still start. Refusing to
@@ -557,6 +637,7 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
         config_path,
         master_key,
         snap,
+        usage,
     )?;
 
     match mode {
@@ -604,6 +685,14 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
 /// Build the shared process state from an already-obtained initial snapshot.
 /// Common to `--role all` and `--role proxy`, so there is exactly one place
 /// that turns a snapshot into a `Registry` and logs what was loaded.
+// One more parameter (`usage`) than clippy's default threshold. Bundling
+// these into a params struct would help nothing here: every field is a
+// distinct, differently-sourced piece of already-resolved startup state
+// (parsed CLI, a pooled client, a loaded snapshot...), not a cohesive value
+// that belongs together, and grouping them into a temporary struct just to
+// make one field count smaller replaces this warning with a struct nobody
+// else uses.
+#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     cli: &Cli,
     client: fastllm_proxy::state::HttpClient,
@@ -612,6 +701,7 @@ fn build_app_state(
     config_path: Option<PathBuf>,
     legacy_master_key: Option<String>,
     snapshot: Snapshot,
+    usage: fastllm_proxy::usage::UsageReporter,
 ) -> Result<Arc<AppState>> {
     if snapshot.open {
         warn!("no keys configured; the proxy accepts unauthenticated requests");
@@ -649,7 +739,19 @@ fn build_app_state(
         started: Instant::now(),
         requests_ok: AtomicU64::new(0),
         requests_failed: AtomicU64::new(0),
+        usage,
     }))
+}
+
+/// Derive `POST /usage`'s URL from `--control-url`, which names
+/// `/snapshot` (see `deploy/deployment.yaml`'s `FASTLLM_CONTROL_URL`): the
+/// two are sibling routes on the same control plane, so this avoids a second
+/// flag that could point somewhere else and drift out of sync with the first.
+fn usage_url(control_url: &str) -> String {
+    format!(
+        "{}/usage",
+        control_url.strip_suffix("/snapshot").unwrap_or(control_url)
+    )
 }
 
 /// Health sweeps and the proxy listener's accept loop. Common to `--role
@@ -715,7 +817,9 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Root certificates for `https://` api_bases.
+/// Root certificates for `https://` api_bases, and for `https://` control
+/// plane URLs (`--control-url`) — both go through the one shared `Upstream`
+/// (see its doc comment), so both trust whatever this builds.
 ///
 /// The typical deployment is plain HTTP to nodes on a private network, but the
 /// config schema accepts `https://` and a hosted or TLS-terminated endpoint is
@@ -724,8 +828,11 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
 ///
 /// System roots are preferred so an internal CA already trusted by the host
 /// works without extra configuration; the bundled Mozilla set is the fallback
-/// for minimal containers that ship no root store at all.
-fn tls_config() -> Result<rustls::ClientConfig> {
+/// for minimal containers that ship no root store at all. `ca_bundle` adds to
+/// that rather than replacing it, so an operator trusting a private
+/// cert-manager CA for the control plane does not also lose the ability to
+/// reach a public, publicly-CA-signed backend.
+fn tls_config(ca_bundle: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
     // Exactly one provider is compiled in, but installing it explicitly keeps
     // this deterministic rather than dependent on rustls' defaulting rules.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -743,6 +850,16 @@ fn tls_config() -> Result<rustls::ClientConfig> {
         }
     }
 
+    if let Some(path) = ca_bundle {
+        let added = load_extra_ca_bundle(&mut roots, path)
+            .with_context(|| format!("loading --ca-bundle {}", path.display()))?;
+        info!(
+            certs = added,
+            path = %path.display(),
+            "extra CA bundle trusted, in addition to the system root store"
+        );
+    }
+
     let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -752,6 +869,28 @@ fn tls_config() -> Result<rustls::ClientConfig> {
     // hyper-rustls builder set this implicitly via enable_http1().
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
+}
+
+/// Parse a PEM file that may hold one or more CA certificates (a bundle) and
+/// add every one of them to `roots`. Returns how many were added, so the
+/// caller can log a number rather than just "loaded" — a bundle with zero
+/// usable certs (wrong file, wrong format) is a misconfiguration worth
+/// noticing at startup rather than a silent no-op.
+fn load_extra_ca_bundle(
+    roots: &mut rustls::RootCertStore,
+    path: &std::path::Path,
+) -> Result<usize> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut added = 0;
+    for cert in rustls_pemfile::certs(&mut reader) {
+        roots.add(cert?)?;
+        added += 1;
+    }
+    if added == 0 {
+        anyhow::bail!("no PEM certificates found in {}", path.display());
+    }
+    Ok(added)
 }
 
 /// SIGHUP reloads the config in place, in `File` mode.
@@ -802,5 +941,28 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_url_is_a_sibling_of_the_snapshot_url() {
+        assert_eq!(
+            usage_url("https://fastllm-control.fastllm.svc:4001/snapshot"),
+            "https://fastllm-control.fastllm.svc:4001/usage"
+        );
+    }
+
+    /// `--control-url` without a `/snapshot` suffix (a bare base URL) is
+    /// still handled: the `/usage` route is simply appended.
+    #[test]
+    fn usage_url_tolerates_a_bare_base_url() {
+        assert_eq!(
+            usage_url("https://fastllm-control.fastllm.svc:4001"),
+            "https://fastllm-control.fastllm.svc:4001/usage"
+        );
     }
 }

@@ -32,6 +32,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-native-certs = "0.8"
 webpki-roots = "1"
+# Not a TLS implementation itself — just PEM decoding into the
+# `CertificateDer`/`PrivateKeyDer` types rustls's own `pki-types` crate
+# defines, maintained by the same project. Unconditional (not behind
+# `control`): the data-plane client needs it too, to load an extra CA bundle
+# for a private control-plane or backend cert (`tls_config` in main.rs), in
+# every build including `--no-default-features`.
+rustls-pemfile = "2"
 http-body-util = "0.1"
 http = "1"
 bytes = "1"

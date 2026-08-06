@@ -48,6 +48,29 @@ stringData:
   # a maintenance operation, not a config change.
   key: "REPLACE-ME-openssl-rand-hex-32"
 ---
+# `/snapshot` carries usable upstream backend credentials (see
+# model_backends.upstream_api_key's schema comment) and `/usage` is gated by
+# the same bearer token as `/snapshot` — both must be TLS in any deployment
+# where a backend has a real credential, which this cluster's is. `cluster-ca`
+# is the in-cluster ClusterIssuer already used for other internal services
+# (see e.g. novamail); cert-manager writes `tls.crt`/`tls.key` (mounted by
+# fastllm-control below) and `ca.crt` (mounted by fastllm-proxy in
+# deployment.yaml as its `--ca-bundle`, since `cluster-ca` is a private CA no
+# public root store trusts) into one Secret.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastllm-control-tls
+  namespace: fastllm
+spec:
+  secretName: fastllm-control-tls
+  issuerRef: { name: cluster-ca, kind: ClusterIssuer }
+  dnsNames:
+    - fastllm-control.fastllm.svc
+    - fastllm-control.fastllm.svc.cluster.local
+  duration: 2160h    # 90d
+  renewBefore: 360h  # 15d
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -103,6 +126,8 @@ spec:
           args:
             - --role=control
             - --admin-port=4001
+            - --tls-cert=/etc/fastllm/tls/tls.crt
+            - --tls-key=/etc/fastllm/tls/tls.key
           ports:
             - { name: admin, containerPort: 4001 }
           env:
@@ -117,12 +142,20 @@ spec:
                 secretKeyRef: { name: fastllm-encryption-key, key: key }
             - name: FASTLLM_LOG
               value: info
+          volumeMounts:
+            # cert-manager-issued cert/key for `/snapshot` + `/usage`, from
+            # the `Certificate` above. `readOnlyRootFilesystem` below means
+            # this has to be an explicit volume, same reasoning as
+            # deployment.yaml's snapshot-cache mount.
+            - { name: tls, mountPath: /etc/fastllm/tls, readOnly: true }
           # `/admin/*` (POST/DELETE) has no authentication at all, but it's a
           # mutating endpoint, not a health check, so it's not a valid probe
           # target either. `/snapshot` requires the proxy token, which the
           # kubelet doesn't have. There is no `/health`/`/metrics` here the
           # way the proxy role has. A TCP check on the admin port is the
-          # honest probe until this role grows a dedicated `/healthz`.
+          # honest probe until this role grows a dedicated `/healthz` — it
+          # stays a plain TCP check even now that the port is TLS, since a
+          # kubelet probe has no simple way to speak TLS with a private CA.
           readinessProbe:
             tcpSocket: { port: admin }
             periodSeconds: 10
@@ -142,6 +175,9 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: tls
+          secret: { secretName: fastllm-control-tls }
 ---
 # ClusterIP only — deliberately not a LoadBalancer and deliberately not on
 # fastllm-proxy's VIP. See the SECURITY note at the top of this file.

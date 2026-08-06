@@ -47,14 +47,25 @@ spec:
             # time-to-first-byte, never the generation itself.
             - --upstream-timeout=120
             - --health-interval=10
+            # `fastllm-control`'s cert is issued by `cluster-ca`
+            # (control.yaml), a private in-cluster CA no public root store
+            # trusts — without this, the TLS handshake to `/snapshot` and
+            # `/usage` fails closed.
+            - --ca-bundle=/etc/fastllm/ca/ca.crt
           ports:
             - { name: http, containerPort: 4000 }
           env:
             # Http mode: models, backends and keys come from fastllm-control,
             # not from the ConfigMap below. `config` is still mounted for the
             # optional `fastllm:` tuning block only (see configmap.yaml).
+            # `https://` + `/snapshot`: `/snapshot` carries usable upstream
+            # backend credentials (model_backends.upstream_api_key), so this
+            # must be TLS wherever a backend has a real one, which this
+            # cluster's do — see control.yaml's `fastllm-control-tls`
+            # `Certificate`. `POST /usage`'s URL is derived from this one
+            # (main.rs's `usage_url`), not a second flag that could drift.
             - name: FASTLLM_CONTROL_URL
-              value: http://fastllm-control.fastllm.svc:4001
+              value: https://fastllm-control.fastllm.svc:4001/snapshot
             - name: FASTLLM_PROXY_TOKEN
               valueFrom:
                 secretKeyRef: { name: fastllm-proxy-token, key: token }
@@ -71,6 +82,10 @@ spec:
             # regardless, so nothing is lost by not persisting this across
             # rescheduling.
             - { name: snapshot-cache, mountPath: /var/lib/fastllm }
+            # Only `ca.crt` out of fastllm-control-tls (never `tls.key`,
+            # which this pod has no use for and no business holding) — see
+            # the `items` selector below.
+            - { name: control-ca, mountPath: /etc/fastllm/ca, readOnly: true }
           # Readiness tracks backends: /health is 503 with none healthy, which
           # correctly pulls this pod out of the Service. Liveness must NOT use
           # it — spark2 being down would then restart-loop a perfectly healthy
@@ -100,3 +115,8 @@ spec:
           configMap: { name: fastllm-proxy-config }
         - name: snapshot-cache
           emptyDir: {}
+        - name: control-ca
+          secret:
+            secretName: fastllm-control-tls
+            items:
+              - { key: ca.crt, path: ca.crt }

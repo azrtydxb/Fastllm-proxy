@@ -13,12 +13,20 @@ Plain manifests — this does not earn a Helm chart.
 
 Two Deployments, one Postgres, since Task 12:
 
-- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table) and `/snapshot`. A `ClusterIP` Service on port 4001, **not** on the LoadBalancer VIP.
+- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table), `/snapshot` and `/usage`. A `ClusterIP` Service on port 4001, **not** on the LoadBalancer VIP.
 - **`fastllm-proxy`** (`deployment.yaml`) — `--role=proxy`. Polls `fastllm-control`'s `/snapshot` over `FASTLLM_CONTROL_URL`, authenticating with `FASTLLM_PROXY_TOKEN`. Caches the last snapshot it received to an `emptyDir` at `/var/lib/fastllm`, so a pod restart while the control plane is down still comes up serving the last-known model/key set instead of crash-looping or refusing traffic.
+
+### TLS on `/snapshot` and `/usage`
+
+`/snapshot` carries `model_backends.upstream_api_key` in usable plaintext form — encrypted at rest in Postgres, but the proxy has to present it to the backend, so the *transport* has to be trusted wherever a backend has a real credential. This cluster's do, so `fastllm-control` terminates TLS on its admin listener (both `/admin/*` and `/snapshot`/`/usage` share the one listener — there is no way to TLS one route and not the others on the same port).
+
+The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `novamail` and others use) via the `fastllm-control-tls` `Certificate` in `control.yaml`. cert-manager writes `tls.crt`/`tls.key` (mounted into `fastllm-control` at `/etc/fastllm/tls`, passed to `--tls-cert`/`--tls-key`) and `ca.crt` (mounted into `fastllm-proxy` at `/etc/fastllm/ca`, passed to `--ca-bundle`) into that one Secret — `cluster-ca` is a private CA no public root store trusts, so without `--ca-bundle` the proxy's TLS handshake to `fastllm-control` fails closed. `FASTLLM_CONTROL_URL` in `deployment.yaml` points at `https://fastllm-control.fastllm.svc:4001/snapshot` accordingly.
+
+If `--tls-cert`/`--tls-key` are ever both removed (a dev cluster with no real backend credentials, say), `fastllm-control` falls back to plain HTTP rather than refusing to start — but it logs a startup warning every time, precisely because that fallback is silent otherwise and this is data that should not travel in the clear by accident.
 
 ### ⚠️ The admin API has no authentication — keep it off the VIP
 
-`fastllm-control`'s `/admin/*` — every route: keys, principals, role grants, models, backends — has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` checks `--proxy-token`, and that token is a shared secret for machine-to-machine polling (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
+`fastllm-control`'s `/admin/*` — every route: keys, principals, role grants, models, backends — has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` and `/usage` check `--proxy-token`, and that token is a shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
 
 **Network isolation — the `ClusterIP` Service below — is therefore the only control `/admin/*` has.** Do not read the token requirement on `/snapshot` as implying `/admin/*` is protected too; it is not, and this document previously said otherwise.
 
@@ -48,6 +56,11 @@ kubectl -n fastllm create secret generic fastllm-encryption-key \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f deploy/
+# fastllm-control mounts fastllm-control-tls (the Certificate above) and
+# fastllm-proxy mounts its ca.crt — both Deployments can sit in
+# ContainerCreating for a few seconds on a from-scratch install until
+# cert-manager finishes issuing it. `kubectl -n fastllm get certificate
+# fastllm-control-tls` shows READY once it exists.
 kubectl -n fastllm rollout status deploy/fastllm-control --timeout=240s
 kubectl -n fastllm rollout status deploy/fastllm-proxy --timeout=240s
 ```
@@ -58,7 +71,7 @@ Keys are minted through the control plane's admin API, reachable only from insid
 
 ```bash
 kubectl -n fastllm exec deploy/fastllm-control -- \
-  curl -s -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
+  curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/keys -H 'content-type: application/json' \
   -d '{"name":"my-client","principal_id":1}'
 # {"id":7,"key":"sk-..."}
 ```
@@ -67,7 +80,7 @@ The response is the only time the plaintext key is ever shown — the database s
 
 ```bash
 kubectl -n fastllm exec deploy/fastllm-control -- \
-  curl -s -XDELETE localhost:4001/admin/keys/7
+  curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/keys/7
 ```
 
 Revocation reaches the proxy within one poll interval (`--config-poll`, default 5s).
@@ -80,17 +93,17 @@ through the same API, no SQL:
 ```bash
 E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
 
-E curl -s localhost:4001/admin/principals            # who exists, and their roles
-E curl -s localhost:4001/admin/roles                 # what each role grants
-E curl -s localhost:4001/admin/keys                  # prefix/name/principal/expiry only
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/principals            # who exists, and their roles
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/roles                 # what each role grants
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/keys                  # prefix/name/principal/expiry only
 
-E curl -s -XPOST localhost:4001/admin/principals -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/principals -H 'content-type: application/json' \
   -d '{"name":"eval-team"}'
 # {"id":4,"name":"eval-team","kind":"service_account"}
-E curl -s -XPOST localhost:4001/admin/principals/4/roles -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/principals/4/roles -H 'content-type: application/json' \
   -d '{"role":"inference"}'
-E curl -s -XDELETE localhost:4001/admin/principals/4/roles/inference
-E curl -s -XDELETE localhost:4001/admin/principals/4   # also drops its keys and grants
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/principals/4/roles/inference
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/principals/4   # also drops its keys and grants
 ```
 
 `GET /admin/keys` never returns a key or its hash — the plaintext exists only in
@@ -153,21 +166,21 @@ this; it bypasses the write path and waits on the periodic rebuild.
 ```bash
 E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
 
-E curl -s localhost:4001/admin/models     # models, backend ids, api_bases
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/models     # models, backend ids, api_bases
 
-E curl -s -XPOST localhost:4001/admin/models -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models -H 'content-type: application/json' \
   -d '{"name":"qwen3-6-35b-a3b-nvfp4"}'
 # {"id":3,"name":"qwen3-6-35b-a3b-nvfp4"}
 
 # Add a backend to that pool. upstream_model defaults to the model's own name;
 # upstream_api_key is encrypted before it reaches Postgres and can never be
 # read back — GET /admin/models reports only whether one is set.
-E curl -s -XPOST localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
   -d '{"api_base":"http://192.168.10.245:40045/v1"}'
 # {"id":9,...}
 
-E curl -s -XDELETE localhost:4001/admin/backends/9   # drop one replica
-E curl -s -XDELETE localhost:4001/admin/models/3     # drop the model and its backends
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/backends/9   # drop one replica
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/models/3     # drop the model and its backends
 ```
 
 ## When spark2's port changes
@@ -188,9 +201,9 @@ one at the new address.
 ```bash
 E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
 
-E curl -s localhost:4001/admin/models          # find the model id and the stale backend id
-E curl -s -XDELETE localhost:4001/admin/backends/9
-E curl -s -XPOST localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/models          # find the model id and the stale backend id
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/backends/9
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
   -d '{"api_base":"http://192.168.10.245:40118/v1"}'
 ```
 

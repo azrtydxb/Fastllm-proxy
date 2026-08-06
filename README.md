@@ -43,7 +43,7 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 |---|---|---|
 | `proxy` (default) | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
 | `all` | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
-| `control` | Database, admin API (`/admin/*` — keys, principals, roles, models, backends) and `/snapshot` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
+| `control` | Database, admin API (`/admin/*` — keys, principals, roles, models, backends), `/snapshot` and `/usage` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
 
 `proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
 
@@ -125,6 +125,7 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `GET /metrics` | Prometheus text. No auth required |
 | `/admin/*` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See the table below and the warning under it |
 | `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
+| `POST /usage` | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot` |
 
 #### Admin API
 
@@ -156,6 +157,20 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 `model_backends.upstream_api_key` is encrypted at rest with AES-256-GCM (`src/control/secrets.rs`; `ring::aead`, already in the dependency tree via rustls) before `import`/the admin API ever write it to Postgres, and decrypted by `build_snapshot` when the control plane builds a snapshot. This protects the **database**, not the **snapshot**: `/snapshot` still carries the credential in usable plaintext form, because the proxy has to present it to the backend as a bearer token — an upstream credential cannot be reduced to a hash the way `api_keys.hash` is. `/snapshot` must be TLS wherever a backend has a real credential, exactly as before this existed. What encryption at rest actually buys: someone with read access to Postgres (a backup, a replica, a leaked `pg_dump`) no longer gets every upstream credential for free.
 
 `--role control`/`all` and `fastllm-proxy import`/`reencrypt-backends` all require `FASTLLM_ENCRYPTION_KEY` — 32 bytes, hex-encoded (e.g. `openssl rand -hex 32`) — and refuse to start without it rather than falling back to plaintext. `--role proxy` never touches the database and never requires it. A database that already has plaintext rows from before this existed (a developer's scratch database — the live cluster has no control-plane database deployed at all yet) needs the one-shot `fastllm-proxy reencrypt-backends --database-url <url>` command run once; see `migrations/0004_encrypted_upstream_api_key.sql` for why this is a command rather than a format the read path silently tolerates forever.
+
+### TLS on `/snapshot` and `/usage`
+
+`/snapshot` carries `model_backends.upstream_api_key` in usable plaintext form (see "Encryption at rest" above), so it — and `/usage`, gated by the same token and sharing the same listener — must be TLS in any deployment where a backend has a real credential.
+
+`--role control`/`all` take `--tls-cert`/`--tls-key` (PEM, `FASTLLM_TLS_CERT`/`FASTLLM_TLS_KEY`). Give both and the admin API — `/admin/*`, `/snapshot`, `/usage`, all of it, since they share one listener — serves HTTPS via `rustls`/`tokio-rustls` (already dependencies; no new TLS crate). Give neither and it serves plain HTTP, logging a startup warning every time it does, because a dev deployment with no real backend credentials is legitimate and must not be forced to generate a cert it does not need — but the fallback must never be silent. Giving only one of the two is a startup error, not a silent fall-back to HTTP.
+
+On the client side, `--role proxy` in `Http` mode (`--control-url https://...`) and any `https://` backend `api_base` both go through the one pooled `Upstream` client (`src/upstream.rs`), which already speaks TLS. `--ca-bundle` (`FASTLLM_CA_BUNDLE`) adds one or more PEM CA certificates to the trust store *in addition to* the system roots — required to trust a private or self-signed cert (a cert-manager-issued, in-cluster control-plane certificate is the normal case; see `deploy/control.yaml`'s `fastllm-control-tls` `Certificate` and `deploy/README.md`'s TLS section) that no public root store contains. Without it, `--control-url https://...` against such a cert fails the handshake.
+
+### `POST /usage`: the reverse channel
+
+Defined now so the wire protocol never has to reshape later, even though nothing calls it yet — P2 wires real token counting into the request path. `--role proxy` holds a `usage::UsageReporter`: a bounded queue plus a background flush task that batches events and posts them to `/usage` on its own schedule, authenticated with the same `--proxy-token` as `/snapshot`. Recording an event (`UsageReporter::record`) is a non-blocking `try_send` — a full queue means the control plane is not keeping up, and the event is dropped rather than applying backpressure to inference (the design's stated tradeoff: "dropping usage rather than blocking a request is deliberate — billing accuracy is not worth failing inference"). Dropped events are counted and exposed on `/metrics` as `fastllm_usage_reports_dropped_total`, so the loss is visible instead of silent.
+
+On the control-plane side, `POST /usage` accepts a batch and persists it to `usage_events`. A record naming a `principal_id` or model that no longer exists is dropped from the batch rather than failing the whole request — one stale id from one replica must not poison every other principal's usage in the same flush interval.
 
 ### Options
 
