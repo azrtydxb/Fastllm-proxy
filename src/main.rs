@@ -250,14 +250,24 @@ async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> 
         let cfg = FileConfig::load(config)?;
         let pool = fastllm_proxy::control::db::connect(database_url).await?;
         let summary = fastllm_proxy::control::import::import(&pool, &cfg, &key).await?;
-        // No key count: `import` never touches `api_keys` (a LiteLLM config
-        // has no key material in it), so there is nothing truthful to report
-        // there. An earlier revision printed a permanently-zero "0 new
-        // key(s)" instead, which read as a claim that key import runs and
-        // finds nothing every time.
+        // Both halves of every count, because a re-import legitimately
+        // creates nothing and "0 new principal(s)" alone reads as a failure
+        // rather than as convergence. Never the key plaintext: the file
+        // already holds it, and `import` must not produce a second copy in a
+        // terminal buffer or a CI log.
         println!(
-            "import complete: {} new model(s), {} new backend(s)",
-            summary.models, summary.backends
+            "import complete: {} new model(s), {} new backend(s), \
+             {} new principal(s) ({} already present), {} new key(s) ({} updated in place), \
+             {} new grant(s) ({} already present, {} revoked)",
+            summary.models,
+            summary.backends,
+            summary.principals,
+            summary.principals_existing,
+            summary.keys,
+            summary.keys_existing,
+            summary.grants,
+            summary.grants_existing,
+            summary.grants_revoked,
         );
         Ok(())
     }

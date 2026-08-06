@@ -24,10 +24,19 @@ mod tests {
     async fn migrations_apply_and_seed_the_default_roles() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = connect(&url).await.unwrap();
-        let roles: Vec<String> = sqlx::query_scalar("SELECT name FROM roles ORDER BY name")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        // Still an exact whole-table assertion, minus the one namespace that
+        // is not the migration's to control: `control::import` creates an
+        // `import:<principal>` role per imported `auth.keys` entry (see
+        // `import::import_role_name`), and this suite shares one scratch
+        // database, so a role left behind by an import test is not evidence
+        // that a migration seeded something it shouldn't have. Excluding the
+        // prefix keeps this strict about everything the migrations *do* own.
+        let roles: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM roles WHERE name NOT LIKE 'import:%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(roles, vec!["admin", "inference", "operator"]);
     }
 

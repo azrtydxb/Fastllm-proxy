@@ -3,9 +3,13 @@
 //! The migration path off a file-driven deployment, and the reason the
 //! LiteLLM-compatibility promise survives the move to a control plane.
 
-use crate::config::FileConfig;
+use crate::config::{FileConfig, KeyConfig};
+use crate::control::api::safe_display_prefix;
 use crate::control::secrets::{self, EncryptionKey};
+use crate::snapshot::hash_key;
+use anyhow::Context;
 use sqlx::PgPool;
+use std::collections::HashSet;
 
 /// What an import run actually did — every field is a per-run delta, the
 /// same way `backends` always was. A prior revision reported `models` as the
@@ -15,31 +19,90 @@ use sqlx::PgPool;
 /// an already-seeded database should now print zeroes for anything that was
 /// already there.
 ///
-/// No `keys` field: a LiteLLM-format config has no key material to import —
-/// `import` seeds `models`/`model_backends` only, never `api_keys` — so a
-/// field that could only ever read zero would just be a second thing to keep
-/// truthful for no information gained. An earlier revision carried one
-/// anyway and printed it as "0 new key(s)" on every run, which read as a
-/// claim that key import was attempted and always finds nothing, rather
-/// than what was actually true: it was never attempted at all.
+/// The `*_existing` counters are how idempotency is signalled rather than
+/// merely claimed: a second run of the same file must move every count into
+/// its `_existing` column, and a reader who cannot see that has no way to
+/// tell "nothing to do" apart from "silently did nothing".
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ImportSummary {
     pub models: usize,
     pub backends: usize,
+    /// Principals created from `auth.keys[].name`.
+    pub principals: usize,
+    pub principals_existing: usize,
+    /// Keys created from `auth.keys[].key`, stored as a SHA-256 hash.
+    pub keys: usize,
+    pub keys_existing: usize,
+    /// `model:invoke` permissions newly attached to a key's own role.
+    pub grants: usize,
+    pub grants_existing: usize,
+    /// Grants removed because the file no longer lists that model. Editing a
+    /// key's `models:` down and re-importing has to actually narrow it —
+    /// an import that only ever adds would leave a revoked model reachable.
+    pub grants_revoked: usize,
 }
 
-/// Seed `models`/`model_backends` from a LiteLLM-format config.
+/// Name of the role that carries one imported key's model grants.
 ///
-/// Idempotent on `(model_id, api_base, upstream_model)`: re-running this over
-/// the same file, or an edited one, adds rows without duplicating existing
-/// backends. That is what makes it safe to run against a live deployment's
-/// ConfigMap repeatedly while migrating it onto the control plane, rather
-/// than requiring one careful one-shot cutover.
+/// Per principal, and derived from the principal's name, for two reasons
+/// that are both about not surprising an operator later. Derived, so a
+/// re-import finds the same role and edits it instead of accumulating a
+/// second one every run. Per principal, because `File` mode's grants are
+/// per key entry — folding two keys that happen to list the same models
+/// into one shared role would mean that narrowing one key's `models:` later
+/// silently narrows the other's too.
+///
+/// The `import:` prefix is what keeps these out of the way of the hand-made
+/// roles (`admin`, `operator`, `inference`) an operator manages through
+/// `POST /admin/principals/{id}/roles`.
+pub fn import_role_name(principal: &str) -> String {
+    format!("import:{principal}")
+}
+
+/// Seed `models`/`model_backends` and `auth:` keys from a LiteLLM-format config.
+///
+/// Idempotent on `(model_id, api_base, upstream_model)` for backends, on
+/// `principals.name`, and on `api_keys.hash`: re-running this over the same
+/// file, or an edited one, converges the database on the file rather than
+/// duplicating it. That is what makes it safe to run against a live
+/// deployment's ConfigMap repeatedly while migrating it onto the control
+/// plane, rather than requiring one careful one-shot cutover.
+///
+/// ## How `auth:` becomes RBAC rows
+///
+/// `File` mode answers "may this key invoke this model?" from
+/// `KeyConfig::models` directly (`source::file`); the control plane answers
+/// it from `build::flatten_grants` over `permissions` rows. Import has to
+/// produce rows that flatten to the same answer, so:
+///
+/// - `models: ['*']` becomes one `model:invoke` on `model/*`, which
+///   `flatten_grants` short-circuits to `allow_all` — the same thing
+///   `FileSource` does with a literal `*`.
+/// - a named list becomes one `model:invoke` on `model/<name>` per entry.
+/// - an absent or empty list grants nothing, matching `FileSource`, where
+///   an empty `models` yields an empty `allowed_models` and `allow_all`
+///   false. (The README once described omitting it as "every model"; the
+///   code has never done that, and import follows the code.)
+///
+/// Two edges where the two sides genuinely cannot agree, both harmless and
+/// both worth knowing about: `flatten_grants` drops a named grant for a
+/// model that does not exist (where `FileSource` keeps it — but a grant on a
+/// model with no backends is unreachable either way), and it reads a name
+/// *ending* in `*` as a prefix wildcard (where `FileSource` reads it
+/// literally). Neither is reachable from a config that grants models it
+/// actually serves.
+///
+/// The key's plaintext is hashed with `hash_key` on the way in and is never
+/// logged, printed or returned. The file it came from still contains it —
+/// that is the operator's copy — but nothing downstream of this function
+/// gains a second one.
 pub async fn import(
     pool: &PgPool,
     cfg: &FileConfig,
     key: &EncryptionKey,
 ) -> anyhow::Result<ImportSummary> {
     let mut tx = pool.begin().await?;
+    let mut summary = ImportSummary::default();
     let mut models = 0usize;
     let mut backends = 0usize;
 
@@ -99,8 +162,206 @@ pub async fn import(
         backends += inserted.rows_affected() as usize;
     }
 
+    summary.models = models;
+    summary.backends = backends;
+
+    // Keys after models, in the same transaction: a named grant only
+    // flattens into the snapshot if the model exists (see `flatten_grants`),
+    // so importing grants against models this same run is creating has to
+    // see them.
+    for entry in &cfg.auth.keys {
+        import_key(&mut tx, entry, &mut summary).await?;
+    }
+
     tx.commit().await?;
-    Ok(ImportSummary { models, backends })
+    Ok(summary)
+}
+
+/// One `auth.keys` entry: its principal, its own role, that role's grants,
+/// and the key itself.
+async fn import_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry: &KeyConfig,
+    summary: &mut ImportSummary,
+) -> anyhow::Result<()> {
+    let principal_name = entry.name.trim();
+    if principal_name.is_empty() {
+        anyhow::bail!("an auth.keys entry has an empty name; a name is what its principal and its grant role are keyed on");
+    }
+
+    // `ON CONFLICT DO NOTHING RETURNING id` returns nothing for a row that
+    // already existed, which is exactly the "was it new?" signal the summary
+    // needs — no second query to count what changed.
+    let created: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO principals (kind, name) VALUES ('service_account', $1)
+         ON CONFLICT (name) DO NOTHING RETURNING id",
+    )
+    .bind(principal_name)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let principal_id = match created {
+        Some(id) => {
+            summary.principals += 1;
+            id
+        }
+        None => {
+            summary.principals_existing += 1;
+            sqlx::query_scalar("SELECT id FROM principals WHERE name = $1")
+                .bind(principal_name)
+                .fetch_one(&mut **tx)
+                .await?
+        }
+    };
+
+    let role_name = import_role_name(principal_name);
+    let role_id: i64 = match sqlx::query_scalar(
+        "INSERT INTO roles (name, description) VALUES ($1, $2)
+         ON CONFLICT (name) DO NOTHING RETURNING id",
+    )
+    .bind(&role_name)
+    .bind(format!(
+        "Model grants imported from the auth: block for {principal_name}"
+    ))
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+                .bind(&role_name)
+                .fetch_one(&mut **tx)
+                .await?
+        }
+    };
+
+    sqlx::query(
+        "INSERT INTO principal_roles (principal_id, role_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(principal_id)
+    .bind(role_id)
+    .execute(&mut **tx)
+    .await?;
+
+    // See this module's doc comment for why `*` maps to `model/*` rather
+    // than to the expanded model list: the wildcard has to stay a wildcard,
+    // so a model added tomorrow is covered without a re-import.
+    let wanted: HashSet<String> = if entry.models.iter().any(|m| m == "*") {
+        ["model/*".to_string()].into_iter().collect()
+    } else {
+        entry
+            .models
+            .iter()
+            .map(|m| format!("model/{m}"))
+            .collect::<HashSet<_>>()
+    };
+
+    for resource in &wanted {
+        let permission_id: i64 = match sqlx::query_scalar(
+            "INSERT INTO permissions (verb, resource) VALUES ('model:invoke', $1)
+             ON CONFLICT (verb, resource) DO NOTHING RETURNING id",
+        )
+        .bind(resource)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            Some(id) => id,
+            None => {
+                sqlx::query_scalar(
+                    "SELECT id FROM permissions WHERE verb = 'model:invoke' AND resource = $1",
+                )
+                .bind(resource)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+        };
+        let granted = sqlx::query(
+            "INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(role_id)
+        .bind(permission_id)
+        .execute(&mut **tx)
+        .await?;
+        if granted.rows_affected() == 0 {
+            summary.grants_existing += 1;
+        } else {
+            summary.grants += 1;
+        }
+    }
+
+    // Narrowing a key's `models:` in the file and re-importing has to
+    // actually narrow it. Only this key's own role is touched — that is the
+    // whole reason the role is per principal.
+    let wanted_list: Vec<String> = wanted.into_iter().collect();
+    let revoked = sqlx::query(
+        "DELETE FROM role_permissions rp USING permissions p
+         WHERE rp.permission_id = p.id AND rp.role_id = $1
+           AND NOT (p.verb = 'model:invoke' AND p.resource = ANY($2))",
+    )
+    .bind(role_id)
+    .bind(&wanted_list)
+    .execute(&mut **tx)
+    .await?;
+    summary.grants_revoked += revoked.rows_affected() as usize;
+
+    let expires_at = entry
+        .expires_at
+        .as_deref()
+        .map(parse_expiry)
+        .transpose()
+        .with_context(|| format!("auth.keys entry {principal_name:?}: bad expires_at"))?;
+
+    // Looked up by hash, then updated, rather than `ON CONFLICT (hash) DO
+    // UPDATE`: the update fires either way there, so the summary could not
+    // tell a new key from a re-imported one. The update itself matters —
+    // an edited `expires_at` in the file must land, and a key re-appearing
+    // in the file after being revoked through the admin API is the operator
+    // asking for it back.
+    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM api_keys WHERE hash = $1")
+        .bind(hash_key(&entry.key).to_vec())
+        .fetch_optional(&mut **tx)
+        .await?;
+    match existing {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE api_keys SET name = $1, principal_id = $2, expires_at = $3,
+                        disabled = FALSE
+                 WHERE id = $4",
+            )
+            .bind(principal_name)
+            .bind(principal_id)
+            .bind(expires_at)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+            summary.keys_existing += 1;
+        }
+        None => {
+            sqlx::query(
+                "INSERT INTO api_keys (hash, prefix, name, principal_id, expires_at)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(hash_key(&entry.key).to_vec())
+            .bind(safe_display_prefix(&entry.key))
+            .bind(principal_name)
+            .bind(principal_id)
+            .bind(expires_at)
+            .execute(&mut **tx)
+            .await?;
+            summary.keys += 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed with the same `humantime::parse_rfc3339` `FileSource` uses, not
+/// with chrono's looser RFC 3339 reader, so a timestamp the file-mode proxy
+/// would reject cannot be quietly accepted here — the two modes have to
+/// agree on which files are valid, not just on what valid ones mean.
+fn parse_expiry(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    Ok(humantime::parse_rfc3339(s)?.into())
 }
 
 /// One-shot migration for rows written before encryption-at-rest existed
@@ -299,6 +560,273 @@ mod tests {
         assert_eq!(
             model.backends[0].api_key.as_deref(),
             Some(plaintext_credential)
+        );
+    }
+
+    /// A config with an `auth:` block, in both `File` mode and control-plane
+    /// form, so one test body can drive both sides of the comparison.
+    struct AuthFixture {
+        yaml: String,
+        granted_model: String,
+        ungranted_model: String,
+        named_key: String,
+        named_principal: String,
+        wildcard_key: String,
+        wildcard_principal: String,
+    }
+
+    fn auth_fixture() -> AuthFixture {
+        let granted_model = unique_name("granted");
+        let ungranted_model = unique_name("ungranted");
+        let named_key = unique_name("sk-named-key-long-enough-to-prefix");
+        let named_principal = unique_name("named-principal");
+        let wildcard_key = unique_name("sk-wildcard-key-long-enough-to-prefix");
+        let wildcard_principal = unique_name("wildcard-principal");
+        let yaml = format!(
+            "model_list:\n\
+             \x20 - model_name: {granted_model}\n\
+             \x20   litellm_params: {{ api_base: http://a:8000/v1 }}\n\
+             \x20 - model_name: {ungranted_model}\n\
+             \x20   litellm_params: {{ api_base: http://b:8000/v1 }}\n\
+             auth:\n\
+             \x20 keys:\n\
+             \x20   - key: {named_key}\n\
+             \x20     name: {named_principal}\n\
+             \x20     models: [{granted_model}]\n\
+             \x20     expires_at: \"2035-01-01T00:00:00Z\"\n\
+             \x20   - key: {wildcard_key}\n\
+             \x20     name: {wildcard_principal}\n\
+             \x20     models: ['*']\n"
+        );
+        AuthFixture {
+            yaml,
+            granted_model,
+            ungranted_model,
+            named_key,
+            named_principal,
+            wildcard_key,
+            wildcard_principal,
+        }
+    }
+
+    /// The point of importing `auth:` at all: a file that authorised a set of
+    /// calls in `File` mode must authorise exactly the same set once it has
+    /// been imported and the control plane has built a snapshot from the
+    /// database. Anything less makes `import` a migration that silently
+    /// changes who can reach what.
+    ///
+    /// Compared through `authenticate`/`may_invoke` rather than by diffing
+    /// rows, because those two calls *are* the request path's questions —
+    /// principal ids legitimately differ between the two sources (`File` mode
+    /// numbers them by position, Postgres by sequence) and a row-level
+    /// comparison would fail on that difference while missing a real one.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn imported_auth_authorises_exactly_what_file_mode_authorises() {
+        use crate::source::SnapshotSource;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let fx = auth_fixture();
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, fx.yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let file_snapshot = crate::source::file::FileSource::new(file.path().into())
+            .fetch(None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&fx.yaml).unwrap();
+        let summary = import(&pool, &cfg, &test_key()).await.unwrap();
+        assert_eq!(summary.principals, 2, "one principal per auth.keys entry");
+        assert_eq!(summary.keys, 2);
+        assert_eq!(
+            summary.grants, 2,
+            "one model:invoke grant for the named model, one for the wildcard"
+        );
+
+        let db_snapshot = crate::control::build::build_snapshot(&pool, &test_key())
+            .await
+            .unwrap();
+
+        let now = std::time::SystemTime::now();
+        for (key, expected_name) in [
+            (&fx.named_key, &fx.named_principal),
+            (&fx.wildcard_key, &fx.wildcard_principal),
+        ] {
+            let from_file = file_snapshot
+                .authenticate(key, now)
+                .expect("File mode must resolve this key");
+            let from_db = db_snapshot
+                .authenticate(key, now)
+                .expect("the imported database must resolve the same key");
+            assert_eq!(
+                from_file.name, from_db.name,
+                "the same key must resolve to the same principal name"
+            );
+            assert_eq!(&from_db.name, expected_name);
+            assert_eq!(
+                from_file.allow_all, from_db.allow_all,
+                "wildcard grants must survive as wildcards, not as an expanded list"
+            );
+
+            // One model the key is granted, one it is not, and one that does
+            // not exist anywhere — the last is what actually distinguishes a
+            // wildcard grant from a list that happened to cover everything.
+            for model in [
+                fx.granted_model.as_str(),
+                fx.ungranted_model.as_str(),
+                "a-model-no-config-has-ever-mentioned",
+            ] {
+                assert_eq!(
+                    from_file.may_invoke(model),
+                    from_db.may_invoke(model),
+                    "authorisation for principal {:?} on model {model:?} disagrees between \
+                     File mode and the imported database",
+                    from_db.name
+                );
+            }
+        }
+
+        // Guard against the comparison passing vacuously — if both sides
+        // said "yes" (or both "no") to everything, the loop above would be
+        // satisfied without proving anything about grants.
+        let named = db_snapshot.authenticate(&fx.named_key, now).unwrap();
+        assert!(named.may_invoke(&fx.granted_model));
+        assert!(!named.may_invoke(&fx.ungranted_model));
+        let wildcard = db_snapshot.authenticate(&fx.wildcard_key, now).unwrap();
+        assert!(wildcard.may_invoke(&fx.ungranted_model));
+    }
+
+    /// Re-running import over the same file must converge, not accumulate:
+    /// the operator-facing promise is that `import` is safe to run on every
+    /// deploy, and a second principal, key or grant per run would quietly
+    /// break that.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn re_importing_auth_creates_nothing_new() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let fx = auth_fixture();
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&fx.yaml).unwrap();
+
+        import(&pool, &cfg, &test_key()).await.unwrap();
+        let second = import(&pool, &cfg, &test_key()).await.unwrap();
+
+        assert_eq!(second.principals, 0);
+        assert_eq!(second.principals_existing, 2);
+        assert_eq!(second.keys, 0);
+        assert_eq!(second.keys_existing, 2);
+        assert_eq!(second.grants, 0);
+        assert_eq!(second.grants_existing, 2);
+        assert_eq!(second.grants_revoked, 0);
+
+        for name in [&fx.named_principal, &fx.wildcard_principal] {
+            let principals: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM principals WHERE name = $1")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(principals, 1, "principal {name} was duplicated");
+            let keys: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM api_keys k JOIN principals p ON p.id = k.principal_id
+                 WHERE p.name = $1",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(keys, 1, "key for {name} was duplicated");
+        }
+    }
+
+    /// Narrowing a key's `models:` and re-importing must actually revoke,
+    /// not just stop adding. An import that only ever grants would leave a
+    /// deliberately-removed model reachable until someone noticed by hand.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn narrowing_a_grant_list_revokes_the_dropped_model() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let a = unique_name("keep");
+        let b = unique_name("drop");
+        let principal = unique_name("narrowing-principal");
+        let key = unique_name("sk-narrowing-key-long-enough-to-prefix");
+
+        let models = format!(
+            "model_list:\n\
+             \x20 - model_name: {a}\n    litellm_params: {{ api_base: http://a:8000/v1 }}\n\
+             \x20 - model_name: {b}\n    litellm_params: {{ api_base: http://b:8000/v1 }}\n"
+        );
+        let wide: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "{models}auth:\n  keys:\n    - key: {key}\n      name: {principal}\n      models: [{a}, {b}]\n"
+        ))
+        .unwrap();
+        let narrow: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "{models}auth:\n  keys:\n    - key: {key}\n      name: {principal}\n      models: [{a}]\n"
+        ))
+        .unwrap();
+
+        assert_eq!(import(&pool, &wide, &test_key()).await.unwrap().grants, 2);
+        let narrowed = import(&pool, &narrow, &test_key()).await.unwrap();
+        assert_eq!(narrowed.grants_revoked, 1);
+
+        let snapshot = crate::control::build::build_snapshot(&pool, &test_key())
+            .await
+            .unwrap();
+        let p = snapshot
+            .authenticate(&key, std::time::SystemTime::now())
+            .unwrap();
+        assert!(p.may_invoke(&a));
+        assert!(
+            !p.may_invoke(&b),
+            "the dropped model must no longer resolve"
+        );
+    }
+
+    /// The prefix column is returned by `GET /admin/keys`, and an imported
+    /// key is whatever the operator wrote — often far shorter than the 67
+    /// characters `generate_key` mints. Storing 11 characters of a 7-character
+    /// key would put the whole secret in a listing.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_short_imported_key_is_not_stored_in_the_prefix_column() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let principal = unique_name("short-key-principal");
+        // Short *and* unique: 11 characters, well under the threshold at
+        // which any prefix is safe to store, but distinct per run because
+        // `api_keys.hash` is UNIQUE across the shared scratch database.
+        let key = format!(
+            "sk{:09}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000_000
+        );
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "auth:\n  keys:\n    - key: {key}\n      name: {principal}\n      models: ['*']\n"
+        ))
+        .unwrap();
+        import(&pool, &cfg, &test_key()).await.unwrap();
+
+        let prefix: String = sqlx::query_scalar(
+            "SELECT prefix FROM api_keys k JOIN principals p ON p.id = k.principal_id
+             WHERE p.name = $1",
+        )
+        .bind(&principal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(prefix, "(hidden)");
+        assert!(
+            !key.starts_with(&prefix),
+            "prefix {prefix:?} discloses the leading characters of a short key"
         );
     }
 
