@@ -1,13 +1,58 @@
 # TODO
 
-Performance backlog, with the measurements that justify (or kill) each item.
+## Features
+
+### Embedded management and monitoring UI
+
+Serve a small React dashboard from the binary itself, the way Go's `embed.FS`
+is normally used.
+
+`rust-embed` is the direct analogue: `#[derive(RustEmbed)] #[folder = "web/dist/"]`
+reads from disk in debug builds (so the frontend hot-reloads during
+development) and bakes the bytes into the binary in release. `include_dir!` is
+the lighter option if the runtime crate is unwanted; `include_bytes!` covers
+single files.
+
+Two reasons this fits here specifically:
+
+- It lands on routes the proxy already serves locally (`/`, `/ui/*`), so it is
+  completely off the byte-pump path. No effect on the hot path.
+- It keeps the single-binary, single-container deployment — no sidecar, no
+  second Service, nothing new to deploy alongside it on kw.
+
+`/health` and `/metrics` already expose everything a dashboard needs: per-backend
+in-flight, request and error totals, health state, active policy, uptime and the
+model list. The UI is a rendering job, not a new API — though a small
+`/v1/stats`-style endpoint with a time series would beat polling `/metrics` and
+diffing counters client-side.
+
+Two real costs, neither hidden:
+
+1. **Build ordering.** `cargo build` fails outright if `web/dist/` is missing.
+   Either a `build.rs` that shells out to npm — which makes cargo depend on node
+   for everyone, including CI jobs that only want to run tests — or an extra
+   `node` stage in the existing multi-stage Dockerfile that builds the SPA and
+   copies `dist` into the Rust stage. The Dockerfile route is preferable: CI
+   already has the shape for it and `cargo test` stays node-free.
+2. **Caching.** `ETag` and `Cache-Control` have to be hand-rolled. rust-embed
+   exposes each file's hash so it is a few lines, but it is not free the way a
+   real static server is.
+
+Also worth deciding before building it: whether the dashboard sits behind the
+master key. `/health` and `/metrics` are deliberately open so probes and
+Prometheus work without a key, and both already leak backend addresses — a UI
+on the same terms is consistent, but it is a more inviting target on a VIP.
+
+## Performance
+
+Backlog with the measurements that justify (or kill) each item.
 
 Numbers come from `cargo build --release` on a 10-core arm64 macOS host, driven
 by a mock SSE upstream that flushes every frame with no think time — the worst
 case for framing overhead. A real vLLM batches tokens, so production numbers
 should be better than these. Re-measure before acting on any of this.
 
-## Context: where the time goes today
+### Context: where the time goes today
 
 - **Streaming cost is per-frame, not per-byte.** Same bytes, same event count,
   only the framing changed: 500 single-event frames → 77 MiB/s; 5 hundred-event
@@ -31,9 +76,9 @@ against a 650k ceiling — about 3% utilised — and the added per-token latency
 ~1.5µs against inter-token gaps of ~500µs. Do these only if the proxy is
 measurably in the way.
 
-## Worth doing, hardest first
+### Worth doing, hardest first
 
-### 1. Own the upstream connection instead of using the pooled client
+#### 1. Own the upstream connection instead of using the pooled client
 
 Replace `hyper_util::client::legacy::Client` with `hyper::client::conn::http1`,
 driven on the same task as the response body, plus a small connection pool of
@@ -47,7 +92,7 @@ us for free.
 **Unverified** — prototype against `scratchpad/bench` and confirm the frames/s
 gain before committing to it.
 
-### 2. Byte-level relay after the response is committed
+#### 2. Byte-level relay after the response is committed
 
 Once headers are forwarded the proxy never looks at the body again, so it could
 copy raw socket bytes rather than decoding and re-encoding chunk framing. This
@@ -58,13 +103,13 @@ know where one response ends and the next begins, so it implies closing the
 upstream connection per request unless the framing is tracked anyway. Probably
 only worth it in combination with (1).
 
-### 3. Re-measure against a real vLLM node
+#### 3. Re-measure against a real vLLM node
 
 Everything above assumes the mock's flush-per-token behaviour. Under real
 batching the merge ratio is likely above 1.000, which would make coalescing
 (see below) worth reviving on its own. Measure before building anything.
 
-## Measured and rejected — do not retry without new evidence
+### Measured and rejected — do not retry without new evidence
 
 - **Coalescing already-arrived frames in `TrackedBody`.** 1301 → 1318 req/s,
   merge ratio 1.000. Cannot help while the client hands over one chunk per
