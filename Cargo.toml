@@ -1,3 +1,11 @@
+[workspace]
+members = [".", "bench"]
+# A plain `cargo build`/`cargo test` at the workspace root must build and test
+# only the proxy: `bench` is measurement tooling, not part of the product, and
+# its binaries take real time to compile. `-p bench` (or a `cd bench`) still
+# reaches it explicitly.
+default-members = ["."]
+
 [package]
 name = "fastllm-proxy"
 version = "0.1.0"
@@ -57,6 +65,7 @@ control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand"]
 
 [dev-dependencies]
 tempfile = "3"
+ureq = { version = "2", features = ["json"] }
 
 [profile.release]
 opt-level = 3
