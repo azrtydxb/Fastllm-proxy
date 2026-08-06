@@ -211,7 +211,7 @@ async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> 
         let pool = fastllm_proxy::control::db::connect(database_url).await?;
         let summary = fastllm_proxy::control::import::import(&pool, &cfg).await?;
         println!(
-            "imported {} model(s), {} new backend(s), {} key(s)",
+            "import complete: {} new model(s), {} new backend(s), {} new key(s)",
             summary.models, summary.backends, summary.keys
         );
         Ok(())
