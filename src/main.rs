@@ -7,16 +7,14 @@ mod proxy;
 mod registry;
 mod router;
 mod state;
+mod upstream;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use clap::Parser;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_rustls::HttpsConnector;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -128,22 +126,14 @@ async fn run(cli: Cli) -> Result<()> {
         cli.config.display()
     );
 
-    // TCP_NODELAY matters on both hops: without it a small SSE frame can sit in
-    // the kernel waiting for a co-tenant, adding tens of milliseconds of
-    // inter-token jitter that looks like slow generation.
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(Duration::from_secs(5)));
-    connector.set_keepalive(Some(Duration::from_secs(60)));
-    // hyper-rustls requires the wrapped connector to permit non-HTTPS URIs; the
-    // https_or_http() policy below is what actually decides per request.
-    connector.enforce_http(false);
-
-    let client = Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(cli.pool_max_idle)
-        .retry_canceled_requests(false)
-        .build(https_connector(connector)?);
+    let client = upstream::Upstream::new(
+        upstream::Config {
+            max_idle_per_host: cli.pool_max_idle,
+            idle_timeout: Duration::from_secs(90),
+            connect_timeout: Duration::from_secs(5),
+        },
+        tls_config()?,
+    );
 
     let master_key = cli
         .master_key
@@ -237,7 +227,7 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Wrap the TCP connector so `https://` api_bases work.
+/// Root certificates for `https://` api_bases.
 ///
 /// The typical deployment is plain HTTP to nodes on a private network, but the
 /// config schema accepts `https://` and a hosted or TLS-terminated endpoint is
@@ -247,20 +237,33 @@ async fn run(cli: Cli) -> Result<()> {
 /// System roots are preferred so an internal CA already trusted by the host
 /// works without extra configuration; the bundled Mozilla set is the fallback
 /// for minimal containers that ship no root store at all.
-fn https_connector(http: HttpConnector) -> Result<HttpsConnector<HttpConnector>> {
+fn tls_config() -> Result<rustls::ClientConfig> {
     // Exactly one provider is compiled in, but installing it explicitly keeps
     // this deterministic rather than dependent on rustls' defaulting rules.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let builder = hyper_rustls::HttpsConnectorBuilder::new();
-    let tls = match builder.with_native_roots() {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "no system root certificates; falling back to the bundled Mozilla set");
-            hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
+    let mut roots = rustls::RootCertStore::empty();
+    match rustls_native_certs::load_native_certs() {
+        result if !result.certs.is_empty() => {
+            for cert in result.certs {
+                let _ = roots.add(cert);
+            }
         }
-    };
-    Ok(tls.https_or_http().enable_http1().wrap_connector(http))
+        _ => {
+            warn!("no system root certificates; falling back to the bundled Mozilla set");
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+    }
+
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // Without this the handshake offers no ALPN and a strict server closes the
+    // connection rather than guessing — which is exactly what api.openai.com
+    // did, reported as "closed before sending a response". The old
+    // hyper-rustls builder set this implicitly via enable_http1().
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 /// Reload when the config file's contents change on disk.

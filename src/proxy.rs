@@ -16,6 +16,7 @@
 //! locate `model`, forward the original bytes — so an upload never gets
 //! re-encoded on its way through.
 
+use crate::upstream::{BoxError, UpstreamBody};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Frame, Incoming};
@@ -34,7 +35,7 @@ use crate::multipart;
 use crate::registry::{Backend, BackendUid, InflightGuard};
 use crate::state::AppState;
 
-pub type ResBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
 /// Endpoints forwarded to a backend. Everything else is served locally.
 const PROXIED_SUFFIXES: &[&str] = &[
@@ -388,7 +389,7 @@ fn build_upstream_request(
 
 /// Hand the upstream response to the client, keeping the in-flight guard alive
 /// for as long as the body is still streaming.
-fn finish_response(resp: Response<Incoming>, guard: InflightGuard) -> Response<ResBody> {
+fn finish_response(resp: Response<UpstreamBody>, guard: InflightGuard) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     // Hop-by-hop only: the response body is passed through byte for byte, so
     // an upstream `content-length` remains correct and is worth keeping.
@@ -402,19 +403,19 @@ pin_project! {
     /// Passthrough body that releases an [`InflightGuard`] when the stream ends.
     ///
     /// Deliberately not batching: merging frames that have already arrived was
-    /// measured at a 1.000 merge ratio, because hyper's pooled client hands the
-    /// body over one chunk per want/give round trip and a second chunk is never
-    /// already waiting. The cost per frame is that handoff, not this wrapper,
-    /// so a coalescing buffer here only adds a poll and a branch.
+    /// measured at a 1.000 merge ratio both against the pooled client and
+    /// against the owned connection that replaced it, and against a real vLLM,
+    /// whose tokens arrive tens of milliseconds apart. There is never a second
+    /// frame waiting, so a coalescing buffer here only adds a poll and a branch.
     struct TrackedBody {
         #[pin]
-        inner: Incoming,
+        inner: UpstreamBody,
         guard: Option<InflightGuard>,
     }
 }
 
 impl TrackedBody {
-    fn new(inner: Incoming, guard: InflightGuard) -> Self {
+    fn new(inner: UpstreamBody, guard: InflightGuard) -> Self {
         Self {
             inner,
             guard: Some(guard),
@@ -424,7 +425,7 @@ impl TrackedBody {
 
 impl Body for TrackedBody {
     type Data = Bytes;
-    type Error = hyper::Error;
+    type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
