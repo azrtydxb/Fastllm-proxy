@@ -191,9 +191,13 @@ async fn import_key(
 
     // `ON CONFLICT DO NOTHING RETURNING id` returns nothing for a row that
     // already existed, which is exactly the "was it new?" signal the summary
-    // needs — no second query to count what changed.
+    // needs — no second query to count what changed. `imported` is set TRUE
+    // only here, on the row `import` itself creates — see migration 0007's
+    // comment for why that is what lets the `None` branch below tell an
+    // earlier import run's principal apart from one a human or the admin API
+    // created that only happens to share the name.
     let created: Option<i64> = sqlx::query_scalar(
-        "INSERT INTO principals (kind, name) VALUES ('service_account', $1)
+        "INSERT INTO principals (kind, name, imported) VALUES ('service_account', $1, TRUE)
          ON CONFLICT (name) DO NOTHING RETURNING id",
     )
     .bind(principal_name)
@@ -205,11 +209,30 @@ async fn import_key(
             id
         }
         None => {
+            // A principal with this name already exists. `import` may only
+            // attach to it if `import` itself was what created it —
+            // otherwise this is the review finding this branch exists to
+            // fix: a config naming an existing, privileged, hand-created
+            // principal would otherwise mint a key that inherits every role
+            // already granted to that principal, with nothing about the
+            // config file itself asking for that.
+            let (existing_id, imported): (i64, bool) =
+                sqlx::query_as("SELECT id, imported FROM principals WHERE name = $1")
+                    .bind(principal_name)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if !imported {
+                anyhow::bail!(
+                    "auth.keys entry {principal_name:?} names an existing principal (id \
+                     {existing_id}) that `import` did not create. Refusing to attach a new key \
+                     to it: doing so would silently grant that key every role already granted to \
+                     the existing principal. Rename this auth.keys entry, or first rename or \
+                     delete the existing principal through the admin API if the two are meant to \
+                     be the same."
+                );
+            }
             summary.principals_existing += 1;
-            sqlx::query_scalar("SELECT id FROM principals WHERE name = $1")
-                .bind(principal_name)
-                .fetch_one(&mut **tx)
-                .await?
+            existing_id
         }
     };
 
@@ -315,9 +338,24 @@ async fn import_key(
     // Looked up by hash, then updated, rather than `ON CONFLICT (hash) DO
     // UPDATE`: the update fires either way there, so the summary could not
     // tell a new key from a re-imported one. The update itself matters —
-    // an edited `expires_at` in the file must land, and a key re-appearing
-    // in the file after being revoked through the admin API is the operator
-    // asking for it back.
+    // an edited `expires_at` in the file must land.
+    //
+    // `disabled = FALSE` is unconditional and deliberate, reconsidered as
+    // part of the same review that added the `imported` check above: a key
+    // is looked up here by its *hash*, i.e. by its exact plaintext value, so
+    // the only way this branch re-enables a disabled key is an operator
+    // running `import` again over a file that still names that exact key.
+    // `import`'s whole contract is "converge the database on the file" (see
+    // this function's doc comment — narrowing `models:` and re-importing
+    // already revokes grants the same way), and a config file is the
+    // operator's own source of truth: if it still lists the key, that is the
+    // operator asking for it to be live, the same as adding a brand new key
+    // would be. The one-time, out-of-band revocation this could plausibly
+    // surprise — `DELETE`ing a key through the admin API without also
+    // editing the file — is exactly what `deploy/README.md` documents `POST
+    // /admin/keys/{id}` (not editing the ConfigMap) for; a key an operator
+    // truly wants gone belongs out of the file, not merely disabled while
+    // import keeps re-seeding it.
     let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM api_keys WHERE hash = $1")
         .bind(hash_key(&entry.key).to_vec())
         .fetch_optional(&mut **tx)
@@ -828,6 +866,84 @@ mod tests {
             !key.starts_with(&prefix),
             "prefix {prefix:?} discloses the leading characters of a short key"
         );
+    }
+
+    /// Regression for the review finding: `import_key` used to resolve a
+    /// principal purely by name and reuse whatever it found, so a config
+    /// file naming an existing, privileged, hand-created principal minted a
+    /// key that silently inherited every role already granted to it — the
+    /// grant handling itself (the per-principal `import:<name>` role) was
+    /// never the problem; reusing someone else's principal was. This proves
+    /// the fix: importing a config that names a pre-existing principal with
+    /// an `admin`-equivalent grant must be refused, and that principal's
+    /// roles must not reach any key `import` creates.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn import_refuses_to_attach_a_key_to_a_preexisting_principal() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+
+        // A principal created by hand (through the admin API's own code
+        // path, not by `import`) and granted `admin` — the privileged role
+        // whose permissions must never leak to an attacker-controlled config
+        // file that merely names it.
+        let victim_principal = unique_name("hand-created-admin-principal");
+        let principal_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&victim_principal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let admin_role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = 'admin'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO principal_roles (principal_id, role_id) VALUES ($1, $2)")
+            .bind(principal_id)
+            .bind(admin_role_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let hijack_key = unique_name("sk-hijack-attempt-long-enough-to-prefix");
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "auth:\n  keys:\n    - key: {hijack_key}\n      name: {victim_principal}\n      models: ['*']\n"
+        ))
+        .unwrap();
+
+        let err = import(&pool, &cfg, &test_key())
+            .await
+            .expect_err("import must refuse to attach a new key to a principal it did not create");
+        assert!(
+            err.to_string().contains(&victim_principal),
+            "the error must name the principal that could not be reused: {err}"
+        );
+
+        // Nothing must have been created for the attempted key at all — not
+        // the key, and no grant either.
+        let key_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_keys WHERE hash = $1)")
+                .bind(hash_key(&hijack_key).to_vec())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            !key_exists,
+            "the rejected import must not have created a key"
+        );
+
+        // The victim principal's own roles must be exactly what they were:
+        // still just `admin`, not also `import:<name>`.
+        let roles: Vec<String> = sqlx::query_scalar(
+            "SELECT r.name FROM principal_roles pr JOIN roles r ON r.id = pr.role_id
+             WHERE pr.principal_id = $1",
+        )
+        .bind(principal_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(roles, vec!["admin".to_string()]);
     }
 
     #[tokio::test]

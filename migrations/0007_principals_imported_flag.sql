@@ -1,0 +1,19 @@
+-- `control::import::import_key` resolves an `auth.keys[].name` entry's
+-- principal by NAME and, if a principal with that name already exists,
+-- reuses it and binds the new key to it. Before this column existed, that
+-- reuse had no way to tell "a principal `import` itself created on an
+-- earlier run" (the intended, idempotent case: re-running import over the
+-- same file must not create a second principal) apart from "a principal an
+-- operator created by hand, or through the admin API, that only happens to
+-- have the same name" (not intended at all: a config file naming an
+-- existing privileged principal would mint a key that inherits every role
+-- already granted to it).
+--
+-- FALSE by default so every principal that exists before this migration
+-- runs — including the bootstrap principal from migration 0003 and anything
+-- created through the admin API — is correctly classified as "not
+-- import's to reuse". `import` sets this TRUE only on the principals it
+-- creates itself (see `control::import::import_key`), so a later run
+-- naming the same principal keeps attaching to it; a run naming any other,
+-- pre-existing principal is refused instead of silently attaching.
+ALTER TABLE principals ADD COLUMN imported BOOLEAN NOT NULL DEFAULT FALSE;
