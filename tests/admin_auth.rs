@@ -28,7 +28,19 @@ fn encryption_key() -> String {
     "ab".repeat(32)
 }
 
+/// Serialises process startup across this file's tests.
+///
+/// Each test here spawns its own full `--role all`, and every one of those
+/// runs migrations against the same database behind a Postgres advisory
+/// lock. Started concurrently on a small CI runner they simply queue behind
+/// each other, and the observed result was three processes alive, silent and
+/// unresponsive past a 90s deadline. Serialising costs nothing — the work was
+/// already serial inside Postgres — and removes the contention rather than
+/// hiding it behind a longer timeout.
+static START_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
+    let _serialise = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // The child's stderr goes to a file rather than being inherited so that a
     // startup *failure* and mere startup *slowness* stop looking identical.
     // Without this, a process that exited immediately (a bad env var, a
@@ -49,6 +61,9 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         .env("FASTLLM_DATABASE_URL", database_url)
         .env("FASTLLM_PROXY_TOKEN", PROXY_TOKEN)
         .env("FASTLLM_ENCRYPTION_KEY", encryption_key())
+        // Debug so that if this ever hangs again the captured stderr says
+        // where, instead of being empty.
+        .env("FASTLLM_LOG", "debug")
         .stderr(std::process::Stdio::from(log))
         .spawn()
         .expect("failed to spawn fastllm-proxy --role all");
