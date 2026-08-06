@@ -1002,7 +1002,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let stale_start = chrono::Utc::now() - chrono::Duration::days(2);
+        // Truncated to microseconds because that is Postgres `timestamptz`'s
+        // resolution: a chrono nanosecond value is rounded on the way in, so
+        // comparing what comes back against the un-truncated Rust value can
+        // miss by up to 999ns. That made this assertion pass or fail purely
+        // on whether the clock's sub-microsecond part happened to be zero —
+        // green locally, red in CI.
+        use chrono::SubsecRound as _;
+        let stale_start = (chrono::Utc::now() - chrono::Duration::days(2)).trunc_subsecs(6);
         sqlx::query(
             "INSERT INTO budgets (principal_id, tokens_total, tokens_used, window_start, budget_window)
              VALUES ($1, 100, 100, $2, 'daily')",
