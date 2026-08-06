@@ -58,62 +58,45 @@ should be better than these. Re-measure before acting on any of this.
   only the framing changed: 500 single-event frames → 77 MiB/s; 5 hundred-event
   frames → 2918 MiB/s. The byte pump is fine at ~3 GB/s. The ceiling is roughly
   **650k frames/s** regardless of frame size.
-- **That ceiling is the upstream client, not this code.** Instrumenting
-  frames-in vs frames-out gave a ratio of exactly **1.000**: a second frame is
-  never already available when the first is consumed. `hyper-util`'s pooled
-  client runs each connection in its own task and hands body chunks over a
-  1-deep want/give channel, so every SSE frame costs a task wakeup, usually
-  cross-thread. A profile agrees — ~28% of samples in `__psynch_cvwait`,
-  `__workq_kernreturn` and `kevent`.
+- **That ceiling was the upstream client, not this code — now fixed.** The
+  pooled client cost one cross-task wakeup per frame. Replacing it with a
+  connection this process owns and drives from inside the response body took
+  streaming from 1314 to 7921 req/s and 78 to 471 MiB/s, a little over 6x, with
+  no change to non-streaming. See `src/upstream.rs`.
 - **The request path is ~2% of a request.** All of this proxy's own per-request
   work measures ~0.76µs (URL format + `Uri` parse 156ns, bearer header 92ns,
   header copy 97ns, `BodyPeek` parse 229ns at 1KiB, prefix hash 108ns, path
   allocations 41ns) against ~38µs of core time per request. The rest is kernel,
   socket and hyper protocol work.
 
-**None of this is urgent.** Ten vLLM nodes at 2000 tok/s each is ~20k frames/s
-against a 650k ceiling — about 3% utilised — and the added per-token latency is
-~1.5µs against inter-token gaps of ~500µs. Do these only if the proxy is
-measurably in the way.
+**Measured against the real spark2 replica (2026-08-06).** One stream: TTFT
+90ms proxied vs 93ms direct, inter-token 27.54ms vs 27.47ms. Eight concurrent
+streams: 121.8 tok/s aggregate proxied vs 118.7 direct, inter-token 63.4ms vs
+62.2ms. The proxy is not measurable in either. Crucially, vLLM emits **one SSE
+event per HTTP frame, tens of milliseconds apart** — so there is nothing to
+coalesce there either, and the per-frame ceiling is four orders of magnitude
+from being reached.
 
-### Worth doing, hardest first
+### Worth doing
 
-#### 1. Own the upstream connection instead of using the pooled client
-
-Replace `hyper_util::client::legacy::Client` with `hyper::client::conn::http1`,
-driven on the same task as the response body, plus a small connection pool of
-our own (keep-alive, idle eviction, per-backend caps).
-
-This is the only change that targets the actual ceiling: it removes the
-per-frame cross-task handoff and makes frame coalescing possible for the first
-time. It also means owning pooling correctness, which the current client gives
-us for free.
-
-**Unverified** — prototype against `scratchpad/bench` and confirm the frames/s
-gain before committing to it.
-
-#### 2. Byte-level relay after the response is committed
-
-Once headers are forwarded the proxy never looks at the body again, so it could
-copy raw socket bytes rather than decoding and re-encoding chunk framing. This
-is as fast as a proxy gets.
-
-The cost is connection reuse: without tracking chunk framing there is no way to
-know where one response ends and the next begins, so it implies closing the
-upstream connection per request unless the framing is tracked anyway. Probably
-only worth it in combination with (1).
-
-#### 3. Re-measure against a real vLLM node
-
-Everything above assumes the mock's flush-per-token behaviour. Under real
-batching the merge ratio is likely above 1.000, which would make coalescing
-(see below) worth reviving on its own. Measure before building anything.
+Nothing identified. The three items that used to live here are all resolved
+below — one implemented, two measured and closed.
 
 ### Measured and rejected — do not retry without new evidence
 
-- **Coalescing already-arrived frames in `TrackedBody`.** 1301 → 1318 req/s,
-  merge ratio 1.000. Cannot help while the client hands over one chunk per
-  round trip. Revisit only after item 1 or 3.
+- **Byte-level relay after the response is committed.** A dumb bidirectional
+  TCP relay — parsing nothing, framing nothing, the hard ceiling for any proxy
+  on this path — does 694 MiB/s where this proxy does 524 MiB/s and a single
+  direct hop does 951 MiB/s. So the whole prize is **1.32x**, and only if
+  detecting the end of a response were free. It is not: the in-flight guard has
+  to be released, the connection returned to the pool, and the next request
+  served on the client socket, all of which need the framing this would skip.
+  Paying for that with a hijacked client socket and no pooling is a bad trade.
+- **Coalescing already-arrived frames.** Merge ratio measured at exactly 1.000
+  in three separate settings: against the pooled client, against the owned
+  connection that replaced it, and against a real vLLM. There is never a second
+  frame waiting. Confirmed dead; it was the deleted wakeup, not batching, that
+  gave the 6x.
 - **Hand-rolled `model` scanner to skip the JSON parse.** 67.1k → 67.2k req/s
   on 64KiB bodies. `serde_json` skips what it does not want at ~16 B/ns and the
   parse is ~3% of a request; a bespoke parser on the routing path is not worth
