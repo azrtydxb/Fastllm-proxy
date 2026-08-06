@@ -38,6 +38,7 @@ arc-swap = "1"
 parking_lot = "0.12"
 pin-project-lite = "0.2"
 smallvec = "1"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

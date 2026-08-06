@@ -6,5 +6,6 @@ pub mod multipart;
 pub mod proxy;
 pub mod registry;
 pub mod router;
+pub mod snapshot;
 pub mod state;
 pub mod upstream;
