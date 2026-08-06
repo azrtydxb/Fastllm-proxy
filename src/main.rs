@@ -356,6 +356,36 @@ fn admin_tls_config(cli: &Cli) -> Result<Option<rustls::ServerConfig>> {
     }
 }
 
+/// A missing or empty `--proxy-token` must never mean "`/snapshot` and
+/// `/usage` accept anyone" (see `control::api::proxy_token_authorised`, and
+/// the review finding it fixes: `constant_time_eq(b"", b"")` is `true`, so
+/// `unwrap_or_default()` alone used to make an unset token equivalent to no
+/// authentication at all). Between the two ways to make that safe — refuse
+/// to start, or start with those two routes permanently closed — this
+/// refuses to start.
+///
+/// `/snapshot` is how every `Http`-mode proxy in the deployment gets its
+/// policy at all; permanently closing it would not fail loudly once, it
+/// would silently starve every proxy of updates from that point on, which is
+/// exactly the kind of quiet failure this whole batch of fixes exists to
+/// stop introducing. A hard startup error is loud, immediate, and it does
+/// not touch the one case that has to keep working with no token
+/// configured: `File` mode (`--role proxy`, no `--control-url`) never calls
+/// this at all — it has no admin API and needs no proxy token — so a
+/// bare-YAML dev deployment is unaffected. The shipped manifests already set
+/// a real token for `--role control`/`all` (see the review finding), so this
+/// only turns an already-misconfigured deployment's silent open door into a
+/// startup failure that says so.
+#[cfg(feature = "control")]
+fn require_proxy_token(cli: &Cli) -> Result<String> {
+    cli.proxy_token.clone().filter(|t| !t.is_empty()).context(
+        "--proxy-token (or FASTLLM_PROXY_TOKEN) is required for --role control/all and must \
+             not be empty: it is what gates /snapshot (every key hash and usable upstream \
+             credential) and /usage (a write route). Refusing to start with it unset is safer \
+             than serving with those routes open to anyone.",
+    )
+}
+
 /// `--role control`: database and admin API, no proxy listener at all.
 ///
 /// Not gated behind `cfg(feature = "control")` at the call site — that would
@@ -370,6 +400,7 @@ async fn run_control(cli: Cli) -> Result<()> {
         // See `EncryptionKey::from_env` for why a missing/malformed key is a
         // hard startup failure rather than a plaintext fallback.
         let key = Arc::new(fastllm_proxy::control::secrets::EncryptionKey::from_env()?);
+        let proxy_token = require_proxy_token(&cli)?;
         let db_url = cli
             .database_url
             .clone()
@@ -391,15 +422,7 @@ async fn run_control(cli: Cli) -> Result<()> {
                 format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
             })?;
         info!(%addr, tls = tls.is_some(), "control plane admin API listening");
-        fastllm_proxy::control::api::serve(
-            pool,
-            addr,
-            cli.proxy_token.unwrap_or_default(),
-            cache,
-            key,
-            tls,
-        )
-        .await
+        fastllm_proxy::control::api::serve(pool, addr, proxy_token, cache, key, tls).await
     }
     #[cfg(not(feature = "control"))]
     {
@@ -423,6 +446,7 @@ async fn run_all(cli: Cli) -> Result<()> {
         // through the same database), so it needs the key just as
         // unconditionally.
         let key = Arc::new(fastllm_proxy::control::secrets::EncryptionKey::from_env()?);
+        let proxy_token = require_proxy_token(&cli)?;
         let db_url = cli
             .database_url
             .clone()
@@ -484,7 +508,7 @@ async fn run_all(cli: Cli) -> Result<()> {
             })?;
         let admin_pool = pool.clone();
         let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
-        let admin_token = cli.proxy_token.clone().unwrap_or_default();
+        let admin_token = proxy_token;
         let admin_tls = admin_tls_config(&cli)?;
         fastllm_proxy::control::api::spawn_snapshot_rebuilder(
             pool.clone(),
