@@ -129,6 +129,13 @@ struct Ctx {
     /// every `POST /limits/reconcile` call the same way `pool` is shared by
     /// every database query.
     reconcile: Arc<ReconcileState>,
+    /// Whether `serve` bound with TLS — the one bit `login`/`logout` need to
+    /// decide whether to set `Secure` on the session cookie. `Secure`
+    /// unconditionally would make the cookie silently never round-trip over
+    /// the plain-HTTP dev path this crate already tolerates for `/snapshot`;
+    /// omitting it whenever TLS *is* on would ship a session cookie plain
+    /// HTTP could read.
+    tls_enabled: bool,
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
@@ -1895,6 +1902,175 @@ struct HealthView {
     snapshot_rebuild_failures: u64,
 }
 
+// --- Admin session authentication (P4) -------------------------------
+
+/// Read the session token out of the `Cookie` header, if present. Manual
+/// parsing rather than a cookie-jar crate: the request side only ever needs
+/// to find one named value in a `key=value; key=value` list, which is a
+/// handful of lines and one fewer dependency.
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == crate::control::auth::SESSION_COOKIE).then(|| value.to_string())
+    })
+}
+
+/// `Set-Cookie` for a freshly created session. `HttpOnly` so client-side JS
+/// (including an XSS payload in the admin UI itself) cannot read the token;
+/// `SameSite=Strict` because this cookie only ever needs to be sent on
+/// same-site navigations/requests the admin UI itself makes; `Secure` only
+/// when TLS is actually on, per `Ctx::tls_enabled`'s doc comment.
+fn set_cookie_header(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}",
+        crate::control::auth::SESSION_COOKIE,
+        crate::control::auth::SESSION_TTL_HOURS * 3600,
+    )
+}
+
+/// `Set-Cookie` for logout: same name/attributes, empty value, immediately
+/// expired — the standard way to make a browser drop a cookie it already
+/// holds.
+fn clear_cookie_header(secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}",
+        crate::control::auth::SESSION_COOKIE,
+    )
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    name: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    name: String,
+}
+
+/// `POST /login`: the one `/admin`-adjacent route reachable without a
+/// session — logging in is how a session is obtained in the first place.
+/// Deliberately outside the `/admin/*` prefix `require_session` gates, and
+/// mounted alongside it rather than requiring the proxy token: this is a
+/// human typing a password into the UI, not a proxy or an operator's script
+/// carrying `--proxy-token`.
+async fn login(
+    State(ctx): State<Ctx>,
+    Json(body): Json<LoginRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(principal_id) =
+        crate::control::auth::verify_login(&ctx.pool, &body.name, &body.password).await
+    else {
+        // Same message regardless of *why* — unknown name, wrong password,
+        // disabled principal, or a service_account that has no password at
+        // all. Distinguishing any of those to the caller is exactly the
+        // username-enumeration mistake a login endpoint must not make.
+        return Err(api_error(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    };
+    let token = crate::control::auth::create_session(&ctx.pool, principal_id)
+        .await
+        .map_err(|e| db_error("create session", &e))?;
+    let headers = [(
+        axum::http::header::SET_COOKIE,
+        set_cookie_header(&token, ctx.tls_enabled),
+    )];
+    Ok((headers, Json(LoginResponse { name: body.name })))
+}
+
+/// `POST /logout`. Always answers 204, whether or not the presented cookie
+/// (if any) named a real session — logging out is idempotent from the
+/// caller's point of view, and the browser is told to drop the cookie
+/// either way.
+async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(token) = session_cookie(&headers) {
+        let _ = crate::control::auth::delete_session(&ctx.pool, &token).await;
+    }
+    (
+        [(
+            axum::http::header::SET_COOKIE,
+            clear_cookie_header(ctx.tls_enabled),
+        )],
+        StatusCode::NO_CONTENT,
+    )
+}
+
+/// Gates every `/admin/*` route (mounted as a `Router` layer, see `serve`
+/// below): no valid session cookie, no response body — a 401 before the
+/// wrapped handler ever runs. This is the fix for the gap `TODO.md` has
+/// documented since P0: "`/admin/*` and `/snapshot` are gated on the shared
+/// proxy token alone" (`/snapshot`, `/usage` and `/limits/reconcile` still
+/// are, deliberately — those are proxy processes, not humans, and have no
+/// password to present).
+async fn require_session(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    let Some(token) = session_cookie(&headers) else {
+        return Err(api_error(StatusCode::UNAUTHORIZED, "no session cookie"));
+    };
+    if crate::control::auth::authenticate_session(&ctx.pool, &token)
+        .await
+        .is_none()
+    {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired session",
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+#[derive(Deserialize)]
+struct SetPassword {
+    password: String,
+}
+
+/// `PUT /admin/principals/{id}/password`: sets or replaces a principal's
+/// login password, promoting it to `kind = 'user'` if it was not already —
+/// see `auth::set_password`. Gated by `require_session` like every other
+/// `/admin/*` route; bootstrapping the very *first* user (when no session
+/// can possibly exist yet) is `fastllm-proxy set-password`'s job instead
+/// (`main.rs`), not this route's.
+async fn put_password(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetPassword>,
+) -> Result<StatusCode, ApiError> {
+    if body.password.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "password must not be empty",
+        ));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM principals WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| db_error("check principal", &e))?;
+    if !exists {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no principal with id {id}"),
+        ));
+    }
+    crate::control::auth::set_password(&ctx.pool, id, &body.password)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "admin API password hashing failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "setting password failed; see server logs",
+            )
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn admin_health(State(ctx): State<Ctx>) -> Json<HealthView> {
     Json(HealthView {
         snapshot_rebuild_failures: ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
@@ -1909,6 +2085,7 @@ pub async fn serve(
     key: Arc<EncryptionKey>,
     tls: Option<rustls::ServerConfig>,
 ) -> anyhow::Result<()> {
+    let tls_enabled = tls.is_some();
     let ctx = Ctx {
         pool,
         proxy_token,
@@ -1916,6 +2093,7 @@ pub async fn serve(
         key,
         snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
         reconcile: Arc::new(ReconcileState::new()),
+        tls_enabled,
     };
     // Every mutating route below ends in `refresh(&ctx)` — the one write
     // path that publishes through `SnapshotSink::store_snapshot`. That is
@@ -1924,7 +2102,13 @@ pub async fn serve(
     // route that writes a row without it would reintroduce exactly the
     // "changed in Postgres, invisible to a running process" gap that
     // `spawn_snapshot_rebuilder` exists to paper over.
-    let app = Router::new()
+    //
+    // `admin_routes` is everything `require_session` gates — every
+    // `/admin/*` route including the UI's own data source — layered with
+    // that middleware exactly once here rather than checked inside each
+    // handler, so a new route added later is protected by construction
+    // instead of by remembering to add a check.
+    let admin_routes = Router::new()
         .route("/admin/keys", get(list_keys).post(post_key))
         .route("/admin/keys/{id}", delete(revoke_key))
         .route(
@@ -1934,6 +2118,7 @@ pub async fn serve(
         .route("/admin/principals/{id}", delete(delete_principal))
         .route("/admin/principals/{id}/roles", post(grant_role))
         .route("/admin/principals/{id}/roles/{role}", delete(revoke_role))
+        .route("/admin/principals/{id}/password", put(put_password))
         .route("/admin/models", get(list_models).post(post_model))
         .route("/admin/models/{id}", delete(delete_model))
         .route("/admin/models/{id}/backends", post(post_backend))
@@ -1967,10 +2152,33 @@ pub async fn serve(
             put(put_budget).delete(delete_budget),
         )
         .route("/admin/health", get(admin_health))
+        .layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            require_session,
+        ));
+
+    // Reachable with no session: `/login` (how one is obtained in the first
+    // place), and the three proxy-token-gated routes proxy processes (not
+    // humans) call — see their own doc comments for why those stay on the
+    // bearer token rather than moving to sessions.
+    let public_routes = Router::new()
+        .route("/login", post(login))
+        .route("/logout", post(logout))
         .route("/snapshot", get(get_snapshot))
         .route("/usage", post(post_usage))
-        .route("/limits/reconcile", post(post_reconcile))
-        .with_state(ctx);
+        .route("/limits/reconcile", post(post_reconcile));
+
+    // The management UI (P4): served by this process only, which is to say
+    // only by `--role control`/`all` — `serve` is never called for `--role
+    // proxy` at all, so there is no separate role check to get wrong here.
+    // Mounted last as the fallback: any path not matched above (`/`,
+    // `/ui/...`, a client-side route the SPA itself resolves) falls through
+    // to `crate::control::ui`, which degrades to a plain "UI not available"
+    // response if `web/dist/` was empty at build time (see that module).
+    let app = admin_routes
+        .merge(public_routes)
+        .with_state(ctx)
+        .fallback(crate::control::ui::serve_asset);
 
     match tls {
         Some(server_config) => {
@@ -2113,6 +2321,7 @@ mod tests {
             key: Arc::new(test_key()),
             snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
             reconcile: Arc::new(ReconcileState::new()),
+            tls_enabled: false,
         };
         (ctx, cache)
     }

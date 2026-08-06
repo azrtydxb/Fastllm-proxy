@@ -208,6 +208,36 @@ enum Command {
         #[arg(long, env = "FASTLLM_DATABASE_URL")]
         database_url: String,
     },
+
+    /// Bootstrap (or reset) an admin login for the management UI (P4).
+    ///
+    /// The one gap `PUT /admin/principals/{id}/password` cannot close on its
+    /// own: that route is (correctly) gated behind a session cookie, and a
+    /// freshly migrated database has no session anyone can ever obtain — its
+    /// `principals` rows have no `password_hash` set. This is how the very
+    /// first one gets one, run once by whoever holds cluster access, the
+    /// same trust boundary `import`'s `--database-url` already relies on.
+    /// Safe to run again later against an existing user to reset a
+    /// forgotten password.
+    SetPassword {
+        /// The login name. Created as a new `kind = 'user'` principal if no
+        /// principal by this name exists yet, and granted the `admin` role
+        /// if it has no role at all yet — see `control::auth::bootstrap_admin_user`.
+        #[arg(long)]
+        name: String,
+
+        /// The new password, in plaintext, on the command line or in
+        /// `FASTLLM_BOOTSTRAP_PASSWORD` — an operator's terminal history or
+        /// a one-shot Job's env is the trust boundary here, the same as
+        /// `--proxy-token`/`FASTLLM_PROXY_TOKEN` elsewhere in this CLI.
+        #[arg(long, env = "FASTLLM_BOOTSTRAP_PASSWORD")]
+        password: String,
+
+        /// Database to write to. Distinct from `--database-url` on `Cli` for
+        /// the same reason `Import::database_url` is.
+        #[arg(long, env = "FASTLLM_DATABASE_URL")]
+        database_url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -269,6 +299,11 @@ async fn run_command(command: &Command) -> Result<()> {
             database_url,
         } => run_import(config, database_url).await,
         Command::ReencryptBackends { database_url } => run_reencrypt_backends(database_url).await,
+        Command::SetPassword {
+            name,
+            password,
+            database_url,
+        } => run_set_password(name, password, database_url).await,
     }
 }
 
@@ -334,6 +369,27 @@ async fn run_reencrypt_backends(database_url: &str) -> Result<()> {
     {
         let _ = database_url;
         anyhow::bail!("reencrypt-backends requires the `control` feature; this binary was built with --no-default-features")
+    }
+}
+
+/// `fastllm-proxy set-password --name <name> --password <password> --database-url <url>`:
+/// see `Command::SetPassword`'s doc comment for why this exists at all.
+/// Prints nothing but a plain confirmation — never the password, which the
+/// caller already has, and never a hash, which is not this command's job to
+/// disclose either.
+async fn run_set_password(name: &str, password: &str, database_url: &str) -> Result<()> {
+    #[cfg(feature = "control")]
+    {
+        let pool = fastllm_proxy::control::db::connect(database_url).await?;
+        let principal_id =
+            fastllm_proxy::control::auth::bootstrap_admin_user(&pool, name, password).await?;
+        println!("set-password complete: principal {name:?} (id {principal_id}) can now log into the admin UI");
+        Ok(())
+    }
+    #[cfg(not(feature = "control"))]
+    {
+        let _ = (name, password, database_url);
+        anyhow::bail!("set-password requires the `control` feature; this binary was built with --no-default-features")
     }
 }
 
