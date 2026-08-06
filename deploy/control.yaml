@@ -10,66 +10,24 @@
 # reachable from the whole LAN at 192.168.10.126. Putting /admin on that VIP
 # means unauthenticated key creation from anywhere on the network. See
 # deploy/README.md.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: fastllm-proxy-token
-  namespace: fastllm
-type: Opaque
-stringData:
-  # Shared secret between control and proxy: the proxy presents it as a
-  # bearer token to GET /snapshot, which is the only route that checks it.
-  # /admin/* checks nothing at all (see the SECURITY note above) — this
-  # token authenticates the proxy's polling, it is not a substitute for real
-  # admin auth and does not gate /admin/* in any way. Placeholder value
-  # below; replace it before first deploy the same way fastllm-proxy-auth is
-  # generated in the README, then re-apply. Rotating it requires restarting
-  # both fastllm-control and fastllm-proxy.
-  token: "REPLACE-ME-openssl-rand-hex-32"
----
-# Encrypts model_backends.upstream_api_key at rest (control::secrets,
-# AES-256-GCM) — see the FASTLLM_ENCRYPTION_KEY env var below and
-# README.md's "Encryption at rest" section for exactly what this does and
-# does not protect. `fastllm-control` refuses to start without this key
-# rather than falling back to storing credentials in plaintext.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: fastllm-encryption-key
-  namespace: fastllm
-type: Opaque
-stringData:
-  # 32 bytes, hex-encoded (`EncryptionKey::from_hex`). Placeholder value
-  # below; replace it before first deploy the same way fastllm-proxy-token
-  # is, then re-apply. Rotating it is NOT just a matter of restarting
-  # fastllm-control: every row already encrypted under the old key needs
-  # decrypting under the old key and re-encrypting under the new one before
-  # the swap, which this repo has no automation for yet — treat rotation as
-  # a maintenance operation, not a config change.
-  key: "REPLACE-ME-openssl-rand-hex-32"
----
-# `/snapshot` carries usable upstream backend credentials (see
-# model_backends.upstream_api_key's schema comment) and `/usage` is gated by
-# the same bearer token as `/snapshot` — both must be TLS in any deployment
-# where a backend has a real credential, which this cluster's is. `cluster-ca`
-# is the in-cluster ClusterIssuer already used for other internal services
-# (see e.g. novamail); cert-manager writes `tls.crt`/`tls.key` (mounted by
-# fastllm-control below) and `ca.crt` (mounted by fastllm-proxy in
-# deployment.yaml as its `--ca-bundle`, since `cluster-ca` is a private CA no
-# public root store trusts) into one Secret.
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: fastllm-control-tls
-  namespace: fastllm
-spec:
-  secretName: fastllm-control-tls
-  issuerRef: { name: cluster-ca, kind: ClusterIssuer }
-  dnsNames:
-    - fastllm-control.fastllm.svc
-    - fastllm-control.fastllm.svc.cluster.local
-  duration: 2160h    # 90d
-  renewBefore: 360h  # 15d
+# CREDENTIALS ARE NOT IN THIS FILE, DELIBERATELY.
+#
+# fastllm-proxy-token and fastllm-encryption-key are created imperatively, the
+# same way fastllm-proxy-auth is (see deploy/README.md). They used to ship here
+# with REPLACE-ME placeholders and a comment saying to replace them and
+# re-apply — which meant every later `kubectl apply -f deploy/` silently
+# overwrote the real secrets with the placeholders and crash-looped the control
+# plane. A manifest that destroys credentials when re-applied is worse than one
+# that omits them.
+#
+#   kubectl -n fastllm create secret generic fastllm-proxy-token \
+#     --from-literal=token="pt-$(openssl rand -hex 24)"
+#   kubectl -n fastllm create secret generic fastllm-encryption-key \
+#     --from-literal=key="$(openssl rand -hex 32)"
+#
+# Rotating fastllm-proxy-token needs both Deployments restarted. Rotating the
+# encryption key is NOT just a restart: rows already encrypted under the old
+# key must be re-encrypted first (`fastllm-proxy reencrypt-backends`).
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -83,7 +41,7 @@ spec:
   # emptyDir mount in deployment.yaml) — so paying for synchronous replicas
   # here buys less than it costs. Revisit if that assumption stops holding.
   instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
   storage:
     size: 5Gi
     storageClass: longhorn
@@ -121,7 +79,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:main
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-71616a3
           imagePullPolicy: Always
           args:
             - --role=control
