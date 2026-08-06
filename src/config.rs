@@ -68,6 +68,15 @@ pub struct KeyConfig {
     /// see `crate::limiter::Limits::is_unlimited`.
     #[serde(default)]
     pub limits: Option<LimitsConfig>,
+    /// Mirrors the control plane's `budgets` table (P3) for `File` mode,
+    /// same rationale as `limits` above. `File` mode has no reconciliation
+    /// loop reporting usage back into this file, so `tokens_used` here is
+    /// static for the life of the process — useful for testing enforcement
+    /// or for a hand-managed "this key already spent N tokens elsewhere"
+    /// starting point, but it will not advance on its own the way a
+    /// control-plane-backed budget does from real `POST /usage` traffic.
+    #[serde(default)]
+    pub budget: Option<BudgetConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -76,6 +85,13 @@ pub struct LimitsConfig {
     pub requests_per_min: Option<u32>,
     #[serde(default)]
     pub tokens_per_min: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct BudgetConfig {
+    pub tokens_total: u64,
+    #[serde(default)]
+    pub tokens_used: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

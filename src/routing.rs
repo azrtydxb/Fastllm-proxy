@@ -352,6 +352,7 @@ mod tests {
             allow_all: true,
             roles: roles.iter().map(|r| r.to_string()).collect(),
             limits: None,
+            budget: None,
         }
     }
 

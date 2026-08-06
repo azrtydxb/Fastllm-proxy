@@ -41,12 +41,44 @@ pub struct Principal {
     /// zero. `crate::limiter::Limiter::check` reads this on the request
     /// path; nothing else about rate limiting touches the database.
     pub limits: Option<Limits>,
+    /// P3 (design doc, "P3 -- Usage accounting and budgets"): `None` means
+    /// this principal has no configured budget and is unlimited, the same
+    /// "absence, not zero capacity" convention `limits` uses above. Window
+    /// rollover has already happened by the time this reaches the
+    /// snapshot — see `crate::control::build`'s budget-window logic — so
+    /// the request path (`crate::proxy`) only ever compares two counters,
+    /// never touches a clock or a window length.
+    pub budget: Option<Budget>,
 }
 
 impl Principal {
     #[inline]
     pub fn may_invoke(&self, model: &str) -> bool {
         self.allow_all || self.allowed_models.contains(model)
+    }
+}
+
+/// A principal's token budget, pre-resolved into the snapshot like `Limits`.
+/// See that type's doc comment and `Principal::budget` for why resolving
+/// once at snapshot-build time is the point.
+///
+/// Enforcement is deliberately after the fact: `tokens_used` reflects usage
+/// reported for requests that have already completed (see `crate::usage`
+/// and the design doc's P3 section), so a request that pushes a principal
+/// over budget still completes — only the *next* request is refused. Getting
+/// real-time enforcement would mean parsing every streaming frame to count
+/// tokens as they arrive, which is exactly the per-frame cost this proxy's
+/// whole design exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub tokens_total: u64,
+    pub tokens_used: u64,
+}
+
+impl Budget {
+    #[inline]
+    pub fn exhausted(&self) -> bool {
+        self.tokens_used >= self.tokens_total
     }
 }
 
@@ -160,6 +192,10 @@ pub struct WirePrincipal {
     /// last-known-good cache the same way `virtual_models` already does.
     #[serde(default)]
     pub limits: Option<WireLimits>,
+    /// Absent from a snapshot cached on disk before this field existed —
+    /// same `#[serde(default)]` rationale as `limits`.
+    #[serde(default)]
+    pub budget: Option<WireBudget>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -168,6 +204,12 @@ pub struct WireLimits {
     pub requests_per_min: Option<u32>,
     #[serde(default)]
     pub tokens_per_min: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WireBudget {
+    pub tokens_total: u64,
+    pub tokens_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +278,11 @@ impl Snapshot {
     /// spam an info log). This is what lets the rebuilder tell "the database
     /// was polled" apart from "the database actually changed".
     pub fn content_eq(&self, other: &Snapshot) -> bool {
+        // `principals` carries `Budget.tokens_used`, so a usage report that
+        // pushes a principal over (or further over) budget correctly counts
+        // as a content change here — that is what makes the periodic
+        // rebuilder (`control::api::rebuild_once`) actually publish the
+        // updated counter rather than treating it as noise.
         self.keys == other.keys
             && self.principals == other.principals
             && self.models == other.models
@@ -276,6 +323,7 @@ impl Snapshot {
                 allow_all: true,
                 roles: HashSet::new(),
                 limits: None,
+                budget: None,
             },
         );
         self.keys.insert(
@@ -324,6 +372,10 @@ impl Snapshot {
                     limits: p.limits.map(|l| WireLimits {
                         requests_per_min: l.requests_per_min,
                         tokens_per_min: l.tokens_per_min,
+                    }),
+                    budget: p.budget.map(|b| WireBudget {
+                        tokens_total: b.tokens_total,
+                        tokens_used: b.tokens_used,
                     }),
                 })
                 .collect(),
@@ -428,6 +480,10 @@ impl Snapshot {
                             limits: p.limits.map(|l| Limits {
                                 requests_per_min: l.requests_per_min,
                                 tokens_per_min: l.tokens_per_min,
+                            }),
+                            budget: p.budget.map(|b| Budget {
+                                tokens_total: b.tokens_total,
+                                tokens_used: b.tokens_used,
                             }),
                         },
                     )
@@ -539,6 +595,7 @@ mod tests {
             allow_all: false,
             roles: HashSet::new(),
             limits: None,
+            budget: None,
         };
         Snapshot::for_test(
             vec![(key.to_string(), 1, expires, false)],

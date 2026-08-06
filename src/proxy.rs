@@ -33,8 +33,10 @@ use tracing::{debug, warn};
 
 use crate::multipart;
 use crate::registry::{Backend, BackendUid, InflightGuard, Registry};
-use crate::snapshot::{AuthError, Principal, Snapshot};
+use crate::snapshot::{AuthError, Budget, Principal, PrincipalId, Snapshot};
 use crate::state::AppState;
+use crate::tail_buffer::TailBuffer;
+use crate::usage::{UsageEvent, UsageReporter};
 use std::time::SystemTime;
 
 pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
@@ -347,6 +349,21 @@ async fn proxy_request(
         }
     }
 
+    // Budget enforcement (P3): after the fact, on purpose. Consumption is
+    // only known once a response completes (see the design doc's P3
+    // section), so this compares against `tokens_used` as of the last
+    // successful snapshot rebuild — a request that pushed a principal over
+    // budget still completed; this is what refuses the *next* one. One
+    // integer comparison, no I/O, same cost shape as the rate limiter below.
+    if let Some(principal) = principal {
+        if let Some(budget) = &principal.budget {
+            if budget.exhausted() {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return budget_exceeded_response(budget);
+            }
+        }
+    }
+
     // Rate limiting (P2): one hash lookup and a short, synchronous
     // decrement — see `crate::limiter`'s doc comment for why this stays off
     // the I/O path the same way authorisation does. `Principal::limits ==
@@ -378,6 +395,15 @@ async fn proxy_request(
         }
     }
 
+    // Whether this response is worth reading for real token counts (P3) --
+    // decided once, outside the retry loop, since it depends only on the
+    // principal and the request shape, neither of which changes between
+    // attempts. `model_field.is_none()` restricts injection to the JSON
+    // chat/completions-shaped routes: the multipart audio routes have no
+    // `stream_options` to inject into and are never streaming completions.
+    let needs_usage = principal_needs_usage(principal);
+    let inject_include_usage = needs_usage && streaming && model_field.is_none();
+
     let mut tried: Vec<BackendUid> = Vec::new();
     let mut last_error: Option<String> = None;
 
@@ -395,6 +421,7 @@ async fn proxy_request(
             &requested_model,
             &backend.upstream_model,
             model_field.clone(),
+            inject_include_usage,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -469,7 +496,20 @@ async fn proxy_request(
                     %status,
                     "proxied"
                 );
-                return finish_response(resp, guard);
+                // `needs_usage` (`principal_needs_usage`) is already `false`
+                // whenever `principal` is `None` (an open snapshot has no
+                // principal to attribute usage to), so this `and_then` never
+                // silently drops tracking that was actually wanted.
+                let tracking = needs_usage
+                    .then_some(principal)
+                    .flatten()
+                    .map(|p| UsageTracking {
+                        tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
+                        principal_id: p.id,
+                        model: target_model.clone(),
+                        reporter: state.usage.clone(),
+                    });
+                return finish_response(resp, guard, tracking);
             }
             Err(e) => {
                 backend.note_error();
@@ -486,33 +526,80 @@ async fn proxy_request(
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
 }
 
-/// Rebuild the body with a different `model` value, or hand back the original
-/// bytes when the names already match.
+/// Rebuild the body with a different `model` value and/or an injected
+/// `stream_options.include_usage`, or hand back the original bytes when
+/// neither rewrite is needed.
 ///
-/// The common case is a straight `Bytes` clone (a refcount bump). Only aliases
-/// pay for a rewrite — and for multipart, `model_field` is the already-located
-/// range of the field value, so even that is a splice rather than a re-encode
-/// of the upload.
+/// The common case — no alias, no injection — is a straight `Bytes` clone (a
+/// refcount bump), same allocation as the caller already had. Only a request
+/// that actually needs one of the two rewrites pays for a reparse — and for
+/// multipart, `model_field` is the already-located range of the field value,
+/// so a model rewrite there is a splice rather than a re-encode of the
+/// upload. `inject_include_usage` never applies to multipart (the audio
+/// routes have no `stream_options`, and are never streaming completions), so
+/// callers only ever pass it `true` alongside `model_field: None`.
+///
+/// **Why inject at all** (design doc, "P3 -- Usage accounting and
+/// budgets"): a streaming response only carries a `usage` object if the
+/// request asked for one via `stream_options.include_usage`. Real token
+/// counts are needed for principals with a configured budget or
+/// tokens-per-minute limit, so this proxy asks the upstream for them on
+/// their behalf — but *only* for those principals (see
+/// `principal_needs_usage`), because the injection adds a usage chunk to the
+/// stream that the client itself never asked for.
 fn rewrite_model_if_needed(
     body: &Bytes,
     requested: &str,
     upstream: &str,
     model_field: Option<Range<usize>>,
+    inject_include_usage: bool,
 ) -> Result<Bytes, serde_json::Error> {
-    if requested == upstream {
+    if requested == upstream && !inject_include_usage {
         return Ok(body.clone());
     }
     if let Some(range) = model_field {
-        return Ok(multipart::replace_range(body, range, upstream));
+        return Ok(if requested == upstream {
+            body.clone()
+        } else {
+            multipart::replace_range(body, range, upstream)
+        });
     }
     let mut value: serde_json::Value = serde_json::from_slice(body)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "model".into(),
-            serde_json::Value::String(upstream.to_string()),
-        );
+        if requested != upstream {
+            obj.insert(
+                "model".into(),
+                serde_json::Value::String(upstream.to_string()),
+            );
+        }
+        if inject_include_usage {
+            // Merged into whatever `stream_options` the client already sent
+            // (if any) rather than overwriting the whole object, so a
+            // client-supplied option alongside this one survives the rewrite.
+            let entry = obj
+                .entry("stream_options")
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let Some(stream_options) = entry.as_object_mut() {
+                stream_options.insert("include_usage".into(), serde_json::Value::Bool(true));
+            }
+        }
     }
     Ok(Bytes::from(serde_json::to_vec(&value)?))
+}
+
+/// Whether this principal's real token consumption is worth asking the
+/// upstream for. Scoped narrowly on purpose — see the design doc's stated
+/// consequence: injecting `stream_options.include_usage` adds a chunk the
+/// client did not request, so it must never happen for a principal with
+/// neither a budget nor a token-rate limit configured.
+#[inline]
+fn principal_needs_usage(principal: Option<&Principal>) -> bool {
+    principal.is_some_and(|p| {
+        p.budget.is_some()
+            || p.limits
+                .as_ref()
+                .is_some_and(|l| l.tokens_per_min.is_some())
+    })
 }
 
 fn build_upstream_request(
@@ -546,37 +633,113 @@ fn build_upstream_request(
 }
 
 /// Hand the upstream response to the client, keeping the in-flight guard alive
-/// for as long as the body is still streaming.
-fn finish_response(resp: Response<UpstreamBody>, guard: InflightGuard) -> Response<ResBody> {
+/// for as long as the body is still streaming, and — for a principal with a
+/// budget or a token-rate limit — feeding forwarded bytes into a bounded tail
+/// buffer so real usage can be reported once the stream ends (P3).
+fn finish_response(
+    resp: Response<UpstreamBody>,
+    guard: InflightGuard,
+    tracking: Option<UsageTracking>,
+) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     // Hop-by-hop only: the response body is passed through byte for byte, so
     // an upstream `content-length` remains correct and is worth keeping.
     for name in HOP_BY_HOP {
         parts.headers.remove(*name);
     }
-    Response::from_parts(parts, TrackedBody::new(body, guard).boxed())
+    Response::from_parts(parts, TrackedBody::new(body, guard, tracking).boxed())
+}
+
+/// Everything [`TrackedBody`] needs to turn "the stream ended" into one
+/// `usage::UsageReporter::record` call. Constructed once per request, in
+/// `proxy_request`, only when [`principal_needs_usage`] said this principal's
+/// consumption is worth reading at all.
+struct UsageTracking {
+    tail: TailBuffer,
+    principal_id: PrincipalId,
+    /// The resolved concrete model name (`snapshot::ModelDef::name`), not
+    /// the client-requested one — see `usage::UsageEvent::model`'s doc
+    /// comment for why the data plane only ever reports the name the way the
+    /// snapshot named it.
+    model: String,
+    reporter: UsageReporter,
+}
+
+impl UsageTracking {
+    /// The one parse per request (`TailBuffer::extract_usage`), and the one
+    /// `record` call it feeds if it found anything. A response that never
+    /// carried usage — no `stream_options.include_usage` echoed back, an
+    /// upstream that does not support it, a truncated stream — simply
+    /// reports nothing; see the design doc's stated cost of this whole
+    /// mechanism being "one small parse per request, not per frame".
+    fn finish(mut self) {
+        if let Some(tokens) = self.tail.extract_usage() {
+            self.reporter.record(UsageEvent {
+                principal_id: self.principal_id,
+                model: self.model,
+                prompt_tokens: tokens.prompt_tokens,
+                completion_tokens: tokens.completion_tokens,
+                at: chrono::Utc::now(),
+            });
+        }
+    }
 }
 
 pin_project! {
-    /// Passthrough body that releases an [`InflightGuard`] when the stream ends.
+    /// Passthrough body that releases an [`InflightGuard`] when the stream ends,
+    /// and — when `usage_tracking` is `Some` — mirrors forwarded bytes into a
+    /// bounded tail buffer along the way.
     ///
     /// Deliberately not batching: merging frames that have already arrived was
     /// measured at a 1.000 merge ratio both against the pooled client and
     /// against the owned connection that replaced it, and against a real vLLM,
     /// whose tokens arrive tens of milliseconds apart. There is never a second
     /// frame waiting, so a coalescing buffer here only adds a poll and a branch.
+    ///
+    /// `usage_tracking` is plain (not `#[pin]`): nothing in it is ever polled,
+    /// it is only read from and mutated between polls of `inner`.
     struct TrackedBody {
         #[pin]
         inner: UpstreamBody,
         guard: Option<InflightGuard>,
+        usage_tracking: Option<UsageTracking>,
+    }
+
+    impl PinnedDrop for TrackedBody {
+        /// The parse cannot rely on being polled to `None`.
+        ///
+        /// A non-streaming response carries a `content-length`, so once the last
+        /// frame is out `is_end_stream()` is true and hyper's server simply stops
+        /// polling — the `Ready(None)` that `poll_frame` keys the extraction off
+        /// never arrives. Usage was therefore recorded for streaming responses and
+        /// silently dropped for every non-streaming one, which is the shape the
+        /// budget end-to-end test caught.
+        ///
+        /// This is the same trap the connection pool hit in `upstream::UpstreamBody`
+        /// and is worth the duplicated safety net: `finish()` takes the tracking out
+        /// of the `Option`, so whichever path runs first wins and the other is a
+        /// no-op. Dropping a half-read body still reports whatever the tail holds —
+        /// a client that hung up mid-generation consumed those tokens upstream
+        /// regardless, so not billing them would be the wrong way to be wrong.
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            if let Some(tracking) = this.usage_tracking.take() {
+                tracking.finish();
+            }
+        }
     }
 }
 
 impl TrackedBody {
-    fn new(inner: UpstreamBody, guard: InflightGuard) -> Self {
+    fn new(
+        inner: UpstreamBody,
+        guard: InflightGuard,
+        usage_tracking: Option<UsageTracking>,
+    ) -> Self {
         Self {
             inner,
             guard: Some(guard),
+            usage_tracking,
         }
     }
 }
@@ -591,6 +754,25 @@ impl Body for TrackedBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
         let polled = this.inner.poll_frame(cx);
+        // A memcpy per frame into the bounded tail buffer, never a parse —
+        // see `crate::tail_buffer`'s module doc comment for why this is the
+        // one piece of per-frame work the design accepts.
+        if let Poll::Ready(Some(Ok(frame))) = &polled {
+            if let Some(tracking) = this.usage_tracking.as_mut() {
+                if let Some(data) = frame.data_ref() {
+                    tracking.tail.push(data);
+                }
+            }
+        }
+        // The one parse per request happens here, at clean end-of-stream
+        // only — an aborted stream (the `Err` arm below) has nothing
+        // trustworthy to extract usage from and is left unreported, same as
+        // "no usage found" for any other reason.
+        if let Poll::Ready(None) = &polled {
+            if let Some(tracking) = this.usage_tracking.take() {
+                tracking.finish();
+            }
+        }
         // Release on both clean end-of-stream and error; a client that hangs up
         // mid-generation drops the whole body and the guard with it.
         if let Poll::Ready(None) | Poll::Ready(Some(Err(_))) = polled {
@@ -696,6 +878,36 @@ fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> 
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header("content-type", "application/json")
         .header("retry-after", secs.to_string())
+        .body(full(Bytes::from(body.to_string())))
+        .expect("static response is well-formed")
+}
+
+/// **402, not 429.** Both are defensible for "you may not make this request
+/// right now", but they mean different things and this proxy already uses
+/// 429 for the other one: rate limiting (`rate_limited_response` above) is a
+/// *pacing* problem — the same request succeeds if the caller waits a few
+/// seconds and `Retry-After` says exactly how long. A budget is a *spending*
+/// problem — the caller has consumed the tokens it was allocated for this
+/// window, and no amount of waiting a few seconds fixes that; the earliest
+/// legitimate retry is whenever the window rolls over (hours to a month
+/// away, not something worth promising via `Retry-After`) or whenever an
+/// operator raises the budget. 402 Payment Required is the one status in the
+/// spec whose stated meaning — access denied pending some accounting action,
+/// not merely "try again soon" — actually matches that.
+fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "token budget exhausted: {} of {} tokens used for the current window",
+                budget.tokens_used, budget.tokens_total
+            ),
+            "type": "budget_exceeded",
+            "code": StatusCode::PAYMENT_REQUIRED.as_u16(),
+        }
+    });
+    Response::builder()
+        .status(StatusCode::PAYMENT_REQUIRED)
+        .header("content-type", "application/json")
         .body(full(Bytes::from(body.to_string())))
         .expect("static response is well-formed")
 }
@@ -864,6 +1076,7 @@ mod tests {
                 allow_all: false,
                 roles: HashSet::new(),
                 limits: None,
+                budget: None,
             }],
             vec![],
         )
@@ -900,15 +1113,106 @@ mod tests {
     #[test]
     fn identical_model_names_avoid_a_reserialise() {
         let body = Bytes::from_static(br#"{"model":"m","messages":[]}"#);
-        let out = rewrite_model_if_needed(&body, "m", "m", None).unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", None, false).unwrap();
         // Same allocation, not a copy.
         assert_eq!(out.as_ptr(), body.as_ptr());
+    }
+
+    /// P3's consequence #1, pinned directly: `stream_options.include_usage`
+    /// must land in the upstream body when injection is requested, and the
+    /// untouched path (no alias, no injection) must stay the exact same
+    /// allocation — the same "same allocation, not a copy" property the test
+    /// above pins for the pre-existing alias-rewrite path.
+    #[test]
+    fn include_usage_is_injected_only_when_requested_and_the_untouched_path_is_byte_identical() {
+        let body = Bytes::from_static(br#"{"model":"m","messages":[],"stream":true}"#);
+
+        let untouched = rewrite_model_if_needed(&body, "m", "m", None, false).unwrap();
+        assert_eq!(
+            untouched.as_ptr(),
+            body.as_ptr(),
+            "no rewrite requested must mean no reallocation at all"
+        );
+
+        let injected = rewrite_model_if_needed(&body, "m", "m", None, true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&injected).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
+    }
+
+    /// A client that already set its own `stream_options` keeps whatever
+    /// else it put there — injection merges `include_usage` in rather than
+    /// clobbering the object.
+    #[test]
+    fn include_usage_injection_merges_into_an_existing_stream_options_object() {
+        let body = Bytes::from_static(
+            br#"{"model":"m","messages":[],"stream":true,"stream_options":{"other":true}}"#,
+        );
+        let out = rewrite_model_if_needed(&body, "m", "m", None, true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
+        assert_eq!(parsed["stream_options"]["other"], true);
+    }
+
+    /// `principal_needs_usage`, pinned directly: only a principal with a
+    /// configured budget or a tokens-per-minute limit is worth reading real
+    /// usage for — an unconfigured principal, a principal with only a
+    /// requests-per-minute limit, and no principal at all (an open
+    /// snapshot) all say no, exactly per the design doc's stated
+    /// consequence that injection must never happen where it was not
+    /// specifically asked for by configuration.
+    #[test]
+    fn only_a_principal_with_a_budget_or_a_token_limit_needs_usage() {
+        fn principal(limits: Option<crate::limiter::Limits>, budget: Option<Budget>) -> Principal {
+            Principal {
+                id: 1,
+                name: "p".into(),
+                allowed_models: HashSet::new(),
+                allow_all: true,
+                roles: HashSet::new(),
+                limits,
+                budget,
+            }
+        }
+
+        assert!(!principal_needs_usage(None), "no principal at all");
+        assert!(!principal_needs_usage(Some(&principal(None, None))));
+        assert!(!principal_needs_usage(Some(&principal(
+            Some(crate::limiter::Limits {
+                requests_per_min: Some(10),
+                tokens_per_min: None,
+            }),
+            None
+        ))));
+        assert!(principal_needs_usage(Some(&principal(
+            Some(crate::limiter::Limits {
+                requests_per_min: None,
+                tokens_per_min: Some(10),
+            }),
+            None
+        ))));
+        assert!(principal_needs_usage(Some(&principal(
+            None,
+            Some(Budget {
+                tokens_total: 10,
+                tokens_used: 0,
+            })
+        ))));
+    }
+
+    #[test]
+    fn budget_exceeded_uses_402_not_429() {
+        let resp = budget_exceeded_response(&Budget {
+            tokens_total: 10,
+            tokens_used: 10,
+        });
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
     #[test]
     fn alias_rewrites_the_model_field() {
         let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[],"temperature":0.7}"#);
-        let out = rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B", None).unwrap();
+        let out =
+            rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B", None, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(parsed["model"], "Qwen/Qwen3-30B-A3B");
         // Other parameters must survive the round trip.
@@ -927,9 +1231,14 @@ mod tests {
              --xy--\r\n",
         );
         let range = multipart::find_field(&body, "xy", "model").unwrap();
-        let out =
-            rewrite_model_if_needed(&body, "whisper-1", "Systran/faster-whisper", Some(range))
-                .unwrap();
+        let out = rewrite_model_if_needed(
+            &body,
+            "whisper-1",
+            "Systran/faster-whisper",
+            Some(range),
+            false,
+        )
+        .unwrap();
 
         let model = multipart::find_field(&out, "xy", "model").unwrap();
         assert_eq!(
@@ -946,7 +1255,7 @@ mod tests {
             b"--xy\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm\r\n--xy--\r\n",
         );
         let range = multipart::find_field(&body, "xy", "model").unwrap();
-        let out = rewrite_model_if_needed(&body, "m", "m", Some(range)).unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", Some(range), false).unwrap();
         assert_eq!(out.as_ptr(), body.as_ptr());
     }
 
@@ -1048,6 +1357,7 @@ model_list:
             allow_all: false,
             roles: HashSet::new(),
             limits: None,
+            budget: None,
         };
         let granted_virtual_only = Principal {
             id: 2,
@@ -1056,6 +1366,7 @@ model_list:
             allow_all: false,
             roles: HashSet::new(),
             limits: None,
+            budget: None,
         };
 
         let target = resolve_target_model(

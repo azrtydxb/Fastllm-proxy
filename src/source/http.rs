@@ -110,6 +110,7 @@ mod tests {
                 allow_all: false,
                 roles: Default::default(),
                 limits: None,
+                budget: None,
             }],
             vec![],
         )

@@ -6,7 +6,7 @@
 
 use crate::control::secrets::{self, EncryptionKey};
 use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
-use crate::snapshot::{BackendDef, KeyEntry, ModelDef, Principal, Snapshot};
+use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
@@ -156,6 +156,8 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         })
         .collect();
 
+    let budgets_by_principal = roll_over_and_load_budgets(pool).await?;
+
     let mut principals = HashMap::new();
     for (id, name) in principal_rows {
         // One query per principal: see the module-level rationale above.
@@ -197,6 +199,7 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
                 allow_all,
                 roles: role_names.into_iter().collect(),
                 limits: limits_by_principal.get(&id).copied(),
+                budget: budgets_by_principal.get(&id).copied(),
             },
         );
     }
@@ -237,6 +240,134 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         virtual_models,
         open: false,
     })
+}
+
+/// P3's three fixed window lengths. Deliberately *not* calendar arithmetic —
+/// `'monthly'` is a rolling 30-day period, not "resets on the 1st" — because
+/// getting true calendar-month rollover right (28/29/30/31-day months,
+/// timezone-of-record for "the 1st") is real complexity this design does not
+/// need to take on to satisfy "a monthly budget resets". An operator who
+/// needs billing-calendar precision is better served by reading
+/// `usage_events` directly than by this coarse a mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetWindow {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl BudgetWindow {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "daily" => Some(Self::Daily),
+            "weekly" => Some(Self::Weekly),
+            "monthly" => Some(Self::Monthly),
+            _ => None,
+        }
+    }
+
+    fn duration(self) -> chrono::Duration {
+        match self {
+            Self::Daily => chrono::Duration::days(1),
+            Self::Weekly => chrono::Duration::days(7),
+            Self::Monthly => chrono::Duration::days(30),
+        }
+    }
+}
+
+/// Pure rollover decision, factored out of the database call so it can be
+/// tested without Postgres: has this budget's window elapsed as of `now`,
+/// and if so, what does the reset row look like?
+///
+/// Only ever advances *one* window forward, not however many were missed
+/// while nobody looked — a budget dormant for three missed months resets to
+/// `window_start + 30d` once, not to "now" and not to three resets in a row.
+/// The next `build_snapshot` (run on the same `snapshot_rebuild_interval` as
+/// everything else) catches it up further if it is still elapsed, which for
+/// any realistic rebuild interval is instantaneous from an operator's point
+/// of view — the alternative, looping here to catch up in one call, buys
+/// nothing but a more complicated function for a case that is not
+/// meaningfully slower without it.
+fn rolled_over(
+    window_start: chrono::DateTime<chrono::Utc>,
+    window: BudgetWindow,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let elapsed_at = window_start + window.duration();
+    if now >= elapsed_at {
+        Some(elapsed_at)
+    } else {
+        None
+    }
+}
+
+/// Roll over any budget whose window has elapsed (persisting the reset to
+/// Postgres so the next usage report accumulates onto zero, not onto the
+/// previous window's total), then return every principal's current
+/// `Budget` — rolled-over rows included — keyed by principal id.
+///
+/// One query per elapsed row rather than a single bulk `UPDATE`, matching
+/// this module's existing N+1-is-fine rationale (see the module doc
+/// comment): rollover checks run once per snapshot rebuild against at most a
+/// few dozen budgets, not on the request path.
+async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64, Budget>> {
+    type BudgetRow = (i64, i64, i64, chrono::DateTime<chrono::Utc>, String);
+    let rows: Vec<BudgetRow> = sqlx::query_as(
+        "SELECT principal_id, tokens_total, tokens_used, window_start, budget_window FROM budgets",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let now = chrono::Utc::now();
+    let mut budgets = HashMap::with_capacity(rows.len());
+    for (principal_id, tokens_total, tokens_used, window_start, window_str) in rows {
+        // An unparseable `window` value can only reach here via hand-written
+        // SQL bypassing the CHECK constraint — contained to this one row
+        // (never rolled over, reported as-is) rather than failing the whole
+        // rebuild, the same "one bad row" pattern this module already
+        // applies to an undecryptable backend and an unparseable routing
+        // rule.
+        let Some(window) = BudgetWindow::parse(&window_str) else {
+            tracing::error!(
+                principal_id,
+                window = %window_str,
+                "dropping budget rollover: unrecognised window value; the budget is still \
+                 published, but will never roll over until the row is corrected"
+            );
+            budgets.insert(
+                principal_id,
+                Budget {
+                    tokens_total: tokens_total.max(0) as u64,
+                    tokens_used: tokens_used.max(0) as u64,
+                },
+            );
+            continue;
+        };
+
+        let effective_used = match rolled_over(window_start, window, now) {
+            Some(new_start) => {
+                sqlx::query(
+                    "UPDATE budgets SET tokens_used = 0, window_start = $2, updated_at = now()
+                     WHERE principal_id = $1",
+                )
+                .bind(principal_id)
+                .bind(new_start)
+                .execute(pool)
+                .await?;
+                0i64
+            }
+            None => tokens_used,
+        };
+
+        budgets.insert(
+            principal_id,
+            Budget {
+                tokens_total: tokens_total.max(0) as u64,
+                tokens_used: effective_used.max(0) as u64,
+            },
+        );
+    }
+    Ok(budgets)
 }
 
 /// Resolve `virtual_models`/`routing_rules`/`rule_targets`/
@@ -403,6 +534,30 @@ mod tests {
             set,
             ["a".to_string(), "b".to_string()].into_iter().collect()
         );
+    }
+
+    #[test]
+    fn a_window_still_in_progress_does_not_roll_over() {
+        let start = chrono::Utc::now();
+        let now = start + chrono::Duration::hours(1);
+        assert_eq!(rolled_over(start, BudgetWindow::Daily, now), None);
+    }
+
+    #[test]
+    fn an_elapsed_window_rolls_over_to_exactly_one_window_forward() {
+        let start = chrono::Utc::now() - chrono::Duration::days(2);
+        let now = chrono::Utc::now();
+        let new_start = rolled_over(start, BudgetWindow::Daily, now)
+            .expect("a daily window two days stale must roll over");
+        assert_eq!(new_start, start + chrono::Duration::days(1));
+    }
+
+    #[test]
+    fn budget_window_parses_the_three_known_values_and_rejects_anything_else() {
+        assert_eq!(BudgetWindow::parse("daily"), Some(BudgetWindow::Daily));
+        assert_eq!(BudgetWindow::parse("weekly"), Some(BudgetWindow::Weekly));
+        assert_eq!(BudgetWindow::parse("monthly"), Some(BudgetWindow::Monthly));
+        assert_eq!(BudgetWindow::parse("fortnightly"), None);
     }
 
     fn unique_name(tag: &str) -> String {
@@ -744,6 +899,138 @@ mod tests {
                 requests_per_min: Some(10),
                 tokens_per_min: None,
             })
+        );
+    }
+
+    /// A row in `budgets` reaches `Principal.budget`, and a principal with no
+    /// row is unlimited (`None`) — the same shape as the limits test above.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_configured_budget_reaches_the_snapshot_and_an_unconfigured_principal_is_unlimited() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let budgeted_name = unique_name("budgeted-principal");
+        let budgeted_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&budgeted_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO budgets (principal_id, tokens_total, tokens_used, budget_window)
+             VALUES ($1, 1000, 250, 'monthly')",
+        )
+        .bind(budgeted_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let unbudgeted_name = unique_name("unbudgeted-principal");
+        let unbudgeted_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&unbudgeted_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+
+        let budgeted = snapshot
+            .principals
+            .get(&(budgeted_id as u64))
+            .expect("the budgeted principal must be in the snapshot");
+        assert_eq!(
+            budgeted.budget,
+            Some(Budget {
+                tokens_total: 1000,
+                tokens_used: 250,
+            })
+        );
+
+        let unbudgeted = snapshot
+            .principals
+            .get(&(unbudgeted_id as u64))
+            .expect("the unconfigured principal must be in the snapshot too");
+        assert_eq!(
+            unbudgeted.budget, None,
+            "no row in `budgets` must mean unlimited, not a bucket with capacity zero"
+        );
+    }
+
+    /// The end-to-end version of `an_elapsed_window_rolls_over_to_exactly_one_window_forward`:
+    /// a budget whose window has actually elapsed, sitting in Postgres, comes
+    /// back from `build_snapshot` reset to zero — and the row itself is
+    /// updated, not just the in-memory value, so the next usage report
+    /// accumulates onto zero rather than the stale total.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn an_elapsed_budget_window_is_rolled_over_by_build_snapshot() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let name = unique_name("stale-window-principal");
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stale_start = chrono::Utc::now() - chrono::Duration::days(2);
+        sqlx::query(
+            "INSERT INTO budgets (principal_id, tokens_total, tokens_used, window_start, budget_window)
+             VALUES ($1, 100, 100, $2, 'daily')",
+        )
+        .bind(id)
+        .bind(stale_start)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let principal = snapshot.principals.get(&(id as u64)).unwrap();
+        assert_eq!(
+            principal.budget,
+            Some(Budget {
+                tokens_total: 100,
+                tokens_used: 0,
+            }),
+            "a daily budget two days stale must have rolled over to zero usage"
+        );
+
+        let (persisted_used, persisted_start): (i64, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT tokens_used, window_start FROM budgets WHERE principal_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            persisted_used, 0,
+            "the reset must be persisted, not just returned"
+        );
+        // Not an exact `stale_start + 1 day`: this test runs against the
+        // same live database as `tests/budgets.rs`'s end-to-end test, whose
+        // `--role all` process rebuilds (and therefore rolls over every
+        // stale budget it finds, this row included) once a second for as
+        // long as it runs. Advancing "exactly one window forward per call"
+        // is `rolled_over`'s documented behaviour (see its doc comment) —
+        // several calls in quick succession legitimately advance the window
+        // several times, which an exact equality here would misreport as a
+        // bug. What must hold regardless of how many rebuilds raced this
+        // one: the window moved forward at least once and landed no later
+        // than now.
+        assert!(
+            persisted_start >= stale_start + chrono::Duration::days(1),
+            "the window must have advanced at least one full day"
+        );
+        assert!(
+            persisted_start <= chrono::Utc::now(),
+            "rollover must never advance a window into the future"
         );
     }
 }

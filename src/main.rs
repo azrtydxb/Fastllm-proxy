@@ -501,19 +501,30 @@ async fn run_all(cli: Cli) -> Result<()> {
             );
         }
 
-        // `disabled()`: see `usage::UsageReporter::disabled`'s doc comment
-        // for why `--role all` does not loop a `POST /usage` HTTP request
-        // back into its own process here — that decision belongs to whatever
-        // P2 wiring actually calls `record`, not to this scaffolding.
+        // P3 wires `usage::record` in: `--role all` is one process, so
+        // rather than inventing a second, in-process delivery path for
+        // usage events, this loops a `POST /usage` request back to its own
+        // admin API over loopback — the exact same wire protocol and the
+        // exact same `budgets.tokens_used` increment (`control::api::post_usage`)
+        // that an external `Http`-mode proxy already uses. `127.0.0.1`
+        // specifically, not `cli.host`: this is always same-host by
+        // construction, and `cli.host` may be `0.0.0.0`, which is not a
+        // valid address to *connect* to.
+        let admin_tls = admin_tls_config(&cli)?;
+        let admin_scheme = if admin_tls.is_some() { "https" } else { "http" };
+        let usage = fastllm_proxy::usage::spawn(
+            fastllm_proxy::usage::ReporterConfig {
+                url: format!("{admin_scheme}://127.0.0.1:{}/usage", cli.admin_port),
+                token: proxy_token.clone(),
+                queue_capacity: 10_000,
+                batch_max: 500,
+                flush_interval: Duration::from_secs(5),
+            },
+            Arc::clone(&client),
+        );
+
         let state = build_app_state(
-            &cli,
-            client,
-            interner,
-            &tuning,
-            None,
-            master_key,
-            snap,
-            fastllm_proxy::usage::UsageReporter::disabled(),
+            &cli, client, interner, &tuning, None, master_key, snap, usage,
         )?;
 
         let admin_addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
@@ -524,7 +535,6 @@ async fn run_all(cli: Cli) -> Result<()> {
         let admin_pool = pool.clone();
         let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
         let admin_token = proxy_token;
-        let admin_tls = admin_tls_config(&cli)?;
         fastllm_proxy::control::api::spawn_snapshot_rebuilder(
             pool.clone(),
             Arc::clone(&admin_sink),

@@ -163,6 +163,7 @@ fn authorisation_reads_only_the_snapshot() {
             allow_all: false,
             roles: std::collections::HashSet::new(),
             limits: None,
+            budget: None,
         },
     );
     let snap = Snapshot {

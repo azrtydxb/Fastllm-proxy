@@ -19,6 +19,7 @@ use axum::{Json, Router};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1382,6 +1383,137 @@ async fn delete_limits(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// --- Budgets (P3) -------------------------------------------------------
+//
+// Same shape as `limits` just above: read the current state, upsert a row,
+// `refresh(&ctx)` so the write reaches the published snapshot. See
+// `migrations/0010_budgets.sql` for the schema and
+// `crate::control::build::roll_over_and_load_budgets` for how a row here
+// becomes `Principal.budget` (including window rollover, which runs on
+// every snapshot rebuild, not just here).
+
+const BUDGET_WINDOWS: [&str; 3] = ["daily", "weekly", "monthly"];
+
+#[derive(Serialize)]
+struct BudgetView {
+    principal_id: i64,
+    principal: String,
+    tokens_total: i64,
+    tokens_used: i64,
+    window: String,
+    window_start: chrono::DateTime<chrono::Utc>,
+}
+
+async fn list_budgets(State(ctx): State<Ctx>) -> Result<Json<Vec<BudgetView>>, ApiError> {
+    type BudgetRow = (i64, String, i64, i64, String, chrono::DateTime<chrono::Utc>);
+    let rows: Vec<BudgetRow> = sqlx::query_as(
+        "SELECT b.principal_id, p.name, b.tokens_total, b.tokens_used, b.budget_window, b.window_start
+         FROM budgets b JOIN principals p ON p.id = b.principal_id
+         ORDER BY b.principal_id",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing budgets", &e))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(principal_id, principal, tokens_total, tokens_used, window, window_start)| {
+                    BudgetView {
+                        principal_id,
+                        principal,
+                        tokens_total,
+                        tokens_used,
+                        window,
+                        window_start,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PutBudget {
+    tokens_total: i64,
+    window: String,
+}
+
+/// `PUT`, not `POST`: same upsert-on-the-principal shape `put_limits` uses,
+/// matching `budgets`' one-row-per-principal primary key. Deliberately
+/// leaves `tokens_used`/`window_start` alone on an update — raising or
+/// lowering `tokens_total` (e.g. after a billing conversation) must not
+/// incidentally reset a principal's consumption or restart its window; that
+/// is what `DELETE` followed by a fresh `PUT`, or waiting for the window to
+/// roll over on its own, are for.
+async fn put_budget(
+    State(ctx): State<Ctx>,
+    Path(principal_id): Path<i64>,
+    Json(body): Json<PutBudget>,
+) -> Result<StatusCode, ApiError> {
+    if body.tokens_total <= 0 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "tokens_total must be a positive number of tokens",
+        ));
+    }
+    if !BUDGET_WINDOWS.contains(&body.window.as_str()) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "window {:?} is not one of {}",
+                body.window,
+                BUDGET_WINDOWS.join(", ")
+            ),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO budgets (principal_id, tokens_total, budget_window)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (principal_id)
+         DO UPDATE SET tokens_total = EXCLUDED.tokens_total, budget_window = EXCLUDED.budget_window,
+                        updated_at = now()",
+    )
+    .bind(principal_id)
+    .bind(body.tokens_total)
+    .bind(&body.window)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no principal with id {principal_id}; GET /admin/principals lists the ids \
+                     that exist"
+                ),
+            )
+        } else {
+            db_error("budget upsert", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_budget(
+    State(ctx): State<Ctx>,
+    Path(principal_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM budgets WHERE principal_id = $1")
+        .bind(principal_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("budget deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("principal {principal_id} has no configured budget to remove"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct ReconcileCountWire {
     principal_id: u64,
@@ -1672,7 +1804,7 @@ async fn post_usage(
     // a `NOT NULL` foreign key the `INSERT` could violate) are what makes an
     // unresolvable row silently absent from `RETURNING` instead of failing
     // the statement outright.
-    let accepted_ids: Vec<i64> = sqlx::query_scalar(
+    let accepted_rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], $5::timestamptz[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at)
@@ -1682,7 +1814,7 @@ async fn post_usage(
          FROM input i
          JOIN principals p ON p.id = i.principal_id
          JOIN models m ON m.name = i.model_name
-         RETURNING id",
+         RETURNING id, principal_id, prompt_tokens, completion_tokens",
     )
     .bind(&principal_ids)
     .bind(&models)
@@ -1693,11 +1825,62 @@ async fn post_usage(
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
 
-    let accepted = accepted_ids.len();
+    let accepted = accepted_rows.len();
+    apply_usage_to_budgets(&ctx.pool, &accepted_rows).await;
+
     Ok(Json(UsageBatchResponse {
         accepted,
         dropped: submitted - accepted,
     }))
+}
+
+/// The other half of `budgets.tokens_used` being "the running counter the
+/// snapshot carries, reconciled from [`usage_events`]" (migrations/0005's
+/// comment): every accepted event's tokens are folded into its principal's
+/// budget row, if one exists. `principal_id` here is not `pub(crate)` typed
+/// as `PrincipalId` — this is raw `i64` straight off the `RETURNING` clause,
+/// matching every other id in this file.
+///
+/// One `UPDATE` per *distinct* principal in the batch, not per event: a
+/// batch is typically many events for a handful of principals (P2's
+/// reconciliation-scale traffic, not one row per caller), so grouping first
+/// keeps this proportional to the number of principals reporting, not the
+/// number of requests they made.
+///
+/// A failure here is logged and otherwise swallowed rather than turning an
+/// already-successful usage ingest into a 500: the durable audit log
+/// (`usage_events`) is already committed by the time this runs, and a
+/// missed budget increment only means enforcement is stale until the next
+/// successful one — not that billing data was lost. This mirrors `refresh`'s
+/// same reasoning a few lines below.
+async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, i64, i64, i64)]) {
+    let mut totals: HashMap<i64, i64> = HashMap::new();
+    for (_id, principal_id, prompt_tokens, completion_tokens) in accepted_rows {
+        *totals.entry(*principal_id).or_insert(0) += prompt_tokens + completion_tokens;
+    }
+    for (principal_id, total) in totals {
+        if total <= 0 {
+            continue;
+        }
+        if let Err(e) = sqlx::query(
+            "UPDATE budgets SET tokens_used = tokens_used + $2, updated_at = now()
+             WHERE principal_id = $1",
+        )
+        .bind(principal_id)
+        .bind(total)
+        .execute(pool)
+        .await
+        {
+            tracing::error!(
+                error = %e,
+                principal_id,
+                total,
+                "could not apply reported usage to that principal's budget; usage_events is \
+                 unaffected, but budget enforcement is now stale for this principal until the \
+                 next successful update"
+            );
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1777,6 +1960,11 @@ pub async fn serve(
         .route(
             "/admin/principals/{id}/limits",
             put(put_limits).delete(delete_limits),
+        )
+        .route("/admin/budgets", get(list_budgets))
+        .route(
+            "/admin/principals/{id}/budget",
+            put(put_budget).delete(delete_budget),
         )
         .route("/admin/health", get(admin_health))
         .route("/snapshot", get(get_snapshot))
@@ -2825,5 +3013,204 @@ mod tests {
         // pin, exercised here through the HTTP-facing wrapper.
         assert_eq!(resp.0.allowances[0].requests_share, 1.0);
         assert_eq!(resp.0.allowances[0].tokens_share, 1.0);
+    }
+
+    // --- Budgets (P3) ---------------------------------------------------
+
+    /// Same write-path proof `put_and_delete_limits_reach_the_published_snapshot`
+    /// makes for `limits`: `put_budget` reaches the published snapshot,
+    /// `delete_budget` removes it again, and the principal ends up
+    /// unlimited afterward — not limited to zero.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn put_and_delete_budget_reach_the_published_snapshot() {
+        let (ctx, cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("budget-route-principal")).await;
+
+        put_budget(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutBudget {
+                tokens_total: 500,
+                window: "daily".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let published = cache
+            .current_snapshot()
+            .principals
+            .get(&(principal_id as u64))
+            .expect("the principal must be in the published snapshot")
+            .budget;
+        assert_eq!(
+            published,
+            Some(crate::snapshot::Budget {
+                tokens_total: 500,
+                tokens_used: 0,
+            })
+        );
+
+        let listed = list_budgets(State(ctx.clone())).await.unwrap();
+        assert!(listed
+            .0
+            .iter()
+            .any(|b| b.principal_id == principal_id && b.tokens_total == 500));
+
+        delete_budget(State(ctx.clone()), Path(principal_id))
+            .await
+            .unwrap();
+        let published_after_delete = cache
+            .current_snapshot()
+            .principals
+            .get(&(principal_id as u64))
+            .expect("the principal itself is not deleted")
+            .budget;
+        assert_eq!(
+            published_after_delete, None,
+            "removing the budget must make the principal unlimited, not limited to zero"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn put_budget_rejects_a_bad_window_or_non_positive_total() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("bad-budget-principal")).await;
+
+        let err = put_budget(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutBudget {
+                tokens_total: 100,
+                window: "fortnightly".into(),
+            }),
+        )
+        .await
+        .expect_err("an unrecognised window must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        let err = put_budget(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutBudget {
+                tokens_total: 0,
+                window: "daily".into(),
+            }),
+        )
+        .await
+        .expect_err("a non-positive tokens_total must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn deleting_a_budget_that_does_not_exist_is_not_found() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("no-budget-principal")).await;
+        let err = delete_budget(State(ctx.clone()), Path(principal_id))
+            .await
+            .expect_err("no row to delete");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    /// The other half of P3's usage flow: `POST /usage` does not just write
+    /// `usage_events`, it also folds accepted rows into `budgets.tokens_used`
+    /// — this is what lets a completed request's *real* token count, not the
+    /// request path's estimate, push a principal toward (or over) its
+    /// budget.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_usage_report_increments_the_matching_principals_budget() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("budget-usage-principal")).await;
+        let model_name = unique_name("budget-usage-model");
+        let _ = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        put_budget(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutBudget {
+                tokens_total: 1000,
+                window: "monthly".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // usage_event(..) below is prompt_tokens: 10, completion_tokens: 5 —
+        // 15 tokens per event, two events, 30 total.
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![
+                    usage_event(principal_id, &model_name),
+                    usage_event(principal_id, &model_name),
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.accepted, 2);
+
+        let tokens_used: i64 =
+            sqlx::query_scalar("SELECT tokens_used FROM budgets WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(tokens_used, 30);
+    }
+
+    /// A usage report for a principal with no configured budget must not
+    /// error or create a row — `apply_usage_to_budgets`'s `UPDATE` simply
+    /// matches zero rows, same as any other principal with nothing
+    /// configured.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_usage_report_for_an_unbudgeted_principal_creates_no_budget_row() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("no-budget-usage-principal")).await;
+        let model_name = unique_name("no-budget-usage-model");
+        let _ = post_model(
+            State(ctx.clone()),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![usage_event(principal_id, &model_name)],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.accepted, 1);
+
+        let row: Option<i64> =
+            sqlx::query_scalar("SELECT tokens_used FROM budgets WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .unwrap();
+        assert!(
+            row.is_none(),
+            "no budget row must be created out of thin air"
+        );
     }
 }

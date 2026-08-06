@@ -151,6 +151,9 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `GET /admin/limits` | Every principal with a configured rate limit |
 | `PUT /admin/principals/{id}/limits` | `{"requests_per_min":..., "tokens_per_min":...}`. Either or both; upserts the one row this principal may have |
 | `DELETE /admin/principals/{id}/limits` | Remove the limit — the principal becomes unlimited, not limited to zero |
+| `GET /admin/budgets` | Every principal with a configured token budget, including current consumption |
+| `PUT /admin/principals/{id}/budget` | `{"tokens_total":..., "window":"daily"\|"weekly"\|"monthly"}`. Upserts the one row this principal may have; leaves `tokens_used` and the window's start alone on an update |
+| `DELETE /admin/principals/{id}/budget` | Remove the budget — the principal becomes unlimited, not limited to zero |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
 
@@ -172,9 +175,18 @@ On the client side, `--role proxy` in `Http` mode (`--control-url https://...`) 
 
 ### `POST /usage`: the reverse channel
 
-Defined now so the wire protocol never has to reshape later, even though nothing calls it yet — P2 wires real token counting into the request path. `--role proxy` holds a `usage::UsageReporter`: a bounded queue plus a background flush task that batches events and posts them to `/usage` on its own schedule, authenticated with the same `--proxy-token` as `/snapshot`. Recording an event (`UsageReporter::record`) is a non-blocking `try_send` — a full queue means the control plane is not keeping up, and the event is dropped rather than applying backpressure to inference (the design's stated tradeoff: "dropping usage rather than blocking a request is deliberate — billing accuracy is not worth failing inference"). Dropped events are counted and exposed on `/metrics` as `fastllm_usage_reports_dropped_total`, so the loss is visible instead of silent.
+`--role proxy` holds a `usage::UsageReporter`: a bounded queue plus a background flush task that batches events and posts them to `/usage` on its own schedule, authenticated with the same `--proxy-token` as `/snapshot`. Recording an event (`UsageReporter::record`) is a non-blocking `try_send` — a full queue means the control plane is not keeping up, and the event is dropped rather than applying backpressure to inference (the design's stated tradeoff: "dropping usage rather than blocking a request is deliberate — billing accuracy is not worth failing inference"). Dropped events are counted and exposed on `/metrics` as `fastllm_usage_reports_dropped_total`, so the loss is visible instead of silent. `--role all` loops this same request back to its own admin API over `127.0.0.1` rather than inventing a second, in-process delivery path.
 
-On the control-plane side, `POST /usage` accepts a batch and persists it to `usage_events`. A record naming a `principal_id` or model that no longer exists is dropped from the batch rather than failing the whole request — one stale id from one replica must not poison every other principal's usage in the same flush interval.
+On the control-plane side, `POST /usage` accepts a batch, persists it to `usage_events`, and folds each event's tokens into its principal's `budgets.tokens_used`, if that principal has a configured budget. A record naming a `principal_id` or model that no longer exists is dropped from the batch rather than failing the whole request — one stale id from one replica must not poison every other principal's usage in the same flush interval.
+
+### P3: usage accounting and budgets
+
+The proxy never parses response bodies — that is its whole performance story — but usage lives in the body, so this is the one place that comes under tension. The resolution:
+
+- **Getting the numbers.** A non-streaming response already carries a top-level `usage` object. A streaming one only does if the request set `stream_options.include_usage`, so `src/proxy.rs`'s `rewrite_model_if_needed` injects that field into the upstream body — reusing the same body-rewrite path that already exists for model aliases — but **only** for a principal with a configured budget or a `tokens_per_min` limit (`principal_needs_usage`), never globally, because the injection adds a usage chunk the client did not ask for.
+- **Reading them without becoming a parser.** `src/tail_buffer.rs`'s `TailBuffer` keeps a fixed-size (8 KiB) ring of the last bytes forwarded — `TrackedBody::poll_frame` in `src/proxy.rs` mirrors every frame into it with a memcpy, never a parse, alongside the pass-through that already exists. At clean end of stream, and only then, the tail is parsed once for a trailing `usage` object (streaming SSE or non-streaming JSON, tried in that order) and the result — or nothing, if none was found, which is an ordinary outcome, not an error — is handed to `usage::record`. A response larger than the buffer, or a stream that ends mid-frame, still costs exactly one bounded parse and never panics.
+- **Enforcement is after the fact.** `Principal.budget` is pre-resolved into the snapshot (`control::build::roll_over_and_load_budgets`), so the request path's check is one integer comparison, no I/O — the same shape as the rate limiter just above it. A request that pushes a principal over budget still completes; the *next* one is refused, with **402 Payment Required**, not 429: rate limiting (429) is a pacing problem where waiting a few seconds fixes it, and `Retry-After` says how long; a budget is a spending problem where no amount of waiting helps until the window rolls over or an operator raises the limit, which is what 402's stated meaning — access denied pending an accounting action — actually matches.
+- **Budgets roll over.** `daily`/`weekly`/`monthly` (fixed-length — 1/7/30 days, not calendar-month arithmetic) checked on every snapshot rebuild; an elapsed window resets `tokens_used` to zero and persists the new `window_start`, advancing exactly one window forward even if several were missed while nobody looked.
 
 ### Rate limits
 
@@ -254,9 +266,14 @@ auth:
       limits:                             # optional; absent means unlimited
         requests_per_min: 60
         tokens_per_min: 100000
+      budget:                             # optional; absent means unlimited
+        tokens_total: 1000000
+        tokens_used: 0                    # optional starting point; static —
+                                           # File mode has no reconciliation
+                                           # loop to advance it on its own
 ```
 
-Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move. `limits` is `File` mode's mirror of the control plane's `limits` table (see "Rate limits" above) — either field alone, both, or neither.
+Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move. `limits` is `File` mode's mirror of the control plane's `limits` table (see "Rate limits" above) — either field alone, both, or neither. `budget` is the same mirror of the `budgets` table (see "P3: usage accounting and budgets" above).
 
 ### Tuning affinity
 

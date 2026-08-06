@@ -76,6 +76,10 @@ impl SnapshotSource for FileSource {
                         requests_per_min: l.requests_per_min,
                         tokens_per_min: l.tokens_per_min,
                     }),
+                    budget: k.budget.map(|b| crate::snapshot::Budget {
+                        tokens_total: b.tokens_total,
+                        tokens_used: b.tokens_used,
+                    }),
                 },
             );
             keys.insert(

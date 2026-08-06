@@ -14,5 +14,6 @@ pub mod routing;
 pub mod snapshot;
 pub mod source;
 pub mod state;
+pub mod tail_buffer;
 pub mod upstream;
 pub mod usage;
