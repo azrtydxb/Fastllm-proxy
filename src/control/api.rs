@@ -18,6 +18,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// 32 bytes of OS randomness. High entropy is what makes SHA-256 the right
@@ -111,6 +112,14 @@ struct Ctx {
     proxy_token: String,
     cache: Arc<dyn SnapshotSink>,
     key: Arc<EncryptionKey>,
+    /// How many times `refresh` has run `build_snapshot` after a write and
+    /// had it fail. The write itself already committed by the time `refresh`
+    /// runs — see `refresh`'s doc comment for why a failure here is
+    /// deliberately not turned into a 5xx on the route that triggered it —
+    /// so this counter, surfaced on `GET /admin/health`, is what makes that
+    /// otherwise-silent divergence between "the database" and "the published
+    /// snapshot" something an operator can actually notice.
+    snapshot_rebuild_failures: Arc<AtomicU64>,
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
@@ -801,9 +810,36 @@ async fn list_roles(State(ctx): State<Ctx>) -> Result<Json<Vec<RoleView>>, ApiEr
 
 /// Rebuild immediately after a write so revocation is bounded by the proxy's
 /// poll interval alone, not by poll interval plus rebuild interval.
+///
+/// The database write this follows has already committed by the time this
+/// runs — every caller is a route that just did its `INSERT`/`UPDATE`/
+/// `DELETE` and returned success to the client — so a rebuild failure here
+/// must not turn that already-successful write into a 5xx: the operator
+/// asked for a real change and got one, and reporting failure would be a
+/// lie in the other direction. What must not happen is *silence*: a failed
+/// rebuild means the published snapshot (and, in `--role all`, the routing
+/// `Registry` built from it — see `SnapshotSink`) has just fallen out of
+/// sync with the database, and nothing else notices until either this route
+/// is hit again or `spawn_snapshot_rebuilder`'s next tick happens to
+/// succeed. So: log it loudly, at error level, with the cause, and bump a
+/// counter `GET /admin/health` reports — cheap enough to always run, and it
+/// turns "silently wrong until someone notices by accident" into something
+/// an operator (or an alert on that endpoint) can actually see.
 async fn refresh(ctx: &Ctx) {
-    if let Ok(snap) = build_snapshot(&ctx.pool, &ctx.key).await {
-        ctx.cache.store_snapshot(snap);
+    match build_snapshot(&ctx.pool, &ctx.key).await {
+        Ok(snap) => {
+            ctx.cache.store_snapshot(snap);
+        }
+        Err(e) => {
+            ctx.snapshot_rebuild_failures
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                error = %e,
+                "snapshot rebuild after an admin API write failed: the write itself already \
+                 committed, but the published snapshot is now stale until the next successful \
+                 rebuild; see GET /admin/health for how many rebuilds have failed"
+            );
+        }
     }
 }
 
@@ -878,14 +914,30 @@ pub fn spawn_snapshot_rebuilder(
 /// credentials (see the schema comment on `model_backends.upstream_api_key`);
 /// `/usage` accepts writes from anything holding this token. Both are worth
 /// paying for a non-short-circuiting compare rather than plain `==`.
+///
+/// An empty `expected` or an empty presented token is rejected explicitly,
+/// before ever reaching `constant_time_eq` — `constant_time_eq(b"", b"")` is
+/// `true`, so without this an unset `--proxy-token` (`unwrap_or_default`
+/// turns it into `""`) would authenticate *any* caller that sent
+/// `Authorization: Bearer ` with nothing after it, including no bearer
+/// value at all once stripped. An absent or empty token must mean "no one
+/// can authenticate", never "everyone can" — `main.rs` additionally refuses
+/// to start `--role control`/`all` at all without a non-empty token (see
+/// `require_proxy_token`), so `expected` being empty here should be
+/// unreachable in production; this check is what makes that a property this
+/// function itself guarantees, rather than one only true because every
+/// caller happens to uphold it.
 fn proxy_token_authorised(headers: &HeaderMap, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match presented {
-        Some(token) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
-        None => false,
+        Some(token) if !token.is_empty() => constant_time_eq(token.as_bytes(), expected.as_bytes()),
+        _ => false,
     }
 }
 
@@ -1011,6 +1063,24 @@ async fn post_usage(
     }))
 }
 
+#[derive(Serialize)]
+struct HealthView {
+    /// See `Ctx::snapshot_rebuild_failures` and `refresh`'s doc comment: a
+    /// nonzero value means the database and the published snapshot have, at
+    /// some point, fallen out of sync. It does not by itself mean they still
+    /// are — the next successful rebuild (another write, or
+    /// `spawn_snapshot_rebuilder`'s next tick) resolves it — but the counter
+    /// itself never resets, so it stays a true "has this ever happened"
+    /// signal an operator or an alert can watch for.
+    snapshot_rebuild_failures: u64,
+}
+
+async fn admin_health(State(ctx): State<Ctx>) -> Json<HealthView> {
+    Json(HealthView {
+        snapshot_rebuild_failures: ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
+    })
+}
+
 pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
@@ -1024,6 +1094,7 @@ pub async fn serve(
         proxy_token,
         cache,
         key,
+        snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
     };
     // Every mutating route below ends in `refresh(&ctx)` — the one write
     // path that publishes through `SnapshotSink::store_snapshot`. That is
@@ -1047,6 +1118,7 @@ pub async fn serve(
         .route("/admin/models/{id}/backends", post(post_backend))
         .route("/admin/backends/{id}", delete(delete_backend))
         .route("/admin/roles", get(list_roles))
+        .route("/admin/health", get(admin_health))
         .route("/snapshot", get(get_snapshot))
         .route("/usage", post(post_usage))
         .with_state(ctx);
@@ -1187,6 +1259,7 @@ mod tests {
             proxy_token: "test-token".into(),
             cache: Arc::clone(&cache),
             key: Arc::new(test_key()),
+            snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
         };
         (ctx, cache)
     }
@@ -1517,6 +1590,40 @@ mod tests {
         );
     }
 
+    /// Regression for the review finding: `refresh` used to be `if let
+    /// Ok(snap) = build_snapshot(...)`, discarding the error entirely on
+    /// failure — no log, no counter, and the mutating route it followed
+    /// still answered success. A rebuild failure has to become observable
+    /// somewhere, since the route itself correctly keeps reporting the
+    /// write succeeded (the write did commit).
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_failed_refresh_is_counted_on_admin_health() {
+        let (ctx, _cache) = test_ctx().await;
+        let before = ctx
+            .snapshot_rebuild_failures
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Force `build_snapshot`'s first query to fail deterministically,
+        // without touching global state another concurrent test could race
+        // on: closing this test's own pool handle.
+        ctx.pool.close().await;
+
+        refresh(&ctx).await;
+
+        let after = ctx
+            .snapshot_rebuild_failures
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "a failed rebuild must increment the counter GET /admin/health reports"
+        );
+
+        let health = admin_health(State(ctx.clone())).await;
+        assert_eq!(health.0.snapshot_rebuild_failures, after);
+    }
+
     fn auth_header(token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(
@@ -1524,6 +1631,38 @@ mod tests {
             axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         h
+    }
+
+    /// Regression for the review finding: `constant_time_eq(b"", b"")` is
+    /// `true`, so `proxy_token.unwrap_or_default()` plus the old
+    /// unconditional compare meant an unset `--proxy-token` authenticated
+    /// *any* request carrying `Authorization: Bearer ` with nothing after
+    /// it — an unset token must never be equivalent to "everyone is
+    /// authorised". All three ways that used to slip through are checked
+    /// here directly against `proxy_token_authorised`, independent of any
+    /// particular route.
+    #[test]
+    fn an_empty_configured_or_presented_token_never_authorises() {
+        // An empty configured token: no presented value can ever match it,
+        // not even another empty one.
+        assert!(!proxy_token_authorised(&auth_header(""), ""));
+        assert!(!proxy_token_authorised(&HeaderMap::new(), ""));
+        assert!(!proxy_token_authorised(&auth_header("anything"), ""));
+
+        // A real configured token, but an empty presented one — exactly
+        // `Authorization: Bearer ` with nothing after it.
+        assert!(!proxy_token_authorised(&auth_header(""), "real-token"));
+
+        // The header missing `Bearer ` entirely, or missing outright, must
+        // also fail against a real configured token.
+        assert!(!proxy_token_authorised(&HeaderMap::new(), "real-token"));
+
+        // Sanity check the positive case still works, so the assertions
+        // above are proving something rather than passing vacuously.
+        assert!(proxy_token_authorised(
+            &auth_header("real-token"),
+            "real-token"
+        ));
     }
 
     fn usage_event(principal_id: i64, model: &str) -> UsageEvent {
