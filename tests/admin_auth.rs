@@ -49,6 +49,10 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
     // from a CI log.
     let log_path = std::env::temp_dir().join(format!("fastllm-admin-auth-{port}.log"));
     let log = std::fs::File::create(&log_path).expect("create child log");
+    // BOTH streams: `tracing_subscriber::fmt()` writes to stdout, not stderr.
+    // Capturing only stderr produced an always-empty diagnostic that made a
+    // hanging child look like a silent one.
+    let log_err = log.try_clone().expect("clone child log handle");
     let child = Command::new(env!("CARGO_BIN_EXE_fastllm-proxy"))
         .args([
             "--role",
@@ -64,7 +68,8 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         // Debug so that if this ever hangs again the captured stderr says
         // where, instead of being empty.
         .env("FASTLLM_LOG", "debug")
-        .stderr(std::process::Stdio::from(log))
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
         .spawn()
         .expect("failed to spawn fastllm-proxy --role all");
     let mut proc = Proc(child);
@@ -87,7 +92,7 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             panic!(
                 "fastllm-proxy --role all on port {port} did not answer /health within 90s; \
-                 child stderr:\n{log}"
+                 child output:\n{log}"
             );
         }
         std::thread::sleep(Duration::from_millis(100));
