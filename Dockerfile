@@ -9,6 +9,12 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
+# The root manifest declares a workspace, so cargo insists on loading every
+# member before it will build anything — omitting this fails the build outright
+# rather than merely skipping the benchmarks. `default-members` still keeps
+# them out of the release build; only their manifest has to be readable.
+COPY bench ./bench
 
 # Cache mounts are not part of the resulting layer, so the binary has to be
 # copied out of the target directory inside the same step that produced it.
