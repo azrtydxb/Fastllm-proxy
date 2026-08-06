@@ -7,6 +7,7 @@
 //! the same backend appears in both generations.
 
 use anyhow::{Context, Result};
+use hyper::header::HeaderValue;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -19,26 +20,42 @@ use crate::config::FileConfig;
 /// The prefix-affinity cache stores these rather than array indices, so a
 /// reload that reorders or resizes the model list does not silently
 /// re-point warm prefixes at the wrong node.
-pub type BackendUid = u16;
+pub type BackendUid = u32;
 
 /// Assigns a stable [`BackendUid`] to each distinct `(api_base, upstream_model)`.
+///
+/// Entries are never removed and a uid is never reused, because the affinity
+/// cache holds uids for warm prefixes: recycling one onto a different backend
+/// would silently misroute them. Reloads that churn the model set therefore
+/// grow the table monotonically — at ~2^32 distinct backends per process
+/// lifetime the ceiling is unreachable in practice, and a few dozen bytes per
+/// backend ever seen is the price of never misrouting.
 #[derive(Default)]
 pub struct Interner {
-    map: Mutex<HashMap<String, BackendUid>>,
+    inner: Mutex<InternerState>,
+}
+
+#[derive(Default)]
+struct InternerState {
+    map: HashMap<String, BackendUid>,
+    /// Tracked separately from `map.len()` so uids stay unique regardless of
+    /// what the map does.
+    next: u64,
 }
 
 impl Interner {
     pub fn intern(&self, api_base: &str, upstream_model: &str) -> Result<BackendUid> {
         let key = format!("{api_base}|{upstream_model}");
-        let mut map = self.map.lock();
-        if let Some(uid) = map.get(&key) {
+        let mut state = self.inner.lock();
+        if let Some(uid) = state.map.get(&key) {
             return Ok(*uid);
         }
-        let next = map.len();
-        let uid: BackendUid = next
+        let uid: BackendUid = state
+            .next
             .try_into()
-            .context("more than 65536 distinct backends seen over this process's lifetime")?;
-        map.insert(key, uid);
+            .context("more than 4294967295 distinct backends seen over this process's lifetime")?;
+        state.next += 1;
+        state.map.insert(key, uid);
         Ok(uid)
     }
 }
@@ -51,7 +68,9 @@ pub struct Backend {
     pub api_base: String,
     /// Model name to put in the request body sent upstream.
     pub upstream_model: String,
-    pub api_key: Option<String>,
+    /// Ready-made `Authorization` header, built once instead of formatted and
+    /// re-validated on every request. `None` when the upstream needs no key.
+    pub auth: Option<HeaderValue>,
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
@@ -66,12 +85,19 @@ impl Backend {
         api_base: String,
         upstream_model: String,
         api_key: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let auth = api_key
+            .as_deref()
+            .map(|key| {
+                HeaderValue::from_str(&format!("Bearer {key}"))
+                    .with_context(|| format!("api_key for {api_base} is not a valid header value"))
+            })
+            .transpose()?;
+        Ok(Self {
             uid,
             api_base,
             upstream_model,
-            api_key,
+            auth,
             // Optimistic: a backend serves traffic until a health check says
             // otherwise. Starting unhealthy would blackhole every request in
             // the window before the first sweep completes.
@@ -80,7 +106,7 @@ impl Backend {
             inflight: AtomicUsize::new(0),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
-        }
+        })
     }
 
     #[inline]
@@ -190,14 +216,15 @@ impl Registry {
                 let carried = previous
                     .and_then(|p| p.all.iter().find(|b| b.uid == uid))
                     .cloned();
-                let backend = carried.unwrap_or_else(|| {
-                    Arc::new(Backend::new(
+                let backend = match carried {
+                    Some(live) => live,
+                    None => Arc::new(Backend::new(
                         uid,
                         api_base.clone(),
                         upstream_model.clone(),
                         entry.litellm_params.effective_api_key(),
-                    ))
-                });
+                    )?),
+                };
                 by_uid.insert(uid, Arc::clone(&backend));
                 backend
             };

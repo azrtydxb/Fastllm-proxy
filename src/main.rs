@@ -2,6 +2,7 @@
 
 mod config;
 mod health;
+mod multipart;
 mod proxy;
 mod registry;
 mod router;
@@ -12,6 +13,7 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -128,12 +130,15 @@ async fn run(cli: Cli) -> Result<()> {
     connector.set_nodelay(true);
     connector.set_connect_timeout(Some(Duration::from_secs(5)));
     connector.set_keepalive(Some(Duration::from_secs(60)));
+    // hyper-rustls requires the wrapped connector to permit non-HTTPS URIs; the
+    // https_or_http() policy below is what actually decides per request.
+    connector.enforce_http(false);
 
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(cli.pool_max_idle)
         .retry_canceled_requests(false)
-        .build(connector);
+        .build(https_connector(connector)?);
 
     let master_key = cli
         .master_key
@@ -222,6 +227,32 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Wrap the TCP connector so `https://` api_bases work.
+///
+/// The typical deployment is plain HTTP to nodes on a private network, but the
+/// config schema accepts `https://` and a hosted or TLS-terminated endpoint is
+/// a legitimate backend — accepting the URL and then failing to connect is the
+/// worst of both.
+///
+/// System roots are preferred so an internal CA already trusted by the host
+/// works without extra configuration; the bundled Mozilla set is the fallback
+/// for minimal containers that ship no root store at all.
+fn https_connector(http: HttpConnector) -> Result<HttpsConnector<HttpConnector>> {
+    // Exactly one provider is compiled in, but installing it explicitly keeps
+    // this deterministic rather than dependent on rustls' defaulting rules.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let builder = hyper_rustls::HttpsConnectorBuilder::new();
+    let tls = match builder.with_native_roots() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "no system root certificates; falling back to the bundled Mozilla set");
+            hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
+        }
+    };
+    Ok(tls.https_or_http().enable_http1().wrap_connector(http))
 }
 
 /// SIGHUP reloads the config in place.

@@ -3,6 +3,7 @@
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::Full;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use std::path::PathBuf;
@@ -13,7 +14,9 @@ use std::time::{Duration, Instant};
 use crate::registry::{Interner, Registry};
 use crate::router::Router;
 
-pub type HttpClient = Client<HttpConnector, Full<Bytes>>;
+/// Speaks both schemes: cluster-local vLLM nodes are plain HTTP, but a config
+/// may equally point at a TLS-terminated or hosted endpoint.
+pub type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 pub struct AppState {
     /// Swapped wholesale on reload; readers never block.
