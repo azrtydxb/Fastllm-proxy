@@ -109,6 +109,7 @@ mod tests {
                 allowed_models: ["m".to_string()].into_iter().collect(),
                 allow_all: false,
                 roles: Default::default(),
+                limits: None,
             }],
             vec![],
         )

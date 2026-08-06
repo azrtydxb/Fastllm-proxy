@@ -63,6 +63,19 @@ pub struct KeyConfig {
     /// RFC 3339, e.g. `2027-01-01T00:00:00Z`.
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// Mirrors the control plane's `limits` table (P2) for `File` mode,
+    /// where there is no database to store it in. Absent means unlimited —
+    /// see `crate::limiter::Limits::is_unlimited`.
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct LimitsConfig {
+    #[serde(default)]
+    pub requests_per_min: Option<u32>,
+    #[serde(default)]
+    pub tokens_per_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

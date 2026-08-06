@@ -162,6 +162,7 @@ fn authorisation_reads_only_the_snapshot() {
             allowed_models: ["m".to_string()].into_iter().collect(),
             allow_all: false,
             roles: std::collections::HashSet::new(),
+            limits: None,
         },
     );
     let snap = Snapshot {

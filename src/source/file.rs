@@ -72,6 +72,10 @@ impl SnapshotSource for FileSource {
                     // (P1) feature and `File` mode carries no virtual models
                     // to evaluate them against anyway.
                     roles: HashSet::new(),
+                    limits: k.limits.map(|l| crate::limiter::Limits {
+                        requests_per_min: l.requests_per_min,
+                        tokens_per_min: l.tokens_per_min,
+                    }),
                 },
             );
             keys.insert(

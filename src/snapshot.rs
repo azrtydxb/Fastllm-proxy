@@ -5,6 +5,7 @@
 //! deny rules applied. The request path asks a `HashSet` and never walks the
 //! RBAC graph — that is what keeps authorisation off the latency budget.
 
+use crate::limiter::Limits;
 use crate::routing::{CallerMatch, RoutingRule, ShapeMatch, VirtualModelDef, WeightedTarget};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,6 +35,12 @@ pub struct Principal {
     /// question is already answered by `allowed_models`), so the raw role
     /// name set is exactly what the request path needs.
     pub roles: HashSet<String>,
+    /// Pre-resolved exactly like `allowed_models`: `None` means this
+    /// principal has no configured limit on either dimension and is
+    /// unlimited (see `Limits::is_unlimited`), not a bucket with capacity
+    /// zero. `crate::limiter::Limiter::check` reads this on the request
+    /// path; nothing else about rate limiting touches the database.
+    pub limits: Option<Limits>,
 }
 
 impl Principal {
@@ -148,6 +155,19 @@ pub struct WirePrincipal {
     pub allow_all: bool,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Absent from a snapshot cached on disk before this field existed —
+    /// `#[serde(default)]` lets an `Http`-mode proxy read an old
+    /// last-known-good cache the same way `virtual_models` already does.
+    #[serde(default)]
+    pub limits: Option<WireLimits>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WireLimits {
+    #[serde(default)]
+    pub requests_per_min: Option<u32>,
+    #[serde(default)]
+    pub tokens_per_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +275,7 @@ impl Snapshot {
                 allowed_models: HashSet::new(),
                 allow_all: true,
                 roles: HashSet::new(),
+                limits: None,
             },
         );
         self.keys.insert(
@@ -300,6 +321,10 @@ impl Snapshot {
                     allowed_models: p.allowed_models.iter().cloned().collect(),
                     allow_all: p.allow_all,
                     roles: p.roles.iter().cloned().collect(),
+                    limits: p.limits.map(|l| WireLimits {
+                        requests_per_min: l.requests_per_min,
+                        tokens_per_min: l.tokens_per_min,
+                    }),
                 })
                 .collect(),
             models: self
@@ -400,6 +425,10 @@ impl Snapshot {
                             allowed_models: p.allowed_models.into_iter().collect(),
                             allow_all: p.allow_all,
                             roles: p.roles.into_iter().collect(),
+                            limits: p.limits.map(|l| Limits {
+                                requests_per_min: l.requests_per_min,
+                                tokens_per_min: l.tokens_per_min,
+                            }),
                         },
                     )
                 })
@@ -509,6 +538,7 @@ mod tests {
             allowed_models: allowed.iter().map(|s| s.to_string()).collect(),
             allow_all: false,
             roles: HashSet::new(),
+            limits: None,
         };
         Snapshot::for_test(
             vec![(key.to_string(), 1, expires, false)],

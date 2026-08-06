@@ -351,6 +351,7 @@ mod tests {
             allowed_models: Set::new(),
             allow_all: true,
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            limits: None,
         }
     }
 

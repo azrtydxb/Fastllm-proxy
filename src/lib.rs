@@ -4,6 +4,7 @@ pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
 pub mod health;
+pub mod limiter;
 pub mod multipart;
 pub mod proxy;
 pub mod registry;

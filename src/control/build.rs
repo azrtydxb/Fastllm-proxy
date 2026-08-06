@@ -128,6 +128,34 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
             .fetch_all(pool)
             .await?;
 
+    // One query for every configured limit, not one per principal: this
+    // table has at most one row per principal (see migrations/0009) and the
+    // whole point of pre-resolving into the snapshot is to spend queries
+    // here, once per rebuild, rather than on the request path.
+    let limit_rows: Vec<(i64, Option<i32>, Option<i32>)> =
+        sqlx::query_as("SELECT principal_id, requests_per_min, tokens_per_min FROM limits")
+            .fetch_all(pool)
+            .await?;
+    let limits_by_principal: HashMap<i64, crate::limiter::Limits> = limit_rows
+        .into_iter()
+        .map(|(pid, requests, tokens)| {
+            (
+                pid,
+                crate::limiter::Limits {
+                    // Negative would only reach here via hand-written SQL —
+                    // the admin route and the migration's own CHECK
+                    // constraint both refuse it — but clamping to `None`
+                    // (unlimited) rather than panicking on the cast is the
+                    // same "contain the failure to the one bad row" pattern
+                    // this module already applies to an undecryptable
+                    // backend and an unparseable routing rule below.
+                    requests_per_min: requests.filter(|v| *v > 0).map(|v| v as u32),
+                    tokens_per_min: tokens.filter(|v| *v > 0).map(|v| v as u32),
+                },
+            )
+        })
+        .collect();
+
     let mut principals = HashMap::new();
     for (id, name) in principal_rows {
         // One query per principal: see the module-level rationale above.
@@ -168,6 +196,7 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
                 allowed_models,
                 allow_all,
                 roles: role_names.into_iter().collect(),
+                limits: limits_by_principal.get(&id).copied(),
             },
         );
     }
@@ -621,5 +650,100 @@ mod tests {
             .get(&(principal_id as u64))
             .expect("the principal must be in the snapshot");
         assert!(principal.roles.contains("inference"));
+    }
+
+    /// A row in `limits` reaches `Principal.limits`, and a principal with no
+    /// row is unlimited (`None`), not a bucket with capacity zero.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_configured_limit_reaches_the_snapshot_and_an_unconfigured_principal_is_unlimited() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let limited_name = unique_name("limited-principal");
+        let limited_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&limited_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO limits (principal_id, requests_per_min, tokens_per_min)
+             VALUES ($1, 42, 4200)",
+        )
+        .bind(limited_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let unlimited_name = unique_name("unlimited-principal");
+        let unlimited_id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&unlimited_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+
+        let limited = snapshot
+            .principals
+            .get(&(limited_id as u64))
+            .expect("the limited principal must be in the snapshot");
+        assert_eq!(
+            limited.limits,
+            Some(crate::limiter::Limits {
+                requests_per_min: Some(42),
+                tokens_per_min: Some(4200),
+            })
+        );
+
+        let unlimited = snapshot
+            .principals
+            .get(&(unlimited_id as u64))
+            .expect("the unconfigured principal must be in the snapshot too");
+        assert_eq!(
+            unlimited.limits, None,
+            "no row in `limits` must mean unlimited, not a bucket with capacity zero"
+        );
+    }
+
+    /// Only one of the two dimensions may be set — the schema's own CHECK
+    /// constraints allow it (`requests_per_min IS NOT NULL OR tokens_per_min
+    /// IS NOT NULL`, each independently nullable), and `build_snapshot` must
+    /// carry that through rather than assuming both are always present.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_single_dimension_limit_leaves_the_other_unset() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+
+        let name = unique_name("requests-only-principal");
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO limits (principal_id, requests_per_min) VALUES ($1, 10)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let principal = snapshot.principals.get(&(id as u64)).unwrap();
+        assert_eq!(
+            principal.limits,
+            Some(crate::limiter::Limits {
+                requests_per_min: Some(10),
+                tokens_per_min: None,
+            })
+        );
     }
 }
