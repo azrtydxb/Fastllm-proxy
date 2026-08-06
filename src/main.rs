@@ -1,14 +1,5 @@
 //! fastllm-proxy — a low-latency OpenAI-compatible gateway for multi-node LLM serving.
 
-mod config;
-mod health;
-mod multipart;
-mod proxy;
-mod registry;
-mod router;
-mod state;
-mod upstream;
-
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use clap::Parser;
@@ -23,10 +14,11 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-use crate::config::FileConfig;
-use crate::registry::{Interner, Registry};
-use crate::router::{Policy, Router};
-use crate::state::AppState;
+use fastllm_proxy::config::FileConfig;
+use fastllm_proxy::registry::{Interner, Registry};
+use fastllm_proxy::router::{Policy, Router};
+use fastllm_proxy::state::AppState;
+use fastllm_proxy::{health, proxy, upstream};
 
 #[derive(Parser, Debug)]
 #[command(

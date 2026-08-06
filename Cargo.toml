@@ -8,6 +8,14 @@ description = "Low-latency OpenAI-compatible inference gateway for multi-node LL
 repository = "https://github.com/azrtydxb/Fastllm-proxy"
 readme = "README.md"
 
+[lib]
+name = "fastllm_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fastllm-proxy"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
