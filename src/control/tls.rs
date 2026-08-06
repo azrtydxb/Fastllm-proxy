@@ -57,6 +57,32 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
         .context("no private key found in PEM file (expected PKCS#8, RSA, or SEC1/EC)")
 }
 
+/// Tells apart the one handshake failure that is routine — a peer that opened
+/// the TCP connection and closed it again without sending a single byte —
+/// from every other kind, which means bytes *were* exchanged and the
+/// handshake still failed (bad/expired certificate, a client that refuses
+/// every protocol version this server offers, an untrusted CA, ALPN
+/// mismatch, and so on).
+///
+/// This matches on `io::Error::kind()` rather than inspecting the underlying
+/// `rustls::Error` (reachable via `e.get_ref().and_then(|e|
+/// e.downcast_ref::<rustls::Error>())`) because `tokio_rustls` does not
+/// actually give the connect-and-drop case a `rustls::Error` to downcast:
+/// the connection dies during the initial record read, before rustls has
+/// parsed anything, so `tokio_rustls` reports it as a bare `io::Error` of
+/// kind `UnexpectedEof` with no inner `rustls::Error` at all (confirmed by
+/// exercising `TlsAcceptor::accept` directly against a dropped socket during
+/// development of this function). A protocol-level failure — the cases this
+/// function must keep at WARN — always has bytes to fail on and therefore
+/// never presents as `UnexpectedEof`; every rustls-side alert (bad cert,
+/// version/ALPN mismatch, unknown CA) is wrapped in a different `io::Error`
+/// kind (`InvalidData`, in current `rustls`/`tokio-rustls`). So the `io`
+/// error kind alone is a reliable — not just convenient — way to split the
+/// two cases.
+fn is_routine_disconnect(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::UnexpectedEof
+}
+
 /// `axum::serve::Listener` over a TCP listener that TLS-terminates every
 /// accepted connection before handing it to axum.
 ///
@@ -98,7 +124,26 @@ impl axum::serve::Listener for TlsListener {
                     // Never fatal: one bad handshake (a health-checker or
                     // scanner speaking plain HTTP at an HTTPS port) must not
                     // take the admin API down for every other caller.
-                    tracing::warn!(error = %e, %addr, "TLS handshake failed");
+                    //
+                    // But not every log level here is equal. `deploy/control.yaml`'s
+                    // `tcpSocket` probes (soon `httpGet` against `/healthz`, but a
+                    // plain TCP connect-and-close is also exactly what an LB health
+                    // check, a port scanner, or `kubectl port-forward` teardown looks
+                    // like) open the TCP connection and drop it without sending a
+                    // single TLS record. `tokio_rustls` reports that as an
+                    // `io::Error` of kind `UnexpectedEof` — see
+                    // `is_routine_disconnect`'s doc comment for why that kind
+                    // specifically is the routine case. Logging that at WARN every
+                    // few seconds, forever, is noise that also buries the WARN that
+                    // matters: a real misconfiguration (expired/wrong cert, a client
+                    // that refuses the offered protocol version, an untrusted CA)
+                    // fails differently — with bytes exchanged and a specific TLS
+                    // alert — and that case must keep standing out.
+                    if is_routine_disconnect(&e) {
+                        tracing::debug!(error = %e, %addr, "TLS handshake aborted before any data (routine probe/scan)");
+                    } else {
+                        tracing::warn!(error = %e, %addr, "TLS handshake failed");
+                    }
                 }
             }
         }
@@ -246,5 +291,95 @@ mod tests {
             .unwrap()
             .to_bytes();
         assert_eq!(&body[..], b"pong");
+    }
+
+    #[test]
+    fn a_bare_unexpected_eof_is_the_routine_case() {
+        let e = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        assert!(is_routine_disconnect(&e));
+    }
+
+    #[test]
+    fn any_other_error_kind_is_not_routine() {
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            let e = std::io::Error::from(kind);
+            assert!(
+                !is_routine_disconnect(&e),
+                "{kind:?} must not be classified as a routine disconnect"
+            );
+        }
+    }
+
+    /// End-to-end proof, not just the classifier in isolation: a client that
+    /// opens the TCP connection and drops it before sending anything — the
+    /// literal shape of a `tcpSocket`/health-checker probe — must make
+    /// `TlsAcceptor::accept` fail with the same error kind
+    /// `is_routine_disconnect` treats as routine. If a future `rustls` or
+    /// `tokio-rustls` upgrade ever changes how that case is reported, this
+    /// test (not just production logs) is what catches it.
+    #[tokio::test]
+    async fn connect_and_drop_is_classified_as_routine() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_path, key_path) = self_signed_cert_files(dir.path(), &["127.0.0.1"]);
+        let config = load_server_config(&cert_path, &key_path).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            drop(stream); // connect, then close without sending a byte
+        });
+        let (stream, _) = tcp.accept().await.unwrap();
+        let err = acceptor
+            .accept(stream)
+            .await
+            .expect_err("a dropped socket must not complete a TLS handshake");
+        client.await.unwrap();
+
+        assert!(
+            is_routine_disconnect(&err),
+            "a bare connect-and-drop must classify as routine, got: {err:?}"
+        );
+    }
+
+    /// The contrasting case: bytes that are *not* a valid TLS record (here,
+    /// plaintext HTTP hitting the TLS port) must fail the handshake without
+    /// being classified as a routine disconnect — this is the "real problem"
+    /// case that must keep logging at WARN.
+    #[tokio::test]
+    async fn garbage_bytes_are_not_classified_as_routine() {
+        use tokio::io::AsyncWriteExt;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_path, key_path) = self_signed_cert_files(dir.path(), &["127.0.0.1"]);
+        let config = load_server_config(&cert_path, &key_path).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            drop(stream);
+        });
+        let (stream, _) = tcp.accept().await.unwrap();
+        let err = acceptor
+            .accept(stream)
+            .await
+            .expect_err("plaintext HTTP must not complete a TLS handshake");
+        client.await.unwrap();
+
+        assert!(
+            !is_routine_disconnect(&err),
+            "a real protocol failure must not be classified as routine, got: {err:?}"
+        );
     }
 }

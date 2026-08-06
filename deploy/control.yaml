@@ -82,7 +82,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-71616a3
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-cd9c0b8
           imagePullPolicy: Always
           args:
             - --role=control
@@ -113,21 +113,32 @@ spec:
           # health check, so it's not a valid probe target. `/snapshot`
           # requires the proxy token, which the kubelet doesn't have, and
           # `/login` would mean handing the kubelet a real password just to
-          # probe liveness. There is no `/health`/`/metrics` here the way the
-          # proxy role has. A TCP check on the admin port is the honest probe
-          # until this role grows a dedicated `/healthz` — it stays a plain
-          # TCP check even now that the port is TLS, since a kubelet probe
-          # has no simple way to speak TLS with a private CA.
+          # probe liveness. `GET /healthz` is the dedicated, unauthenticated
+          # route for exactly this (see its doc comment in
+          # src/control/api.rs): the kubelet has no session cookie and no
+          # proxy token to present, so the probe target has to be a route
+          # that needs neither — and it does no I/O (no database query) on
+          # every hit, so a probe firing every few seconds does not become a
+          # steady background query load, and a transient database blip does
+          # not get an otherwise-healthy control plane restarted.
+          #
+          # `scheme: HTTPS` because the admin port only ever speaks TLS now
+          # (`--tls-cert`/`--tls-key` above); this is not a downgrade from
+          # the previous `tcpSocket` check's blindness to plaintext-vs-TLS.
+          # The kubelet's `httpGet` probe does not verify the server
+          # certificate (no `insecureSkipVerify` knob needed or offered —
+          # that is simply how it behaves), so the in-cluster private CA on
+          # `fastllm-control-tls` needs no special handling here.
           readinessProbe:
-            tcpSocket: { port: admin }
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
-            tcpSocket: { port: admin }
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
             periodSeconds: 20
             failureThreshold: 3
           startupProbe:
-            tcpSocket: { port: admin }
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
             periodSeconds: 3
             failureThreshold: 20
           resources:

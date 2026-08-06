@@ -368,3 +368,56 @@ async fn the_management_ui_route_exists_on_the_admin_port_and_not_on_the_proxy_p
         "the proxy role must never serve the management UI: {proxy_body}"
     );
 }
+
+/// `/healthz` (deploy/control.yaml's probe target) has to satisfy two
+/// properties at once that are easy to break independently: it must answer
+/// with no credential at all (a kubelet has neither a session cookie nor the
+/// proxy token), and its exemption from `require_session` must not have
+/// accidentally widened to cover a real `/admin/*` route too — so this pins
+/// both against the same running process, the way the P0 gap this file is
+/// named for was originally missed: by checking each route in isolation
+/// instead of checking that the boundary between them was in the right
+/// place.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn healthz_is_unauthenticated_and_does_not_widen_the_session_gate() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let port = 14728;
+    let admin_port = 14729;
+    let _p = start_all(port, admin_port, &database_url);
+
+    // No cookie, no `Authorization` header, no proxy token anywhere: exactly
+    // what a kubelet probe can present.
+    let resp = ureq::get(&format!("http://127.0.0.1:{admin_port}/healthz"))
+        .call()
+        .expect("/healthz must answer with no credential of any kind");
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_string().unwrap();
+    assert_eq!(
+        body, r#"{"status":"ok"}"#,
+        "the probe body must stay the minimal, boring shape this route promises"
+    );
+    // Nothing sensitive leaked into that body: no key material, no
+    // credential, no backend address, no principal name.
+    for secret in [
+        PROXY_TOKEN,
+        &encryption_key(),
+        "api_base",
+        "backend",
+        "principal",
+        "sk-",
+    ] {
+        assert!(
+            !body.contains(secret),
+            "/healthz body must not mention {secret:?}: {body}"
+        );
+    }
+
+    // The same unauthenticated request against a real `/admin/*` route is
+    // still refused — the exemption above did not widen past `/healthz`.
+    assert_eq!(
+        admin_get_with_cookie(admin_port, "/admin/keys", None),
+        401,
+        "/admin/keys must still require a session even though /healthz does not"
+    );
+}

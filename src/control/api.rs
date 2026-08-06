@@ -2077,6 +2077,44 @@ async fn admin_health(State(ctx): State<Ctx>) -> Json<HealthView> {
     })
 }
 
+/// `GET /healthz`: the Kubernetes probe target (`deploy/control.yaml`'s
+/// readiness/liveness/startup probes), not a second copy of `/admin/health`.
+///
+/// Two things force it to be a distinct, separate route rather than just
+/// pointing the probes at `/admin/health`:
+///
+/// - The kubelet has no credential. `/admin/health` sits behind
+///   `require_session` like every other `/admin/*` route, and a probe cannot
+///   present a session cookie — there is no login step in a liveness check.
+///   `/healthz` is therefore mounted on `public_routes` in `serve`, *not*
+///   nested under `admin_routes`, so it is exempt from `require_session` by
+///   construction rather than by an exception carved into that middleware.
+/// - `/admin/health`'s body (`HealthView`) is meant for an authenticated
+///   operator and is free to grow richer over time. A probe response is the
+///   opposite: it must stay small, boring, and disclose nothing an
+///   unauthenticated caller on the network shouldn't see — no key material,
+///   no credentials, no backend addresses, no principal names. `{"status":
+///   "ok"}` is deliberately all this returns, unlike the data-plane's
+///   `GET /health` (`control::api`'s proxy-side counterpart, which lists
+///   backends) — this route must never grow to do that.
+///
+/// It does no I/O — no database query, nothing awaited — on purpose.
+/// `readinessProbe`/`livenessProbe` fire every few seconds for the life of
+/// the pod; routing that through Postgres would make a probe interval into a
+/// steady background query load, and worse, a transient database blip would
+/// fail liveness and get a control plane that is otherwise fine restarted
+/// for a problem restarting it does nothing to fix. Touching
+/// `ctx.snapshot_rebuild_failures` (an `Arc<AtomicU64>`, loaded with
+/// `Ordering::Relaxed`) costs nothing and proves the handler actually ran
+/// against real shared state rather than being dead code — but it is *not*
+/// returned in the body, matching the "discloses nothing" rule above; a
+/// wedged process (deadlocked, task starved) simply never gets here to
+/// return a response at all, which is what a liveness probe needs to catch.
+async fn healthz(State(ctx): State<Ctx>) -> Json<serde_json::Value> {
+    let _ = ctx.snapshot_rebuild_failures.load(Ordering::Relaxed);
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
@@ -2158,15 +2196,19 @@ pub async fn serve(
         ));
 
     // Reachable with no session: `/login` (how one is obtained in the first
-    // place), and the three proxy-token-gated routes proxy processes (not
+    // place), the three proxy-token-gated routes proxy processes (not
     // humans) call — see their own doc comments for why those stay on the
-    // bearer token rather than moving to sessions.
+    // bearer token rather than moving to sessions — and `/healthz`, which has
+    // neither a session cookie nor the proxy token available to it (see that
+    // handler's doc comment for why it is a separate route from
+    // `/admin/health` rather than reusing it).
     let public_routes = Router::new()
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/snapshot", get(get_snapshot))
         .route("/usage", post(post_usage))
-        .route("/limits/reconcile", post(post_reconcile));
+        .route("/limits/reconcile", post(post_reconcile))
+        .route("/healthz", get(healthz));
 
     // The management UI (P4): served by this process only, which is to say
     // only by `--role control`/`all` — `serve` is never called for `--role
