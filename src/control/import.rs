@@ -491,6 +491,7 @@ mod tests {
         )
     }
 
+    use crate::control::test_support::TestCleanup;
     /// Shared with `control::api::tests` — see `secrets::test_key` for why
     /// every DB-backed test in `control::*` must use the same key rather
     /// than each picking its own.
@@ -501,8 +502,12 @@ mod tests {
     async fn importing_the_deployed_config_creates_models_and_backends() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
+        // Not `unique_name("qwen3")` — the tag itself would prefix-match
+        // the real registered model `qwen3-6-35b-a3b-nvfp4`, which this
+        // suite must never touch. `qwen3-import-test` is unambiguous.
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "qwen3-import-test-");
 
-        let name = unique_name("qwen3");
+        let name = unique_name("qwen3-import-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n\
              \x20 - model_name: {name}\n\
@@ -523,8 +528,12 @@ mod tests {
     async fn importing_twice_does_not_duplicate() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
+        // `"m"` alone would be too broad a prefix to track safely (it would
+        // match any other test's/run's model name that happens to start
+        // with the same letter); a distinctive tag makes tracking exact.
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "import-dup-test-");
 
-        let name = unique_name("m");
+        let name = unique_name("import-dup-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n  - model_name: {name}\n    litellm_params: {{ api_base: http://a:8000/v1 }}\n"
         ))
@@ -556,6 +565,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "secret-backend-");
 
         let name = unique_name("secret-backend");
         let plaintext_credential = "sk-do-not-leak-this-upstream-token";
@@ -647,6 +657,22 @@ mod tests {
         }
     }
 
+    impl AuthFixture {
+        /// Every row `import` creates from this fixture: the two models,
+        /// the two principals, and (unlike a principal's other roles, which
+        /// cascade away with it) the two `import:<principal>` roles
+        /// `import_key` creates alongside each principal.
+        fn cleanup(&self) -> TestCleanup {
+            TestCleanup::new()
+                .track_exact("models", "name", self.granted_model.clone())
+                .track_exact("models", "name", self.ungranted_model.clone())
+                .track_exact("principals", "name", self.named_principal.clone())
+                .track_exact("principals", "name", self.wildcard_principal.clone())
+                .track_exact("roles", "name", import_role_name(&self.named_principal))
+                .track_exact("roles", "name", import_role_name(&self.wildcard_principal))
+        }
+    }
+
     /// The point of importing `auth:` at all: a file that authorised a set of
     /// calls in `File` mode must authorise exactly the same set once it has
     /// been imported and the control plane has built a snapshot from the
@@ -666,6 +692,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let fx = auth_fixture();
+        let _cleanup = fx.cleanup();
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut file, fx.yaml.as_bytes()).unwrap();
@@ -749,6 +776,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let fx = auth_fixture();
+        let _cleanup = fx.cleanup();
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&fx.yaml).unwrap();
 
         import(&pool, &cfg, &test_key()).await.unwrap();
@@ -790,10 +818,15 @@ mod tests {
     async fn narrowing_a_grant_list_revokes_the_dropped_model() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
-        let a = unique_name("keep");
-        let b = unique_name("drop");
+        let a = unique_name("narrowing-test-keep");
+        let b = unique_name("narrowing-test-drop");
         let principal = unique_name("narrowing-principal");
         let key = unique_name("sk-narrowing-key-long-enough-to-prefix");
+        let _cleanup = TestCleanup::new()
+            .track_exact("models", "name", a.clone())
+            .track_exact("models", "name", b.clone())
+            .track_exact("principals", "name", principal.clone())
+            .track_exact("roles", "name", import_role_name(&principal));
 
         let models = format!(
             "model_list:\n\
@@ -836,6 +869,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let principal = unique_name("short-key-principal");
+        let _cleanup = TestCleanup::new()
+            .track_exact("principals", "name", principal.clone())
+            .track_exact("roles", "name", import_role_name(&principal));
         // Short *and* unique: 11 characters, well under the threshold at
         // which any prefix is safe to store, but distinct per run because
         // `api_keys.hash` is UNIQUE across the shared scratch database.
@@ -888,6 +924,8 @@ mod tests {
         // whose permissions must never leak to an attacker-controlled config
         // file that merely names it.
         let victim_principal = unique_name("hand-created-admin-principal");
+        let _cleanup =
+            TestCleanup::new().track_exact("principals", "name", victim_principal.clone());
         let principal_id: i64 = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
@@ -952,6 +990,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "legacy-plaintext-");
 
         let name = unique_name("legacy-plaintext");
 

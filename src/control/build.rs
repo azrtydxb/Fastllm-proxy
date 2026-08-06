@@ -480,6 +480,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::test_support::TestCleanup;
 
     #[test]
     fn a_wildcard_resource_grants_every_model() {
@@ -585,6 +586,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "undecryptable-model")
+            .track_prefix("models", "name", "unrelated-model");
 
         let broken_model = unique_name("undecryptable-model");
         let model_id: i64 =
@@ -598,16 +602,16 @@ mod tests {
         // `encrypt`-produced ciphertext at all, so `secrets::decrypt` fails
         // on the version byte, the same shape a partially completed key
         // rotation or an unmigrated pre-encryption row would take. Valid
-        // UTF-8 (unlike, say, `0xFF` bytes) deliberately: this row is never
-        // cleaned up — this whole module's tests share one scratch
-        // database with `control::import`'s, including its
-        // `reencrypt_migrates_a_plaintext_row_and_is_idempotent`, which
-        // scans *every* `model_backends` row with a non-null
+        // UTF-8 (unlike, say, `0xFF` bytes) deliberately: `_cleanup` above
+        // removes this row at the end of the test, but this whole module's
+        // tests share one scratch database with `control::import`'s while
+        // it exists, including `reencrypt_migrates_a_plaintext_row_and_is_idempotent`,
+        // which scans *every* `model_backends` row with a non-null
         // `upstream_api_key` and treats "does not decrypt" as "must be a
         // pre-migration plaintext row" (`reencrypt_plaintext_backends`'s
         // documented contract) — bytes that are not valid UTF-8 would trip
-        // that function's own refuse-to-guess `bail!` on a row this test
-        // left behind, in a run where both tests share the table.
+        // that function's own refuse-to-guess `bail!` if the two tests ever
+        // run concurrently against the same database.
         sqlx::query(
             "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
              VALUES ($1, 'http://broken:8000/v1', 'broken', $2)",
@@ -672,6 +676,11 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "vm-primary")
+            .track_prefix("models", "name", "vm-secondary")
+            .track_prefix("models", "name", "vm-fallback")
+            .track_prefix("virtual_models", "name", "vm-canary");
 
         let primary = unique_name("vm-primary");
         let secondary = unique_name("vm-secondary");
@@ -781,6 +790,8 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "roles-reach-snapshot");
 
         let principal_name = unique_name("roles-reach-snapshot");
         let principal_id: i64 = sqlx::query_scalar(
@@ -815,6 +826,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "limited-principal")
+            .track_prefix("principals", "name", "unlimited-principal");
 
         let limited_name = unique_name("limited-principal");
         let limited_id: i64 = sqlx::query_scalar(
@@ -876,6 +890,8 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "requests-only-principal");
 
         let name = unique_name("requests-only-principal");
         let id: i64 = sqlx::query_scalar(
@@ -910,6 +926,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "budgeted-principal")
+            .track_prefix("principals", "name", "unbudgeted-principal");
 
         let budgeted_name = unique_name("budgeted-principal");
         let budgeted_id: i64 = sqlx::query_scalar(
@@ -972,6 +991,8 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "stale-window-principal");
 
         let name = unique_name("stale-window-principal");
         let id: i64 = sqlx::query_scalar(

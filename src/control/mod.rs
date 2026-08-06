@@ -8,4 +8,6 @@ pub mod db;
 pub mod import;
 pub mod reconcile;
 pub mod secrets;
+#[cfg(test)]
+pub mod test_support;
 pub mod tls;

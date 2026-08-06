@@ -2006,6 +2006,7 @@ mod tests {
     /// why every DB-backed test in `control::*` must use the same key
     /// rather than each picking its own.
     use crate::control::secrets::test_key;
+    use crate::control::test_support::TestCleanup;
 
     #[test]
     fn a_generated_key_is_random_prefixed_and_long_enough() {
@@ -2054,6 +2055,8 @@ mod tests {
     async fn creating_a_key_returns_plaintext_once_and_stores_only_the_hash() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "task6-test-principal-");
         let principal_id: i64 = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
@@ -2133,6 +2136,13 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn every_mutating_route_publishes_through_the_one_write_path() {
         let (ctx, cache) = test_ctx().await;
+        // Redundant with the explicit `delete_*` calls near the end of the
+        // happy path below, and that's fine — a second `DELETE` matching
+        // nothing is a no-op. What this buys is the case those calls never
+        // reach: any `assert!`/`unwrap()` above them panicking first.
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "route-principal-")
+            .track_prefix("models", "name", "route-model-");
         let principal_name = unique_name("route-principal");
         let model_name = unique_name("route-model");
 
@@ -2262,6 +2272,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn listing_keys_returns_no_key_material() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "key-listing-principal-");
         let principal_name = unique_name("key-listing-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -2394,6 +2406,10 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn virtual_model_routes_publish_rules_and_targets_to_the_snapshot() {
         let (ctx, cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "vm-route-primary-")
+            .track_prefix("models", "name", "vm-route-secondary-")
+            .track_prefix("virtual_models", "name", "vm-route-canary-");
         let primary_name = unique_name("vm-route-primary");
         let secondary_name = unique_name("vm-route-secondary");
 
@@ -2514,6 +2530,9 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_model_and_a_virtual_model_cannot_share_a_name() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "vm-collision-")
+            .track_prefix("virtual_models", "name", "vm-collision-");
         let name = unique_name("vm-collision");
 
         let (status, _) = post_model(
@@ -2575,6 +2594,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let cache: Arc<dyn SnapshotSink> = Arc::new(ArcSwap::from_pointee(Snapshot::default()));
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "rebuild-test-");
 
         // Establish a baseline as of right now.
         rebuild_once(&pool, cache.as_ref(), &test_key())
@@ -2712,7 +2732,15 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_valid_usage_batch_persists_and_the_route_is_gated_by_the_proxy_token() {
         let (ctx, _cache) = test_ctx().await;
-        let principal_name = unique_name("usage-principal");
+        // Tags distinct enough that this cleanup's prefix match cannot also
+        // catch `a_batch_with_an_unknown_principal_survives_and_only_that_row_is_dropped`'s
+        // rows below — "usage-principal" would otherwise be a string prefix
+        // of that test's "usage-principal-survives", and the two tests can
+        // run concurrently under `cargo test`.
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "usage-basic-principal-")
+            .track_prefix("models", "name", "usage-basic-model-");
+        let principal_name = unique_name("usage-basic-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
             Json(NewPrincipal {
@@ -2725,7 +2753,7 @@ mod tests {
         .unwrap();
         let principal_id = created.0["id"].as_i64().unwrap();
 
-        let model_name = unique_name("usage-model");
+        let model_name = unique_name("usage-basic-model");
         let _ = post_model(
             State(ctx.clone()),
             Json(NewModel {
@@ -2801,6 +2829,9 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_batch_with_an_unknown_principal_survives_and_only_that_row_is_dropped() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "usage-principal-survives-")
+            .track_prefix("models", "name", "usage-model-survives-");
         let principal_name = unique_name("usage-principal-survives");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -2894,6 +2925,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn put_and_delete_limits_reach_the_published_snapshot() {
         let (ctx, cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "limits-route-principal-");
         let principal_id = make_principal(&ctx, &unique_name("limits-route-principal")).await;
 
         put_limits(
@@ -2946,6 +2979,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn put_limits_rejects_an_empty_body() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "empty-limits-principal-");
         let principal_id = make_principal(&ctx, &unique_name("empty-limits-principal")).await;
         let err = put_limits(
             State(ctx.clone()),
@@ -2964,6 +2999,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn deleting_a_limit_that_does_not_exist_is_not_found() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("principals", "name", "no-limit-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-limit-principal")).await;
         let err = delete_limits(State(ctx.clone()), Path(principal_id))
             .await
@@ -3025,6 +3061,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn put_and_delete_budget_reach_the_published_snapshot() {
         let (ctx, cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "budget-route-principal-");
         let principal_id = make_principal(&ctx, &unique_name("budget-route-principal")).await;
 
         put_budget(
@@ -3077,6 +3115,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn put_budget_rejects_a_bad_window_or_non_positive_total() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "bad-budget-principal-");
         let principal_id = make_principal(&ctx, &unique_name("bad-budget-principal")).await;
 
         let err = put_budget(
@@ -3108,6 +3148,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn deleting_a_budget_that_does_not_exist_is_not_found() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup =
+            TestCleanup::new().track_prefix("principals", "name", "no-budget-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-budget-principal")).await;
         let err = delete_budget(State(ctx.clone()), Path(principal_id))
             .await
@@ -3124,6 +3166,9 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_usage_report_increments_the_matching_principals_budget() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "budget-usage-principal-")
+            .track_prefix("models", "name", "budget-usage-model-");
         let principal_id = make_principal(&ctx, &unique_name("budget-usage-principal")).await;
         let model_name = unique_name("budget-usage-model");
         let _ = post_model(
@@ -3179,6 +3224,9 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_usage_report_for_an_unbudgeted_principal_creates_no_budget_row() {
         let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "no-budget-usage-principal-")
+            .track_prefix("models", "name", "no-budget-usage-model-");
         let principal_id = make_principal(&ctx, &unique_name("no-budget-usage-principal")).await;
         let model_name = unique_name("no-budget-usage-model");
         let _ = post_model(

@@ -24,6 +24,10 @@ use std::io::Read;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::TestCleanup;
+
 struct Proc(Child);
 
 impl Drop for Proc {
@@ -205,8 +209,22 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
+        .as_nanos()
+        .to_string();
     let name = |tag: &str| format!("{tag}-{suffix}");
+
+    // Every name this test mints goes through `name()` above, so it always
+    // ends in this one shared `suffix` regardless of tag — one cleanup
+    // tracker per table covers all of it. A `Drop` guard rather than a
+    // cleanup statement at the end of the test body: this test's own
+    // `assert_eq!`s above panic on failure, and a line after them would
+    // simply never run in that case, which is exactly how this shared
+    // database accumulated hundreds of leftover rows before.
+    let _cleanup = TestCleanup::new()
+        .track_suffix("models", "name", suffix.clone())
+        .track_suffix("virtual_models", "name", suffix.clone())
+        .track_suffix("principals", "name", suffix.clone())
+        .track_suffix("roles", "name", suffix.clone());
 
     // Two concrete models, each with one backend at an address nothing is
     // listening on — the point is not a successful completion, it is
@@ -401,23 +419,8 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     assert_eq!(vm_view["rules"][0]["roles"][0], canary_role);
     assert_eq!(vm_view["default_targets"][0]["model"], model_a_name);
 
-    // `grant_one_model` writes outside anything an admin route owns, unlike
-    // every other row this test creates (models, principals, keys, the
-    // virtual model itself) — those are left behind on purpose, the same
-    // convention `control::build`'s and `control::api`'s own DB tests
-    // follow, since they are only ever found by their unique suffixed name.
-    // Roles are different: `control::db::tests::migrations_apply_and_seed_the_default_roles`
-    // asserts the *exact* set of roles a fresh database has (modulo
-    // `import:`-prefixed ones), so a role left behind here would fail a
-    // completely unrelated test the next time it runs against this shared
-    // database. Clean up the ones created for this test's fixture only.
-    sqlx::query("DELETE FROM roles WHERE name = ANY($1)")
-        .bind(vec![
-            canary_role.clone(),
-            name("vm-e2e-grant-a"),
-            name("vm-e2e-grant-vm"),
-        ])
-        .execute(&pool)
-        .await
-        .unwrap();
+    // `_cleanup` (declared above, right after `pool`) deletes every model,
+    // virtual model, principal and role this test created — including
+    // `grant_one_model`'s roles, which no admin route creates — when it
+    // drops at the end of this function, panic or not.
 }

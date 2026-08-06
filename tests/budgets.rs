@@ -23,6 +23,10 @@ use std::io::Read;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::TestCleanup;
+
 struct Proc(Child);
 
 impl Drop for Proc {
@@ -255,6 +259,18 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     let port = 14621;
     let admin_port = 14622;
     let upstream_port = 14623;
+
+    // Deletes the model and principal this test creates (and, by cascade,
+    // the backend/budget/key/usage rows hanging off them) even if one of
+    // the `panic!`s below fires — this suite runs against the shared kw dev
+    // database, which has no per-run reset, so a cleanup line placed after
+    // the assertions instead of in a `Drop` guard would leave rows behind
+    // on every failing run. Tracked by the same literal tag `unique_name`
+    // below prefixes each name with, since (unlike `virtual_models.rs`)
+    // each call mints its own timestamp rather than sharing one suffix.
+    let _cleanup = TestCleanup::new()
+        .track_prefix("models", "name", "budget-e2e-model")
+        .track_prefix("principals", "name", "budget-e2e-principal");
 
     // 3 + 4 = 7 tokens per completed request.
     spawn_mock_upstream(upstream_port, 3, 4).await;
