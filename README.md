@@ -42,8 +42,8 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 | Role | What it does | Needs |
 |---|---|---|
 | `proxy` (default) | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
-| `all` | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url` |
-| `control` | Database, admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot` — no proxy listener | `--database-url` |
+| `all` | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
+| `control` | Database, admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
 
 `proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
 
@@ -66,11 +66,16 @@ Idempotent — seeds `models`/`model_backends`/keys from a LiteLLM-format config
 ```bash
 docker compose up
 # proxy on :4000, admin API on :4001, postgres on :5432
-fastllm-proxy import --config litellm_config.yaml \
+FASTLLM_ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
+  fastllm-proxy import --config litellm_config.yaml \
   --database-url postgres://fastllm:fastllm@localhost:5432/fastllm
 curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
   -d '{"name":"local","principal_id":1}'
 ```
+
+(`import`, run here on the host rather than inside the container, needs the
+same `FASTLLM_ENCRYPTION_KEY` `docker-compose.yml` sets for `--role all` —
+they share one database, so they must agree on one key.)
 
 ## Usage
 
@@ -106,7 +111,11 @@ kill -HUP $(pgrep -x fastllm-proxy)
 
 **`/admin/*` has no authentication of any kind.** `POST /admin/keys` and `DELETE /admin/keys/{id}` check nothing — no header, no token, no session — so anyone who can reach the admin port can mint or revoke an API key. `--proxy-token` gates `/snapshot` only; it is not, and never was, a check that `/admin/*` also performs (an earlier version of this README claimed otherwise). Sessions and passwords for real admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, network isolation is the *only* control: **never** put the admin port on a network-reachable listener — bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them, and do not treat `--proxy-token` as covering `/admin/*` when deciding what is safe to expose.
 
-**`model_backends.upstream_api_key` is stored unencrypted.** There is no encryption-at-rest layer in this codebase for that column (see `migrations/0002_correct_upstream_api_key_comment.sql`), so database read access is equivalent to upstream-credential access. Restrict who can read the control plane's Postgres accordingly.
+### Encryption at rest
+
+`model_backends.upstream_api_key` is encrypted at rest with AES-256-GCM (`src/control/secrets.rs`; `ring::aead`, already in the dependency tree via rustls) before `import`/the admin API ever write it to Postgres, and decrypted by `build_snapshot` when the control plane builds a snapshot. This protects the **database**, not the **snapshot**: `/snapshot` still carries the credential in usable plaintext form, because the proxy has to present it to the backend as a bearer token — an upstream credential cannot be reduced to a hash the way `api_keys.hash` is. `/snapshot` must be TLS wherever a backend has a real credential, exactly as before this existed. What encryption at rest actually buys: someone with read access to Postgres (a backup, a replica, a leaked `pg_dump`) no longer gets every upstream credential for free.
+
+`--role control`/`all` and `fastllm-proxy import`/`reencrypt-backends` all require `FASTLLM_ENCRYPTION_KEY` — 32 bytes, hex-encoded (e.g. `openssl rand -hex 32`) — and refuse to start without it rather than falling back to plaintext. `--role proxy` never touches the database and never requires it. A database that already has plaintext rows from before this existed (a developer's scratch database — the live cluster has no control-plane database deployed at all yet) needs the one-shot `fastllm-proxy reencrypt-backends --database-url <url>` command run once; see `migrations/0004_encrypted_upstream_api_key.sql` for why this is a command rather than a format the read path silently tolerates forever.
 
 ### Options
 

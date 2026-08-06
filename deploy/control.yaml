@@ -27,6 +27,27 @@ stringData:
   # both fastllm-control and fastllm-proxy.
   token: "REPLACE-ME-openssl-rand-hex-32"
 ---
+# Encrypts model_backends.upstream_api_key at rest (control::secrets,
+# AES-256-GCM) — see the FASTLLM_ENCRYPTION_KEY env var below and
+# README.md's "Encryption at rest" section for exactly what this does and
+# does not protect. `fastllm-control` refuses to start without this key
+# rather than falling back to storing credentials in plaintext.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fastllm-encryption-key
+  namespace: fastllm
+type: Opaque
+stringData:
+  # 32 bytes, hex-encoded (`EncryptionKey::from_hex`). Placeholder value
+  # below; replace it before first deploy the same way fastllm-proxy-token
+  # is, then re-apply. Rotating it is NOT just a matter of restarting
+  # fastllm-control: every row already encrypted under the old key needs
+  # decrypting under the old key and re-encrypting under the new one before
+  # the swap, which this repo has no automation for yet — treat rotation as
+  # a maintenance operation, not a config change.
+  key: "REPLACE-ME-openssl-rand-hex-32"
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -91,6 +112,9 @@ spec:
             - name: FASTLLM_PROXY_TOKEN
               valueFrom:
                 secretKeyRef: { name: fastllm-proxy-token, key: token }
+            - name: FASTLLM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: fastllm-encryption-key, key: key }
             - name: FASTLLM_LOG
               value: info
           # `/admin/*` (POST/DELETE) has no authentication at all, but it's a

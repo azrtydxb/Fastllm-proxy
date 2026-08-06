@@ -16,10 +16,15 @@ Known gaps carried forward rather than silently fixed:
   (principals with Argon2id passwords, sessions) is specified but deferred to
   the management-UI phase below. Until then, `/admin` must never be exposed
   outside the cluster — see `deploy/README.md`.
-- **`model_backends.upstream_api_key` is stored unencrypted at rest.**
-  Recorded during the Task 9 import work (`migrations/0002_correct_upstream_api_key_comment.sql`);
-  no encryption-at-rest layer exists in this codebase. Database read access
-  is upstream-credential access.
+- ~~`model_backends.upstream_api_key` is stored unencrypted at rest.~~ Fixed:
+  `src/control/secrets.rs` encrypts it with AES-256-GCM before
+  `import`/the admin API write it, `build_snapshot` decrypts it back on read,
+  and `--role control`/`all` refuse to start without `FASTLLM_ENCRYPTION_KEY`
+  rather than falling back to plaintext (`migrations/0004_encrypted_upstream_api_key.sql`).
+  This protects the database, not `/snapshot` — the proxy still receives the
+  credential in usable plaintext form, because it has to present it to the
+  backend. `/snapshot` must still be TLS wherever a backend has a real
+  credential. See README.md's "Encryption at rest" section.
 
 Deliberately not covered by P0: rate limits (P2), usage and budgets (P3),
 virtual models and routing (P1), the management UI (P4), and `POST /usage`

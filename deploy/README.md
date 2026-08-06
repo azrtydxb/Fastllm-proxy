@@ -38,6 +38,15 @@ kubectl -n fastllm create secret generic fastllm-proxy-token \
 # above overwrites it before first deploy; keep doing this rather than
 # committing a real token to git.)
 
+# Also generate the encryption-at-rest key: fastllm-control encrypts
+# model_backends.upstream_api_key with this before writing it to Postgres
+# (see README.md's "Encryption at rest" section) and refuses to start
+# without it. Same rotation caveat as the proxy token: don't hand-edit
+# control.yaml's placeholder, overwrite it here.
+kubectl -n fastllm create secret generic fastllm-encryption-key \
+  --from-literal=key="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply -f deploy/
 kubectl -n fastllm rollout status deploy/fastllm-control --timeout=240s
 kubectl -n fastllm rollout status deploy/fastllm-proxy --timeout=240s
@@ -93,6 +102,12 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
   fastllm-proxy import --config /path/to/litellm_config.yaml \
   --database-url "$FASTLLM_DATABASE_URL"
 ```
+
+`import` encrypts `upstream_api_key` before writing it and requires
+`FASTLLM_ENCRYPTION_KEY` to do so (see README.md's "Encryption at rest"
+section) — running it via `kubectl exec` against `fastllm-control` picks that
+up from the pod's own environment automatically, since `control.yaml` sets
+it. Running `import` from anywhere else needs the same env var set by hand.
 
 (There is no admin-API route for model/backend CRUD yet — `import` and direct
 SQL against `models`/`model_backends` are the only two ways today.) Neither
