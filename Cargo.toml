@@ -58,10 +58,15 @@ argon2 = { version = "0.5", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 rand = { version = "0.9", optional = true }
+# Already pulled in transitively by rustls/tokio-rustls (see the `ring`
+# features on those two above) — this promotes it to a direct dependency so
+# `src/control/secrets.rs` can call `ring::aead` for encryption at rest,
+# without adding a new crate to the dependency tree.
+ring = { version = "0.17", optional = true }
 
 [features]
 default = ["control"]
-control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand"]
+control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring"]
 
 [dev-dependencies]
 tempfile = "3"

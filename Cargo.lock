@@ -514,6 +514,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "rand 0.9.5",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",
