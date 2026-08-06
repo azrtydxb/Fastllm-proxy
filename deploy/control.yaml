@@ -18,11 +18,11 @@ metadata:
 type: Opaque
 stringData:
   # Shared secret between control and proxy: the proxy presents it as a
-  # bearer token to GET /snapshot, and the control plane's admin API accepts
-  # it as the only credential it currently checks (see the SECURITY note
-  # above — this token is not a substitute for real admin auth, it is what
-  # stands in for it until Task/P4 lands sessions). Placeholder value below;
-  # replace it before first deploy the same way fastllm-proxy-auth is
+  # bearer token to GET /snapshot, which is the only route that checks it.
+  # /admin/* checks nothing at all (see the SECURITY note above) — this
+  # token authenticates the proxy's polling, it is not a substitute for real
+  # admin auth and does not gate /admin/* in any way. Placeholder value
+  # below; replace it before first deploy the same way fastllm-proxy-auth is
   # generated in the README, then re-apply. Rotating it requires restarting
   # both fastllm-control and fastllm-proxy.
   token: "REPLACE-ME-openssl-rand-hex-32"

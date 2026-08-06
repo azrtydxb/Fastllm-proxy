@@ -17,6 +17,10 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     environment:
+      # `proxy` is the binary's default (an existing File-mode deployment
+      # must upgrade without gaining a new required flag), so this compose
+      # file's control-plane-in-one-process quickstart has to ask for `all`
+      # explicitly rather than relying on what used to be the default.
       FASTLLM_ROLE: all
       FASTLLM_DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
       FASTLLM_HOST: 0.0.0.0

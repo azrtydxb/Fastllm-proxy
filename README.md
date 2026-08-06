@@ -41,9 +41,11 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 
 | Role | What it does | Needs |
 |---|---|---|
-| `all` (default) | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url`, or nothing for `File` mode with `--config` alone |
+| `proxy` (default) | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
+| `all` | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url` |
 | `control` | Database, admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot` — no proxy listener | `--database-url` |
-| `proxy` | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
+
+`proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
 
 `control` and `proxy` split for a cluster deployment where the admin API — which has **no authentication of its own yet** (see below) — needs to stay off the public listener while the proxy scales out independently. See `deploy/` for the manifests that wire this up on Kubernetes.
 
@@ -99,10 +101,10 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `GET /v1/models` | Aggregated across every pool |
 | `GET /health` | Per-backend health, in-flight, request and error counts. No auth required. Exposes backend addresses — keep it off the public interface |
 | `GET /metrics` | Prometheus text. No auth required |
-| `POST /admin/keys`, `DELETE /admin/keys/{id}` | `--role all`/`control` only. Bearer-token gated by `--proxy-token`, but that token is a placeholder, not real admin auth — see below |
+| `POST /admin/keys`, `DELETE /admin/keys/{id}` | `--role all`/`control` only. **No authentication at all** — not even `--proxy-token`. See below |
 | `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
 
-**The admin API has no authentication of its own yet.** `--proxy-token` is the only credential either `/admin/*` or `/snapshot` currently check, and it is shared with the proxy's own polling — anyone who has it can create keys, not just read the snapshot. Sessions and passwords for real per-admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, **never** put `/admin` or `/snapshot` on a network-reachable listener — bind the admin port to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them.
+**`/admin/*` has no authentication of any kind.** `POST /admin/keys` and `DELETE /admin/keys/{id}` check nothing — no header, no token, no session — so anyone who can reach the admin port can mint or revoke an API key. `--proxy-token` gates `/snapshot` only; it is not, and never was, a check that `/admin/*` also performs (an earlier version of this README claimed otherwise). Sessions and passwords for real admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, network isolation is the *only* control: **never** put the admin port on a network-reachable listener — bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them, and do not treat `--proxy-token` as covering `/admin/*` when deciding what is safe to expose.
 
 **`model_backends.upstream_api_key` is stored unencrypted.** There is no encryption-at-rest layer in this codebase for that column (see `migrations/0002_correct_upstream_api_key_comment.sql`), so database read access is equivalent to upstream-credential access. Restrict who can read the control plane's Postgres accordingly.
 

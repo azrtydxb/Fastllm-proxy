@@ -18,7 +18,9 @@ Two Deployments, one Postgres, since Task 12:
 
 ### ⚠️ The admin API has no authentication — keep it off the VIP
 
-`fastllm-control`'s `/admin/*` and `/snapshot` are gated on `--proxy-token` alone, which is a shared secret for machine-to-machine polling, not per-admin authentication. There is no session, no password, no user identity behind it — real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
+`fastllm-control`'s `/admin/*` (`POST /admin/keys`, `DELETE /admin/keys/{id}`) has **no authentication at all** — not `--proxy-token`, not anything else. It checks no header and no credential; anyone who can reach port 4001 can mint or revoke an API key. Only `/snapshot` checks `--proxy-token`, and that token is a shared secret for machine-to-machine polling (the proxy proving itself to the control plane), not admin authentication — there is no session, no password, no user identity behind either route. Real admin auth (principals with Argon2id passwords, sessions) is specified but deferred to the management-UI phase (see the repo root `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`).
+
+**Network isolation — the `ClusterIP` Service below — is therefore the only control `/admin/*` has.** Do not read the token requirement on `/snapshot` as implying `/admin/*` is protected too; it is not, and this document previously said otherwise.
 
 **That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN. Putting `/admin/keys` on it turns "reachable from any machine on the network" into "can mint an API key for this proxy from any machine on the network" — unauthenticated key creation, not a probe-and-metrics exposure like `/health`. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
 
@@ -93,9 +95,12 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
 ```
 
 (There is no admin-API route for model/backend CRUD yet — `import` and direct
-SQL against `models`/`model_backends` are the only two ways today.) A change
-lands on `fastllm-proxy` within one `--config-poll` interval (default 5s) of
-`fastllm-control` rebuilding its snapshot — no rollout, no dropped generations.
+SQL against `models`/`model_backends` are the only two ways today.) Neither
+goes through the admin API, so `fastllm-control` only picks either up on its
+own periodic rebuild (`--snapshot-rebuild-interval`, default 5s) rather than
+immediately the way an admin API write does. A change lands on `fastllm-proxy`
+within that interval plus one `--config-poll` interval (default 5s each, so
+worst case ~10s) — no rollout, no dropped generations.
 
 ## When spark2's port changes
 
@@ -108,5 +113,6 @@ curl -H "Authorization: Bearer $GPUSTACK_KEY" \
 ```
 
 then update `model_backends.api_base` for that row (re-run `import` against an
-updated config file, or `UPDATE` it directly) and wait for the next poll. This
-is the main thing a discovery source would automate later.
+updated config file, or `UPDATE` it directly) and wait for `fastllm-control`'s
+next periodic rebuild plus `fastllm-proxy`'s next poll (see above). This is
+the main thing a discovery source would automate later.
