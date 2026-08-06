@@ -98,10 +98,9 @@ struct Cli {
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 
-    /// Control plane and forwarding in one process (default), the admin API
-    /// and database only, or forwarding only against a control plane or a
-    /// config file.
-    #[arg(long, value_enum, default_value_t = Role::All, env = "FASTLLM_ROLE")]
+    /// Forwarding only (default), the control plane and forwarding in one
+    /// process, or the admin API and database only.
+    #[arg(long, value_enum, default_value_t = Role::Proxy, env = "FASTLLM_ROLE")]
     role: Role,
 
     /// Required for `--role all` and `--role control`; unused by `--role proxy`.
@@ -128,6 +127,18 @@ struct Cli {
     /// Bind port for the admin API (`--role all`/`control`).
     #[arg(long, default_value_t = 4001)]
     admin_port: u16,
+
+    /// Seconds between the control plane rebuilding its snapshot from the
+    /// database on its own initiative, independent of admin API writes.
+    ///
+    /// Without this, a running `--role all`/`control` process only ever
+    /// rebuilds at startup and right after its own `POST`/`DELETE
+    /// /admin/keys` — so `fastllm-proxy import` (a separate process) and a
+    /// hand-written `UPDATE`/`INSERT` against Postgres (`deploy/README.md`'s
+    /// documented fix for a moved backend) never reach it at all. 0 disables
+    /// the rebuild, same convention as `--config-poll`.
+    #[arg(long, default_value_t = 5, env = "FASTLLM_SNAPSHOT_REBUILD_INTERVAL")]
+    snapshot_rebuild_interval: u64,
 }
 
 /// One-shot maintenance commands, as opposed to `Cli`'s server-starting flags.
@@ -152,12 +163,22 @@ enum Command {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Role {
-    /// Control plane and forwarding in one process. The default, and what a
-    /// single container runs.
+    /// Control plane and forwarding in one process. Opt-in, not the default:
+    /// it requires `--database-url`, and every deployment that predates the
+    /// control plane runs with no `--role` flag at all. If `all` were the
+    /// default, pulling this binary into an existing deployment (same image
+    /// tag, same flags, no `--database-url` anywhere in the pod spec) would
+    /// make every new pod exit at startup — a CrashLoopBackOff with no config
+    /// change to point at, and nothing for `maxUnavailable: 0` to roll back
+    /// to once the last old pod is gone.
     All,
     /// Database, admin API and `/snapshot` only — no proxy listener.
     Control,
-    /// Forwarding only, against a control plane or a config file.
+    /// Forwarding only, against a control plane or a config file. The
+    /// default, precisely because it is what today's flags already mean:
+    /// `--config` alone still boots `File` mode exactly as it always has, no
+    /// database required, no behaviour change on upgrade. `all` and
+    /// `control` are both explicit opt-ins via `--role`.
     Proxy,
 }
 
@@ -210,9 +231,14 @@ async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> 
         let cfg = FileConfig::load(config)?;
         let pool = fastllm_proxy::control::db::connect(database_url).await?;
         let summary = fastllm_proxy::control::import::import(&pool, &cfg).await?;
+        // No key count: `import` never touches `api_keys` (a LiteLLM config
+        // has no key material in it), so there is nothing truthful to report
+        // there. An earlier revision printed a permanently-zero "0 new
+        // key(s)" instead, which read as a claim that key import runs and
+        // finds nothing every time.
         println!(
-            "import complete: {} new model(s), {} new backend(s), {} new key(s)",
-            summary.models, summary.backends, summary.keys
+            "import complete: {} new model(s), {} new backend(s)",
+            summary.models, summary.backends
         );
         Ok(())
     }
@@ -253,6 +279,11 @@ async fn run_control(cli: Cli) -> Result<()> {
         let snap = fastllm_proxy::control::build::build_snapshot(&pool).await?;
         let cache: Arc<dyn fastllm_proxy::control::api::SnapshotSink> =
             Arc::new(ArcSwap::from_pointee(snap));
+        fastllm_proxy::control::api::spawn_snapshot_rebuilder(
+            pool.clone(),
+            Arc::clone(&cache),
+            Duration::from_secs(cli.snapshot_rebuild_interval),
+        );
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
             .with_context(|| {
@@ -303,7 +334,19 @@ async fn run_all(cli: Cli) -> Result<()> {
             .or_else(|| tuning_cfg.general_settings.master_key.clone())
             .filter(|k| !k.is_empty());
         if master_key.is_some() {
-            warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
+            // `--role all` gets its snapshot from `build_snapshot`, which
+            // never merges a legacy master key in — that merge only happens
+            // in `File`-mode `run_data_plane`. Storing the value on
+            // `AppState` anyway (for `reload()`'s benefit, which `all` never
+            // calls either) without saying so would leave an operator
+            // believing a compat flag they set still works. It does not: a
+            // fresh install must go through migration 0003's bootstrap
+            // principal or the admin API instead.
+            warn!(
+                "--master-key has no effect in `--role all`; it is only honoured in `File` mode \
+                 (--role proxy with --config and no --control-url). Mint keys through the admin \
+                 API instead."
+            );
         }
 
         let state = build_app_state(&cli, client, interner, &tuning, None, master_key, snap)?;
@@ -316,6 +359,11 @@ async fn run_all(cli: Cli) -> Result<()> {
         let admin_pool = pool.clone();
         let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
         let admin_token = cli.proxy_token.clone().unwrap_or_default();
+        fastllm_proxy::control::api::spawn_snapshot_rebuilder(
+            pool.clone(),
+            Arc::clone(&admin_sink),
+            Duration::from_secs(cli.snapshot_rebuild_interval),
+        );
         tokio::spawn(async move {
             if let Err(e) =
                 fastllm_proxy::control::api::serve(admin_pool, admin_addr, admin_token, admin_sink)
@@ -355,14 +403,13 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
 
     // Deprecated: a single shared key is exactly what this release replaces,
     // but silently breaking a running deployment is worse than a warning.
+    // Whether it actually *does* anything depends on which mode this turns
+    // out to be — see the mode-specific warning below, once that is known.
     let master_key = cli
         .master_key
         .clone()
         .or_else(|| tuning_cfg.general_settings.master_key.clone())
         .filter(|k| !k.is_empty());
-    if master_key.is_some() {
-        warn!("--master-key is deprecated; define keys under `auth:` or use a control plane");
-    }
 
     enum Mode {
         /// No control plane. SIGHUP and a poll both apply.
@@ -393,12 +440,32 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
                 http_src.load_cached().unwrap_or_default()
             }
         };
+        if master_key.is_some() {
+            // Unlike `File` mode, nothing here ever calls
+            // `add_legacy_master_key`: `Http` mode's snapshot comes from the
+            // control plane's `/snapshot`, and the poller below polls it with
+            // a plain `HttpSource`, not a `WithLegacyMasterKey`-wrapped one.
+            // A flag that is silently stored and never consulted is worse
+            // than one that says so — see Task 12's final review.
+            warn!(
+                "--master-key has no effect in `Http` mode (--control-url set); it is only \
+                 honoured in `File` mode (--config, no --control-url). Define keys through the \
+                 control plane's admin API instead."
+            );
+        }
         (snap, Mode::Http { url, token }, cli.config.clone())
     } else {
         let path = cli
             .config
             .clone()
             .context("File mode (no --control-url) requires --config")?;
+        // Deprecated, but this is the one mode where it actually still works
+        // (merged in by `WithLegacyMasterKey` on every fetch, not just this
+        // first one) — see the `Http`/`all` branches for why the same flag is
+        // inert everywhere else.
+        if master_key.is_some() {
+            warn!("--master-key is deprecated; define keys under `auth:` instead");
+        }
         let file_src = WithLegacyMasterKey::new(FileSource::new(path.clone()), master_key.clone());
         let snap = file_src
             .fetch(None)
