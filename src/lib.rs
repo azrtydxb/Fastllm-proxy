@@ -7,6 +7,7 @@ pub mod health;
 pub mod limiter;
 pub mod multipart;
 pub mod proxy;
+pub mod reconcile;
 pub mod registry;
 pub mod router;
 pub mod routing;

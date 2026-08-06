@@ -5,6 +5,7 @@
 //! — key hashes, never plaintext — and grants nothing else.
 
 use crate::control::build::build_snapshot;
+use crate::control::reconcile::ReconcileState;
 use crate::control::secrets::EncryptionKey;
 use crate::routing::MatchConditionJson;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
@@ -13,7 +14,7 @@ use arc_swap::ArcSwap;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,12 @@ struct Ctx {
     /// otherwise-silent divergence between "the database" and "the published
     /// snapshot" something an operator can actually notice.
     snapshot_rebuild_failures: Arc<AtomicU64>,
+    /// P2 reconciliation's server-side aggregation state — see
+    /// `control::reconcile`'s doc comment for why this is in-memory only,
+    /// not a table. One instance for the life of the process, shared by
+    /// every `POST /limits/reconcile` call the same way `pool` is shared by
+    /// every database query.
+    reconcile: Arc<ReconcileState>,
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
@@ -1252,6 +1259,192 @@ async fn list_roles(State(ctx): State<Ctx>) -> Result<Json<Vec<RoleView>>, ApiEr
     ))
 }
 
+// --- Rate limits (P2) --------------------------------------------------
+//
+// Same shape as every other admin route in this file: read the current
+// state, write a row, `refresh(&ctx)` so the write reaches the published
+// snapshot. See `migrations/0009_limits.sql` for the schema and
+// `crate::control::build::build_snapshot` for how a row here becomes
+// `Principal::limits`.
+
+#[derive(Serialize)]
+struct LimitView {
+    principal_id: i64,
+    principal: String,
+    requests_per_min: Option<i32>,
+    tokens_per_min: Option<i32>,
+}
+
+async fn list_limits(State(ctx): State<Ctx>) -> Result<Json<Vec<LimitView>>, ApiError> {
+    let rows: Vec<(i64, String, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT l.principal_id, p.name, l.requests_per_min, l.tokens_per_min
+         FROM limits l JOIN principals p ON p.id = l.principal_id
+         ORDER BY l.principal_id",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing limits", &e))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(principal_id, principal, requests_per_min, tokens_per_min)| LimitView {
+                    principal_id,
+                    principal,
+                    requests_per_min,
+                    tokens_per_min,
+                },
+            )
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PutLimits {
+    #[serde(default)]
+    requests_per_min: Option<i32>,
+    #[serde(default)]
+    tokens_per_min: Option<i32>,
+}
+
+/// `PUT`, not `POST`: this is an upsert on the principal, matching the
+/// schema's one-row-per-principal shape (`migrations/0009_limits.sql`'s
+/// `PRIMARY KEY (principal_id)`) — calling it again with a new value updates
+/// the existing row rather than erroring or creating a second one.
+async fn put_limits(
+    State(ctx): State<Ctx>,
+    Path(principal_id): Path<i64>,
+    Json(body): Json<PutLimits>,
+) -> Result<StatusCode, ApiError> {
+    if body.requests_per_min.is_none() && body.tokens_per_min.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "at least one of requests_per_min/tokens_per_min must be set; \
+             DELETE /admin/principals/{id}/limits removes a limit instead",
+        ));
+    }
+    for (field, value) in [
+        ("requests_per_min", body.requests_per_min),
+        ("tokens_per_min", body.tokens_per_min),
+    ] {
+        if value.is_some_and(|v| v <= 0) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("{field} must be a positive number of units per minute"),
+            ));
+        }
+    }
+    sqlx::query(
+        "INSERT INTO limits (principal_id, requests_per_min, tokens_per_min)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (principal_id)
+         DO UPDATE SET requests_per_min = EXCLUDED.requests_per_min,
+                        tokens_per_min = EXCLUDED.tokens_per_min,
+                        updated_at = now()",
+    )
+    .bind(principal_id)
+    .bind(body.requests_per_min)
+    .bind(body.tokens_per_min)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no principal with id {principal_id}; GET /admin/principals lists the ids \
+                     that exist"
+                ),
+            )
+        } else {
+            db_error("limit upsert", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_limits(
+    State(ctx): State<Ctx>,
+    Path(principal_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM limits WHERE principal_id = $1")
+        .bind(principal_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("limit deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("principal {principal_id} has no configured limit to remove"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ReconcileCountWire {
+    principal_id: u64,
+    requests: u64,
+    tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct ReconcileRequest {
+    replica_id: String,
+    counts: Vec<ReconcileCountWire>,
+}
+
+#[derive(Serialize)]
+struct AllowanceWire {
+    principal_id: u64,
+    requests_share: f64,
+    tokens_share: f64,
+}
+
+#[derive(Serialize)]
+struct ReconcileResponse {
+    allowances: Vec<AllowanceWire>,
+}
+
+/// `POST /limits/reconcile`: the P2 half of the Snapshot protocol's reverse
+/// channel, sibling to `/usage` and gated by the same proxy bootstrap token
+/// (a stolen token already discloses every key hash and usable backend
+/// credential via `/snapshot`; letting it also exchange rate-limit counts
+/// grants nothing new). Unlike `/usage` this is not fire-and-forget: the
+/// whole point is the allowance in the response body — see
+/// `crate::control::reconcile::ReconcileState::report` for the aggregation
+/// itself, which is a pure function tested independently of this wire
+/// wrapper.
+async fn post_reconcile(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Json(body): Json<ReconcileRequest>,
+) -> Result<Json<ReconcileResponse>, ApiError> {
+    if !proxy_token_authorised(&headers, &ctx.proxy_token) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "bad or missing proxy token",
+        ));
+    }
+    let now = std::time::Instant::now();
+    let allowances = body
+        .counts
+        .into_iter()
+        .map(|c| {
+            let share =
+                ctx.reconcile
+                    .report(&body.replica_id, c.principal_id, c.requests, c.tokens, now);
+            AllowanceWire {
+                principal_id: c.principal_id,
+                requests_share: share.requests,
+                tokens_share: share.tokens,
+            }
+        })
+        .collect();
+    Ok(Json(ReconcileResponse { allowances }))
+}
+
 /// Rebuild immediately after a write so revocation is bounded by the proxy's
 /// poll interval alone, not by poll interval plus rebuild interval.
 ///
@@ -1539,6 +1732,7 @@ pub async fn serve(
         cache,
         key,
         snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
+        reconcile: Arc::new(ReconcileState::new()),
     };
     // Every mutating route below ends in `refresh(&ctx)` — the one write
     // path that publishes through `SnapshotSink::store_snapshot`. That is
@@ -1579,9 +1773,15 @@ pub async fn serve(
             delete(delete_default_target),
         )
         .route("/admin/roles", get(list_roles))
+        .route("/admin/limits", get(list_limits))
+        .route(
+            "/admin/principals/{id}/limits",
+            put(put_limits).delete(delete_limits),
+        )
         .route("/admin/health", get(admin_health))
         .route("/snapshot", get(get_snapshot))
         .route("/usage", post(post_usage))
+        .route("/limits/reconcile", post(post_reconcile))
         .with_state(ctx);
 
     match tls {
@@ -1721,6 +1921,7 @@ mod tests {
             cache: Arc::clone(&cache),
             key: Arc::new(test_key()),
             snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
+            reconcile: Arc::new(ReconcileState::new()),
         };
         (ctx, cache)
     }
@@ -2483,5 +2684,146 @@ mod tests {
         .unwrap();
         assert_eq!(resp.0.accepted, 0);
         assert_eq!(resp.0.dropped, 0);
+    }
+
+    // --- Rate limits (P2) --------------------------------------------
+
+    async fn make_principal(ctx: &Ctx, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap()
+    }
+
+    /// The write path this whole file's other tests already pin for every
+    /// other route: `put_limits` reaches the published snapshot without a
+    /// second rebuild trigger, `delete_limits` removes it again, and the
+    /// principal ends up unlimited afterward — not limited to zero.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn put_and_delete_limits_reach_the_published_snapshot() {
+        let (ctx, cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("limits-route-principal")).await;
+
+        put_limits(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutLimits {
+                requests_per_min: Some(7),
+                tokens_per_min: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let published = cache
+            .current_snapshot()
+            .principals
+            .get(&(principal_id as u64))
+            .expect("the principal must be in the published snapshot")
+            .limits;
+        assert_eq!(
+            published,
+            Some(crate::limiter::Limits {
+                requests_per_min: Some(7),
+                tokens_per_min: None,
+            })
+        );
+
+        let listed = list_limits(State(ctx.clone())).await.unwrap();
+        assert!(listed
+            .0
+            .iter()
+            .any(|l| l.principal_id == principal_id && l.requests_per_min == Some(7)));
+
+        delete_limits(State(ctx.clone()), Path(principal_id))
+            .await
+            .unwrap();
+        let published_after_delete = cache
+            .current_snapshot()
+            .principals
+            .get(&(principal_id as u64))
+            .expect("the principal itself is not deleted")
+            .limits;
+        assert_eq!(
+            published_after_delete, None,
+            "removing the limit must make the principal unlimited, not limited to zero"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn put_limits_rejects_an_empty_body() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("empty-limits-principal")).await;
+        let err = put_limits(
+            State(ctx.clone()),
+            Path(principal_id),
+            Json(PutLimits {
+                requests_per_min: None,
+                tokens_per_min: None,
+            }),
+        )
+        .await
+        .expect_err("a body with neither dimension set must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn deleting_a_limit_that_does_not_exist_is_not_found() {
+        let (ctx, _cache) = test_ctx().await;
+        let principal_id = make_principal(&ctx, &unique_name("no-limit-principal")).await;
+        let err = delete_limits(State(ctx.clone()), Path(principal_id))
+            .await
+            .expect_err("no row to delete");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    /// `POST /limits/reconcile` is gated by the same proxy token as
+    /// `/snapshot` and `/usage`, and its aggregation is exactly
+    /// `control::reconcile::ReconcileState::report` — this exercises it
+    /// through the actual route handler rather than only the pure function,
+    /// proving the wire wrapper does not lose or misroute anything.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn the_reconcile_route_is_gated_and_answers_with_a_computed_share() {
+        let (ctx, _cache) = test_ctx().await;
+
+        let unauthorised = post_reconcile(
+            State(ctx.clone()),
+            HeaderMap::new(),
+            Json(ReconcileRequest {
+                replica_id: "r1".into(),
+                counts: vec![],
+            }),
+        )
+        .await;
+        assert!(unauthorised.is_err());
+
+        let resp = post_reconcile(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(ReconcileRequest {
+                replica_id: "r1".into(),
+                counts: vec![ReconcileCountWire {
+                    principal_id: 999,
+                    requests: 10,
+                    tokens: 100,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.allowances.len(), 1);
+        assert_eq!(resp.0.allowances[0].principal_id, 999);
+        // The only replica that has ever reported for this principal gets
+        // the full share — same property `control::reconcile`'s own tests
+        // pin, exercised here through the HTTP-facing wrapper.
+        assert_eq!(resp.0.allowances[0].requests_share, 1.0);
+        assert_eq!(resp.0.allowances[0].tokens_share, 1.0);
     }
 }

@@ -6,5 +6,6 @@ pub mod api;
 pub mod build;
 pub mod db;
 pub mod import;
+pub mod reconcile;
 pub mod secrets;
 pub mod tls;
