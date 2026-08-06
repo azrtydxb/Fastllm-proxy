@@ -525,6 +525,7 @@ async fn run_all(cli: Cli) -> Result<()> {
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
 
+        info!("startup: snapshot built, loading tuning config");
         let tuning_cfg = load_tuning_config(cli.config.as_ref())?;
         let tuning = tuning_cfg.fastllm.clone();
         let interner = Interner::default();
@@ -566,8 +567,10 @@ async fn run_all(cli: Cli) -> Result<()> {
         // specifically, not `cli.host`: this is always same-host by
         // construction, and `cli.host` may be `0.0.0.0`, which is not a
         // valid address to *connect* to.
+        info!("startup: loading admin TLS config");
         let admin_tls = admin_tls_config(&cli)?;
         let admin_scheme = if admin_tls.is_some() { "https" } else { "http" };
+        info!("startup: spawning usage reporter");
         let usage = fastllm_proxy::usage::spawn(
             fastllm_proxy::usage::ReporterConfig {
                 url: format!("{admin_scheme}://127.0.0.1:{}/usage", cli.admin_port),
@@ -987,6 +990,7 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
 /// cert-manager CA for the control plane does not also lose the ability to
 /// reach a public, publicly-CA-signed backend.
 fn tls_config(ca_bundle: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
+    info!("startup: building rustls client config (loading root certificates)");
     // Exactly one provider is compiled in, but installing it explicitly keeps
     // this deterministic rather than dependent on rustls' defaulting rules.
     let _ = rustls::crypto::ring::default_provider().install_default();
