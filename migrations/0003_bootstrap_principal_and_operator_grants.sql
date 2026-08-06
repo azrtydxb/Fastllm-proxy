@@ -12,8 +12,14 @@
 -- environment this migration runs in — a real operator is free to add more
 -- principals afterward through direct SQL (there is no admin route for that
 -- either yet; see deploy/README.md).
+-- ON CONFLICT DO NOTHING: a database that already has a principal at id 1
+-- (e.g. inserted by hand via the previously-documented manual route) must
+-- not fail this migration — the control plane refusing to start over a
+-- redundant seed row is worse than a no-op here. Seeding intent on a fresh
+-- database is unchanged.
 INSERT INTO principals (id, kind, name) VALUES
-    (1, 'service_account', 'bootstrap');
+    (1, 'service_account', 'bootstrap')
+ON CONFLICT (id) DO NOTHING;
 
 -- BIGSERIAL's sequence has no idea a row landed at an explicit id; without
 -- this, the next principal created by ordinary means (nextval, i.e. id 1)

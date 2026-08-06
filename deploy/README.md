@@ -26,7 +26,7 @@ Two Deployments, one Postgres, since Task 12:
 
 ## First install
 
-Generate the proxy token — shared between `fastllm-control` and `fastllm-proxy`, and the only credential the admin API currently checks:
+Generate the proxy token — shared between `fastllm-control` and `fastllm-proxy`, checked only by `/snapshot` (the data plane's read of policy). It protects nothing on `/admin/*`, which has no authentication at all:
 
 ```bash
 kubectl create namespace fastllm --dry-run=client -o yaml | kubectl apply -f -

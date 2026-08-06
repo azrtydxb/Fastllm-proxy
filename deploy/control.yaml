@@ -93,12 +93,12 @@ spec:
                 secretKeyRef: { name: fastllm-proxy-token, key: token }
             - name: FASTLLM_LOG
               value: info
-          # No unauthenticated route exists on this role's router at all —
-          # `/admin/*` needs the proxy token and `/snapshot` needs it too, so
-          # neither is a valid liveness/readiness target and there is no
-          # `/health`/`/metrics` here the way the proxy role has. A TCP check
-          # on the admin port is the honest probe until this role grows an
-          # unauthenticated `/healthz`.
+          # `/admin/*` (POST/DELETE) has no authentication at all, but it's a
+          # mutating endpoint, not a health check, so it's not a valid probe
+          # target either. `/snapshot` requires the proxy token, which the
+          # kubelet doesn't have. There is no `/health`/`/metrics` here the
+          # way the proxy role has. A TCP check on the admin port is the
+          # honest probe until this role grows a dedicated `/healthz`.
           readinessProbe:
             tcpSocket: { port: admin }
             periodSeconds: 10
