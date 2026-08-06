@@ -31,6 +31,11 @@ use fastllm_proxy::{health, proxy, upstream};
     about = "Low-latency OpenAI-compatible inference gateway"
 )]
 struct Cli {
+    /// One-shot maintenance commands (`import`). Absent means: start the
+    /// server per `--role`, the historical default behaviour.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the model config. LiteLLM-format configs are accepted as-is.
     ///
     /// Required in `File` mode (`--role proxy` with no `--control-url`),
@@ -125,6 +130,26 @@ struct Cli {
     admin_port: u16,
 }
 
+/// One-shot maintenance commands, as opposed to `Cli`'s server-starting flags.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Seed `models`/`model_backends` from a LiteLLM-format config file.
+    ///
+    /// The migration path off a file-driven deployment onto the control
+    /// plane: run this once per environment (safely more than once — it is
+    /// idempotent) instead of hand-writing the equivalent `INSERT`s.
+    Import {
+        /// LiteLLM-format config to import, e.g. an exported ConfigMap.
+        #[arg(long)]
+        config: PathBuf,
+
+        /// Database to seed. Distinct from `--database-url` on `Cli` so
+        /// `import` never has to be issued alongside `--role`.
+        #[arg(long, env = "FASTLLM_DATABASE_URL")]
+        database_url: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Role {
     /// Control plane and forwarding in one process. The default, and what a
@@ -156,10 +181,45 @@ fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Some(command) = &cli.command {
+        return run_command(command).await;
+    }
     match cli.role {
         Role::Control => run_control(cli).await,
         Role::Proxy => run_data_plane(cli).await,
         Role::All => run_all(cli).await,
+    }
+}
+
+/// Runs a one-shot command and returns; never starts a server or a listener.
+async fn run_command(command: &Command) -> Result<()> {
+    match command {
+        Command::Import {
+            config,
+            database_url,
+        } => run_import(config, database_url).await,
+    }
+}
+
+/// `fastllm-proxy import --config <path> --database-url <url>`: connects,
+/// migrates (via `control::db::connect`), imports, and prints a summary for
+/// whoever is running the migration by hand.
+async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> {
+    #[cfg(feature = "control")]
+    {
+        let cfg = FileConfig::load(config)?;
+        let pool = fastllm_proxy::control::db::connect(database_url).await?;
+        let summary = fastllm_proxy::control::import::import(&pool, &cfg).await?;
+        println!(
+            "imported {} model(s), {} new backend(s), {} key(s)",
+            summary.models, summary.backends, summary.keys
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "control"))]
+    {
+        let _ = (config, database_url);
+        anyhow::bail!("import requires the `control` feature; this binary was built with --no-default-features")
     }
 }
 
