@@ -18,6 +18,18 @@ jobs:
     # same base as the Dockerfile, so CI and the image agree on the compiler.
     container:
       image: rust:1-bookworm
+    # A sibling service container, reachable by its service name — not
+    # localhost, which is the `test` container's own loopback, not the
+    # runner's. Same Postgres major version CNPG runs in deploy/control.yaml.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fastllm
+          POSTGRES_PASSWORD: fastllm
+          POSTGRES_DB: fastllm
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -28,6 +40,14 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      # The database tests are `#[ignore]`d by default so `cargo test` stays
+      # database-free everywhere else (a laptop with no Postgres running,
+      # `cargo build --no-default-features`). Here, with a real Postgres
+      # alongside, `--include-ignored` actually runs them.
+      - name: Test (with database)
+        env:
+          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+        run: cargo test --features control --locked -- --include-ignored
 
   publish:
     # Only what lands on main or a tag becomes an image; a PR just gets tested.

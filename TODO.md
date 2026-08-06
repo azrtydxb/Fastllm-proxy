@@ -1,5 +1,30 @@
 # TODO
 
+## P0: control plane and RBAC — done
+
+Real per-key RBAC (principals, roles, permissions, SHA-256-hashed API keys),
+a control/data-plane split (`--role=control`/`proxy`, sharing `Snapshot` as
+the sole contract), three snapshot sources (file, http-poll, in-process),
+`fastllm-proxy import` to migrate a `File`-mode deployment onto a database,
+and the CI/deployment/docs wiring in this task. Design and self-review:
+`docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`.
+
+Known gaps carried forward rather than silently fixed:
+
+- **The admin API has no authentication of its own.** `/admin/*` and
+  `/snapshot` are gated on the shared proxy token alone. Real admin auth
+  (principals with Argon2id passwords, sessions) is specified but deferred to
+  the management-UI phase below. Until then, `/admin` must never be exposed
+  outside the cluster — see `deploy/README.md`.
+- **`model_backends.upstream_api_key` is stored unencrypted at rest.**
+  Recorded during the Task 9 import work (`migrations/0002_correct_upstream_api_key_comment.sql`);
+  no encryption-at-rest layer exists in this codebase. Database read access
+  is upstream-credential access.
+
+Deliberately not covered by P0: rate limits (P2), usage and budgets (P3),
+virtual models and routing (P1), the management UI (P4), and `POST /usage`
+(the wire protocol has it; nothing sends to it until P2).
+
 ## Features
 
 ### Embedded management and monitoring UI

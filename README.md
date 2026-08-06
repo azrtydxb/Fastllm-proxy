@@ -35,6 +35,41 @@ cargo build --release
 # target/release/fastllm-proxy
 ```
 
+## Roles
+
+One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
+
+| Role | What it does | Needs |
+|---|---|---|
+| `all` (default) | Control plane and forwarding in one process, sharing state directly — no HTTP round trip between them | `--database-url`, or nothing for `File` mode with `--config` alone |
+| `control` | Database, admin API (`POST /admin/keys`, `DELETE /admin/keys/{id}`) and `/snapshot` — no proxy listener | `--database-url` |
+| `proxy` | Forwarding only, against either a control plane (`Http` mode) or a config file (`File` mode) | `--control-url` + `--proxy-token` (`Http` mode), or `--config` alone (`File` mode) |
+
+`control` and `proxy` split for a cluster deployment where the admin API — which has **no authentication of its own yet** (see below) — needs to stay off the public listener while the proxy scales out independently. See `deploy/` for the manifests that wire this up on Kubernetes.
+
+`Http` mode degrades gracefully: a `proxy` that cannot reach its control plane at startup, or loses it later, falls back to the last snapshot it wrote to `--snapshot-cache` (default `/var/lib/fastllm/snapshot.json`) rather than refusing to start or dropping traffic.
+
+### Migrating a `File`-mode deployment onto a database
+
+```bash
+fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
+```
+
+Idempotent — seeds `models`/`model_backends`/keys from a LiteLLM-format config and can be run more than once safely. Point `--role=all`/`control` at the same database afterward.
+
+### Quickstart with docker-compose
+
+`docker-compose.yml` in the repo root brings up Postgres and `--role=all` together:
+
+```bash
+docker compose up
+# proxy on :4000, admin API on :4001, postgres on :5432
+fastllm-proxy import --config litellm_config.yaml \
+  --database-url postgres://fastllm:fastllm@localhost:5432/fastllm
+curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
+  -d '{"name":"local","principal_id":1}'
+```
+
 ## Usage
 
 ```bash
@@ -64,6 +99,12 @@ kill -HUP $(pgrep -x fastllm-proxy)
 | `GET /v1/models` | Aggregated across every pool |
 | `GET /health` | Per-backend health, in-flight, request and error counts. No auth required. Exposes backend addresses — keep it off the public interface |
 | `GET /metrics` | Prometheus text. No auth required |
+| `POST /admin/keys`, `DELETE /admin/keys/{id}` | `--role all`/`control` only. Bearer-token gated by `--proxy-token`, but that token is a placeholder, not real admin auth — see below |
+| `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
+
+**The admin API has no authentication of its own yet.** `--proxy-token` is the only credential either `/admin/*` or `/snapshot` currently check, and it is shared with the proxy's own polling — anyone who has it can create keys, not just read the snapshot. Sessions and passwords for real per-admin auth are specified but land later, with the management UI (see `TODO.md` and `docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`). Until then, **never** put `/admin` or `/snapshot` on a network-reachable listener — bind the admin port to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them.
+
+**`model_backends.upstream_api_key` is stored unencrypted.** There is no encryption-at-rest layer in this codebase for that column (see `migrations/0002_correct_upstream_api_key_comment.sql`), so database read access is equivalent to upstream-credential access. Restrict who can read the control plane's Postgres accordingly.
 
 ### Options
 
@@ -116,6 +157,21 @@ fastllm:
 ```
 
 `openai/`, `vllm/`, `hosted_vllm/` and `openai_like/` prefixes are stripped from `litellm_params.model`; a name that is genuinely `Qwen/Qwen3-1.7B` keeps its org. `not-needed`, `none` and `null` API keys are treated as absent.
+
+### Per-key RBAC in `File` mode
+
+`--master-key`/`general_settings.master_key` is one shared secret for every client and is deprecated. The replacement in `File` mode (no `--control-url`) is an `auth:` block:
+
+```yaml
+auth:
+  keys:
+    - key: sk-...
+      name: ci-pipeline
+      models: ["qwen3-6-35b-a3b-nvfp4"]   # or omit/`["*"]` for every model
+      expires_at: "2027-01-01T00:00:00Z"  # RFC 3339, optional
+```
+
+Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead (`POST /admin/keys`, `DELETE /admin/keys/{id}`).
 
 ### Tuning affinity
 

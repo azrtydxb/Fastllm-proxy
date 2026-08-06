@@ -1,0 +1,134 @@
+# The control plane: database, admin API (`POST /admin/keys`, `DELETE
+# /admin/keys/{id}`) and `/snapshot` for the proxy to poll. No proxy listener
+# lives here — that is deploy/deployment.yaml, `--role=proxy`.
+#
+# SECURITY: the admin API has NO authentication of its own today (sessions
+# and passwords land later, with the management UI — see TODO.md and the
+# design spec). Anyone who can reach port 4001 can mint an API key. The
+# Service below is therefore ClusterIP only, and MUST NOT be merged into
+# fastllm-proxy's LoadBalancer Service in deploy/service.yaml, which is
+# reachable from the whole LAN at 192.168.10.126. Putting /admin on that VIP
+# means unauthenticated key creation from anywhere on the network. See
+# deploy/README.md.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fastllm-proxy-token
+  namespace: fastllm
+type: Opaque
+stringData:
+  # Shared secret between control and proxy: the proxy presents it as a
+  # bearer token to GET /snapshot, and the control plane's admin API accepts
+  # it as the only credential it currently checks (see the SECURITY note
+  # above — this token is not a substitute for real admin auth, it is what
+  # stands in for it until Task/P4 lands sessions). Placeholder value below;
+  # replace it before first deploy the same way fastllm-proxy-auth is
+  # generated in the README, then re-apply. Rotating it requires restarting
+  # both fastllm-control and fastllm-proxy.
+  token: "REPLACE-ME-openssl-rand-hex-32"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: fastllm-pg
+  namespace: fastllm
+spec:
+  # One instance, not the 3-instance HA pattern used elsewhere on kw
+  # (novamail-pg): a control plane outage already degrades gracefully — the
+  # proxy keeps serving from its last-known-good snapshot cache (see the
+  # emptyDir mount in deployment.yaml) — so paying for synchronous replicas
+  # here buys less than it costs. Revisit if that assumption stops holding.
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  storage:
+    size: 5Gi
+    storageClass: longhorn
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  bootstrap:
+    initdb:
+      database: fastllm
+      owner: fastllm
+  # CNPG generates fastllm-pg-app with username/password/host/port/dbname
+  # and a ready-made `uri` key — that `uri` is what fastllm-control's
+  # FASTLLM_DATABASE_URL reads below, so there is no second place a DB
+  # credential is copied to or can drift from what CNPG issued.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-control
+  namespace: fastllm
+  labels: { app: fastllm-control }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: fastllm-control }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: fastllm-control }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:main
+          imagePullPolicy: Always
+          args:
+            - --role=control
+            - --admin-port=4001
+          ports:
+            - { name: admin, containerPort: 4001 }
+          env:
+            - name: FASTLLM_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: fastllm-pg-app, key: uri }
+            - name: FASTLLM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: fastllm-proxy-token, key: token }
+            - name: FASTLLM_LOG
+              value: info
+          # No unauthenticated route exists on this role's router at all —
+          # `/admin/*` needs the proxy token and `/snapshot` needs it too, so
+          # neither is a valid liveness/readiness target and there is no
+          # `/health`/`/metrics` here the way the proxy role has. A TCP check
+          # on the admin port is the honest probe until this role grows an
+          # unauthenticated `/healthz`.
+          readinessProbe:
+            tcpSocket: { port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: admin }
+            periodSeconds: 20
+            failureThreshold: 3
+          startupProbe:
+            tcpSocket: { port: admin }
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+# ClusterIP only — deliberately not a LoadBalancer and deliberately not on
+# fastllm-proxy's VIP. See the SECURITY note at the top of this file.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-control
+  namespace: fastllm
+  labels: { app: fastllm-control }
+spec:
+  type: ClusterIP
+  selector: { app: fastllm-control }
+  ports:
+    - { name: admin, port: 4001, targetPort: admin }
