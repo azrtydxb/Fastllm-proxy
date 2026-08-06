@@ -5,6 +5,7 @@
 //! single-process role, `Http` for a proxy against a control plane.
 
 pub mod file;
+pub mod http;
 
 use crate::snapshot::Snapshot;
 
