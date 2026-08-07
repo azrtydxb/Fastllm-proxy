@@ -75,8 +75,14 @@ struct Set {
     vectors: Vec<Vec<f32>>,
 }
 
+/// (class, precision, recall, support).
+type PerClass = Vec<(String, f64, f64, usize)>;
+
+/// (coverage, accuracy over what was covered, per-class breakdown).
+type Scored = (f64, f64, PerClass);
+
 /// Seed centroids from the first `SEEDS` of each class, evaluate on the rest.
-fn evaluate(sets: &[Set], floor: f32) -> (f64, f64, Vec<(String, f64, f64, usize)>) {
+fn evaluate(sets: &[Set], floor: f32) -> Scored {
     let centroids: Vec<(&str, Vec<f32>)> = sets
         .iter()
         .map(|s| (s.name, mean(&s.vectors[..SEEDS].iter().collect::<Vec<_>>())))
@@ -106,7 +112,7 @@ fn evaluate(sets: &[Set], floor: f32) -> (f64, f64, Vec<(String, f64, f64, usize
     }
 
     let correct: usize = tp.values().sum();
-    let per_class = sets
+    let per_class: PerClass = sets
         .iter()
         .map(|s| {
             let t = *tp.get(s.name).unwrap_or(&0) as f64;
