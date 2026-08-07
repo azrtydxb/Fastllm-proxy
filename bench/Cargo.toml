@@ -43,6 +43,13 @@ path = "src/potion.rs"
 name = "potion-real"
 path = "src/potion_real.rs"
 
+# Asks the model which classes it can separate, rather than assuming — see
+# `src/potion_classes.rs`. Clustering plus a candidate taxonomy scored for
+# collisions; a prototype of the admin `evaluate` endpoint.
+[[bin]]
+name = "potion-classes"
+path = "src/potion_classes.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
