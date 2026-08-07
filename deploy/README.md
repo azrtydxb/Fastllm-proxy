@@ -205,6 +205,24 @@ E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/models/3     # drop the model and its backends
 ```
 
+## Memory, and the classifier
+
+Both classifier models ship in the image, and the process that loads them needs
+room for them:
+
+| | without classes | fast tier | both tiers |
+|---|---|---|---|
+| proxy | 85 Mi | ~150 Mi | 268 Mi |
+| control plane | ~90 Mi | 272 Mi | 275 Mi |
+
+Measured on this cluster. The manifests request 384 Mi and limit 1 Gi for the
+control plane, 128 Mi / 1 Gi for a proxy. A limit below ~350 Mi will OOM-kill
+the process the moment a prompt class is defined — which is exactly what the
+old 256 Mi limit did, because it was set before the feature existed.
+
+Nothing loads the refined tier unless a routing rule names a class that needs
+it, so a deployment using only fast-tier classes stays at the middle column.
+
 ## Adding a provider
 
 Most providers need no image change and no restart — a backend row is the

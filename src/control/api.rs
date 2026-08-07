@@ -4121,7 +4121,21 @@ async fn post_prompt_class(
     .bind(body.min_margin)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| db_error("prompt class creation", &e))?;
+    .map_err(|e| {
+        // A name collision is the caller's mistake, not a server fault, and
+        // "see server logs" for something the caller can fix by picking another
+        // name is a poor answer.
+        if e.as_database_error()
+            .is_some_and(|d| d.is_unique_violation())
+        {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("a prompt class named {name:?} already exists"),
+            )
+        } else {
+            db_error("prompt class creation", &e)
+        }
+    })?;
 
     for r in &body.refines {
         sqlx::query("INSERT INTO prompt_class_refines (class_id, refines) VALUES ($1, $2)")

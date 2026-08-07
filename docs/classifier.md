@@ -149,6 +149,14 @@ measurably an easier one.
 On realistic traffic mixes escalation touches well under a tenth of requests,
 putting the average added cost near 0.2 ms.
 
+## Memory
+
+Both models ship in the image. Loaded, they cost real memory in whichever
+process uses them — measured on the dev cluster at 272-275 Mi for a control
+plane with both tiers, 268 Mi for a proxy that has lazily loaded the refined
+tier, against 85 Mi for a proxy doing no classification. Size limits
+accordingly; [deploy/README.md](../deploy/README.md) has the table.
+
 ## Not GPU work
 
 Tier 1 is a memory lookup, not a matmul: **94,450 prompts/s on a single core**,
@@ -173,6 +181,13 @@ stands.
 
 So to split coding into architecture and debugging, define *both* as refined
 classes, both refining `coding`.
+
+A refined answer still satisfies a rule naming the class it refines. `debugging`
+is a kind of `coding`, so an existing `{"class": "coding"}` rule keeps matching
+after you add the refinement — put the more specific rule *earlier* in the chain
+to separate them. Without that, defining a refined class would silently stop
+every rule on its parent from firing, which is a change nobody asked for and
+nobody would see.
 
 ## What is not built
 

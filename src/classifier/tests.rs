@@ -265,3 +265,18 @@ fn tier_names_round_trip() {
     }
     assert_eq!(Tier::parse("gpu"), None);
 }
+
+/// A refined answer still carries what it refines, so a routing rule naming the
+/// general class keeps matching. Without this, defining `debugging` would
+/// silently stop an existing `coding` rule from firing.
+#[test]
+fn a_refined_answer_reports_the_classes_it_refines() {
+    let c = Classifier::new(vec![
+        class("coding", Tier::Fast, axis(4, 0), 0.05, &[]),
+        class("architecture", Tier::Refined, axis(4, 2), 0.05, &["coding"]),
+        class("debugging", Tier::Refined, axis(4, 3), 0.05, &["coding"]),
+    ]);
+    let got = c.classify(&axis(4, 0), || Some(axis(4, 3))).unwrap();
+    assert_eq!(got.class, "debugging");
+    assert_eq!(got.refines, vec!["coding".to_string()]);
+}

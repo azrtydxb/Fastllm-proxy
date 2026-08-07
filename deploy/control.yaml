@@ -142,8 +142,14 @@ spec:
             periodSeconds: 3
             failureThreshold: 20
           resources:
-            requests: { cpu: 100m, memory: 64Mi }
-            limits: { cpu: "1", memory: 256Mi }
+            # Sized for the classifier, which is what actually lives in this
+            # process's memory: the fast-tier table plus, if any refined class
+            # exists, an ONNX session. Measured at 272-275Mi with both loaded on
+            # this cluster. The previous 256Mi limit OOM-killed the control
+            # plane the moment a class was defined — a limit set before the
+            # feature existed and never revisited.
+            requests: { cpu: 200m, memory: 384Mi }
+            limits: { cpu: "1", memory: 1Gi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

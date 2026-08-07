@@ -104,8 +104,11 @@ spec:
             periodSeconds: 3
             failureThreshold: 20
           resources:
-            requests: { cpu: 100m, memory: 64Mi }
-            limits: { cpu: "2", memory: 512Mi }
+            requests: { cpu: 100m, memory: 128Mi }
+            # 85Mi serving without classification; 268Mi measured once a refined
+            # class caused the ONNX session to load lazily. 1Gi leaves room for
+            # that without inviting a pod to grow into it unnoticed.
+            limits: { cpu: "2", memory: 1Gi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -101,6 +101,14 @@ pub struct PromptClass {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     pub class: String,
+    /// The fast-tier classes this one refines, empty for a fast-tier answer.
+    ///
+    /// Carried so a routing rule naming the *general* class still matches a
+    /// request the refined tier made more specific. Without it, adding a
+    /// refined class silently stops every existing rule on the class it refines
+    /// from matching — an operator would add `debugging` and discover that
+    /// their `coding` rule had quietly stopped firing.
+    pub refines: Vec<String>,
     pub margin: f32,
     /// Which tier decided. Reported so an operator can see how often the
     /// expensive path is actually taken.
@@ -201,6 +209,7 @@ impl Classifier {
         }
         Some(Classification {
             class: class.name.clone(),
+            refines: class.refines.clone(),
             margin,
             tier,
         })

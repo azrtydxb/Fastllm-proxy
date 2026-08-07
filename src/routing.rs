@@ -291,10 +291,19 @@ pub struct ClassMatch {
 }
 
 impl ClassMatch {
-    fn matches(&self, classified_as: Option<&str>) -> bool {
+    /// Matches the class itself, or any class that refines it.
+    ///
+    /// Refinement is a *sub*-classification: `debugging` is a kind of `coding`.
+    /// A rule saying "coding goes to the local pool" should therefore still
+    /// catch a request the refined tier called `debugging`, and an operator who
+    /// wants to split them writes a more specific rule *earlier* in the chain —
+    /// which is what rule order is for. The alternative was that defining a
+    /// refined class silently stopped every existing rule on its parent from
+    /// firing.
+    fn matches(&self, classified_as: Option<&str>, refines: &[String]) -> bool {
         match &self.class {
             None => true,
-            Some(want) => classified_as == Some(want.as_str()),
+            Some(want) => classified_as == Some(want.as_str()) || refines.iter().any(|r| r == want),
         }
     }
 }
@@ -542,6 +551,9 @@ pub struct RequestFacts<'a> {
     /// classified — no classes configured, no classifier in this build, or the
     /// best class did not clear its confidence floor.
     pub class: Option<&'a str>,
+    /// The classes `class` refines, so a rule on the general class still
+    /// matches a refined answer.
+    pub class_refines: &'a [String],
 }
 
 impl RoutingRule {
@@ -552,7 +564,7 @@ impl RoutingRule {
         let c = &self.conditions;
         c.shape
             .matches(facts.prompt_tokens, facts.max_tokens, facts.streaming)
-            && c.class.matches(facts.class)
+            && c.class.matches(facts.class, facts.class_refines)
             && c.caller.matches(facts.caller)
             && c.budget.matches(facts.caller)
             && c.time.matches(facts.now)
@@ -743,6 +755,7 @@ mod tests {
             headers,
             now: fixed_now(),
             class: None,
+            class_refines: &[],
         }
     }
 
@@ -1443,6 +1456,58 @@ mod tests {
         let headers = HeaderMap::new();
         let chain = vm.resolve_candidates(&facts_with(None, 0, None, &headers), 0, &reg);
         assert_eq!(chain, vec!["a".to_string()]);
+    }
+
+    // --- class conditions ------------------------------------------------
+
+    #[test]
+    fn a_class_rule_matches_the_class_itself() {
+        let reg = registry_with(&["m"]);
+        let rule = rule_with(
+            RuleConditions {
+                class: ClassMatch {
+                    class: Some("coding".into()),
+                },
+                ..Default::default()
+            },
+            "m",
+        );
+        let headers = HeaderMap::new();
+        let mut facts = facts_with(None, 0, None, &headers);
+        facts.class = Some("coding");
+        assert!(rule.matches(&facts, &reg));
+
+        facts.class = Some("chat");
+        assert!(!rule.matches(&facts, &reg));
+
+        facts.class = None;
+        assert!(
+            !rule.matches(&facts, &reg),
+            "an unclassified request must fall through, not match"
+        );
+    }
+
+    /// Refinement is a sub-classification: a rule on `coding` must keep
+    /// matching once `debugging` exists, or adding a refined class silently
+    /// breaks every rule on its parent.
+    #[test]
+    fn a_class_rule_also_matches_anything_that_refines_it() {
+        let reg = registry_with(&["m"]);
+        let rule = rule_with(
+            RuleConditions {
+                class: ClassMatch {
+                    class: Some("coding".into()),
+                },
+                ..Default::default()
+            },
+            "m",
+        );
+        let headers = HeaderMap::new();
+        let mut facts = facts_with(None, 0, None, &headers);
+        facts.class = Some("debugging");
+        let refines = vec!["coding".to_string()];
+        facts.class_refines = &refines;
+        assert!(rule.matches(&facts, &reg));
     }
 
     // --- default fallback -------------------------------------------

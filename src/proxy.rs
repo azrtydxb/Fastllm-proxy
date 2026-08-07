@@ -312,6 +312,16 @@ async fn proxy_request(
     // embedding model. Tier 2 is gated one level further in, on whether any
     // active class refines the one tier 1 chose (`crate::classifier`).
     let classification = state.classify(&collected);
+    #[cfg(feature = "classifier")]
+    let (class_name, class_refines) = match &classification {
+        Some(c) => (Some(c.class.as_str()), c.refines.as_slice()),
+        None => (None, &[][..]),
+    };
+    #[cfg(not(feature = "classifier"))]
+    let (class_name, class_refines) = {
+        let _ = &classification;
+        (None, &[][..])
+    };
     let facts = crate::routing::RequestFacts {
         caller: principal,
         prompt_tokens: crate::routing::estimate_prompt_tokens(collected.len()),
@@ -321,7 +331,8 @@ async fn proxy_request(
         // One clock read, and only for a virtual model — `resolve_target_models`
         // returns before touching this for an ordinary name.
         now: chrono::Utc::now(),
-        class: classification.as_deref(),
+        class: class_name,
+        class_refines,
     };
     let candidates =
         match resolve_target_models(&requested_model, snapshot, &facts, prefix, &registry) {
@@ -1590,6 +1601,7 @@ model_list:
             headers: &headers,
             now: chrono::Utc::now(),
             class: None,
+            class_refines: &[],
         };
         let target = resolve_target_models("vm", &snapshot, &facts, 0, &registry)
             .expect("the virtual model has a viable default target")
@@ -1625,6 +1637,7 @@ model_list:
             headers: &headers,
             now: chrono::Utc::now(),
             class: None,
+            class_refines: &[],
         };
         let target = resolve_target_models("concrete-a", &snapshot, &facts, 0, &registry)
             .unwrap()

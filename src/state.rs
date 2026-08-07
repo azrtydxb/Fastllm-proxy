@@ -157,7 +157,7 @@ impl AppState {
     /// deployment that does not use semantic routing pays nothing for its
     /// existence.
     #[cfg(feature = "classifier")]
-    pub fn classify(&self, body: &[u8]) -> Option<String> {
+    pub fn classify(&self, body: &[u8]) -> Option<crate::classifier::Classification> {
         let classifier = self.classifier.load();
         if classifier.is_empty() {
             return None;
@@ -165,12 +165,11 @@ impl AppState {
         let tier1 = self.tier1.as_ref()?;
         let text = std::str::from_utf8(body).ok()?;
         let embedding = tier1.embed(text);
-        let result = classifier.classify(&embedding, || self.refined_embedding(text));
-        result.map(|c| c.class)
+        classifier.classify(&embedding, || self.refined_embedding(text))
     }
 
     #[cfg(not(feature = "classifier"))]
-    pub fn classify(&self, _body: &[u8]) -> Option<String> {
+    pub fn classify(&self, _body: &[u8]) -> Option<std::convert::Infallible> {
         None
     }
 
