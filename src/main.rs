@@ -902,7 +902,7 @@ fn build_app_state(
         },
     };
 
-    Ok(Arc::new(AppState {
+    let state = Arc::new(AppState {
         registry: ArcSwap::from_pointee(registry),
         router: Router::new(
             cli.policy,
@@ -933,7 +933,13 @@ fn build_app_state(
         requests_failed: AtomicU64::new(0),
         usage,
         limiter: Arc::new(fastllm_proxy::limiter::Limiter::new()),
-    }))
+    });
+
+    // The constructor above bypasses `apply_snapshot`, so anything that path
+    // derives has to be primed once here. See `AppState::prime_derived_views`
+    // for what went wrong when it was not.
+    state.prime_derived_views();
+    Ok(state)
 }
 
 /// Derive `POST /usage`'s URL from `--control-url`, which names

@@ -117,6 +117,24 @@ impl AppState {
         self.rebuild_registry_from_snapshot()
     }
 
+    /// Build the views derived from the snapshot this state was *constructed*
+    /// with.
+    ///
+    /// `AppState` is built with a snapshot already in hand, which bypasses
+    /// `apply_snapshot` — the single write path — and so bypasses everything
+    /// that path derives. The registry is fine because it is built separately
+    /// by the same constructor; the classifier was not, so a `--role proxy`
+    /// serving an unchanged snapshot classified nothing at all until the
+    /// control plane happened to publish a change. Tests never caught it
+    /// because `--role all` writes through the admin API, which triggers a
+    /// rebuild immediately.
+    ///
+    /// Call once, immediately after construction.
+    pub fn prime_derived_views(&self) {
+        #[cfg(feature = "classifier")]
+        self.rebuild_classifier(&self.snapshot.load());
+    }
+
     /// Rebuild the classifier from a snapshot's published centroids.
     ///
     /// Called from `apply_snapshot` alongside the registry rebuild, for the
