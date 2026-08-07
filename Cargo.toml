@@ -79,10 +79,17 @@ ring = { version = "0.17", optional = true }
 # and `axum` gives `Cow<[u8]>`/embedded-file conversions this crate's own
 # axum handlers use directly instead of hand-rolling them.
 rust-embed = { version = "8", default-features = false, features = ["mime-guess", "axum"], optional = true }
+model2vec-rs = { version = "0.2", optional = true }
+# Tier 2 only. Brings ONNX Runtime, which is why it is a separate feature from
+# `classifier` rather than part of it: a deployment that routes on subject
+# alone (most of them) should not carry a native inference runtime.
+fastembed = { version = "5", optional = true }
 
 [features]
 default = ["control"]
 control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring", "dep:rust-embed"]
+classifier = ["dep:model2vec-rs"]
+classifier-tier2 = ["classifier", "dep:fastembed"]
 
 [dev-dependencies]
 tempfile = "3"
