@@ -8,9 +8,12 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use serde_json::Value;
+
 use super::{
-    synthetic_id, AssistantMessage, Choice, Completion, OpenAiRequest, ResponseContext, SseEvent,
-    StopField, StreamTranslator, TranslateError, TranslatedRequest, Usage,
+    synthetic_id, AssistantMessage, Choice, Completion, OpenAiFunctionCall, OpenAiRequest,
+    OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator, TranslateError,
+    TranslatedRequest, Turn, Usage,
 };
 
 /// The version header Anthropic requires on every request. Sent by the
@@ -32,6 +35,8 @@ pub fn translate_request(
     let temperature = req.temperature;
     let top_p = req.top_p;
     let stop = req.stop.take().map(StopField::into_vec).unwrap_or_default();
+    let tools = req.tools.take();
+    let tool_choice = req.tool_choice.take();
     let (system, turns) = req.split_system()?;
 
     let mut body = json!({
@@ -55,11 +60,99 @@ pub fn translate_request(
     if streaming {
         obj.insert("stream".into(), json!(true));
     }
+    // `tool_choice: "none"` is expressed by offering no tools at all. That is
+    // exact rather than approximate — a model with no tools cannot call one —
+    // and it avoids depending on the `{"type":"none"}` form, which post-dates
+    // the API version this adapter pins.
+    let suppressed = tool_choice.as_ref().and_then(|c| c.as_str()) == Some("none");
+    if let Some(tools) = tools.filter(|t| !t.is_empty() && !suppressed) {
+        let declared: Vec<Value> = tools
+            .iter()
+            .filter_map(|t| t.function.as_ref())
+            .map(|f| {
+                let mut decl = json!({
+                    "name": f.name,
+                    // Required, and a tool that takes no arguments still has a
+                    // schema: the empty object. Omitting it is a 400.
+                    "input_schema": f.parameters.clone()
+                        .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                });
+                if let Some(d) = &f.description {
+                    decl["description"] = json!(d);
+                }
+                decl
+            })
+            .collect();
+        if !declared.is_empty() {
+            obj.insert("tools".into(), json!(declared));
+            if let Some(choice) = tool_choice.and_then(map_tool_choice) {
+                obj.insert("tool_choice".into(), choice);
+            }
+        }
+    }
 
     Ok(TranslatedRequest {
         body: serde_json::to_vec(&body).map_err(|e| TranslateError::Malformed(e.to_string()))?,
         subpath: "/messages".into(),
     })
+}
+
+/// OpenAI's `tool_choice` in Anthropic's spelling.
+///
+/// `"required"` becomes `any` — both mean "call something, your pick". A
+/// choice this code does not recognise is dropped rather than guessed at:
+/// `auto` is Anthropic's default and also the honest answer to "we do not know
+/// what you asked for", where inventing a forced call would change what the
+/// model does.
+fn map_tool_choice(choice: Value) -> Option<Value> {
+    match &choice {
+        Value::String(s) => match s.as_str() {
+            "auto" => Some(json!({"type": "auto"})),
+            "required" => Some(json!({"type": "any"})),
+            _ => None,
+        },
+        Value::Object(_) => {
+            let name = choice.get("function")?.get("name")?.as_str()?;
+            Some(json!({"type": "tool", "name": name}))
+        }
+        _ => None,
+    }
+}
+
+/// One turn as Anthropic content blocks.
+///
+/// Returns a bare string for the ordinary text-only turn — the shape both this
+/// API and its own clients use — and an array only once there is tool traffic
+/// that a string cannot express.
+fn blocks(turn: &Turn) -> Vec<Value> {
+    let mut out = Vec::new();
+    // Results first. Anthropic requires every `tool_result` to precede any
+    // other block in the message that carries it.
+    for r in &turn.tool_results {
+        out.push(json!({
+            "type": "tool_result",
+            "tool_use_id": r.id,
+            "content": r.text,
+        }));
+    }
+    if !turn.text.is_empty() {
+        out.push(json!({"type": "text", "text": turn.text}));
+    }
+    for call in &turn.tool_calls {
+        out.push(json!({
+            "type": "tool_use",
+            "id": call.id,
+            "name": call.function.name,
+            // Anthropic wants the arguments as a real object where OpenAI
+            // carries them as a string. Arguments that do not parse are sent as
+            // an empty object rather than dropping the call: the model asked
+            // for a tool, and the reason it was skipped would otherwise be
+            // invisible on both sides.
+            "input": serde_json::from_str::<Value>(&call.function.arguments)
+                .unwrap_or_else(|_| json!({})),
+        }));
+    }
+    out
 }
 
 /// Fold consecutive same-role turns into one.
@@ -68,19 +161,44 @@ pub fn translate_request(
 /// and real clients emit them (a system-turned-user preamble followed by the
 /// actual question). Merging is the difference between those clients working
 /// and getting a 400 they cannot act on.
-fn merge_consecutive(turns: Vec<(String, String)>) -> Vec<serde_json::Value> {
-    let mut out: Vec<(String, String)> = Vec::with_capacity(turns.len());
-    for (role, text) in turns {
+fn merge_consecutive(turns: Vec<Turn>) -> Vec<Value> {
+    let mut out: Vec<(String, Vec<Value>)> = Vec::with_capacity(turns.len());
+    for turn in &turns {
+        let mut next = blocks(turn);
         match out.last_mut() {
-            Some((prev_role, prev_text)) if *prev_role == role => {
-                prev_text.push_str("\n\n");
-                prev_text.push_str(&text);
+            Some((prev_role, prev)) if *prev_role == turn.role => {
+                // Two adjacent text blocks were one message before the split
+                // and read as one afterwards, so they join with the blank line
+                // rather than arriving as two blocks.
+                match (prev.last_mut(), next.first()) {
+                    (Some(last), Some(first))
+                        if last["type"] == "text" && first["type"] == "text" =>
+                    {
+                        let joined =
+                            format!("{}\n\n{}", last["text"].as_str().unwrap_or_default(),
+                                first["text"].as_str().unwrap_or_default());
+                        last["text"] = json!(joined);
+                        next.remove(0);
+                    }
+                    _ => {}
+                }
+                prev.append(&mut next);
             }
-            _ => out.push((role, text)),
+            _ => out.push((turn.role.clone(), next)),
         }
     }
     out.into_iter()
-        .map(|(role, content)| json!({"role": role, "content": content}))
+        .map(|(role, mut blocks)| {
+            // Merging can leave a result behind a text block; the ordering rule
+            // is on the message, so it is re-applied after the merge.
+            blocks.sort_by_key(|b| u8::from(b["type"] != "tool_result"));
+            match blocks.as_slice() {
+                [only] if only["type"] == "text" => {
+                    json!({"role": role, "content": only["text"]})
+                }
+                _ => json!({"role": role, "content": blocks}),
+            }
+        })
         .collect()
 }
 
@@ -120,6 +238,13 @@ struct Block {
     kind: String,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// The tool arguments, as a real JSON object.
+    #[serde(default)]
+    input: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -136,13 +261,29 @@ pub fn translate_response(
 ) -> Result<Completion, TranslateError> {
     let msg: Message =
         serde_json::from_slice(body).map_err(|e| TranslateError::Malformed(e.to_string()))?;
-    // Only text blocks contribute. A `tool_use` block cannot appear, because
-    // a request carrying tools was refused before it was ever sent.
     let content: String = msg
         .content
         .iter()
         .filter(|b| b.kind == "text")
         .filter_map(|b| b.text.as_deref())
+        .collect();
+    let tool_calls: Vec<OpenAiToolCall> = msg
+        .content
+        .iter()
+        .filter(|b| b.kind == "tool_use")
+        .map(|b| OpenAiToolCall {
+            id: b.id.clone().unwrap_or_default(),
+            kind: "function".into(),
+            function: OpenAiFunctionCall {
+                name: b.name.clone().unwrap_or_default(),
+                // Back to a string, which is how OpenAI carries arguments.
+                arguments: b
+                    .input
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".into()),
+            },
+        })
         .collect();
     let usage = msg.usage.unwrap_or_default();
     Ok(Completion {
@@ -154,7 +295,10 @@ pub fn translate_response(
             index: 0,
             message: AssistantMessage {
                 role: "assistant",
-                content,
+                // Null, not empty string, when the model only called tools —
+                // the distinction clients branch on.
+                content: (!content.is_empty() || tool_calls.is_empty()).then_some(content),
+                tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             },
             finish_reason: finish_reason(msg.stop_reason.as_deref()).or(Some("stop".into())),
         }],
@@ -176,6 +320,8 @@ struct StreamEvent {
     delta: Option<EventDelta>,
     #[serde(default)]
     usage: Option<MessageUsage>,
+    #[serde(default)]
+    content_block: Option<Block>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +330,11 @@ struct EventDelta {
     text: Option<String>,
     #[serde(default)]
     stop_reason: Option<String>,
+    /// A slice of the open tool call's argument JSON. Deliberately a `String`
+    /// and not a `Value`: mid-call it is a *fragment* — `{"loc` — that no JSON
+    /// parser accepts, and it is forwarded to the client the same way.
+    #[serde(default)]
+    partial_json: Option<String>,
 }
 
 pub fn on_event(t: &mut StreamTranslator, event: &SseEvent, out: &mut Vec<u8>) {
@@ -215,11 +366,27 @@ pub fn on_event(t: &mut StreamTranslator, event: &SseEvent, out: &mut Vec<u8>) {
             }
             t.emit_role(out);
         }
-        "content_block_delta" => {
-            if let Some(text) = parsed.delta.as_ref().and_then(|d| d.text.as_deref()) {
-                t.emit_text(text, out);
+        "content_block_start" => {
+            // Only a tool block needs announcing. A text block's first delta
+            // carries everything the client needs.
+            if let Some(block) = parsed.content_block.filter(|b| b.kind == "tool_use") {
+                t.open_tool_call(
+                    block.id.unwrap_or_default(),
+                    block.name.unwrap_or_default(),
+                    out,
+                );
             }
         }
+        "content_block_delta" => {
+            let delta = parsed.delta.as_ref();
+            if let Some(text) = delta.and_then(|d| d.text.as_deref()) {
+                t.emit_text(text, out);
+            }
+            if let Some(fragment) = delta.and_then(|d| d.partial_json.as_deref()) {
+                t.emit_tool_arguments(fragment, out);
+            }
+        }
+        "content_block_stop" => t.close_tool_call(),
         "message_delta" => {
             if let Some(reason) = parsed.delta.as_ref().and_then(|d| d.stop_reason.as_deref()) {
                 t.finish_reason = finish_reason(Some(reason));
@@ -234,10 +401,9 @@ pub fn on_event(t: &mut StreamTranslator, event: &SseEvent, out: &mut Vec<u8>) {
             let tail = t.finish();
             out.extend_from_slice(&tail);
         }
-        // `ping`, `content_block_start`, `content_block_stop`, `error`: nothing
-        // to forward. An `error` event mid-stream leaves the client with a
-        // short answer, which is the same outcome as the upstream connection
-        // dropping and is handled the same way.
+        // `ping` and `error`: nothing to forward. An `error` event mid-stream
+        // leaves the client with a short answer, which is the same outcome as
+        // the upstream connection dropping and is handled the same way.
         _ => {}
     }
 }

@@ -228,8 +228,8 @@ it, so a deployment using only fast-tier classes stays at the middle column.
 Most providers need no image change and no restart — a backend row is the
 whole of it, and the proxy picks it up on the next snapshot rebuild. See
 `README.md`'s provider table for verified base URLs. OpenRouter is the
-shortest path to Anthropic and Gemini models *with* tool calling, because it
-speaks OpenAI format:
+shortest path to Anthropic and Gemini models, because it speaks OpenAI format
+and needs no protocol setting:
 
 ```bash
 kubectl -n fastllm port-forward svc/fastllm-control 4001:4001 &
@@ -251,9 +251,9 @@ or `"protocol":"gemini"`. Two operational notes:
 - Anthropic backends want `"default_max_tokens": 4096` (or whatever suits).
   Without it, any client request that omits `max_tokens` gets a 400 — the
   provider requires the field and the proxy will not invent a cap.
-- Translated backends serve `/chat/completions` only, text messages only.
-  Tool calling, images and the embeddings/audio endpoints return 501. Use an
-  OpenRouter backend for those.
+- Translated backends serve `/chat/completions` only. Text and tool calling
+  work, streaming included; images and the embeddings/audio endpoints return
+  501. Use an OpenRouter backend for those.
 
 The control plane needs egress to the provider and its CA in the trust store;
 public roots are already present in the image, so the hosted providers work

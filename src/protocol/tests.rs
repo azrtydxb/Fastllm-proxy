@@ -225,9 +225,7 @@ fn refusal(body: Value) -> TranslateError {
 fn unsupported_features_are_refused_by_name_rather_than_silently_dropped() {
     let base = json!({"messages": [{"role": "user", "content": "Hi"}]});
     let cases: &[(&str, Value, &str)] = &[
-        ("tools", json!([{"type": "function"}]), "tool and function"),
-        ("tool_choice", json!("auto"), "tool and function"),
-        ("functions", json!([{"name": "f"}]), "tool and function"),
+        ("functions", json!([{"name": "f"}]), "`functions`"),
         (
             "response_format",
             json!({"type": "json_object"}),
@@ -575,4 +573,365 @@ fn a_complete_gemini_response_becomes_a_chat_completion() {
     // No `responseId` in the payload, so the id is derived from the request's
     // own routing hash rather than invented at random.
     assert_eq!(v["id"], json!("chatcmpl-00000000deadbeef"));
+}
+
+// ---------------------------------------------------------------------------
+// Tool calling
+// ---------------------------------------------------------------------------
+
+/// A transcript in the shape a client sends back on the second turn: the tools
+/// on offer, the call the model made, and the result of running it.
+fn tool_transcript() -> Value {
+    json!({
+        "max_tokens": 100,
+        "messages": [
+            {"role": "user", "content": "Weather in Paris?"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "call_1", "type": "function", "function":
+                    {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "{\"c\":17}"},
+        ],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather",
+            "description": "Current weather",
+            "parameters": {"type": "object", "additionalProperties": false,
+                "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        }}],
+    })
+}
+
+/// The whole reason history needs a real mapper: OpenAI keeps the call on the
+/// assistant message and its result in a separate one, where Anthropic nests
+/// both inside messages and pairs them by id.
+#[test]
+fn anthropic_request_nests_the_call_and_its_result_inside_messages() {
+    let (body, _) = translated(Protocol::Anthropic, tool_transcript(), None);
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "user", "content": "Weather in Paris?"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "get_weather",
+                 "input": {"city": "Paris"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "{\"c\":17}"}
+            ]},
+        ]),
+        "arguments become a real object, and the result pairs back by id"
+    );
+    assert_eq!(
+        body["tools"],
+        json!([{
+            "name": "get_weather",
+            "description": "Current weather",
+            "input_schema": {"type": "object", "additionalProperties": false,
+                "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        }]),
+        "the schema passes through untouched — Anthropic takes the same dialect"
+    );
+}
+
+/// Gemini pairs a result to its call by function *name*; the id never reaches
+/// the wire, so it has to be carried across from the assistant message.
+#[test]
+fn gemini_request_pairs_the_result_to_its_call_by_name() {
+    let (body, _) = translated(Protocol::Gemini, tool_transcript(), None);
+    assert_eq!(
+        body["contents"],
+        json!([
+            {"role": "user", "parts": [{"text": "Weather in Paris?"}]},
+            {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}
+            ]},
+            {"role": "user", "parts": [
+                {"functionResponse": {"name": "get_weather", "response": {"c": 17}}}
+            ]},
+        ])
+    );
+    assert_eq!(
+        body["tools"],
+        json!([{"functionDeclarations": [{
+            "name": "get_weather",
+            "description": "Current weather",
+            // `additionalProperties` is gone: every JSON-Schema generator emits
+            // it and Gemini rejects the whole request over it.
+            "parameters": {"type": "object",
+                "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        }]}])
+    );
+}
+
+/// A tool that returned something other than an object still has to reach
+/// Gemini as one, because `response` is required to be an object.
+#[test]
+fn gemini_wraps_a_non_object_tool_result() {
+    let body = json!({
+        "messages": [
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c", "type": "function", "function": {"name": "count", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "c", "content": "42 widgets"},
+        ],
+    });
+    let (body, _) = translated(Protocol::Gemini, body, None);
+    assert_eq!(
+        body["contents"][1]["parts"][0]["functionResponse"]["response"],
+        json!({"output": "42 widgets"})
+    );
+}
+
+/// Parallel calls come back as several `role: "tool"` messages in a row, and
+/// both native protocols want them in one reply rather than one message each.
+#[test]
+fn consecutive_tool_results_become_a_single_message() {
+    let body = json!({
+        "max_tokens": 10,
+        "messages": [
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "g", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "a", "content": "1"},
+            {"role": "tool", "tool_call_id": "b", "content": "2"},
+        ],
+    });
+    let (body, _) = translated(Protocol::Anthropic, body, None);
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([
+            {"type": "tool_result", "tool_use_id": "a", "content": "1"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "2"},
+        ])
+    );
+}
+
+#[test]
+fn tool_choice_is_translated_to_each_protocols_spelling() {
+    let with = |protocol, choice: Value| {
+        let mut body = tool_transcript();
+        body["tool_choice"] = choice;
+        translated(protocol, body, None).0
+    };
+    assert_eq!(
+        with(Protocol::Anthropic, json!("required"))["tool_choice"],
+        json!({"type": "any"})
+    );
+    assert_eq!(
+        with(
+            Protocol::Anthropic,
+            json!({"type": "function", "function": {"name": "get_weather"}})
+        )["tool_choice"],
+        json!({"type": "tool", "name": "get_weather"})
+    );
+    // `none` is expressed by offering nothing to call, which is exact and does
+    // not depend on a form newer than the pinned API version.
+    let none = with(Protocol::Anthropic, json!("none"));
+    assert!(none.get("tools").is_none() && none.get("tool_choice").is_none());
+
+    assert_eq!(
+        with(Protocol::Gemini, json!("required"))["toolConfig"],
+        json!({"functionCallingConfig": {"mode": "ANY"}})
+    );
+    assert_eq!(
+        with(
+            Protocol::Gemini,
+            json!({"type": "function", "function": {"name": "get_weather"}})
+        )["toolConfig"],
+        json!({"functionCallingConfig":
+            {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}})
+    );
+}
+
+#[test]
+fn anthropic_tool_use_becomes_openai_tool_calls() {
+    let body = br#"{"id":"msg_9","content":[
+        {"type":"text","text":"Let me check."},
+        {"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris"}}],
+        "stop_reason":"tool_use","usage":{"input_tokens":9,"output_tokens":4}}"#;
+    let (bytes, usage) = translate_response(Protocol::Anthropic, body, &ctx()).unwrap();
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+    let message = &out["choices"][0]["message"];
+    assert_eq!(message["content"], json!("Let me check."));
+    assert_eq!(
+        message["tool_calls"],
+        json!([{"id": "toolu_1", "type": "function", "function":
+            {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]),
+        "arguments go back to a string, which is how OpenAI carries them"
+    );
+    assert_eq!(out["choices"][0]["finish_reason"], json!("tool_calls"));
+    assert_eq!(usage, Usage::new(9, 4));
+}
+
+/// `content` must be null rather than `""` when the model only called tools —
+/// clients branch on the distinction.
+#[test]
+fn a_tool_only_answer_reports_null_content() {
+    let body = br#"{"id":"m","content":[{"type":"tool_use","id":"t","name":"f","input":{}}],
+        "stop_reason":"tool_use"}"#;
+    let (bytes, _) = translate_response(Protocol::Anthropic, body, &ctx()).unwrap();
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(out["choices"][0]["message"]["content"], Value::Null);
+}
+
+/// Gemini identifies a call by name alone, but an OpenAI client pairs the
+/// result back by id and sends that id in the next request — so one is
+/// invented, deterministically.
+#[test]
+fn gemini_function_calls_get_stable_synthetic_ids() {
+    let body = br#"{"candidates":[{"content":{"parts":[
+        {"functionCall":{"name":"get_weather","args":{"city":"Paris"}}}]},
+        "finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}"#;
+    let (bytes, _) = translate_response(Protocol::Gemini, body, &ctx()).unwrap();
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        out["choices"][0]["message"]["tool_calls"],
+        json!([{"id": "call_00000000deadbeef_0", "type": "function", "function":
+            {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}])
+    );
+    // Gemini says STOP on the very event that carries the call; reporting
+    // "stop" would tell the client the turn was over and the call needed no
+    // reply.
+    assert_eq!(out["choices"][0]["finish_reason"], json!("tool_calls"));
+}
+
+/// Reassemble streamed tool calls the way a client does: index identifies the
+/// call, and `arguments` fragments concatenate into one JSON string.
+fn replay_tool_calls(out: &[u8]) -> Vec<(String, String, String)> {
+    let mut calls: Vec<(String, String, String)> = Vec::new();
+    for event in SseDecoder::default().push(out) {
+        if event.data == "[DONE]" {
+            continue;
+        }
+        let chunk: Value = serde_json::from_str(&event.data).unwrap();
+        let Some(deltas) = chunk["choices"][0]["delta"]["tool_calls"].as_array() else {
+            continue;
+        };
+        for delta in deltas {
+            let index = delta["index"].as_u64().unwrap() as usize;
+            if index == calls.len() {
+                calls.push((
+                    delta["id"].as_str().unwrap_or_default().to_string(),
+                    delta["function"]["name"].as_str().unwrap_or_default().to_string(),
+                    String::new(),
+                ));
+            }
+            calls[index]
+                .2
+                .push_str(delta["function"]["arguments"].as_str().unwrap_or_default());
+        }
+    }
+    calls
+}
+
+/// The streaming case worth guarding: Anthropic sends the arguments as
+/// fragments of JSON that are not valid on their own, and the index it uses
+/// counts text blocks too — so it cannot be forwarded as the OpenAI index.
+#[test]
+fn anthropic_streams_partial_json_into_indexed_tool_call_deltas() {
+    const STREAM: &str = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Checking.\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"Paris\\\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":12}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let mut t = StreamTranslator::new(Protocol::Anthropic, ctx()).unwrap();
+    let mut out = t.push(STREAM.as_bytes());
+    out.extend(t.finish());
+
+    let (content, finish, done, usage) = replay(&out);
+    assert_eq!(content, "Checking.");
+    assert_eq!(finish.as_deref(), Some("tool_calls"));
+    assert!(done);
+    assert_eq!(usage, Some(Usage::new(9, 12)));
+    assert_eq!(
+        replay_tool_calls(&out),
+        vec![(
+            "toolu_1".to_string(),
+            "get_weather".to_string(),
+            // The fragments were forwarded unparsed and only became valid JSON
+            // once the client had concatenated them.
+            "{\"city\":\"Paris\"}".to_string()
+        )],
+        "the tool call is index 0 even though Anthropic called its block 1"
+    );
+}
+
+/// Byte-at-a-time, because the fragments arrive split at arbitrary boundaries
+/// and a re-framer that only works on whole events is not the one in
+/// production.
+#[test]
+fn a_streamed_tool_call_survives_being_read_one_byte_at_a_time() {
+    const STREAM: &str = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"f\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let mut t = StreamTranslator::new(Protocol::Anthropic, ctx()).unwrap();
+    let mut out = Vec::new();
+    for byte in STREAM.as_bytes() {
+        out.extend(t.push(&[*byte]));
+    }
+    out.extend(t.finish());
+    assert_eq!(
+        replay_tool_calls(&out),
+        vec![("t1".into(), "f".into(), "{\"a\":1}".into())]
+    );
+}
+
+/// Two calls in one message must land on distinct indices, or the client
+/// concatenates both argument lists into the first call.
+#[test]
+fn parallel_streamed_calls_get_distinct_indices() {
+    const STREAM: &str = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"f\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"partial_json\":\"{}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"g\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"partial_json\":\"{\\\"x\\\":2}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let mut t = StreamTranslator::new(Protocol::Anthropic, ctx()).unwrap();
+    let mut out = t.push(STREAM.as_bytes());
+    out.extend(t.finish());
+    assert_eq!(
+        replay_tool_calls(&out),
+        vec![
+            ("t1".into(), "f".into(), "{}".into()),
+            ("t2".into(), "g".into(), "{\"x\":2}".into()),
+        ]
+    );
+}
+
+/// Gemini delivers a call complete in one event, so it goes out as one frame a
+/// client can act on immediately rather than being split to look like
+/// Anthropic's.
+#[test]
+fn gemini_streams_a_whole_call_in_one_frame() {
+    const STREAM: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{\"x\":1}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5}}\n\n";
+    let mut t = StreamTranslator::new(Protocol::Gemini, ctx()).unwrap();
+    let mut out = t.push(STREAM.as_bytes());
+    out.extend(t.finish());
+    assert_eq!(
+        replay_tool_calls(&out),
+        vec![(
+            "call_00000000deadbeef_0".into(),
+            "f".into(),
+            "{\"x\":1}".into()
+        )]
+    );
+    let (_, finish, done, _) = replay(&out);
+    assert_eq!(finish.as_deref(), Some("tool_calls"));
+    assert!(done);
 }

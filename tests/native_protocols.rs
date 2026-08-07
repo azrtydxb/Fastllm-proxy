@@ -750,12 +750,15 @@ async fn unsupported_requests_are_refused_with_501_naming_the_feature() {
             "model": model,
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"type": "function", "function": {"name": "f"}}],
+            // The pre-2023 spelling. Refused rather than given a second
+            // mapping of its own — every client that still emits it also
+            // accepts `tools`, which is translated.
+            "functions": [{"name": "f"}],
         }),
     );
     assert_eq!(status, 501, "{body}");
     assert!(
-        body.contains("tool and function calling"),
+        body.contains("`functions`"),
         "the refusal must name what was unsupported: {body}"
     );
 
@@ -859,5 +862,126 @@ async fn a_passthrough_backend_is_forwarded_byte_for_byte() {
             .map(|(_, v)| v.as_str()),
         Some(format!("Bearer {UPSTREAM_KEY}").as_str()),
         "an openai backend still gets a bearer token"
+    );
+}
+
+
+const ANTHROPIC_TOOL_BODY: &str = r#"{"id":"msg_tool","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_e2e","name":"get_weather","input":{"city":"Paris"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":9}}"#;
+
+/// Tool calling end to end, through a real proxy rather than the translator
+/// alone: the client speaks OpenAI, the provider speaks Anthropic, and the
+/// second turn carries a transcript that only a real message mapper can send —
+/// a call on the assistant message and its result in a separate one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_tool_call_round_trips_through_an_anthropic_backend() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, upstream_port) = (14761, 14762, 14763);
+
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let recorder: Recorder = Arc::new(Mutex::new(Seen::default()));
+    spawn_mock(
+        upstream_port,
+        Arc::clone(&recorder),
+        MockResponse::json(ANTHROPIC_TOOL_BODY),
+    )
+    .await;
+
+    let admin_name = format!("np-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+    let (key, model) = provision(
+        &pool,
+        admin_port,
+        &cookie,
+        &suffix,
+        "anthropic",
+        &format!("http://127.0.0.1:{upstream_port}/v1"),
+        Some(64),
+    )
+    .await;
+    wait_for_model(port, &key, &model);
+
+    // Turn one: offer a tool, get a call back.
+    let (status, body) = chat(
+        port,
+        &key,
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "description": "Current weather",
+                "parameters": {"type": "object",
+                    "properties": {"city": {"type": "string"}}, "required": ["city"]},
+            }}],
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let sent: serde_json::Value =
+        serde_json::from_str(&recorder.lock().unwrap().body).expect("upstream body is JSON");
+    assert_eq!(
+        sent["tools"],
+        serde_json::json!([{
+            "name": "get_weather",
+            "description": "Current weather",
+            "input_schema": {"type": "object",
+                "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        }]),
+        "the provider must receive `input_schema`, not `parameters`"
+    );
+
+    let out: serde_json::Value = serde_json::from_str(&body).expect("response is JSON");
+    assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(out["choices"][0]["message"]["content"], serde_json::Value::Null);
+    let call = &out["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["id"], "toolu_e2e");
+    assert_eq!(call["function"]["name"], "get_weather");
+    assert_eq!(
+        call["function"]["arguments"], "{\"city\":\"Paris\"}",
+        "arguments reach an OpenAI client as a string"
+    );
+    assert_eq!(out["usage"]["prompt_tokens"], 20);
+    assert_eq!(out["usage"]["completion_tokens"], 9);
+
+    // Turn two: hand the call and its result back, the way a client does.
+    let (status, body) = chat(
+        port,
+        &key,
+        serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {"role": "assistant", "content": null, "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "toolu_e2e", "content": "{\"c\":17}"},
+            ],
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let sent: serde_json::Value =
+        serde_json::from_str(&recorder.lock().unwrap().body).expect("upstream body is JSON");
+    assert_eq!(
+        sent["messages"],
+        serde_json::json!([
+            {"role": "user", "content": "Weather in Paris?"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_e2e", "name": "get_weather",
+                 "input": {"city": "Paris"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_e2e", "content": "{\"c\":17}"}
+            ]},
+        ]),
+        "the result must be nested into a message and paired back by id"
     );
 }

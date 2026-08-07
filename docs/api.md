@@ -132,12 +132,21 @@ Two things to know before choosing native over OpenRouter:
   naming this field. It is deliberately not defaulted to an invented number —
   silently capping generation is the kind of bug nobody finds until they
   wonder why answers stop mid-sentence.
-- **Translated backends serve `/chat/completions` only**, with text messages.
-  Tool calling, images, `n > 1`, `logprobs`, `seed`, `response_format`, and
-  the embeddings/rerank/audio endpoints all return `501` naming what was
-  unsupported, rather than quietly doing less than was asked. Requests
-  needing those should go to an OpenAI-compatible backend (OpenRouter serves
-  the same models with tool calling intact).
+- **Translated backends serve `/chat/completions` only.** Text and tool
+  calling work, streaming included — `tools`, `tool_choice`, `tool_calls` and
+  `role: "tool"` messages all translate, in both directions. Images, `n > 1`,
+  `logprobs`, `seed`, `response_format`, the deprecated `functions`
+  parameter, and the embeddings/rerank/audio endpoints return `501` naming
+  what was unsupported, rather than quietly doing less than was asked.
+  Requests needing those should go to an OpenAI-compatible backend.
+
+  Two details a client can observe. Gemini supplies no tool-call id, so the
+  proxy synthesises one — stable within a response, which is all a client
+  needs to pair a result back to its call. And a Gemini call arrives complete
+  in a single streamed frame where Anthropic's arguments accumulate across
+  several; both are valid OpenAI streams, and a client that concatenates
+  `arguments` by `index` handles either without knowing which provider
+  answered.
 
 Everything else is unchanged by the choice: RBAC, rate limits, budgets,
 routing rules and virtual models all work the same against a translated

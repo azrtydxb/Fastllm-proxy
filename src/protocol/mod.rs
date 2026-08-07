@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 
 pub mod anthropic;
@@ -101,8 +102,41 @@ impl fmt::Display for TranslateError {
 impl std::error::Error for TranslateError {}
 
 /// A system prompt lifted out of the message list, and the conversation turns
-/// that remain as `(role, text)`.
-type SplitMessages = (Option<String>, Vec<(String, String)>);
+/// that remain.
+type SplitMessages = (Option<String>, Vec<Turn>);
+
+/// One conversation turn, after roles are normalised but before either native
+/// protocol's shape is applied.
+///
+/// Carries the tool traffic rather than flattening it to text, because both
+/// native protocols nest calls and results *inside* messages while OpenAI keeps
+/// them alongside — so the mapping cannot be done one message at a time.
+#[derive(Debug, Clone, Default)]
+pub struct Turn {
+    /// `"user"` or `"assistant"`.
+    pub role: String,
+    pub text: String,
+    /// Calls this assistant turn made.
+    pub tool_calls: Vec<OpenAiToolCall>,
+    /// Results this turn carries. Attached to the *user* turn that follows the
+    /// assistant's calls, which is where both native protocols expect them.
+    pub tool_results: Vec<ToolResult>,
+}
+
+/// One tool result, carrying both keys: Anthropic pairs it back to the call by
+/// `id`, Gemini by function `name`.
+#[derive(Debug, Clone, Default)]
+pub struct ToolResult {
+    pub id: String,
+    pub name: String,
+    pub text: String,
+}
+
+impl Turn {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.tool_calls.is_empty() && self.tool_results.is_empty()
+    }
+}
 
 /// A translated request: the body to send, and the path to send it to.
 ///
@@ -142,14 +176,18 @@ pub struct OpenAiRequest {
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
 
+    #[serde(default)]
+    pub tools: Option<Vec<OpenAiTool>>,
+    /// `"auto"` / `"none"` / `"required"`, or `{"type":"function","function":
+    /// {"name":...}}`. Left as `Value` because each protocol re-shapes it
+    /// differently and there is nothing shared to model.
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
+
     // Refused rather than translated. Each is `Value` because we only need to
     // know whether the caller sent it.
     #[serde(default)]
     pub n: Option<u32>,
-    #[serde(default)]
-    pub tools: Option<Value>,
-    #[serde(default)]
-    pub tool_choice: Option<Value>,
     #[serde(default)]
     pub functions: Option<Value>,
     #[serde(default)]
@@ -187,6 +225,60 @@ pub struct OpenAiMessage {
     pub role: String,
     #[serde(default)]
     pub content: Option<Content>,
+    /// Calls the assistant made on a previous turn. Present on
+    /// `role: "assistant"` messages in a transcript that used tools.
+    #[serde(default)]
+    pub tool_calls: Option<Vec<OpenAiToolCall>>,
+    /// Which call a `role: "tool"` message answers. The pairing is by id in
+    /// OpenAI's shape and by *position inside a message* in both native
+    /// protocols, which is the whole reason history needs a real mapper rather
+    /// than a per-message translation.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// Legacy `role: "function"` name. Accepted because clients still emit it.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "default_tool_type")]
+    pub kind: String,
+    pub function: OpenAiFunctionCall,
+}
+
+fn default_tool_type() -> String {
+    "function".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiFunctionCall {
+    pub name: String,
+    /// JSON, as a **string**. OpenAI sends arguments serialised; both native
+    /// protocols want a real object, so this is parsed on the way out and
+    /// re-serialised on the way back.
+    #[serde(default)]
+    pub arguments: String,
+}
+
+/// A tool the caller offered, as OpenAI declares it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenAiTool {
+    #[serde(default)]
+    pub function: Option<OpenAiFunctionDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenAiFunctionDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// JSON Schema. Passed through untouched — both native protocols take the
+    /// same dialect, so translating it would only be an opportunity to lose
+    /// something.
+    #[serde(default)]
+    pub parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,8 +330,14 @@ impl OpenAiRequest {
     /// Ordered most-likely-first so the message a caller gets names the thing
     /// they are most likely to be doing, when a request uses several at once.
     pub fn check_supported(&self) -> Result<(), TranslateError> {
-        if self.tools.is_some() || self.functions.is_some() || self.tool_choice.is_some() {
-            return Err(TranslateError::Unsupported("tool and function calling"));
+        // `tools` and `tool_choice` are translated. `functions` is the
+        // pre-2023 spelling that OpenAI itself deprecated; supporting it would
+        // mean a second mapping for the same feature, and every client that
+        // still emits it also accepts `tools`.
+        if self.functions.is_some() {
+            return Err(TranslateError::Unsupported(
+                "the deprecated `functions` parameter — use `tools`",
+            ));
         }
         if self.response_format.is_some() {
             return Err(TranslateError::Unsupported("response_format"));
@@ -274,15 +372,27 @@ impl OpenAiRequest {
         self.max_completion_tokens.or(self.max_tokens).or(default)
     }
 
-    /// Split system messages from the conversation.
+    /// Split system messages out, and fold the tool traffic into turns.
     ///
     /// Both target protocols carry the system prompt outside the message list
-    /// (`system` for Anthropic, `systemInstruction` for Gemini), so this is
-    /// shared. Multiple system messages join with a blank line, which is what
-    /// both vendors' own clients do.
+    /// (`system` for Anthropic, `systemInstruction` for Gemini), so that part
+    /// is shared. Multiple system messages join with a blank line, which is
+    /// what both vendors' own clients do.
+    ///
+    /// The tool part is why this cannot be a per-message translation. OpenAI
+    /// puts a call on the assistant message and its result in a *separate*
+    /// `role: "tool"` message keyed by id; both native protocols nest the
+    /// result inside the following user message. So results are attached to
+    /// the turn that follows the call, and the id→name map built on the way
+    /// past exists because Gemini keys results by function **name** and never
+    /// sees the id at all.
     fn split_system(self) -> Result<SplitMessages, TranslateError> {
         let mut system: Vec<String> = Vec::new();
-        let mut turns: Vec<(String, String)> = Vec::new();
+        let mut turns: Vec<Turn> = Vec::new();
+        // Call id → function name, so a later `role: "tool"` message can be
+        // given the name Gemini needs.
+        let mut names: HashMap<String, String> = HashMap::new();
+
         for msg in self.messages {
             let text = match msg.content {
                 Some(c) => c.into_text()?,
@@ -290,9 +400,47 @@ impl OpenAiRequest {
             };
             match msg.role.as_str() {
                 "system" | "developer" => system.push(text),
-                "user" | "assistant" => turns.push((msg.role, text)),
+                "assistant" => {
+                    let tool_calls = msg.tool_calls.unwrap_or_default();
+                    for call in &tool_calls {
+                        names.insert(call.id.clone(), call.function.name.clone());
+                    }
+                    turns.push(Turn {
+                        role: "assistant".into(),
+                        text,
+                        tool_calls,
+                        tool_results: Vec::new(),
+                    });
+                }
+                "user" => turns.push(Turn {
+                    role: "user".into(),
+                    text,
+                    ..Turn::default()
+                }),
                 "tool" | "function" => {
-                    return Err(TranslateError::Unsupported("tool and function calling"))
+                    let id = msg.tool_call_id.clone().unwrap_or_default();
+                    // `role: "function"` predates ids and identifies the call
+                    // by name only; `name` is also the fallback for a client
+                    // that omits `tool_call_id`.
+                    let name = names
+                        .get(&id)
+                        .cloned()
+                        .or_else(|| msg.name.clone())
+                        .unwrap_or_else(|| id.clone());
+                    let result = ToolResult { id, name, text };
+                    // Consecutive results belong in one message: a model that
+                    // made three calls in parallel gets one reply carrying all
+                    // three, which is the shape both native protocols require.
+                    match turns.last_mut() {
+                        Some(t) if t.role == "user" && t.text.is_empty() => {
+                            t.tool_results.push(result)
+                        }
+                        _ => turns.push(Turn {
+                            role: "user".into(),
+                            tool_results: vec![result],
+                            ..Turn::default()
+                        }),
+                    }
                 }
                 other => {
                     return Err(TranslateError::Malformed(format!(
@@ -301,6 +449,7 @@ impl OpenAiRequest {
                 }
             }
         }
+        turns.retain(|t| !t.is_empty());
         let system = if system.is_empty() {
             None
         } else {
@@ -351,7 +500,12 @@ pub struct Choice {
 #[derive(Debug, Serialize)]
 pub struct AssistantMessage {
     pub role: &'static str,
-    pub content: String,
+    /// `null` when the model answered with tool calls and no prose. Serialised
+    /// rather than skipped, because that is what OpenAI itself emits and
+    /// clients branch on the key being present.
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -378,6 +532,35 @@ pub struct Delta {
     pub role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+/// A fragment of a tool call, as OpenAI streams one.
+///
+/// Everything but `index` is optional because the call is delivered in pieces:
+/// the first frame carries `index`, `id`, `type` and the function name, and
+/// every frame after it carries only another slice of `arguments`. The client
+/// concatenates them.
+#[derive(Debug, Serialize, Default)]
+pub struct ToolCallDelta {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    pub function: FunctionDelta,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct FunctionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A slice of the JSON argument text, **not** a JSON value. Forwarded
+    /// without parsing: Anthropic streams partial JSON that is not valid on its
+    /// own until the last fragment arrives, and parsing mid-flight would either
+    /// fail or force buffering the whole call before emitting anything.
+    pub arguments: String,
 }
 
 /// Wall-clock seconds for the `created` field.
@@ -400,6 +583,17 @@ fn now_secs() -> u64 {
 /// tests assert on exact bytes instead of on a shape.
 fn synthetic_id(request_id: u64) -> String {
     format!("chatcmpl-{request_id:016x}")
+}
+
+/// Tool-call id for a provider that does not supply one.
+///
+/// Gemini identifies a call by function name alone, but OpenAI clients pair a
+/// result back to its call by id and send that id in the next request — so one
+/// has to be invented, and it has to be stable for the length of the response.
+/// Derived from the request id for the same reason as [`synthetic_id`]: no RNG
+/// dependency, and translation tests can assert exact bytes.
+fn synthetic_tool_id(request_id: u64, index: u32) -> String {
+    format!("call_{request_id:016x}_{index}")
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +752,15 @@ pub struct StreamTranslator {
     finish_reason: Option<String>,
     role_sent: bool,
     done: bool,
+    /// Next OpenAI `tool_calls[].index` to hand out. Counts tool calls only,
+    /// where Anthropic's block index counts text blocks too — so the two are
+    /// not interchangeable and this cannot be taken from the wire.
+    next_tool_index: u32,
+    /// The call currently receiving argument fragments, if any. A single slot
+    /// suffices because both protocols emit content blocks strictly in
+    /// sequence, never interleaved.
+    open_tool: Option<u32>,
+    saw_tool_call: bool,
 }
 
 enum StreamState {
@@ -582,6 +785,9 @@ impl StreamTranslator {
             finish_reason: None,
             role_sent: false,
             done: false,
+            next_tool_index: 0,
+            open_tool: None,
+            saw_tool_call: false,
             ctx,
         })
     }
@@ -635,7 +841,14 @@ impl StreamTranslator {
         self.done = true;
         let mut out = Vec::new();
         if self.finish_reason.is_none() {
-            self.finish_reason = Some("stop".into());
+            // A stream that produced tool calls ended because the model wants
+            // them run. Saying "stop" would tell the client the turn is over
+            // and the calls it just received need no reply.
+            self.finish_reason = Some(if self.saw_tool_call {
+                "tool_calls".into()
+            } else {
+                "stop".to_string()
+            });
         }
         let mut final_chunk = self.chunk(Delta::default(), self.finish_reason.clone());
         if self.ctx.include_usage {
@@ -655,10 +868,80 @@ impl StreamTranslator {
             Delta {
                 role: Some("assistant"),
                 content: Some(String::new()),
+                ..Delta::default()
             },
             None,
         );
         out.extend_from_slice(&sse_frame(&chunk));
+    }
+
+    /// Begin a tool call: emit the frame carrying its id and name.
+    ///
+    /// Returns nothing — the index is remembered as the open call, and every
+    /// argument fragment until [`Self::close_tool_call`] belongs to it.
+    fn open_tool_call(&mut self, id: String, name: String, out: &mut Vec<u8>) {
+        self.emit_role(out);
+        let index = self.next_tool_index;
+        self.next_tool_index += 1;
+        self.open_tool = Some(index);
+        self.saw_tool_call = true;
+        let chunk = self.chunk(
+            Delta {
+                tool_calls: Some(vec![ToolCallDelta {
+                    index,
+                    id: Some(id),
+                    kind: Some("function"),
+                    function: FunctionDelta {
+                        name: Some(name),
+                        arguments: String::new(),
+                    },
+                }]),
+                ..Delta::default()
+            },
+            None,
+        );
+        out.extend_from_slice(&sse_frame(&chunk));
+    }
+
+    /// Forward a slice of the open call's argument JSON.
+    fn emit_tool_arguments(&mut self, fragment: &str, out: &mut Vec<u8>) {
+        let Some(index) = self.open_tool else {
+            // Arguments with no open call: a provider frame we did not
+            // understand. Dropping the fragment beats attributing it to the
+            // wrong call, which would corrupt an argument list the client then
+            // executes.
+            return;
+        };
+        if fragment.is_empty() {
+            return;
+        }
+        let chunk = self.chunk(
+            Delta {
+                tool_calls: Some(vec![ToolCallDelta {
+                    index,
+                    function: FunctionDelta {
+                        arguments: fragment.to_string(),
+                        ..FunctionDelta::default()
+                    },
+                    ..ToolCallDelta::default()
+                }]),
+                ..Delta::default()
+            },
+            None,
+        );
+        out.extend_from_slice(&sse_frame(&chunk));
+    }
+
+    fn close_tool_call(&mut self) {
+        self.open_tool = None;
+    }
+
+    /// A whole tool call in one frame, for a provider that does not fragment
+    /// its arguments.
+    fn emit_whole_tool_call(&mut self, id: String, name: String, args: &str, out: &mut Vec<u8>) {
+        self.open_tool_call(id, name, out);
+        self.emit_tool_arguments(args, out);
+        self.close_tool_call();
     }
 
     fn emit_text(&mut self, text: &str, out: &mut Vec<u8>) {
@@ -670,6 +953,7 @@ impl StreamTranslator {
             Delta {
                 role: None,
                 content: Some(text.to_string()),
+                ..Delta::default()
             },
             None,
         );

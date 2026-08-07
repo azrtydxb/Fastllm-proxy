@@ -85,6 +85,7 @@ drawn dotted on purpose: it is not on the default path.
 | response body | never parsed; forwarded byte for byte | parsed, re-framed into OpenAI chunks |
 | usage | bounded tail buffer, one parse at end of stream | already parsed, exactly, during translation |
 | endpoints | all seven proxied suffixes | `/chat/completions` only; the rest are `501` |
+| tool calling | passthrough, untouched | translated both directions, streaming included |
 | overhead | zero measured against a real vLLM | one parse per frame |
 
 Most providers are the left column, including OpenRouter — which is why

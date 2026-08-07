@@ -170,54 +170,49 @@ Done (2026-08-07):
   old credential in service until the process restarted, because live backend
   objects are carried across reloads to preserve in-flight counts.
 
+## Tool calling through translated backends — done
+
+Anthropic and Gemini backends now take `tools`/`tool_choice` and answer with
+`tool_calls`, streaming included. `check_supported` refuses only the
+deprecated `functions` spelling.
+
+Three parts were not the rename they looked like:
+
+- **Conversation history.** OpenAI puts a call on the assistant message and
+  its result in a separate `role:"tool"` message keyed by id; both native
+  protocols nest the result *inside* the following user message. So
+  `split_system` became a real message mapper (`Turn`, `ToolResult`), and it
+  carries an id→name map because Gemini pairs a result to its call by function
+  **name** and never sees the id. Consecutive results fold into one message,
+  which is what a model that called three tools in parallel gets back.
+- **Streaming.** Anthropic sends `content_block_start`, then `input_json_delta`
+  fragments of *partial* JSON, then `content_block_stop`. Those fragments are
+  forwarded to the client unparsed — mid-call they are not valid JSON, and
+  buffering until they were would defeat streaming. Anthropic's block index
+  counts text blocks too, so it cannot be reused as OpenAI's `tool_calls[]`
+  index; the translator hands out its own. Gemini needs none of this: it
+  delivers a call complete in one event.
+- **Two ids that do not exist.** Gemini supplies no call id, so one is
+  synthesised from the request id — deterministic, so translation tests still
+  assert exact bytes. And Gemini reports `finishReason: "STOP"` on the very
+  event carrying a call, so the presence of a call outranks it; forwarding
+  "stop" would tell the client the turn was over and the call needed no reply.
+
+Two smaller things found while building it, both of which would have produced
+a request the provider rejects with a 400 naming nothing: Gemini refuses
+`additionalProperties` and `$schema`, which every JSON-Schema generator emits,
+so they are pruned at every level; and `tool_choice: "none"` is expressed by
+offering no tools at all rather than by a `{"type":"none"}` form newer than
+the pinned Anthropic API version.
+
+Verified end to end through a real proxy against a mock Anthropic provider
+(`tests/native_protocols.rs`), both turns: the call comes back, and the
+transcript carrying its result translates on the way in.
+
 Deliberately not done, each additive and small:
 
-- **Tool calling through a translated backend.** Refused today with a `501`
-  naming the feature (`protocol::mod.rs`'s `check_supported`), and reaching
-  Claude *with* tool calling already works through OpenRouter, which is why
-  this is not urgent. What it needs, concretely:
-
-  1. **Request, Anthropic.** `tools[].function.{name,description,parameters}`
-     becomes `tools[].{name,description,input_schema}` — near enough a rename,
-     since both take JSON Schema. `tool_choice` maps
-     `auto`/`none`/`required`/`{function:{name}}` onto
-     `{type:auto|any|tool,name}`, with `none` having no direct equivalent
-     (drop the tools instead of sending an unsupported value).
-  2. **Request, Gemini.** The same schema becomes
-     `tools[].functionDeclarations[]`, and `tool_choice` becomes
-     `toolConfig.functionCallingConfig.mode` = `AUTO`/`ANY`/`NONE`.
-  3. **Conversation history.** This is the part that is not a rename. An
-     OpenAI transcript carries `assistant.tool_calls[]` and separate
-     `role:"tool"` messages keyed by `tool_call_id`. Anthropic carries
-     `tool_use` and `tool_result` blocks *inside* user/assistant messages;
-     Gemini uses `functionCall`/`functionResponse` parts. So
-     `OpenAiRequest::split_system` — which today flattens every message to a
-     string and refuses anything else — has to become a real message mapper
-     that pairs each result back to its call. The `role:"tool"` arm that
-     currently returns `Unsupported` is where this lands.
-  4. **Non-streaming response.** Anthropic `content[]` gains `tool_use` blocks
-     with `{id,name,input}`; those become `choices[0].message.tool_calls[]`
-     with `function.arguments` **stringified**, and `finish_reason` becomes
-     `tool_calls`. The `stop_reason` mapping already handles `tool_use`.
-     Gemini's `functionCall` parts map the same way.
-  5. **Streaming.** The real work. Anthropic streams a tool call as
-     `content_block_start` with a `tool_use` block, then
-     `input_json_delta` fragments carrying *partial JSON*, then
-     `content_block_stop`. OpenAI expects
-     `delta.tool_calls[{index,id,function:{name,arguments}}]` where
-     `arguments` accumulates as a string. So `StreamTranslator` has to track
-     the open block index and emit indexed deltas — the partial JSON passes
-     through as a string and must **not** be parsed mid-flight, which suits the
-     existing design.
-  6. **Refusals shrink.** `check_supported` stops rejecting
-     `tools`/`tool_choice`, and `split_system` stops rejecting `role:"tool"`.
-     Everything else it refuses stays refused.
-
-  Testable without a provider: `src/protocol/tests.rs` already asserts exact
-  request bytes and replays SSE byte-by-byte, so the fixtures extend the same
-  way. Budget it as one focused change per protocol rather than both at once —
-  the streaming re-framer is where the bugs will be.
-- Multimodal (image/audio parts) through a translated backend. Same shape,
+- Multimodal (image/audio parts) through a translated backend. Same shape as
+  tool calling below but smaller,
   smaller: `content` parts of type `image_url` become Anthropic `image` blocks
   with base64 `source`, or Gemini `inline_data`. The refusal lives in
   `Content::into_text`, which flattens to a string today. No streaming
