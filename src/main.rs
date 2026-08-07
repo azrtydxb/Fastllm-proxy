@@ -222,7 +222,11 @@ enum Command {
     SetPassword {
         /// The login name. Created as a new `kind = 'user'` principal if no
         /// principal by this name exists yet, and granted the `admin` role
-        /// if it has no role at all yet — see `control::auth::bootstrap_admin_user`.
+        /// unless it already holds one that grants `config:write` — see
+        /// `control::auth::bootstrap_admin_user`. Checking for the permission
+        /// rather than for "any role at all" is what stops the seeded
+        /// `bootstrap` principal, which already holds `inference`, from
+        /// becoming an account that can log in but administer nothing.
         #[arg(long)]
         name: String,
 
@@ -383,7 +387,10 @@ async fn run_set_password(name: &str, password: &str, database_url: &str) -> Res
         let pool = fastllm_proxy::control::db::connect(database_url).await?;
         let principal_id =
             fastllm_proxy::control::auth::bootstrap_admin_user(&pool, name, password).await?;
-        println!("set-password complete: principal {name:?} (id {principal_id}) can now log into the admin UI");
+        println!(
+            "set-password complete: principal {name:?} (id {principal_id}) can now log into \
+             the admin UI and holds a role granting config:write"
+        );
         Ok(())
     }
     #[cfg(not(feature = "control"))]

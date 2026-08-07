@@ -7,7 +7,7 @@ Plain manifests — this does not earn a Helm chart.
 | Namespace | `fastllm` |
 | Image | `192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main` (zot, anonymous pull) |
 | VIP | `192.168.10.126` via kube-vip — proxy traffic only, see below |
-| Backend | spark2 `192.168.10.245:40045/v1`, model `qwen3-6-35b-a3b-nvfp4` |
+| Backends | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
 ## Split deployment
 
@@ -44,7 +44,7 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
   --database-url "$FASTLLM_DATABASE_URL"
 ```
 
-(`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role if it has no role at all yet. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
+(`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role unless it already holds one granting `config:write`. The condition is the *permission*, not "has any role": the seeded `bootstrap` principal already holds `inference` so keys minted against it can invoke models, and an earlier "has no role at all" check silently skipped the grant for it — producing an account that logged in and then got 403 everywhere, including from the routes needed to repair it. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
 
 ## First install
 
@@ -205,7 +205,7 @@ E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/models/3     # drop the model and its backends
 ```
 
-## When spark2's port changes
+## When a Spark's port changes
 
 GPUStack assigns the replica port and it moves on redeploy. If the backend goes
 unhealthy, find the current one:

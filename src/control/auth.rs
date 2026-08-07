@@ -233,12 +233,24 @@ pub async fn bootstrap_admin_user(
         .bind(principal_id)
         .execute(&mut *tx)
         .await?;
-    let has_any_role: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM principal_roles WHERE principal_id = $1)")
-            .bind(principal_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if !has_any_role {
+    // Whether this principal can actually administer, not merely whether it
+    // holds *some* role. The original check was "has no role at all", which
+    // silently skipped the grant for the seeded `bootstrap` principal — it
+    // already holds `inference` so that keys minted against it can invoke
+    // models. The documented first step (`set-password --name bootstrap`)
+    // therefore produced an account that logged in successfully and then got
+    // 403 from every admin route, including the ones needed to fix it.
+    let can_administer: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM principal_roles pr
+           JOIN role_permissions rp ON rp.role_id = pr.role_id
+           JOIN permissions p ON p.id = rp.permission_id
+           WHERE pr.principal_id = $1 AND p.verb = 'config:write')",
+    )
+    .bind(principal_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !can_administer {
         sqlx::query(
             "INSERT INTO principal_roles (principal_id, role_id)
              SELECT $1, id FROM roles WHERE name = 'admin'
