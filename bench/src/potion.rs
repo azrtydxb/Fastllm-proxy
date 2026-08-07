@@ -391,7 +391,9 @@ fn main() {
     let long = "Explain what this function does and suggest an improvement. ".repeat(280);
     for (name, repo) in MODELS
         .iter()
-        .filter(|(n, _)| *n == "potion-base-8M" || *n == "potion-retrieval-32M")
+        .filter(|(n, _)| {
+            *n == "potion-base-8M" || *n == "potion-code-16M" || *n == "potion-retrieval-32M"
+        })
     {
         let Ok(model) = StaticModel::from_pretrained(repo, None, None, None) else {
             continue;

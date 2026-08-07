@@ -33,6 +33,160 @@ fastllm-proxy addresses both: routing is prefix-aware, and response bodies are n
 
 **Config reloads in place.** `SIGHUP` rebuilds the routing table and swaps it atomically; in-flight generations are unaffected and health state carries over. Adding or removing a model does not mean restarting a gateway with work in flight.
 
+## Performance
+
+Every number below was measured, on the hardware named, on the date named.
+Nothing here is projected or scaled from a smaller test. Where two runs of the
+same thing disagree, both are shown.
+
+### Against a real vLLM, the proxy is not measurable
+
+Two runs against the live spark2 replica (arm64, `qwen3-6-35b-a3b-nvfp4`),
+2026-08-06. "Direct" is the same client against the same vLLM with no proxy in
+the path:
+
+| | through the proxy | direct | delta |
+|---|---|---|---|
+| TTFT, run 1 | **83.2 ms** | 83.8 ms | −0.6 ms |
+| TTFT, run 2 | **90 ms** | 93 ms | −3 ms |
+| inter-token | **27.51 ms** | 27.46 ms | +0.05 ms |
+| 8 concurrent streams, aggregate | **121.8 tok/s** | 118.7 tok/s | +3.1 tok/s |
+| 8 concurrent, inter-token | 63.4 ms | 62.2 ms | +1.2 ms |
+
+The proxy comes out marginally *ahead* on two of these, which is not a claim
+that a proxy makes inference faster — it is run-to-run noise on a live GPU, and
+that is the point: the overhead is below the noise floor of the thing it sits
+in front of.
+
+### Where the time actually goes
+
+The proxy's own per-request work totals **~0.76 µs**, against ~38 µs of core
+time per request. Roughly 2%; the rest is kernel, socket and HTTP protocol work
+that any process doing this job would pay.
+
+| step | cost |
+|---|---|
+| URL format + `Uri` parse | 156 ns |
+| `BodyPeek` parse (1 KiB body) | 229 ns |
+| prefix hash for affinity | 108 ns |
+| header copy | 97 ns |
+| bearer header build | 92 ns |
+| path allocations | 41 ns |
+
+Authorisation, rate limiting and budget checks are not in that table because
+they are set lookups against a pre-flattened in-memory snapshot — no database
+call, no network call, no file read on the request path. `tests/no_io_on_hot_path.rs`
+fails the build if that changes.
+
+### Synthetic ceilings
+
+10-core arm64 macOS, `--release`, driven by a mock SSE upstream that flushes
+every frame with no think time. That is the **worst case** for framing
+overhead — a real vLLM emits one SSE event per HTTP frame tens of milliseconds
+apart, so production numbers are better than these.
+
+| | measured |
+|---|---|
+| streaming | **7,921 req/s**, 471 MiB/s |
+| non-streaming, 64 KiB bodies | **67,200 req/s** |
+| frame ceiling (any frame size) | ~650,000 frames/s |
+| raw byte pump | ~3 GB/s |
+
+### What one architectural decision was worth
+
+The upstream client used to be a pooled `hyper_util` client, which cost one
+cross-task wakeup per frame. Replacing it with a connection this process owns
+and drives from inside the response body ([src/upstream.rs](src/upstream.rs)):
+
+| | before | after |
+|---|---|---|
+| streaming | 1,314 req/s | **7,921 req/s** |
+| throughput | 78 MiB/s | **471 MiB/s** |
+| non-streaming | unchanged | unchanged |
+
+A little over **6x**, and it is why response bodies are never parsed: the win
+came from deleting a wakeup, not from batching. Coalescing already-arrived
+frames was measured at a merge ratio of exactly 1.000 in three separate
+settings — there is never a second frame waiting.
+
+### How much is left
+
+A dumb bidirectional TCP relay — parsing nothing, framing nothing, the hard
+floor for any proxy — was measured on the same path:
+
+| | throughput |
+|---|---|
+| direct hop, no proxy | 951 MiB/s |
+| dumb TCP relay | 694 MiB/s |
+| **fastllm-proxy** | **524 MiB/s** |
+
+So the entire remaining prize over a proxy that understands nothing is
+**1.32x**, and only if detecting end-of-response were free — it is not, since
+the in-flight guard has to be released and the connection reused.
+[TODO.md](TODO.md) records what was tried and rejected, with numbers, so nobody
+re-litigates it from intuition.
+
+### Classifier tiers
+
+Semantic routing costs what it measures. Same machine, `--release`,
+`bench/potion` and `bench/minilm`:
+
+| tier | model | p50 per prompt | what it separates |
+|---|---|---|---|
+| 1 | potion-base-8M | 103 µs | subject-matter classes |
+| 1 | **potion-code-16M** | **115 µs** | best on coding (98.7%) |
+| 1 | potion-retrieval-32M | 137 µs | best all-round (90.0%) |
+| 2 | all-MiniLM-L6-v2 | 1.66 ms | modest gain over tier 1 |
+| 2 | **bge-small-en-v1.5** | **3.27 ms** | same-subject/different-intent |
+
+Tier 1 is a token-vector lookup and a mean — no transformer, no matmul. Cost
+also *plateaus* rather than growing with the prompt, because the encoder stops
+at its token cap: a 64 KB paste costs exactly what a 4 KB one does.
+
+Measured accuracy, held out over ~21k human-labelled prompts
+(`HuggingFaceH4/no_robots`, `openai/gsm8k`, eleven StackExchange communities):
+
+| class | tier 1 precision | recall |
+|---|---|---|
+| coding | 97.6% | 92.6% |
+| chat | 95.8% | 98.0% |
+| generation | 96.8% | 69.6% |
+| math | 88.0% | 97.6% |
+| devops | 86.8% | 90.5% |
+| finance | 86.2% | 91.6% |
+| legal | 85.9% | 75.0% |
+| security | 84.8% | 82.3% |
+| factual-qa | 83.7% | 50.4% |
+| databases | 82.3% | 91.1% |
+
+Tier 2 is consulted **only** when a routing rule names a class that needs it.
+If no rule does, the transformer is never loaded and no request can pay for it.
+On realistic traffic mixes escalation touches under a tenth of requests, which
+puts the average added cost near 0.2 ms.
+
+Two findings worth knowing before configuring classes:
+
+- **Classify by subject, not by verb.** Subject-matter classes (legal, finance,
+  security, coding) reach 82-98% precision on tier 1. Task-shaped classes
+  (summarise, rewrite, extract) fail on *both* tiers — under bge-small,
+  Summarize scores 46.6% and Extract 35.6%, worse than tier 1. Telling
+  "summarise this" from "extract the dates" needs instruction understanding,
+  not better embeddings.
+- **Margins are not comparable across models.** bge-small reports higher raw
+  cosine similarities than the static model while classifying better, because
+  its space is anisotropic. Confidence floors are calibrated per class *and*
+  per tier.
+
+### What has not been measured
+
+There is no benchmark here against another gateway. The comparisons above are
+against a direct connection and against a dumb TCP relay — the floor and the
+ceiling — not against LiteLLM, Envoy or anything else. Claims of the form
+"faster than X" are not made because that measurement has not been run.
+
+Reproduce any of this with `cargo run -p bench --release --bin realbench`
+(and siblings) — see [bench/](bench/).
+
 ## Install
 
 ```bash
