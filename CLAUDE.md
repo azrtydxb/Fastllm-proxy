@@ -50,8 +50,8 @@ instead.
 - **`AppState::apply_snapshot` is the single write path** for the snapshot. It
   rebuilds the routing registry in the same call so the two cannot diverge.
   Never write to the snapshot cell directly.
-- Performance claims need a measurement. `TODO.md` records what was tried and
-  rejected, with numbers, so nobody re-litigates it from intuition.
+- Performance claims need a measurement. `docs/performance.md` records what was
+  tried and rejected, with numbers, so nobody re-litigates it from intuition.
 
 ## Before you claim something works
 

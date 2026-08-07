@@ -153,7 +153,7 @@ cargo build --release
 | [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration reference |
 | [API and administration](docs/api.md) | Endpoints, admin API, providers, routing rules, auth, TLS, budgets, rate limits |
 | [Deployment on Kubernetes](deploy/README.md) | Manifests, adding a provider, operator runbook |
-| [TODO](TODO.md) | What was tried and rejected, with numbers |
+| [TODO](TODO.md) | What is deliberately not built, and why |
 
 ## Development
 

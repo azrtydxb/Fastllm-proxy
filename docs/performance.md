@@ -89,9 +89,27 @@ floor for any proxy — was measured on the same path:
 
 So the entire remaining prize over a proxy that understands nothing is
 **1.32x**, and only if detecting end-of-response were free — it is not, since
-the in-flight guard has to be released and the connection reused.
-[TODO.md](../TODO.md) records what was tried and rejected, with numbers, so nobody
-re-litigates it from intuition.
+the in-flight guard has to be released, the connection returned to the pool,
+and the next request served on the client socket, all of which need exactly the
+framing such a relay would skip. Paying for that with a hijacked client socket
+and no pooling is a bad trade.
+
+### Measured and rejected — do not retry without new evidence
+
+Kept with their numbers so nobody re-litigates them from intuition. Nothing is
+currently identified as worth doing.
+
+- **Coalescing already-arrived frames.** Merge ratio measured at exactly 1.000
+  in three separate settings: against the pooled client, against the owned
+  connection that replaced it, and against a real vLLM. There is never a second
+  frame waiting. It was the deleted wakeup, not batching, that gave the 6x.
+- **A hand-rolled `model` scanner to skip the JSON parse.** 67.1k → 67.2k req/s
+  on 64 KiB bodies. `serde_json` skips what it does not want at ~16 B/ns and the
+  parse is ~3% of a request; a bespoke parser on the routing path is not worth
+  the risk of misrouting.
+- **Pre-parsed `Uri` per backend per endpoint.** ~0.2%, and it forces an
+  endpoint-index coupling between `proxy.rs` and `registry.rs`.
+- **Anything else on the request path.** There is under 1µs available in total.
 
 ### Classifier tiers
 
