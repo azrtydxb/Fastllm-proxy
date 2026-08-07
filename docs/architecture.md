@@ -24,7 +24,7 @@ flowchart LR
     end
 
     subgraph cp["Control plane — --role control"]
-        admin[admin API + UI]
+        admin["admin API + UI<br/>session auth, per-route permissions"]
         build[build snapshot]
         pg[(Postgres)]
     end
@@ -65,8 +65,9 @@ flowchart TD
 ```
 
 Per request that leaves: one SHA-256 of the bearer token, one hash lookup to a
-principal, an expiry comparison, one set lookup for the model, one atomic
-decrement for the rate limit. No graph walk, no lock held across an await, no
+principal, an expiry comparison, one set lookup for the model, and — when the
+principal has a limit — an `RwLock` read plus up to two short mutex-guarded
+bucket operations. No graph walk, no I/O, no lock held across an await, no
 allocation beyond what the body already needed.
 
 ## A request, end to end
@@ -101,6 +102,23 @@ Two decisions in that flow are load-bearing:
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
   never per frame. The response is still forwarded as opaque bytes.
 
+## Administrative permissions
+
+Admin routes are gated by a session *and* a per-route permission, drawn from
+the same `roles → permissions` model the inference side uses: `usage:read` for
+reads, `key:create` and `key:revoke` for key lifecycle, `config:write` for
+everything else.
+
+Two things an operator should know rather than discover:
+
+- `config:write` is effectively administrative. A principal holding it can
+  grant itself roles through `POST /admin/principals/{id}/roles`, so
+  `key:create`/`key:revoke` are a separation of *duties*, not a security
+  boundary against it.
+- The `/admin/*` 404 for an unknown path is served outside the session gate,
+  so an anonymous caller can tell which admin paths are not routes. It
+  discloses no data, only the shape of the API.
+
 ## Failure modes
 
 | event | behaviour |
@@ -125,4 +143,10 @@ split exists to prevent.
 - **Rate limits can overshoot by up to one reconciliation window** during a
   sharp spike, because replicas enforce locally and reconcile periodically
   rather than sharing a counter on the request path.
+- **A replica with no recent traffic for a principal keeps a floor of
+  `1/replicas` of that principal's limit.** Without it an idle replica's
+  computed share collapses to zero and it refuses every request while the
+  principal is far under budget — a worse failure than over-admitting. The
+  floor bounds total allocation at under 2x the configured limit in the worst
+  case (one busy replica, the rest idle), never more.
 - **Policy changes propagate within one snapshot poll**, not instantly.
