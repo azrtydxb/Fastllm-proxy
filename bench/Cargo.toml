@@ -56,6 +56,12 @@ path = "src/potion_classes.rs"
 name = "potion-arch"
 path = "src/potion_arch.rs"
 
+# Does a real transformer earn its ~10x latency on the splits the static model
+# cannot do? The tier-2 question — see `src/minilm.rs`.
+[[bin]]
+name = "minilm"
+path = "src/minilm.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
@@ -65,3 +71,7 @@ bytes = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 model2vec-rs = "0.2"
+# Real transformer embeddings (ONNX via `ort`), for the tier-2 half of the
+# cascade experiment only. A heavy native dependency, which is precisely why it
+# lives in `bench` and not in the proxy until the measurement justifies it.
+fastembed = "5"

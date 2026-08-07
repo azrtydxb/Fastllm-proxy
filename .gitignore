@@ -10,3 +10,8 @@
 /web/dist/*
 !/web/dist/.gitkeep
 /web/node_modules
+
+# `fastembed` (bench only) caches ONNX weights here — 213MB of them, which a
+# `git add -A` from the repo root will happily commit and which then fails the
+# push with an HTTP 408 rather than anything that names the cause.
+.fastembed_cache/
