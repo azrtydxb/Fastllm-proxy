@@ -50,6 +50,12 @@ path = "src/potion_real.rs"
 name = "potion-classes"
 path = "src/potion_classes.rs"
 
+# Can the embedding tell architecture/design work from concrete coding? Uses
+# two StackExchange communities as a natural experiment — see `src/potion_arch.rs`.
+[[bin]]
+name = "potion-arch"
+path = "src/potion_arch.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }

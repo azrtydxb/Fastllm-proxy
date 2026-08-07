@@ -123,6 +123,36 @@ def main():
     else:
         print(f"  no_robots.json complete ({len(existing)} rows)")
 
+    # The architecture-versus-coding question, as a natural experiment rather
+    # than invented seeds: two StackExchange sites whose communities separated
+    # the traffic themselves. softwareengineering.SE is where design and
+    # architecture questions live; codereview.SE is concrete code. Both are
+    # written by programmers about programs, which is exactly what makes the
+    # separation hard and therefore worth measuring.
+    for config, name in [
+        ("softwareengineering", "se_architecture.json"),
+        ("codereview", "se_codereview.json"),
+        ("devops", "se_devops.json"),
+    ]:
+        target = 1200
+        existing = load(name)
+        if len(existing) < target:
+            rows = fetch_rows(
+                "flax-sentence-embeddings/stackexchange_title_best_voted_answer_jsonl",
+                config,
+                "train",
+                target,
+                start=len(existing),
+            )
+            existing.extend(
+                {"prompt": r["title_body"], "category": config}
+                for r in rows
+                if r.get("title_body")
+            )
+            write(name, existing)
+        else:
+            print(f"  {name} complete ({len(existing)} rows)")
+
     target = 1000
     existing = load("gsm8k.json")
     if len(existing) < target:
