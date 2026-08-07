@@ -83,28 +83,30 @@ impl BucketState {
         }
     }
 
-    /// Refill for elapsed time (capped at `capacity`), then attempt to take
-    /// `amount`. `capacity` is passed in per call rather than stored,
-    /// because it can change between calls -- a reconciliation response
-    /// narrowing this replica's share, or an admin edit to the configured
-    /// limit reaching this principal on the next snapshot -- and a bucket
-    /// whose capacity shrinks must not keep however much `available` it
-    /// already had; `.min(capacity)` on every refill is what clamps it down
-    /// on the very next call instead of only whenever the bucket happens to
-    /// empty out on its own.
-    fn take(&mut self, amount: f64, capacity: f64, now: Instant) -> Result<(), Duration> {
-        let rate_per_sec = capacity / 60.0;
-        let elapsed = now
-            .saturating_duration_since(self.last_refill)
-            .as_secs_f64();
-        self.available = (self.available + elapsed * rate_per_sec).min(capacity);
-        self.last_refill = now;
-
-        if self.available >= amount {
-            self.available -= amount;
+    /// Refill for elapsed time (capped at `capacity`) and report whether
+    /// `amount` would be available, *without* committing the debit --
+    /// `available`/`last_refill` are left untouched. `capacity` is passed
+    /// in per call rather than stored, because it can change between calls
+    /// -- a reconciliation response narrowing this replica's share, or an
+    /// admin edit to the configured limit reaching this principal on the
+    /// next snapshot -- and a bucket whose capacity shrinks must not keep
+    /// however much `available` it already had; `.min(capacity)` here is
+    /// what clamps it down on the very next call instead of only whenever
+    /// the bucket happens to empty out on its own.
+    ///
+    /// Split from the actual debit (`commit`, below) so `Limiter::check`
+    /// can evaluate both dimensions -- requests and tokens are independent
+    /// `BucketState`s -- before committing either one. See `check`'s own
+    /// comment for why that ordering matters: committing a dimension that
+    /// turns out not to matter (because the *other* dimension is what ends
+    /// up rejecting the request) would waste real capacity on a request the
+    /// caller never got admitted for.
+    fn peek(&self, amount: f64, capacity: f64, now: Instant) -> Result<(), Duration> {
+        let available = self.refilled(capacity, now);
+        if available >= amount {
             return Ok(());
         }
-        if rate_per_sec <= 0.0 {
+        if capacity <= 0.0 {
             // Capacity collapsed to zero (a reconciled share of 0, or a
             // configured limit of 0 slipping past admin validation): no
             // amount of waiting refills it, so there is no honest finite
@@ -113,8 +115,31 @@ impl BucketState {
             // runs again well within a minute.
             return Err(Duration::from_secs(60));
         }
-        let deficit = amount - self.available;
-        Err(Duration::from_secs_f64((deficit / rate_per_sec).max(0.0)))
+        let deficit = amount - available;
+        Err(Duration::from_secs_f64(
+            (deficit / (capacity / 60.0)).max(0.0),
+        ))
+    }
+
+    /// Actually refill and debit `amount`. Only ever called after `peek`
+    /// (with the same `capacity`/`now`) has already confirmed `amount` is
+    /// available -- this does not re-check, it trusts the caller, which is
+    /// exactly what lets `Limiter::check` decide both dimensions first and
+    /// commit only the ones a fully-admitted request actually needs.
+    fn commit(&mut self, amount: f64, capacity: f64, now: Instant) {
+        self.available = self.refilled(capacity, now) - amount;
+        self.last_refill = now;
+    }
+
+    /// The shared refill arithmetic `peek` and `commit` both need, kept in
+    /// one place so the two can never drift out of agreement with each
+    /// other about how much a given `elapsed`/`capacity` refills.
+    fn refilled(&self, capacity: f64, now: Instant) -> f64 {
+        let rate_per_sec = capacity / 60.0;
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        (self.available + elapsed * rate_per_sec).min(capacity)
     }
 }
 
@@ -216,8 +241,27 @@ impl Limiter {
 
     /// One hash lookup (a read lock over a `HashMap`, or -- the first time a
     /// principal is seen -- a write lock to insert one entry) plus, per
-    /// configured dimension, a short lock-protected refill-and-decrement.
-    /// No I/O, no heap allocation once the principal's entry exists.
+    /// configured dimension, a short lock-protected refill check and --
+    /// only if the request is admitted overall -- a commit. No I/O, no heap
+    /// allocation once the principal's entry exists.
+    ///
+    /// The two configured dimensions are decided before either is
+    /// committed, and both locks (where held) stay held across that whole
+    /// decide-then-commit sequence -- deliberately, for two reasons:
+    ///
+    /// - **Consistency with `requests_used`/`tokens_used`** (see
+    ///   `PrincipalState`'s doc comment on those fields): both are bumped
+    ///   for every configured dimension regardless of which one -- if
+    ///   either -- ends up rejecting, so a replica that is mostly rejecting
+    ///   a principal's tokens-heavy traffic still reports accurate token
+    ///   demand even on the requests it never got far enough to look at
+    ///   tokens for under the old sequential-short-circuit shape.
+    /// - **No wasted capacity.** Deciding both dimensions before debiting
+    ///   either means a request that is going to be 429'd by *tokens* never
+    ///   consumes a slot from the *requests* bucket first -- the old shape
+    ///   committed `requests` immediately upon success, only to discover
+    ///   the overall answer was `Exceeded` once it got to `tokens`, wasting
+    ///   one real admission the caller never benefited from.
     ///
     /// `token_cost` is an estimate, not a measurement: the proxy does not
     /// know how many tokens a request will actually consume until the
@@ -237,25 +281,60 @@ impl Limiter {
             return Decision::Admitted;
         }
         let state = self.state_for(principal_id, limits, now);
+        let token_cost = token_cost.max(1) as f64;
 
-        if let Some(configured) = limits.requests_per_min {
+        // Demand is counted for every configured dimension unconditionally,
+        // before either bucket is even peeked -- see the doc comment above.
+        if limits.requests_per_min.is_some() {
             state.requests_used.fetch_add(1, Ordering::Relaxed);
+        }
+        if limits.tokens_per_min.is_some() {
+            state
+                .tokens_used
+                .fetch_add(token_cost as u64, Ordering::Relaxed);
+        }
+
+        // Both locks (where the dimension is configured) are acquired here
+        // and held through both the peek below and the commit further
+        // down, so no other `check` call for this principal can interleave
+        // a commit of its own in between this call's decision and its own.
+        let mut requests_bucket = limits.requests_per_min.map(|configured| {
             let capacity =
                 effective_capacity(configured, state.requests_share.load(Ordering::Relaxed));
-            let mut bucket = state.requests.lock();
-            if let Err(retry_after) = bucket.take(1.0, capacity, now) {
-                return Decision::Exceeded { retry_after };
-            }
-        }
-        if let Some(configured) = limits.tokens_per_min {
-            let cost = token_cost.max(1) as u64;
-            state.tokens_used.fetch_add(cost, Ordering::Relaxed);
+            (state.requests.lock(), capacity)
+        });
+        let mut tokens_bucket = limits.tokens_per_min.map(|configured| {
             let capacity =
                 effective_capacity(configured, state.tokens_share.load(Ordering::Relaxed));
-            let mut bucket = state.tokens.lock();
-            if let Err(retry_after) = bucket.take(cost as f64, capacity, now) {
-                return Decision::Exceeded { retry_after };
-            }
+            (state.tokens.lock(), capacity)
+        });
+
+        let requests_peek = requests_bucket
+            .as_ref()
+            .map(|(bucket, capacity)| bucket.peek(1.0, *capacity, now));
+        let tokens_peek = tokens_bucket
+            .as_ref()
+            .map(|(bucket, capacity)| bucket.peek(token_cost, *capacity, now));
+
+        // Whichever configured dimension is tighter decides the wait: if
+        // only one dimension rejects, its own `retry_after` is reported
+        // unchanged from before this fix; if both reject, the caller
+        // cannot usefully retry before the slower of the two clears
+        // anyway, so the longer wait is the honest answer.
+        let retry_after = [&requests_peek, &tokens_peek]
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.err())
+            .max();
+        if let Some(retry_after) = retry_after {
+            return Decision::Exceeded { retry_after };
+        }
+
+        if let Some((bucket, capacity)) = requests_bucket.as_mut() {
+            bucket.commit(1.0, *capacity, now);
+        }
+        if let Some((bucket, capacity)) = tokens_bucket.as_mut() {
+            bucket.commit(token_cost, *capacity, now);
         }
         Decision::Admitted
     }
@@ -589,6 +668,76 @@ mod tests {
         assert_eq!(
             mine.requests, 2,
             "both the admitted and the rejected attempt count as demand"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_requests_bucket_still_counts_token_demand() {
+        // Regression test: `requests_per_min` is exhausted (so the overall
+        // decision is `Exceeded` from that dimension alone), but
+        // `tokens_per_min` is also configured with plenty of headroom. The
+        // old sequential shape returned as soon as `requests` rejected and
+        // never even looked at `tokens`, so `tokens_used` stayed at 0 even
+        // though this call carried real token demand -- undercounting
+        // exactly the demand `control::reconcile` needs to divide up.
+        let limiter = Limiter::new();
+        let lim = limits(Some(1), Some(1_000_000));
+        let now = Instant::now();
+        assert_eq!(limiter.check(1, &lim, 500, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 500, now),
+            Decision::Exceeded { .. }
+        ));
+        let drained = limiter.drain_counts();
+        let mine = drained.iter().find(|c| c.principal_id == 1).unwrap();
+        assert_eq!(mine.requests, 2, "both attempts count as request demand");
+        assert_eq!(
+            mine.tokens, 1000,
+            "token demand from the rejected call must still be counted, even \
+             though `requests` was the dimension that rejected it"
+        );
+    }
+
+    #[test]
+    fn a_request_rejected_by_tokens_does_not_also_consume_a_requests_slot() {
+        // Regression test: `requests_per_min` has room for many more calls,
+        // but `tokens_per_min` is already exhausted. The old shape
+        // committed (debited) the `requests` bucket as soon as it admitted,
+        // before ever checking `tokens` -- wasting one real request slot on
+        // a call that was going to be 429'd anyway. This pins that the
+        // `requests` bucket's available capacity is unaffected by a call
+        // that tokens alone rejects.
+        let limiter = Limiter::new();
+        let lim = limits(Some(1000), Some(10));
+        let now = Instant::now();
+        // One admitted call spends all 10 tokens and 1 of 1000 requests.
+        assert_eq!(limiter.check(1, &lim, 10, now), Decision::Admitted);
+        // Tokens alone rejects this one -- requests still has 999 of 1000
+        // left, vast headroom.
+        assert!(matches!(
+            limiter.check(1, &lim, 10, now),
+            Decision::Exceeded { .. }
+        ));
+
+        // Probe the requests bucket in isolation (tokens not configured
+        // this time, so only the requests dimension can reject) to prove
+        // its remaining capacity is 999, not 998: if the tokens-rejected
+        // call above had wrongly debited a requests slot anyway, only 998
+        // more would be admitted here before this dimension also 429s.
+        let requests_only = limits(Some(1000), None);
+        for i in 0..999 {
+            assert_eq!(
+                limiter.check(1, &requests_only, 1, now),
+                Decision::Admitted,
+                "request {i} of the remaining 999 should be admitted"
+            );
+        }
+        assert!(
+            matches!(
+                limiter.check(1, &requests_only, 1, now),
+                Decision::Exceeded { .. }
+            ),
+            "the 1000th total request must now be rejected"
         );
     }
 }

@@ -126,11 +126,52 @@ pub async fn delete_session(pool: &PgPool, token: &str) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+/// A syntactically valid Argon2id PHC string that verifies against nothing
+/// real — never a login that legitimately succeeds against it. Only its
+/// *shape* matters: `verify_login` runs `Argon2::verify_password` against
+/// this whenever there is no real `password_hash` to check, purely so that
+/// call happens (and costs the same handful of milliseconds Argon2id always
+/// costs) on every rejection path, not only the "wrong password" one.
+const DUMMY_LOGIN_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO4tt+y8yYwgA$b9DCigRtGIAy9y9xRa9Lip7A9pBHRU+4AMK9lJkXDOA";
+
+/// The pure decision `verify_login` reduces to once it has `row` in hand —
+/// split out so it can be unit-tested without a database (see the tests
+/// below) and so the timing-oracle fix has exactly one place to reason
+/// about: every branch below runs `verify_password` exactly once, against
+/// either the real hash or [`DUMMY_LOGIN_HASH`], before it is in a position
+/// to decide anything. Skipping that call on a miss (the previous shape:
+/// `let hash = hash?;` returning `None` before ever touching Argon2) is a
+/// username-enumeration timing oracle — an unknown name or a `service_account`
+/// (`password_hash IS NULL`) answers *fast* because no KDF ran, and a known,
+/// enabled `user` answers *slow* because one did, regardless of whether the
+/// password was right. Running the same KDF call on every path removes that
+/// signal.
+fn decide_login(row: Option<(i64, Option<String>, bool)>, password: &str) -> Option<i64> {
+    // `None` (never a login that can succeed) whenever there is no real hash
+    // to check: no such principal, or a principal that is disabled, or one
+    // with no password set (`kind = 'service_account'`, or a `user` that
+    // has never had `set_password` called for it).
+    let real_hash = row
+        .as_ref()
+        .filter(|(_, _, disabled)| !disabled)
+        .and_then(|(_, hash, _)| hash.as_deref());
+
+    let password_matches = verify_password(password, real_hash.unwrap_or(DUMMY_LOGIN_HASH));
+
+    match row {
+        Some((id, _, _)) if real_hash.is_some() && password_matches => Some(id),
+        _ => None,
+    }
+}
+
 /// Look up a principal by name and verify a presented password against its
 /// `password_hash`. `None` covers every rejection reason (no such
 /// principal, wrong `kind`, no password set, disabled, wrong password)
 /// without distinguishing which — the same "don't tell an attacker which
-/// part was wrong" reasoning any login form follows.
+/// part was wrong" reasoning any login form follows, extended to *timing*
+/// by [`decide_login`]: every one of those reasons costs the same one
+/// Argon2id call, not zero for some and one for others.
 pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<i64> {
     let row: Option<(i64, Option<String>, bool)> = sqlx::query_as(
         "SELECT id, password_hash, disabled FROM principals WHERE name = $1 AND kind = 'user'",
@@ -139,16 +180,7 @@ pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<i
     .fetch_optional(pool)
     .await
     .ok()?;
-    let (id, hash, disabled) = row?;
-    if disabled {
-        return None;
-    }
-    let hash = hash?;
-    if verify_password(password, &hash) {
-        Some(id)
-    } else {
-        None
-    }
+    decide_login(row, password)
 }
 
 /// Set (or replace) a principal's password, promoting it to `kind = 'user'`
@@ -252,5 +284,62 @@ mod tests {
         assert_ne!(a, b);
         assert!(verify_password("same-password", &a));
         assert!(verify_password("same-password", &b));
+    }
+
+    #[test]
+    fn decide_login_accepts_only_a_matching_password_against_an_enabled_hashed_principal() {
+        let hash = hash_password("right password").unwrap();
+        assert_eq!(
+            decide_login(Some((7, Some(hash.clone()), false)), "right password"),
+            Some(7)
+        );
+        assert_eq!(
+            decide_login(Some((7, Some(hash), false)), "wrong password"),
+            None,
+            "a wrong password against a real hash must still be rejected"
+        );
+    }
+
+    #[test]
+    fn decide_login_rejects_an_unknown_name_a_null_hash_and_a_disabled_principal() {
+        // No row at all: unknown name (or `kind != 'user'`, excluded by
+        // verify_login's own query).
+        assert_eq!(decide_login(None, "anything"), None);
+        // A `user` principal that exists but has never had a password set.
+        assert_eq!(decide_login(Some((1, None, false)), "anything"), None);
+        // A real hash, but the principal is disabled.
+        let hash = hash_password("right password").unwrap();
+        assert_eq!(
+            decide_login(Some((1, Some(hash), true)), "right password"),
+            None,
+            "a disabled principal must be rejected even with the correct password"
+        );
+    }
+
+    /// The timing-oracle fix's actual claim: every rejection path below
+    /// calls `verify_password` (and therefore runs the same Argon2id work)
+    /// exactly once, against either a real hash or `DUMMY_LOGIN_HASH`, so a
+    /// caller cannot use "did this answer instantly or after Argon2id ran"
+    /// to tell "no such user" apart from "wrong password for a real user".
+    /// This cannot assert wall-clock timing reliably in CI, so instead it
+    /// pins the thing that *makes* the timing uniform: `DUMMY_LOGIN_HASH`
+    /// itself is a real, verifiable PHC string (not a shortcut like an
+    /// empty string `verify_password` would reject without doing any KDF
+    /// work at all — see `a_malformed_stored_hash_fails_closed_rather_than_panicking`
+    /// above), so substituting it costs a real Argon2id call every time.
+    #[test]
+    fn the_dummy_login_hash_is_a_real_verifiable_argon2_hash_not_a_free_rejection() {
+        assert!(
+            PasswordHash::new(DUMMY_LOGIN_HASH).is_ok(),
+            "DUMMY_LOGIN_HASH must be a well-formed PHC string, or verify_password's malformed-hash \
+             fast path (see a_malformed_stored_hash_fails_closed_rather_than_panicking) would make \
+             the miss path fast again, reopening the timing oracle this constant exists to close"
+        );
+        // Never actually matches anything real -- that would be a bizarre
+        // coincidence with the arbitrary password below, not a contract.
+        assert!(!verify_password(
+            "whatever a caller happens to send",
+            DUMMY_LOGIN_HASH
+        ));
     }
 }
