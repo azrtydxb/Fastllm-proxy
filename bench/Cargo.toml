@@ -1,0 +1,38 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "upstream"
+path = "src/upstream.rs"
+
+[[bin]]
+name = "realbench"
+path = "src/realbench.rs"
+
+[[bin]]
+name = "proto"
+path = "src/proto.rs"
+
+[[bin]]
+name = "tcprelay"
+path = "src/tcprelay.rs"
+
+[[bin]]
+name = "micro"
+path = "src/micro.rs"
+
+[[bin]]
+name = "load"
+path = "src/load.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

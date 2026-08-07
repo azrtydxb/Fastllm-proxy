@@ -4,11 +4,40 @@
 # arm64 throughout, and emulating a Rust release build with LTO is far slower
 # than it is worth.
 
+# The management UI's build (P4). A separate stage, not a `build.rs` that
+# shells out to `npm` from the Rust build — see `src/control/ui.rs` and
+# `TODO.md`'s original design note for why: that would make `cargo build`
+# and `cargo test` require Node for everyone, including CI jobs that only
+# want to run the Rust test suite. This stage's only job is to produce
+# `web/dist/`, which the `build` stage below copies in before compiling —
+# `rust-embed` reads whatever is on disk under `web/dist/` at that point,
+# nothing more.
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1-bookworm AS build
 WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
+# The root manifest declares a workspace, so cargo insists on loading every
+# member before it will build anything — omitting this fails the build outright
+# rather than merely skipping the benchmarks. `default-members` still keeps
+# them out of the release build; only their manifest has to be readable.
+COPY bench ./bench
+# Built `web/dist/` from the `web` stage above, not the `web/` source tree —
+# `rust-embed`'s derive macro (src/control/ui.rs) only ever reads this one
+# directory. Without this `COPY`, the directory `rust-embed` needs to exist
+# at compile time would be missing entirely inside this stage's filesystem;
+# with it, the binary embeds a real, built SPA instead of degrading to the
+# "UI not available" placeholder a bare `cargo build` (no prior `npm run
+# build`) produces.
+COPY --from=web /web/dist ./web/dist
 
 # Cache mounts are not part of the resulting layer, so the binary has to be
 # copied out of the target directory inside the same step that produced it.

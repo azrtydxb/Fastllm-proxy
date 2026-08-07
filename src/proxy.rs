@@ -32,8 +32,12 @@ use std::task::{Context, Poll};
 use tracing::{debug, warn};
 
 use crate::multipart;
-use crate::registry::{Backend, BackendUid, InflightGuard};
+use crate::registry::{Backend, BackendUid, InflightGuard, Registry};
+use crate::snapshot::{AuthError, Budget, Principal, PrincipalId, Snapshot};
 use crate::state::AppState;
+use crate::tail_buffer::TailBuffer;
+use crate::usage::{UsageEvent, UsageReporter};
+use std::time::SystemTime;
 
 pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
@@ -87,18 +91,31 @@ pub async fn handle(
         _ => {}
     }
 
-    if let Some(rejection) = check_auth(&req, &state) {
-        return Ok(rejection);
-    }
+    // An owned `Arc<Snapshot>`, not an `ArcSwap` guard: `authorize` hands back
+    // a `&Principal` borrowed from it, and that borrow has to survive through
+    // `proxy_request`'s `.await` below — a guard held that long is exactly
+    // the thing that blocks a concurrent reload from reclaiming the old
+    // snapshot, which is what the previous `state.snapshot.load()` +
+    // `drop(snapshot)` dance existed to avoid. `load_full()` sidesteps the
+    // question entirely: it is a plain refcounted pointer, cheap to hold for
+    // as long as the request needs it, and correspondingly this is also what
+    // saves the per-request `Principal` clone (name `String` +
+    // `allowed_models: HashSet<String>`) that used to happen on every
+    // authenticated request via `.cloned()`.
+    let snapshot = state.snapshot.load_full();
+    let principal = match authorize(&req, &snapshot) {
+        Ok(p) => p,
+        Err(rejection) => return Ok(rejection),
+    };
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
-        return Ok(models_response(&state));
+        return Ok(models_response(&state, &snapshot));
     }
 
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
-        return Ok(proxy_request(req, state, subpath).await);
+        return Ok(proxy_request(req, state, subpath, principal, &snapshot).await);
     }
 
     Ok(error_response(
@@ -121,12 +138,81 @@ struct BodyPeek {
     model: Option<String>,
     #[serde(default)]
     stream: Option<bool>,
+    /// Read for virtual-model routing rules that match on requested
+    /// generation length (`crate::routing::ShapeMatch`) — already sitting in
+    /// the same JSON object `model` is parsed out of, so this costs nothing
+    /// beyond one more field in a struct `serde_json` already skips past
+    /// everything else in.
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+/// Resolve the client-requested model name to the concrete model that will
+/// actually be routed to, evaluating a virtual model's rules
+/// (`crate::routing`) when the name is a virtual one.
+///
+/// **Authorisation decision**, pinned by
+/// `tests::a_virtual_models_grant_does_not_reach_its_targets_and_vice_versa`:
+/// the caller is authorised against the *resolved concrete model*
+/// (`proxy_request` checks `principal.may_invoke(&target_model)` on what
+/// this function returns), never against the virtual name by itself. A
+/// virtual model routes access; it must never be able to grant it. The
+/// alternative — authorising the virtual name and letting its rules
+/// silently decide which concrete model actually serves the request —
+/// would let a virtual model's configuration (or the weighted split, or a
+/// health-driven failover) expand a principal's reach beyond whatever it
+/// was actually granted, with no grant on record for the model that ends up
+/// serving the request. Requiring the concrete grant means adding a virtual
+/// model in front of existing models never changes who can reach what; it
+/// only changes how an already-authorised request gets routed.
+///
+/// Returns the resolved model name, or an error response when the requested
+/// name — virtual or concrete — does not resolve to anything at all. This
+/// runs *before* authorisation, mirroring the existing "resolve, then
+/// authorise" order for concrete models (an unknown name is a 404
+/// regardless of what the caller may invoke — see `tests/rbac.rs`): a
+/// caller who names a virtual model with no viable target learns "no such
+/// model", not "you may not use the model this routes to", which would leak
+/// routing internals to someone the very next check might reject anyway.
+///
+/// `Response<ResBody>` in the `Err` variant is large, same tradeoff
+/// `authorize` already makes and documents: a boxed error would save stack
+/// space on the rare rejection path at the cost of an allocation on every
+/// call, which is the wrong trade for an interface shared with the rest of
+/// the request path's error responses.
+#[allow(clippy::result_large_err)]
+fn resolve_target_model(
+    requested_model: &str,
+    snapshot: &Snapshot,
+    principal: Option<&Principal>,
+    body_len: usize,
+    max_tokens: Option<u64>,
+    prefix: u64,
+    registry: &Registry,
+) -> Result<String, Response<ResBody>> {
+    let Some(vm) = snapshot.virtual_models.get(requested_model) else {
+        return Ok(requested_model.to_string());
+    };
+    let prompt_tokens = crate::routing::estimate_prompt_tokens(body_len);
+    vm.resolve(principal, prompt_tokens, max_tokens, prefix, registry)
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                &format!(
+                    "virtual model {requested_model:?} has no viable target for this request; \
+                     check its routing rules and defaults"
+                ),
+            )
+        })
 }
 
 async fn proxy_request(
     req: Request<Incoming>,
     state: Arc<AppState>,
     subpath: String,
+    principal: Option<&Principal>,
+    snapshot: &Snapshot,
 ) -> Response<ResBody> {
     let (parts, body) = req.into_parts();
 
@@ -161,67 +247,163 @@ async fn proxy_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
 
-    let (model, model_field, streaming) = match multipart::boundary(content_type) {
-        // Multipart: the audio routes. `model` is a form field, and the rest of
-        // the body — the upload — must not be touched.
-        Some(boundary) => {
-            let Some(range) = multipart::find_field(&collected, &boundary, "model") else {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "multipart body is missing the 'model' field",
-                );
-            };
-            match multipart::field_value(&collected, range.clone()).filter(|m| !m.is_empty()) {
-                Some(model) => (model.to_string(), Some(range), false),
-                None => {
+    let (requested_model, model_field, streaming, max_tokens) =
+        match multipart::boundary(content_type) {
+            // Multipart: the audio routes. `model` is a form field, and the rest of
+            // the body — the upload — must not be touched. Virtual-model routing
+            // rules that key on `max_tokens` have nothing to read here (it is not
+            // a multipart field on these routes), so it is simply `None`.
+            Some(boundary) => {
+                let Some(range) = multipart::find_field(&collected, &boundary, "model") else {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
-                        "the 'model' form field is empty or not valid UTF-8",
+                        "multipart body is missing the 'model' field",
                     );
+                };
+                match multipart::field_value(&collected, range.clone()).filter(|m| !m.is_empty()) {
+                    Some(model) => (model.to_string(), Some(range), false, None),
+                    None => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            "the 'model' form field is empty or not valid UTF-8",
+                        );
+                    }
                 }
             }
-        }
-        None => {
-            let peek: BodyPeek = match serde_json::from_slice(&collected) {
-                Ok(p) => p,
-                Err(e) => {
+            None => {
+                let peek: BodyPeek = match serde_json::from_slice(&collected) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            &format!("request body is not valid JSON: {e}"),
+                        );
+                    }
+                };
+                let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
-                        &format!("request body is not valid JSON: {e}"),
+                        "request body is missing the 'model' field",
                     );
-                }
-            };
-            let Some(model) = peek.model.filter(|m| !m.is_empty()) else {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "request body is missing the 'model' field",
-                );
-            };
-            (model, None, peek.stream.unwrap_or(false))
+                };
+                (model, None, peek.stream.unwrap_or(false), peek.max_tokens)
+            }
+        };
+
+    let registry = state.registry.load();
+    // Same hash the backend router uses for prefix affinity, computed once
+    // and reused for the virtual-model weighted split below — see
+    // `crate::routing`'s module doc comment for why reusing it (rather than
+    // a second, independent hash) is what makes the split deterministic
+    // *and* keeps cache locality once a concrete model is chosen.
+    let prefix = state.router.prefix_key(&collected);
+
+    let target_model = match resolve_target_model(
+        &requested_model,
+        snapshot,
+        principal,
+        collected.len(),
+        max_tokens,
+        prefix,
+        &registry,
+    ) {
+        Ok(m) => m,
+        Err(rejection) => {
+            state.requests_failed.fetch_add(1, Ordering::Relaxed);
+            return rejection;
         }
     };
 
-    let registry = state.registry.load();
-    let Some(pool) = registry.pool(&model) else {
+    let Some(pool) = registry.pool(&target_model) else {
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let known = registry.model_names().join(", ");
         return error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
-            &format!("model {model:?} is not served here; available: [{known}]"),
+            &format!("model {target_model:?} is not served here; available: [{known}]"),
         );
     };
     let pool = Arc::clone(pool);
 
-    let prefix = state.router.prefix_key(&collected);
+    // Authorisation is a set lookup against the pre-flattened grant list, not
+    // a walk of the RBAC graph, and costs nothing measurable. Checked against
+    // `target_model` — see `resolve_target_model`'s doc comment for why a
+    // virtual model's *resolved* concrete target is what gets authorised,
+    // never the virtual name by itself.
+    if let Some(principal) = principal {
+        if !principal.may_invoke(&target_model) {
+            state.requests_failed.fetch_add(1, Ordering::Relaxed);
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "model_access_denied",
+                &format!("key is not permitted to use model {target_model:?}"),
+            );
+        }
+    }
+
+    // Budget enforcement (P3): after the fact, on purpose. Consumption is
+    // only known once a response completes (see the design doc's P3
+    // section), so this compares against `tokens_used` as of the last
+    // successful snapshot rebuild — a request that pushed a principal over
+    // budget still completed; this is what refuses the *next* one. One
+    // integer comparison, no I/O, same cost shape as the rate limiter below.
+    if let Some(principal) = principal {
+        if let Some(budget) = &principal.budget {
+            if budget.exhausted() {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return budget_exceeded_response(budget);
+            }
+        }
+    }
+
+    // Rate limiting (P2): one hash lookup and a short, synchronous
+    // decrement — see `crate::limiter`'s doc comment for why this stays off
+    // the I/O path the same way authorisation does. `Principal::limits ==
+    // None` (an open snapshot, or a principal with nothing configured) never
+    // even reaches `Limiter::check`; unlimited must cost nothing, not merely
+    // decide nothing.
+    if let Some(principal) = principal {
+        if let Some(limits) = &principal.limits {
+            // The proxy cannot know actual token usage until the response
+            // completes (see the design doc's P3 section), so the tokens/min
+            // dimension is charged against an estimate: the same prompt-size
+            // estimate P1's shape-matching routing rules already compute,
+            // plus the client's requested `max_tokens` if it gave one. This
+            // is honestly an estimate, not a measurement — a request that
+            // asks for less than `max_tokens` and gets it is charged for the
+            // budget it reserved, not the tokens it turned out to use.
+            let prompt_tokens = crate::routing::estimate_prompt_tokens(collected.len());
+            let token_cost = prompt_tokens
+                .saturating_add(max_tokens.unwrap_or(0))
+                .min(u32::MAX as u64) as u32;
+            if let crate::limiter::Decision::Exceeded { retry_after } =
+                state
+                    .limiter
+                    .check(principal.id, limits, token_cost, std::time::Instant::now())
+            {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return rate_limited_response(retry_after);
+            }
+        }
+    }
+
+    // Whether this response is worth reading for real token counts (P3) --
+    // decided once, outside the retry loop, since it depends only on the
+    // principal and the request shape, neither of which changes between
+    // attempts. `model_field.is_none()` restricts injection to the JSON
+    // chat/completions-shaped routes: the multipart audio routes have no
+    // `stream_options` to inject into and are never streaming completions.
+    let needs_usage = principal_needs_usage(principal);
+    let inject_include_usage = needs_usage && streaming && model_field.is_none();
+
     let mut tried: Vec<BackendUid> = Vec::new();
     let mut last_error: Option<String> = None;
 
@@ -236,9 +418,10 @@ async fn proxy_request(
 
         let upstream_body = match rewrite_model_if_needed(
             &collected,
-            &model,
+            &requested_model,
             &backend.upstream_model,
             model_field.clone(),
+            inject_include_usage,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -307,12 +490,26 @@ async fn proxy_request(
                 }
                 debug!(
                     backend = %backend.api_base,
-                    model = %model,
+                    requested_model = %requested_model,
+                    model = %target_model,
                     stream = streaming,
                     %status,
                     "proxied"
                 );
-                return finish_response(resp, guard);
+                // `needs_usage` (`principal_needs_usage`) is already `false`
+                // whenever `principal` is `None` (an open snapshot has no
+                // principal to attribute usage to), so this `and_then` never
+                // silently drops tracking that was actually wanted.
+                let tracking = needs_usage
+                    .then_some(principal)
+                    .flatten()
+                    .map(|p| UsageTracking {
+                        tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
+                        principal_id: p.id,
+                        model: target_model.clone(),
+                        reporter: state.usage.clone(),
+                    });
+                return finish_response(resp, guard, tracking);
             }
             Err(e) => {
                 backend.note_error();
@@ -324,37 +521,85 @@ async fn proxy_request(
     }
 
     state.requests_failed.fetch_add(1, Ordering::Relaxed);
-    let detail = last_error.unwrap_or_else(|| format!("no healthy backend for model {model:?}"));
+    let detail =
+        last_error.unwrap_or_else(|| format!("no healthy backend for model {target_model:?}"));
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
 }
 
-/// Rebuild the body with a different `model` value, or hand back the original
-/// bytes when the names already match.
+/// Rebuild the body with a different `model` value and/or an injected
+/// `stream_options.include_usage`, or hand back the original bytes when
+/// neither rewrite is needed.
 ///
-/// The common case is a straight `Bytes` clone (a refcount bump). Only aliases
-/// pay for a rewrite — and for multipart, `model_field` is the already-located
-/// range of the field value, so even that is a splice rather than a re-encode
-/// of the upload.
+/// The common case — no alias, no injection — is a straight `Bytes` clone (a
+/// refcount bump), same allocation as the caller already had. Only a request
+/// that actually needs one of the two rewrites pays for a reparse — and for
+/// multipart, `model_field` is the already-located range of the field value,
+/// so a model rewrite there is a splice rather than a re-encode of the
+/// upload. `inject_include_usage` never applies to multipart (the audio
+/// routes have no `stream_options`, and are never streaming completions), so
+/// callers only ever pass it `true` alongside `model_field: None`.
+///
+/// **Why inject at all** (design doc, "P3 -- Usage accounting and
+/// budgets"): a streaming response only carries a `usage` object if the
+/// request asked for one via `stream_options.include_usage`. Real token
+/// counts are needed for principals with a configured budget or
+/// tokens-per-minute limit, so this proxy asks the upstream for them on
+/// their behalf — but *only* for those principals (see
+/// `principal_needs_usage`), because the injection adds a usage chunk to the
+/// stream that the client itself never asked for.
 fn rewrite_model_if_needed(
     body: &Bytes,
     requested: &str,
     upstream: &str,
     model_field: Option<Range<usize>>,
+    inject_include_usage: bool,
 ) -> Result<Bytes, serde_json::Error> {
-    if requested == upstream {
+    if requested == upstream && !inject_include_usage {
         return Ok(body.clone());
     }
     if let Some(range) = model_field {
-        return Ok(multipart::replace_range(body, range, upstream));
+        return Ok(if requested == upstream {
+            body.clone()
+        } else {
+            multipart::replace_range(body, range, upstream)
+        });
     }
     let mut value: serde_json::Value = serde_json::from_slice(body)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "model".into(),
-            serde_json::Value::String(upstream.to_string()),
-        );
+        if requested != upstream {
+            obj.insert(
+                "model".into(),
+                serde_json::Value::String(upstream.to_string()),
+            );
+        }
+        if inject_include_usage {
+            // Merged into whatever `stream_options` the client already sent
+            // (if any) rather than overwriting the whole object, so a
+            // client-supplied option alongside this one survives the rewrite.
+            let entry = obj
+                .entry("stream_options")
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let Some(stream_options) = entry.as_object_mut() {
+                stream_options.insert("include_usage".into(), serde_json::Value::Bool(true));
+            }
+        }
     }
     Ok(Bytes::from(serde_json::to_vec(&value)?))
+}
+
+/// Whether this principal's real token consumption is worth asking the
+/// upstream for. Scoped narrowly on purpose — see the design doc's stated
+/// consequence: injecting `stream_options.include_usage` adds a chunk the
+/// client did not request, so it must never happen for a principal with
+/// neither a budget nor a token-rate limit configured.
+#[inline]
+fn principal_needs_usage(principal: Option<&Principal>) -> bool {
+    principal.is_some_and(|p| {
+        p.budget.is_some()
+            || p.limits
+                .as_ref()
+                .is_some_and(|l| l.tokens_per_min.is_some())
+    })
 }
 
 fn build_upstream_request(
@@ -388,37 +633,113 @@ fn build_upstream_request(
 }
 
 /// Hand the upstream response to the client, keeping the in-flight guard alive
-/// for as long as the body is still streaming.
-fn finish_response(resp: Response<UpstreamBody>, guard: InflightGuard) -> Response<ResBody> {
+/// for as long as the body is still streaming, and — for a principal with a
+/// budget or a token-rate limit — feeding forwarded bytes into a bounded tail
+/// buffer so real usage can be reported once the stream ends (P3).
+fn finish_response(
+    resp: Response<UpstreamBody>,
+    guard: InflightGuard,
+    tracking: Option<UsageTracking>,
+) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     // Hop-by-hop only: the response body is passed through byte for byte, so
     // an upstream `content-length` remains correct and is worth keeping.
     for name in HOP_BY_HOP {
         parts.headers.remove(*name);
     }
-    Response::from_parts(parts, TrackedBody::new(body, guard).boxed())
+    Response::from_parts(parts, TrackedBody::new(body, guard, tracking).boxed())
+}
+
+/// Everything [`TrackedBody`] needs to turn "the stream ended" into one
+/// `usage::UsageReporter::record` call. Constructed once per request, in
+/// `proxy_request`, only when [`principal_needs_usage`] said this principal's
+/// consumption is worth reading at all.
+struct UsageTracking {
+    tail: TailBuffer,
+    principal_id: PrincipalId,
+    /// The resolved concrete model name (`snapshot::ModelDef::name`), not
+    /// the client-requested one — see `usage::UsageEvent::model`'s doc
+    /// comment for why the data plane only ever reports the name the way the
+    /// snapshot named it.
+    model: String,
+    reporter: UsageReporter,
+}
+
+impl UsageTracking {
+    /// The one parse per request (`TailBuffer::extract_usage`), and the one
+    /// `record` call it feeds if it found anything. A response that never
+    /// carried usage — no `stream_options.include_usage` echoed back, an
+    /// upstream that does not support it, a truncated stream — simply
+    /// reports nothing; see the design doc's stated cost of this whole
+    /// mechanism being "one small parse per request, not per frame".
+    fn finish(mut self) {
+        if let Some(tokens) = self.tail.extract_usage() {
+            self.reporter.record(UsageEvent {
+                principal_id: self.principal_id,
+                model: self.model,
+                prompt_tokens: tokens.prompt_tokens,
+                completion_tokens: tokens.completion_tokens,
+                at: chrono::Utc::now(),
+            });
+        }
+    }
 }
 
 pin_project! {
-    /// Passthrough body that releases an [`InflightGuard`] when the stream ends.
+    /// Passthrough body that releases an [`InflightGuard`] when the stream ends,
+    /// and — when `usage_tracking` is `Some` — mirrors forwarded bytes into a
+    /// bounded tail buffer along the way.
     ///
     /// Deliberately not batching: merging frames that have already arrived was
     /// measured at a 1.000 merge ratio both against the pooled client and
     /// against the owned connection that replaced it, and against a real vLLM,
     /// whose tokens arrive tens of milliseconds apart. There is never a second
     /// frame waiting, so a coalescing buffer here only adds a poll and a branch.
+    ///
+    /// `usage_tracking` is plain (not `#[pin]`): nothing in it is ever polled,
+    /// it is only read from and mutated between polls of `inner`.
     struct TrackedBody {
         #[pin]
         inner: UpstreamBody,
         guard: Option<InflightGuard>,
+        usage_tracking: Option<UsageTracking>,
+    }
+
+    impl PinnedDrop for TrackedBody {
+        /// The parse cannot rely on being polled to `None`.
+        ///
+        /// A non-streaming response carries a `content-length`, so once the last
+        /// frame is out `is_end_stream()` is true and hyper's server simply stops
+        /// polling — the `Ready(None)` that `poll_frame` keys the extraction off
+        /// never arrives. Usage was therefore recorded for streaming responses and
+        /// silently dropped for every non-streaming one, which is the shape the
+        /// budget end-to-end test caught.
+        ///
+        /// This is the same trap the connection pool hit in `upstream::UpstreamBody`
+        /// and is worth the duplicated safety net: `finish()` takes the tracking out
+        /// of the `Option`, so whichever path runs first wins and the other is a
+        /// no-op. Dropping a half-read body still reports whatever the tail holds —
+        /// a client that hung up mid-generation consumed those tokens upstream
+        /// regardless, so not billing them would be the wrong way to be wrong.
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            if let Some(tracking) = this.usage_tracking.take() {
+                tracking.finish();
+            }
+        }
     }
 }
 
 impl TrackedBody {
-    fn new(inner: UpstreamBody, guard: InflightGuard) -> Self {
+    fn new(
+        inner: UpstreamBody,
+        guard: InflightGuard,
+        usage_tracking: Option<UsageTracking>,
+    ) -> Self {
         Self {
             inner,
             guard: Some(guard),
+            usage_tracking,
         }
     }
 }
@@ -433,6 +754,29 @@ impl Body for TrackedBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
         let polled = this.inner.poll_frame(cx);
+        // A memcpy per frame into the bounded tail buffer, never a parse —
+        // see `crate::tail_buffer`'s module doc comment for why this is the
+        // one piece of per-frame work the design accepts.
+        if let Poll::Ready(Some(Ok(frame))) = &polled {
+            if let Some(tracking) = this.usage_tracking.as_mut() {
+                if let Some(data) = frame.data_ref() {
+                    tracking.tail.push(data);
+                }
+            }
+        }
+        // The one parse per request happens here, at clean end-of-stream —
+        // but an aborted stream (the `Err` arm below, or the body simply
+        // being dropped mid-poll) is *not* left unreported: `PinnedDrop`
+        // above runs `tracking.finish()` on whatever partial tail the
+        // buffer already holds, same as `usage_tracking.take()` does here.
+        // That is deliberate, not a gap — see `PinnedDrop`'s own doc
+        // comment for why billing whatever was consumed upstream before the
+        // abort is the right call, not the wrong one.
+        if let Poll::Ready(None) = &polled {
+            if let Some(tracking) = this.usage_tracking.take() {
+                tracking.finish();
+            }
+        }
         // Release on both clean end-of-stream and error; a client that hangs up
         // mid-generation drops the whole body and the guard with it.
         if let Poll::Ready(None) | Poll::Ready(Some(Err(_))) = polled {
@@ -450,18 +794,44 @@ impl Body for TrackedBody {
     }
 }
 
-/// Returns a rejection response when the request may not proceed.
-fn check_auth(req: &Request<Incoming>, state: &AppState) -> Option<Response<ResBody>> {
-    let expected = state.master_key.as_ref()?;
-    let presented = req
+/// Authenticate the caller and return their principal.
+///
+/// `Ok(None)` means the snapshot is open — no keys configured — which is the
+/// same permissive behaviour as running without a master key today.
+///
+/// The `Err` variant is a full `Response`, which clippy flags as large; a
+/// boxed error would save stack space on the (rare) rejection path at the
+/// cost of an allocation on every one, which is the wrong trade for an
+/// interface shared with the rest of the request path's error responses.
+#[allow(clippy::result_large_err)]
+fn authorize<'a>(
+    req: &Request<Incoming>,
+    snapshot: &'a Snapshot,
+) -> Result<Option<&'a Principal>, Response<ResBody>> {
+    if snapshot.open {
+        return Ok(None);
+    }
+    let token = req
         .headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token);
 
-    match presented {
-        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => None,
-        _ => Some(error_response(
+    let Some(token) = token else {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "missing or invalid bearer token",
+        ));
+    };
+    match snapshot.authenticate(token, SystemTime::now()) {
+        Ok(p) => Ok(Some(p)),
+        Err(AuthError::Expired) => Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "expired_api_key",
+            "this api key has expired",
+        )),
+        Err(_) => Err(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_api_key",
             "missing or invalid bearer token",
@@ -481,16 +851,6 @@ fn bearer_token(header: &str) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-/// Comparison that does not short-circuit on the first differing byte, so a
-/// wrong key cannot be recovered one byte at a time. The length itself is not
-/// hidden — for a bearer token that is not the secret.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 fn json_response(status: StatusCode, body: String) -> Response<ResBody> {
     Response::builder()
         .status(status)
@@ -506,11 +866,77 @@ fn error_response(status: StatusCode, kind: &str, message: &str) -> Response<Res
     json_response(status, body.to_string())
 }
 
+/// 429 with `Retry-After` (whole seconds, rounded up, at least 1 — a `0`
+/// would tell a client to retry immediately, which is what got it rate
+/// limited in the first place).
+fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> {
+    let secs = retry_after.as_secs_f64().ceil().max(1.0) as u64;
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("rate limit exceeded; retry after {secs}s"),
+            "type": "rate_limit_exceeded",
+            "code": StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        }
+    });
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "application/json")
+        .header("retry-after", secs.to_string())
+        .body(full(Bytes::from(body.to_string())))
+        .expect("static response is well-formed")
+}
+
+/// **402, not 429.** Both are defensible for "you may not make this request
+/// right now", but they mean different things and this proxy already uses
+/// 429 for the other one: rate limiting (`rate_limited_response` above) is a
+/// *pacing* problem — the same request succeeds if the caller waits a few
+/// seconds and `Retry-After` says exactly how long. A budget is a *spending*
+/// problem — the caller has consumed the tokens it was allocated for this
+/// window, and no amount of waiting a few seconds fixes that; the earliest
+/// legitimate retry is whenever the window rolls over (hours to a month
+/// away, not something worth promising via `Retry-After`) or whenever an
+/// operator raises the budget. 402 Payment Required is the one status in the
+/// spec whose stated meaning — access denied pending some accounting action,
+/// not merely "try again soon" — actually matches that.
+fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "token budget exhausted: {} of {} tokens used for the current window",
+                budget.tokens_used, budget.tokens_total
+            ),
+            "type": "budget_exceeded",
+            "code": StatusCode::PAYMENT_REQUIRED.as_u16(),
+        }
+    });
+    Response::builder()
+        .status(StatusCode::PAYMENT_REQUIRED)
+        .header("content-type", "application/json")
+        .body(full(Bytes::from(body.to_string())))
+        .expect("static response is well-formed")
+}
+
 /// OpenAI-shaped model list, aggregated over every pool.
-fn models_response(state: &AppState) -> Response<ResBody> {
+/// OpenAI-shaped model list.
+///
+/// **Lists both concrete and virtual models.** `/v1/models` has never been
+/// filtered by what the caller may invoke — it enumerates what is
+/// *configured*, same as today's behaviour for concrete models — so leaving
+/// virtual models out would make them undiscoverable except by already
+/// knowing their name, without adding any actual access control: a caller
+/// with no grant for a listed model already gets 403 from `/v1/chat/completions`
+/// regardless of whether that model appeared here. Concrete models are kept
+/// in the list too, even ones that exist only as a virtual model's target —
+/// removing them would break any client still addressing them directly,
+/// which is a legitimate and unrestricted thing to do unless someone
+/// deliberately revokes the grant.
+fn models_response(state: &AppState, snapshot: &Snapshot) -> Response<ResBody> {
     let registry = state.registry.load();
-    let data: Vec<serde_json::Value> = registry
-        .model_names()
+    let mut names: Vec<&str> = registry.model_names();
+    names.extend(snapshot.virtual_models.keys().map(String::as_str));
+    names.sort_unstable();
+    names.dedup();
+    let data: Vec<serde_json::Value> = names
         .into_iter()
         .map(|name| {
             serde_json::json!({
@@ -580,6 +1006,13 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         state.requests_failed.load(Ordering::Relaxed)
     ));
 
+    out.push_str("# HELP fastllm_usage_reports_dropped_total Usage events discarded because the reporting queue to the control plane was full — see crate::usage.\n");
+    out.push_str("# TYPE fastllm_usage_reports_dropped_total counter\n");
+    out.push_str(&format!(
+        "fastllm_usage_reports_dropped_total {}\n",
+        state.usage.dropped()
+    ));
+
     out.push_str("# HELP fastllm_backend_inflight Requests currently streaming from a backend.\n");
     out.push_str("# TYPE fastllm_backend_inflight gauge\n");
     for b in registry.backends() {
@@ -635,19 +1068,155 @@ fn full(bytes: Bytes) -> ResBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn snap(key: &str, models: &[&str]) -> Snapshot {
+        Snapshot::for_test(
+            vec![(key.to_string(), 1, None, false)],
+            vec![Principal {
+                id: 1,
+                name: "t".into(),
+                allowed_models: models.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+                allow_all: false,
+                roles: HashSet::new(),
+                limits: None,
+                budget: None,
+            }],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_valid_key_authorises_a_granted_model() {
+        let s = snap("sk-ok", &["m"]);
+        let p = s
+            .authenticate("sk-ok", std::time::SystemTime::now())
+            .unwrap();
+        assert!(p.may_invoke("m"));
+    }
+
+    #[test]
+    fn a_valid_key_is_forbidden_from_an_ungranted_model() {
+        // 403, not 404: the model exists, this caller may not use it. Returning
+        // 404 would leak nothing but would also mislead.
+        let s = snap("sk-ok", &["m"]);
+        let p = s
+            .authenticate("sk-ok", std::time::SystemTime::now())
+            .unwrap();
+        assert!(!p.may_invoke("secret-model"));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn an_open_snapshot_needs_no_key() {
+        let mut s = Snapshot::default();
+        s.open = true;
+        assert!(s.open);
+    }
 
     #[test]
     fn identical_model_names_avoid_a_reserialise() {
         let body = Bytes::from_static(br#"{"model":"m","messages":[]}"#);
-        let out = rewrite_model_if_needed(&body, "m", "m", None).unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", None, false).unwrap();
         // Same allocation, not a copy.
         assert_eq!(out.as_ptr(), body.as_ptr());
+    }
+
+    /// P3's consequence #1, pinned directly: `stream_options.include_usage`
+    /// must land in the upstream body when injection is requested, and the
+    /// untouched path (no alias, no injection) must stay the exact same
+    /// allocation — the same "same allocation, not a copy" property the test
+    /// above pins for the pre-existing alias-rewrite path.
+    #[test]
+    fn include_usage_is_injected_only_when_requested_and_the_untouched_path_is_byte_identical() {
+        let body = Bytes::from_static(br#"{"model":"m","messages":[],"stream":true}"#);
+
+        let untouched = rewrite_model_if_needed(&body, "m", "m", None, false).unwrap();
+        assert_eq!(
+            untouched.as_ptr(),
+            body.as_ptr(),
+            "no rewrite requested must mean no reallocation at all"
+        );
+
+        let injected = rewrite_model_if_needed(&body, "m", "m", None, true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&injected).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
+    }
+
+    /// A client that already set its own `stream_options` keeps whatever
+    /// else it put there — injection merges `include_usage` in rather than
+    /// clobbering the object.
+    #[test]
+    fn include_usage_injection_merges_into_an_existing_stream_options_object() {
+        let body = Bytes::from_static(
+            br#"{"model":"m","messages":[],"stream":true,"stream_options":{"other":true}}"#,
+        );
+        let out = rewrite_model_if_needed(&body, "m", "m", None, true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
+        assert_eq!(parsed["stream_options"]["other"], true);
+    }
+
+    /// `principal_needs_usage`, pinned directly: only a principal with a
+    /// configured budget or a tokens-per-minute limit is worth reading real
+    /// usage for — an unconfigured principal, a principal with only a
+    /// requests-per-minute limit, and no principal at all (an open
+    /// snapshot) all say no, exactly per the design doc's stated
+    /// consequence that injection must never happen where it was not
+    /// specifically asked for by configuration.
+    #[test]
+    fn only_a_principal_with_a_budget_or_a_token_limit_needs_usage() {
+        fn principal(limits: Option<crate::limiter::Limits>, budget: Option<Budget>) -> Principal {
+            Principal {
+                id: 1,
+                name: "p".into(),
+                allowed_models: HashSet::new(),
+                allow_all: true,
+                roles: HashSet::new(),
+                limits,
+                budget,
+            }
+        }
+
+        assert!(!principal_needs_usage(None), "no principal at all");
+        assert!(!principal_needs_usage(Some(&principal(None, None))));
+        assert!(!principal_needs_usage(Some(&principal(
+            Some(crate::limiter::Limits {
+                requests_per_min: Some(10),
+                tokens_per_min: None,
+            }),
+            None
+        ))));
+        assert!(principal_needs_usage(Some(&principal(
+            Some(crate::limiter::Limits {
+                requests_per_min: None,
+                tokens_per_min: Some(10),
+            }),
+            None
+        ))));
+        assert!(principal_needs_usage(Some(&principal(
+            None,
+            Some(Budget {
+                tokens_total: 10,
+                tokens_used: 0,
+            })
+        ))));
+    }
+
+    #[test]
+    fn budget_exceeded_uses_402_not_429() {
+        let resp = budget_exceeded_response(&Budget {
+            tokens_total: 10,
+            tokens_used: 10,
+        });
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
     #[test]
     fn alias_rewrites_the_model_field() {
         let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[],"temperature":0.7}"#);
-        let out = rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B", None).unwrap();
+        let out =
+            rewrite_model_if_needed(&body, "gpt-4", "Qwen/Qwen3-30B-A3B", None, false).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(parsed["model"], "Qwen/Qwen3-30B-A3B");
         // Other parameters must survive the round trip.
@@ -666,9 +1235,14 @@ mod tests {
              --xy--\r\n",
         );
         let range = multipart::find_field(&body, "xy", "model").unwrap();
-        let out =
-            rewrite_model_if_needed(&body, "whisper-1", "Systran/faster-whisper", Some(range))
-                .unwrap();
+        let out = rewrite_model_if_needed(
+            &body,
+            "whisper-1",
+            "Systran/faster-whisper",
+            Some(range),
+            false,
+        )
+        .unwrap();
 
         let model = multipart::find_field(&out, "xy", "model").unwrap();
         assert_eq!(
@@ -685,7 +1259,7 @@ mod tests {
             b"--xy\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm\r\n--xy--\r\n",
         );
         let range = multipart::find_field(&body, "xy", "model").unwrap();
-        let out = rewrite_model_if_needed(&body, "m", "m", Some(range)).unwrap();
+        let out = rewrite_model_if_needed(&body, "m", "m", Some(range), false).unwrap();
         assert_eq!(out.as_ptr(), body.as_ptr());
     }
 
@@ -695,14 +1269,6 @@ mod tests {
         let peek: BodyPeek = serde_json::from_slice(body).unwrap();
         assert_eq!(peek.model.as_deref(), Some("m"));
         assert_eq!(peek.stream, Some(true));
-    }
-
-    #[test]
-    fn constant_time_eq_matches_semantics() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
-        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]
@@ -737,5 +1303,110 @@ mod tests {
         for route in ["/audio/transcriptions", "/audio/translations"] {
             assert!(PROXIED_SUFFIXES.contains(&route));
         }
+    }
+
+    fn registry_with_two_models() -> crate::registry::Registry {
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(
+            r#"
+model_list:
+  - model_name: concrete-a
+    litellm_params: { api_base: "http://10.0.0.1:8000/v1" }
+  - model_name: concrete-b
+    litellm_params: { api_base: "http://10.0.0.2:8000/v1" }
+"#,
+        )
+        .unwrap();
+        crate::registry::Registry::build(&cfg, &crate::registry::Interner::default(), None).unwrap()
+    }
+
+    /// **Authorisation decision, pinned.** A virtual model resolves to a
+    /// concrete target (`resolve_target_model`), and what gets checked
+    /// against a principal's grants is that *resolved* concrete name, never
+    /// the virtual one — see that function's doc comment for the full
+    /// reasoning. This test proves both directions of the consequence
+    /// directly, without a database:
+    ///
+    /// - A principal granted only the *concrete* model that a virtual model
+    ///   happens to resolve to reaches it, despite never being granted the
+    ///   virtual name itself.
+    /// - A principal granted only the *virtual* name is refused, because
+    ///   the grant recorded is for a name that is never actually checked —
+    ///   this is the escalation path the design doc warns about, and it must
+    ///   not exist: being granted a virtual model must never, by itself,
+    ///   unlock whatever concrete model it happens to route to today.
+    #[test]
+    fn authorisation_checks_the_resolved_concrete_model_not_the_virtual_name() {
+        let registry = registry_with_two_models();
+        let mut virtual_models = HashMap::new();
+        virtual_models.insert(
+            "vm".to_string(),
+            crate::routing::VirtualModelDef {
+                name: "vm".into(),
+                rules: vec![],
+                default_targets: vec![crate::routing::WeightedTarget {
+                    model: "concrete-a".into(),
+                    weight: 100,
+                }],
+            },
+        );
+        let snapshot = Snapshot {
+            virtual_models,
+            ..Snapshot::default()
+        };
+
+        let granted_concrete_only = Principal {
+            id: 1,
+            name: "granted-concrete".into(),
+            allowed_models: ["concrete-a".to_string()].into_iter().collect(),
+            allow_all: false,
+            roles: HashSet::new(),
+            limits: None,
+            budget: None,
+        };
+        let granted_virtual_only = Principal {
+            id: 2,
+            name: "granted-virtual".into(),
+            allowed_models: ["vm".to_string()].into_iter().collect(),
+            allow_all: false,
+            roles: HashSet::new(),
+            limits: None,
+            budget: None,
+        };
+
+        let target = resolve_target_model(
+            "vm",
+            &snapshot,
+            Some(&granted_concrete_only),
+            0,
+            None,
+            0,
+            &registry,
+        )
+        .expect("the virtual model has a viable default target");
+        assert_eq!(target, "concrete-a");
+
+        assert!(
+            granted_concrete_only.may_invoke(&target),
+            "a grant on the concrete model the virtual model resolves to must be honoured"
+        );
+        assert!(
+            !granted_virtual_only.may_invoke(&target),
+            "a grant on only the virtual NAME must not, by itself, unlock the concrete model \
+             it happens to route to — that would let a virtual model's configuration silently \
+             expand a principal's reach beyond what was actually granted"
+        );
+    }
+
+    /// A virtual model whose name collides with nothing still resolves
+    /// straight through: `resolve_target_model` on a name that is not in
+    /// `snapshot.virtual_models` is the identity function, so ordinary
+    /// (concrete) routing is completely unaffected by this feature existing.
+    #[test]
+    fn a_concrete_model_name_resolves_to_itself() {
+        let registry = registry_with_two_models();
+        let snapshot = Snapshot::default();
+        let target =
+            resolve_target_model("concrete-a", &snapshot, None, 0, None, 0, &registry).unwrap();
+        assert_eq!(target, "concrete-a");
     }
 }

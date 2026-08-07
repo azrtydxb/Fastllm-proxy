@@ -1,0 +1,167 @@
+# The control plane: database, admin API (`POST /admin/keys`, `DELETE
+# /admin/keys/{id}`), the management UI (`/`, `/ui/*`) and `/snapshot` for the
+# proxy to poll. No proxy listener lives here — that is deploy/deployment.yaml,
+# `--role=proxy`.
+#
+# SECURITY: `/admin/*` and the UI now require a session cookie (`POST
+# /login`, Argon2id-checked against principals.password_hash — see
+# src/control/auth.rs and README.md's "Admin authentication" section). That
+# is not a reason to put this Service on a public listener: a login screen on
+# the LAN-reachable VIP is still an unauthenticated-until-guessed target, not
+# an authenticated one. The Service below is therefore ClusterIP only, and
+# MUST NOT be merged into fastllm-proxy's LoadBalancer Service in
+# deploy/service.yaml, which is reachable from the whole LAN at
+# 192.168.10.126. See deploy/README.md, including "Bootstrapping the first
+# admin login" for how to get a working session in the first place.
+# CREDENTIALS ARE NOT IN THIS FILE, DELIBERATELY.
+#
+# fastllm-proxy-token and fastllm-encryption-key are created imperatively, the
+# same way fastllm-proxy-auth is (see deploy/README.md). They used to ship here
+# with REPLACE-ME placeholders and a comment saying to replace them and
+# re-apply — which meant every later `kubectl apply -f deploy/` silently
+# overwrote the real secrets with the placeholders and crash-looped the control
+# plane. A manifest that destroys credentials when re-applied is worse than one
+# that omits them.
+#
+#   kubectl -n fastllm create secret generic fastllm-proxy-token \
+#     --from-literal=token="pt-$(openssl rand -hex 24)"
+#   kubectl -n fastllm create secret generic fastllm-encryption-key \
+#     --from-literal=key="$(openssl rand -hex 32)"
+#
+# Rotating fastllm-proxy-token needs both Deployments restarted. Rotating the
+# encryption key is NOT just a restart: rows already encrypted under the old
+# key must be re-encrypted first (`fastllm-proxy reencrypt-backends`).
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: fastllm-pg
+  namespace: fastllm
+spec:
+  # One instance, not the 3-instance HA pattern used elsewhere on kw
+  # (novamail-pg): a control plane outage already degrades gracefully — the
+  # proxy keeps serving from its last-known-good snapshot cache (see the
+  # emptyDir mount in deployment.yaml) — so paying for synchronous replicas
+  # here buys less than it costs. Revisit if that assumption stops holding.
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  storage:
+    size: 5Gi
+    storageClass: longhorn
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  bootstrap:
+    initdb:
+      database: fastllm
+      owner: fastllm
+  # CNPG generates fastllm-pg-app with username/password/host/port/dbname
+  # and a ready-made `uri` key — that `uri` is what fastllm-control's
+  # FASTLLM_DATABASE_URL reads below, so there is no second place a DB
+  # credential is copied to or can drift from what CNPG issued.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-control
+  namespace: fastllm
+  labels: { app: fastllm-control }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: fastllm-control }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: fastllm-control }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-7c4a79c
+          imagePullPolicy: Always
+          args:
+            - --role=control
+            - --admin-port=4001
+            - --tls-cert=/etc/fastllm/tls/tls.crt
+            - --tls-key=/etc/fastllm/tls/tls.key
+          ports:
+            - { name: admin, containerPort: 4001 }
+          env:
+            - name: FASTLLM_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: fastllm-pg-app, key: uri }
+            - name: FASTLLM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: fastllm-proxy-token, key: token }
+            - name: FASTLLM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: fastllm-encryption-key, key: key }
+            - name: FASTLLM_LOG
+              value: info
+          volumeMounts:
+            # cert-manager-issued cert/key for `/snapshot` + `/usage`, from
+            # the `Certificate` above. `readOnlyRootFilesystem` below means
+            # this has to be an explicit volume, same reasoning as
+            # deployment.yaml's snapshot-cache mount.
+            - { name: tls, mountPath: /etc/fastllm/tls, readOnly: true }
+          # `/admin/*` (POST/DELETE) is session-gated and mutating, not a
+          # health check, so it's not a valid probe target. `/snapshot`
+          # requires the proxy token, which the kubelet doesn't have, and
+          # `/login` would mean handing the kubelet a real password just to
+          # probe liveness. `GET /healthz` is the dedicated, unauthenticated
+          # route for exactly this (see its doc comment in
+          # src/control/api.rs): the kubelet has no session cookie and no
+          # proxy token to present, so the probe target has to be a route
+          # that needs neither — and it does no I/O (no database query) on
+          # every hit, so a probe firing every few seconds does not become a
+          # steady background query load, and a transient database blip does
+          # not get an otherwise-healthy control plane restarted.
+          #
+          # `scheme: HTTPS` because the admin port only ever speaks TLS now
+          # (`--tls-cert`/`--tls-key` above); this is not a downgrade from
+          # the previous `tcpSocket` check's blindness to plaintext-vs-TLS.
+          # The kubelet's `httpGet` probe does not verify the server
+          # certificate (no `insecureSkipVerify` knob needed or offered —
+          # that is simply how it behaves), so the in-cluster private CA on
+          # `fastllm-control-tls` needs no special handling here.
+          readinessProbe:
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
+            periodSeconds: 20
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /healthz, port: admin, scheme: HTTPS }
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: tls
+          secret: { secretName: fastllm-control-tls }
+---
+# ClusterIP only — deliberately not a LoadBalancer and deliberately not on
+# fastllm-proxy's VIP. See the SECURITY note at the top of this file.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-control
+  namespace: fastllm
+  labels: { app: fastllm-control }
+spec:
+  type: ClusterIP
+  selector: { app: fastllm-control }
+  ports:
+    - { name: admin, port: 4001, targetPort: admin }

@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: fastllm
+      POSTGRES_PASSWORD: fastllm
+      POSTGRES_DB: fastllm
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastllm"]
+      interval: 5s
+      retries: 10
+
+  fastllm:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      # `proxy` is the binary's default (an existing File-mode deployment
+      # must upgrade without gaining a new required flag), so this compose
+      # file's control-plane-in-one-process quickstart has to ask for `all`
+      # explicitly rather than relying on what used to be the default.
+      FASTLLM_ROLE: all
+      FASTLLM_DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+      FASTLLM_HOST: 0.0.0.0
+      # `--role all` encrypts model_backends.upstream_api_key at rest and
+      # refuses to start without this (see README.md's "Encryption at rest"
+      # section). A fixed, obviously-not-secret value is fine here — this
+      # compose file is a local quickstart, not a deployment.
+      FASTLLM_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+    ports: ["4000:4000", "4001:4001"]
+
+volumes:
+  pgdata:

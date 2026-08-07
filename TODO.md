@@ -1,8 +1,53 @@
 # TODO
 
+## P0: control plane and RBAC — done
+
+Real per-key RBAC (principals, roles, permissions, SHA-256-hashed API keys),
+a control/data-plane split (`--role=control`/`proxy`, sharing `Snapshot` as
+the sole contract), three snapshot sources (file, http-poll, in-process),
+`fastllm-proxy import` to migrate a `File`-mode deployment onto a database,
+and the CI/deployment/docs wiring in this task. Design and self-review:
+`docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`.
+
+Known gaps carried forward rather than silently fixed:
+
+- ~~**The admin API has no authentication of its own.**~~ Fixed in P4:
+  `/admin/*` now requires a session cookie (`POST /login`, Argon2id against
+  `principals.password_hash`; see `src/control/auth.rs` and README.md's
+  "Admin authentication" section). `/snapshot`, `/usage` and
+  `/limits/reconcile` remain gated on the proxy token, deliberately — those
+  are proxy processes authenticating to the control plane, not humans with
+  passwords. `/admin` should still never be exposed outside the cluster: a
+  login screen on a public listener is still the wrong default. See
+  `deploy/README.md`.
+- ~~`model_backends.upstream_api_key` is stored unencrypted at rest.~~ Fixed:
+  `src/control/secrets.rs` encrypts it with AES-256-GCM before
+  `import`/the admin API write it, `build_snapshot` decrypts it back on read,
+  and `--role control`/`all` refuse to start without `FASTLLM_ENCRYPTION_KEY`
+  rather than falling back to plaintext (`migrations/0004_encrypted_upstream_api_key.sql`).
+  This protects the database, not `/snapshot` — the proxy still receives the
+  credential in usable plaintext form, because it has to present it to the
+  backend. `/snapshot` must still be TLS wherever a backend has a real
+  credential. See README.md's "Encryption at rest" section.
+
+All later phases are now implemented too: virtual models and rule-based
+routing (P1), rate limits with reconciliation (P2), usage accounting and
+budgets (P3), and the embedded management UI with session authentication
+(P4). `POST /usage` is wired end to end — the data plane's tail buffer reads
+the upstream's real token counts and the control plane folds them into
+`budgets.tokens_used`.
+
 ## Features
 
-### Embedded management and monitoring UI
+### Embedded management and monitoring UI — done (P4)
+
+Implemented: a small React dashboard (`web/`), embedded into the binary and
+served by `--role=control`/`all` only (`src/control/ui.rs`), gated behind the
+session-cookie login described in README.md's "Admin authentication"
+section. The rest of this section is the original design note, left as-is
+for the reasoning behind the choices it made (`rust-embed` over
+`include_dir!`, the Dockerfile `node` stage over a `build.rs`) — those
+tradeoffs are exactly what got built.
 
 Serve a small React dashboard from the binary itself, the way Go's `embed.FS`
 is normally used.

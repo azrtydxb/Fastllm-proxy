@@ -1,2 +1,12 @@
 /target
 **/*.rs.bk
+
+# The management UI (P4) is built by the Dockerfile's `node` stage, not
+# committed pre-built — `web/dist/.gitkeep` is what's tracked instead, so a
+# fresh checkout still has the empty directory `rust-embed`'s derive macro
+# needs to exist at compile time (see src/control/ui.rs). `cargo build`
+# never runs `npm`, so this directory being empty locally is the normal,
+# expected state, not a broken one.
+/web/dist/*
+!/web/dist/.gitkeep
+/web/node_modules

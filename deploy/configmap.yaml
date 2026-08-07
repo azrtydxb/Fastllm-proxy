@@ -4,26 +4,21 @@ metadata:
   name: fastllm-proxy-config
   namespace: fastllm
 data:
-  # Edit and re-apply to change the model set. The proxy hashes this file every
-  # few seconds and reloads itself when it changes, so a ConfigMap edit applies
-  # without a rollout and without dropping generations in flight. Allow up to
-  # ~60s for the kubelet to refresh the mounted copy, then ~5s for the poll.
+  # fastllm-proxy runs `--role=proxy` against fastllm-control now (see
+  # deployment.yaml and control.yaml), so `model_list` and
+  # `general_settings.master_key` here would be dead weight — the control
+  # plane's database is the source of truth for models, backends and keys.
+  # Change those with the admin API (`POST /admin/keys`, and model/backend
+  # rows directly — see deploy/README.md and `fastllm-proxy import`) not by
+  # editing this file.
+  #
+  # This ConfigMap still exists for the one thing that survives the split:
+  # the `fastllm:` tuning block, which every role reads from `--config` if
+  # given one. Edit and re-apply to change it — the proxy hashes this file
+  # every few seconds and reloads without a rollout or dropped generations.
+  # Allow up to ~60s for the kubelet to refresh the mounted copy, then ~5s
+  # for the poll.
   config.yaml: |
-    model_list:
-      # spark2 (gx10-9c17). The direct per-replica endpoint, deliberately not
-      # the higress gateway on 192.168.10.125: going straight to the replica is
-      # what lets this proxy do its own prefix-affinity routing instead of the
-      # gateway round-robining across replicas and shredding the KV cache.
-      #
-      # NOTE: GPUStack assigns this port and it changes on redeploy. If the
-      # backend goes unhealthy, look the current one up with
-      #   curl -H "Authorization: Bearer $GPUSTACK_KEY" \
-      #     http://192.168.10.125/v2/model-instances
-      - model_name: qwen3-6-35b-a3b-nvfp4
-        litellm_params:
-          model: openai/qwen3-6-35b-a3b-nvfp4
-          api_base: http://192.168.10.245:40045/v1
-
     fastllm:
       # One replica today, so affinity has nothing to choose between. These are
       # the defaults, written out so they are easy to tune when .246 returns

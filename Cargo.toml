@@ -1,3 +1,11 @@
+[workspace]
+members = [".", "bench"]
+# A plain `cargo build`/`cargo test` at the workspace root must build and test
+# only the proxy: `bench` is measurement tooling, not part of the product, and
+# its binaries take real time to compile. `-p bench` (or a `cd bench`) still
+# reaches it explicitly.
+default-members = ["."]
+
 [package]
 name = "fastllm-proxy"
 version = "0.1.0"
@@ -8,6 +16,14 @@ description = "Low-latency OpenAI-compatible inference gateway for multi-node LL
 repository = "https://github.com/azrtydxb/Fastllm-proxy"
 readme = "README.md"
 
+[lib]
+name = "fastllm_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fastllm-proxy"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
@@ -16,6 +32,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-native-certs = "0.8"
 webpki-roots = "1"
+# Not a TLS implementation itself — just PEM decoding into the
+# `CertificateDer`/`PrivateKeyDer` types rustls's own `pki-types` crate
+# defines, maintained by the same project. Unconditional (not behind
+# `control`): the data-plane client needs it too, to load an extra CA bundle
+# for a private control-plane or backend cert (`tls_config` in main.rs), in
+# every build including `--no-default-features`.
+rustls-pemfile = "2"
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
@@ -30,6 +53,46 @@ arc-swap = "1"
 parking_lot = "0.12"
 pin-project-lite = "0.2"
 smallvec = "1"
+sha2 = "0.10"
+humantime = "2"
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "macros", "migrate", "chrono"] }
+axum = { version = "0.8", optional = true }
+argon2 = { version = "0.5", optional = true }
+# Unconditional: the wire snapshot format (src/snapshot.rs) is the contract
+# between the control plane and the data plane, and the data plane (HttpSource,
+# src/source/http.rs) needs it even in a --no-default-features build that has
+# no database driver at all.
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+rand = { version = "0.9", optional = true }
+# Already pulled in transitively by rustls/tokio-rustls (see the `ring`
+# features on those two above) — this promotes it to a direct dependency so
+# `src/control/secrets.rs` can call `ring::aead` for encryption at rest,
+# without adding a new crate to the dependency tree.
+ring = { version = "0.17", optional = true }
+# Embeds the management UI's built `web/dist/` into the binary (P4). Points
+# at a directory that may not exist yet in a plain `cargo build` — see
+# `src/control/ui.rs` for how a missing/empty `web/dist/` degrades to "UI not
+# available" instead of failing the build. `default-features = false`: the
+# default `debug-embed`-adjacent watch/compression machinery is irrelevant
+# here, `mime-guess` is what lets served files carry a real `Content-Type`,
+# and `axum` gives `Cow<[u8]>`/embedded-file conversions this crate's own
+# axum handlers use directly instead of hand-rolling them.
+rust-embed = { version = "8", default-features = false, features = ["mime-guess", "axum"], optional = true }
+
+[features]
+default = ["control"]
+control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring", "dep:rust-embed"]
+
+[dev-dependencies]
+tempfile = "3"
+ureq = { version = "2", features = ["json"] }
+# Unconditional (not gated on the `control` feature): `tests/virtual_models.rs`
+# reaches into Postgres directly to set up a fine-grained RBAC fixture no
+# admin route grants (see that file's doc comment). Dev-dependencies are
+# never compiled by a plain `cargo build`, so this does not affect the
+# `--no-default-features` library/binary build.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono"] }
 
 [profile.release]
 opt-level = 3
