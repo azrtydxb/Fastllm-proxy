@@ -302,6 +302,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
     }
 }
 
+#[cfg(feature = "classifier")]
 const CODING_EXAMPLES: &[&str] = &[
     "Write a Python function that merges two sorted lists.",
     "Why does this Rust code fail the borrow checker?",
@@ -325,26 +326,35 @@ const CHAT_EXAMPLES: &[&str] = &[
     "Give me three ideas for a team offsite.",
 ];
 
-/// Wait until every class reports a centroid.
+/// Wait until each *named* class reports a centroid.
 ///
-/// Not a fixed sleep: the control plane rebuilds the snapshot on its own
-/// schedule, and how long that takes depends on what else is running. Polling
-/// the state the test actually depends on is the difference between a test
-/// that is slow and one that is flaky.
+/// By name, not by count: every test in this file shares one database, so the
+/// list contains classes other tests created, and "two classes are routable"
+/// can be satisfied by somebody else's two while this test's own are still
+/// being embedded. That is what made this flaky roughly one run in four.
+///
+/// Not a fixed sleep either — the control plane rebuilds on its own schedule,
+/// and how long that takes depends on what else is running.
 #[cfg_attr(not(feature = "classifier"), allow(dead_code))]
-fn wait_for_routable_classes(admin_port: u16, cookie: &str, expected: usize) {
+fn wait_for_routable_classes(admin_port: u16, cookie: &str, names: &[String]) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let classes = admin_get(admin_port, cookie, "/admin/prompt-classes");
-        let routable = classes
-            .as_array()
-            .map(|a| a.iter().filter(|c| c["routable"] == true).count())
-            .unwrap_or(0);
-        if routable >= expected {
+        let empty = Vec::new();
+        let all = classes.as_array().unwrap_or(&empty);
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|n| {
+                !all.iter().any(|c| {
+                    c["name"] == serde_json::Value::String((*n).clone()) && c["routable"] == true
+                })
+            })
+            .collect();
+        if missing.is_empty() {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("only {routable} of {expected} classes became routable within 30s: {classes}");
+            panic!("classes never became routable within 30s: {missing:?} of {classes}");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -406,7 +416,11 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
         );
     }
     wait_for_routing(port, &fx.key, &fx.virtual_name);
-    wait_for_routable_classes(admin_port, &cookie, 2);
+    wait_for_routable_classes(
+        admin_port,
+        &cookie,
+        &[format!("coding-{suffix}"), format!("chat-{suffix}")],
+    );
 
     let coding = routed_to(
         port,
@@ -494,9 +508,18 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     );
 
     // And the operator can see why, rather than having to guess.
+    //
+    // Looked up by name, not by position: the list is every class in the
+    // database, including ones other tests in this file created.
     let classes = admin_get(admin_port, &cookie, "/admin/prompt-classes");
-    let c = classes.as_array().unwrap().iter().next().unwrap();
-    assert_eq!(c["examples"].as_i64(), Some(CODING_EXAMPLES.len() as i64));
+    let name = format!("gardening-{suffix}");
+    let c = classes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == serde_json::Value::String(name.clone()))
+        .unwrap_or_else(|| panic!("{name} missing from {classes}"));
+    assert_eq!(c["examples"].as_i64(), Some(4));
     assert_eq!(
         c["routable"].as_bool(),
         Some(false),
