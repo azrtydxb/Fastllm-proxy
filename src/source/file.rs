@@ -45,6 +45,12 @@ impl SnapshotSource for FileSource {
                     .to_string(),
                 upstream_model: entry.litellm_params.upstream_model(&name),
                 api_key: entry.litellm_params.effective_api_key(),
+                // The YAML config is the single-file, no-database deployment
+                // shape; it describes OpenAI-compatible upstreams only. Native
+                // providers need the per-backend protocol and auth columns the
+                // control plane's schema carries, so they are configured
+                // there rather than duplicated into this format.
+                ..Default::default()
             };
             match models.iter_mut().find(|m| m.name == name) {
                 Some(m) => m.backends.push(backend),

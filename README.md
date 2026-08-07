@@ -153,7 +153,7 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `GET /admin/models` | Models and their backends. Reports *whether* a backend has an upstream credential, never the credential |
 | `POST /admin/models` | `{"name":..., "description":...}` |
 | `DELETE /admin/models/{id}` | Cascades to that model's backends |
-| `POST /admin/models/{id}/backends` | `{"api_base":..., "upstream_model":..., "upstream_api_key":...}`. The credential is encrypted before it reaches Postgres and cannot be read back |
+| `POST /admin/models/{id}/backends` | `{"api_base":..., "upstream_model":..., "upstream_api_key":..., "protocol":..., "auth_header":..., "auth_scheme":..., "default_max_tokens":...}`. Everything after the credential is optional and defaults to an OpenAI-compatible upstream reached with `Authorization: Bearer`. The credential is encrypted before it reaches Postgres and cannot be read back |
 | `DELETE /admin/backends/{id}` | Remove one backend from a pool |
 | `GET /admin/roles` | Roles and the permissions each one grants |
 | `GET /admin/limits` | Every principal with a configured rate limit |
@@ -164,6 +164,78 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `DELETE /admin/principals/{id}/budget` | Remove the budget — the principal becomes unlimited, not limited to zero |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
+
+### Providers
+
+Most providers are OpenAI-compatible, so they need no code at all — just a
+backend row pointing at their base URL. That includes **OpenRouter**, which
+itself fronts Anthropic, Gemini and several hundred other models in OpenAI
+format:
+
+```bash
+curl -X POST https://control/admin/models/$MODEL_ID/backends \
+  -H 'content-type: application/json' -b "$SESSION" \
+  -d '{"api_base":"https://openrouter.ai/api/v1",
+       "upstream_model":"anthropic/claude-sonnet-4",
+       "upstream_api_key":"sk-or-..."}'
+```
+
+Verified base URLs for the OpenAI-compatible set:
+
+| provider | `api_base` |
+|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| xAI | `https://api.x.ai/v1` |
+| Together | `https://api.together.xyz/v1` |
+| Fireworks | `https://api.fireworks.ai/inference/v1` |
+| Nebius | `https://api.studio.nebius.ai/v1` |
+| AtlasCloud | `https://api.atlascloud.ai/v1` |
+| AIHubMix | `https://aihubmix.com/v1` |
+| Z.ai | `https://api.z.ai/api/paas/v4` |
+| BigModel | `https://open.bigmodel.cn/api/paas/v4` |
+| Aliyun DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Qwen Cloud | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| Moonshot / Kimi | `https://api.moonshot.cn/v1`, `https://api.moonshot.ai/v1` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
+| GitHub Models | `https://models.github.ai/inference` |
+| Ollama | `http://localhost:11434` |
+
+**Anthropic and Gemini** speak their own wire formats and are reached by
+setting `protocol`. The auth header and scheme are filled in automatically —
+`x-api-key` plus `anthropic-version` for Anthropic, `x-goog-api-key` for
+Gemini — so an operator sets neither:
+
+```bash
+# api_base already carries the version segment each vendor addresses from
+-d '{"api_base":"https://api.anthropic.com/v1", "protocol":"anthropic",
+     "upstream_model":"claude-sonnet-4-5", "upstream_api_key":"sk-ant-...",
+     "default_max_tokens":4096}'
+
+-d '{"api_base":"https://generativelanguage.googleapis.com/v1beta",
+     "protocol":"gemini", "upstream_model":"gemini-2.5-flash",
+     "upstream_api_key":"AIza..."}'
+```
+
+Two things to know before choosing native over OpenRouter:
+
+- **`default_max_tokens` is required for Anthropic in practice.** Anthropic
+  rejects a request with no `max_tokens`; a client that omits one gets a 400
+  naming this field. It is deliberately not defaulted to an invented number —
+  silently capping generation is the kind of bug nobody finds until they
+  wonder why answers stop mid-sentence.
+- **Translated backends serve `/chat/completions` only**, with text messages.
+  Tool calling, images, `n > 1`, `logprobs`, `seed`, `response_format`, and
+  the embeddings/rerank/audio endpoints all return `501` naming what was
+  unsupported, rather than quietly doing less than was asked. Requests
+  needing those should go to an OpenAI-compatible backend (OpenRouter serves
+  the same models with tool calling intact).
+
+Everything else is unchanged by the choice: RBAC, rate limits, budgets,
+routing rules and virtual models all work the same against a translated
+backend, and usage is reported from the provider's own token counts.
 
 ### Admin authentication
 
@@ -328,7 +400,9 @@ Absent `auth:` means open (no key required) — today's behaviour when no master
 - **Audio endpoints take `multipart/form-data`.** `model` is read from the form field and the upload is forwarded byte for byte, content-type and boundary intact. An alias splices the new name into that one field rather than re-encoding the body.
 - **`https://` backends work**, so a TLS-terminated or hosted endpoint can sit in the same config as cluster-local nodes. System root certificates are used, falling back to the bundled Mozilla set.
 - **A backend that fails every probe is still used as a last resort** rather than returning 503. A stale health flag should not turn a recoverable request into an outage.
-- **The client's `Authorization` header is never forwarded.** It authenticates the client to the proxy; the upstream gets the backend's own key or none.
+- **The client's `Authorization` header is never forwarded.** It authenticates the client to the proxy; the upstream gets the backend's own key or none — in whichever header that provider reads it from.
+- **An OpenAI-compatible backend's response is never parsed.** Bytes are forwarded verbatim, which is why proxied overhead measures at zero; `tests/native_protocols.rs` pins it against an intentionally odd-but-valid payload. Only a backend explicitly configured for a native protocol is translated, and only there is a response body read.
+- **A backend's identity covers its whole configuration.** Rotating an upstream key, or changing a backend's protocol, produces a new routing entry rather than reusing the live one — otherwise a reload would keep serving with the old credential, since backend objects are carried across reloads to preserve their in-flight counts.
 - **Affinity keys hash the raw request prefix**, not parsed fields. JSON does not guarantee field order, but order is stable per client, which is all affinity needs — a client that reorders per request degrades to least-loaded rather than misrouting.
 - **A rate-limited request gets `429` with `Retry-After`**, checked after authorisation and model resolution but before the request is dispatched upstream — nothing is forwarded on a rejected request. See "Rate limits" above.
 

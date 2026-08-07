@@ -7,14 +7,16 @@
 //! the same backend appears in both generations.
 
 use anyhow::{Context, Result};
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderName, HeaderValue};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::config::FileConfig;
-use crate::snapshot::Snapshot;
+use crate::protocol::{anthropic, Protocol};
+use crate::snapshot::{BackendDef, Snapshot};
+use sha2::{Digest, Sha256};
 
 /// Stable identifier for a backend across config reloads.
 ///
@@ -23,7 +25,7 @@ use crate::snapshot::Snapshot;
 /// re-point warm prefixes at the wrong node.
 pub type BackendUid = u32;
 
-/// Assigns a stable [`BackendUid`] to each distinct `(api_base, upstream_model)`.
+/// Assigns a stable [`BackendUid`] to each distinct backend *configuration*.
 ///
 /// Entries are never removed and a uid is never reused, because the affinity
 /// cache holds uids for warm prefixes: recycling one onto a different backend
@@ -31,6 +33,17 @@ pub type BackendUid = u32;
 /// grow the table monotonically — at ~2^32 distinct backends per process
 /// lifetime the ceiling is unreachable in practice, and a few dozen bytes per
 /// backend ever seen is the price of never misrouting.
+///
+/// The key covers **everything that changes how the backend is called**, not
+/// just where it lives. It used to be `(api_base, upstream_model)` alone,
+/// which meant a reload that rotated a backend's API key kept serving with
+/// the old one: `Registry::build_from_entries` carries the live `Backend`
+/// object across reloads to preserve in-flight counts and health, so an
+/// unchanged uid meant unchanged credentials, forever, with the admin API
+/// cheerfully reporting the new value. Folding the credential and the
+/// protocol into the identity means a configuration change produces a new
+/// object, while requests still in flight against the old one keep the object
+/// whose in-flight counter they will decrement.
 #[derive(Default)]
 pub struct Interner {
     inner: Mutex<InternerState>,
@@ -45,8 +58,25 @@ struct InternerState {
 }
 
 impl Interner {
-    pub fn intern(&self, api_base: &str, upstream_model: &str) -> Result<BackendUid> {
-        let key = format!("{api_base}|{upstream_model}");
+    pub fn intern(&self, api_base: &str, def: &BackendDef) -> Result<BackendUid> {
+        // The credential is hashed rather than stored: this map lives for the
+        // process's lifetime and is never cleared, and a long-lived plaintext
+        // copy of every key ever configured is not something to keep around
+        // for the sake of a cache key.
+        let key_digest = def.api_key.as_deref().map(|k| {
+            let mut hasher = Sha256::new();
+            hasher.update(k.as_bytes());
+            hex::encode(hasher.finalize())
+        });
+        let key = format!(
+            "{api_base}|{}|{}|{}|{}|{}|{}",
+            def.upstream_model,
+            def.protocol.as_str(),
+            def.auth_header,
+            def.auth_scheme.as_deref().unwrap_or(""),
+            key_digest.as_deref().unwrap_or(""),
+            def.default_max_tokens.unwrap_or(0),
+        );
         let mut state = self.inner.lock();
         if let Some(uid) = state.map.get(&key) {
             return Ok(*uid);
@@ -69,9 +99,22 @@ pub struct Backend {
     pub api_base: String,
     /// Model name to put in the request body sent upstream.
     pub upstream_model: String,
-    /// Ready-made `Authorization` header, built once instead of formatted and
-    /// re-validated on every request. `None` when the upstream needs no key.
-    pub auth: Option<HeaderValue>,
+    /// Ready-made auth (and protocol-constant) headers, built once instead of
+    /// formatted and re-validated on every request. Empty when the upstream
+    /// needs no key and its protocol demands no constants.
+    ///
+    /// A list rather than a single `Authorization` value because the header
+    /// *name* varies by provider — Gemini reads `x-goog-api-key`, Anthropic
+    /// `x-api-key` plus a mandatory `anthropic-version` — and because
+    /// pre-building them keeps every per-request cost identical to what a
+    /// single hardcoded header cost before.
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Wire format this upstream speaks. `OpenAi` is passthrough: the request
+    /// body is forwarded unread and the response is never parsed.
+    pub protocol: Protocol,
+    /// `max_tokens` to supply when the request omits one and the protocol
+    /// requires it. See `crate::protocol::TranslateError::MissingMaxTokens`.
+    pub default_max_tokens: Option<u32>,
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
@@ -81,24 +124,44 @@ pub struct Backend {
 }
 
 impl Backend {
-    fn new(
-        uid: BackendUid,
-        api_base: String,
-        upstream_model: String,
-        api_key: Option<String>,
-    ) -> Result<Self> {
-        let auth = api_key
-            .as_deref()
-            .map(|key| {
-                HeaderValue::from_str(&format!("Bearer {key}"))
-                    .with_context(|| format!("api_key for {api_base} is not a valid header value"))
-            })
-            .transpose()?;
+    fn new(uid: BackendUid, api_base: String, def: &BackendDef) -> Result<Self> {
+        let mut headers: Vec<(HeaderName, HeaderValue)> = Vec::new();
+        if let Some(key) = def.api_key.as_deref() {
+            let name = HeaderName::from_bytes(def.auth_header.to_ascii_lowercase().as_bytes())
+                .with_context(|| {
+                    format!(
+                        "auth_header {:?} for {api_base} is not a valid header name",
+                        def.auth_header
+                    )
+                })?;
+            let value = match def.auth_scheme.as_deref() {
+                Some(scheme) if !scheme.is_empty() => format!("{scheme} {key}"),
+                // Raw key, no prefix: what `x-api-key`/`x-goog-api-key` want.
+                _ => key.to_string(),
+            };
+            headers.push((
+                name,
+                HeaderValue::from_str(&value).with_context(|| {
+                    format!("api_key for {api_base} is not a valid header value")
+                })?,
+            ));
+        }
+        // Protocol constants the operator must not have to know about, and
+        // could get wrong: a mismatched `anthropic-version` changes response
+        // shapes underneath the translator.
+        if def.protocol == Protocol::Anthropic {
+            headers.push((
+                HeaderName::from_static("anthropic-version"),
+                HeaderValue::from_static(anthropic::API_VERSION),
+            ));
+        }
         Ok(Self {
             uid,
             api_base,
-            upstream_model,
-            auth,
+            upstream_model: def.upstream_model.clone(),
+            headers,
+            protocol: def.protocol,
+            default_max_tokens: def.default_max_tokens,
             // Optimistic: a backend serves traffic until a health check says
             // otherwise. Starting unhealthy would blackhole every request in
             // the window before the first sweep completes.
@@ -203,12 +266,14 @@ impl Registry {
                 .api_base
                 .trim_end_matches('/')
                 .to_string();
-            let upstream_model = entry.litellm_params.upstream_model(&entry.model_name);
             (
                 entry.model_name.clone(),
                 api_base,
-                upstream_model,
-                entry.litellm_params.effective_api_key(),
+                BackendDef {
+                    upstream_model: entry.litellm_params.upstream_model(&entry.model_name),
+                    api_key: entry.litellm_params.effective_api_key(),
+                    ..Default::default()
+                },
             )
         });
         Self::build_from_entries(entries, interner, previous)
@@ -217,8 +282,8 @@ impl Registry {
     /// Build a registry straight from a control-plane (or `File`-derived)
     /// [`Snapshot`] rather than the YAML config.
     ///
-    /// `Snapshot::models` already carries exactly what a backend needs
-    /// (`api_base`, `upstream_model`, `api_key`), because `FileSource` builds
+    /// `Snapshot::models` already carries exactly what a backend needs,
+    /// because `FileSource` builds
     /// one from the same YAML `build` reads and the control plane builds one
     /// from Postgres. Routing from the snapshot means there is one place that
     /// turns model data into the routing table regardless of where the data
@@ -234,8 +299,7 @@ impl Registry {
                 (
                     model.name.clone(),
                     b.api_base.trim_end_matches('/').to_string(),
-                    b.upstream_model.clone(),
-                    b.api_key.clone(),
+                    b.clone(),
                 )
             })
         });
@@ -243,15 +307,15 @@ impl Registry {
     }
 
     fn build_from_entries(
-        entries: impl Iterator<Item = (String, String, String, Option<String>)>,
+        entries: impl Iterator<Item = (String, String, BackendDef)>,
         interner: &Interner,
         previous: Option<&Registry>,
     ) -> Result<Self> {
         let mut pools: HashMap<String, Vec<Arc<Backend>>> = HashMap::new();
         let mut by_uid: HashMap<BackendUid, Arc<Backend>> = HashMap::new();
 
-        for (model_name, api_base, upstream_model, api_key) in entries {
-            let uid = interner.intern(&api_base, &upstream_model)?;
+        for (model_name, api_base, def) in entries {
+            let uid = interner.intern(&api_base, &def)?;
 
             // Reuse the live object when we already made one this pass, or when
             // the previous generation had it — preserving in-flight and health.
@@ -262,13 +326,12 @@ impl Registry {
                     .and_then(|p| p.all.iter().find(|b| b.uid == uid))
                     .cloned();
                 let backend = match carried {
+                    // Same uid means byte-identical configuration (see
+                    // `Interner`), so carrying the live object forward carries
+                    // no stale settings with it — only the counters and health
+                    // state it is kept for.
                     Some(live) => live,
-                    None => Arc::new(Backend::new(
-                        uid,
-                        api_base.clone(),
-                        upstream_model.clone(),
-                        api_key,
-                    )?),
+                    None => Arc::new(Backend::new(uid, api_base.clone(), &def)?),
                 };
                 by_uid.insert(uid, Arc::clone(&backend));
                 backend

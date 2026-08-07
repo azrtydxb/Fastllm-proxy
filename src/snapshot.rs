@@ -6,6 +6,7 @@
 //! RBAC graph — that is what keeps authorisation off the latency budget.
 
 use crate::limiter::Limits;
+use crate::protocol::Protocol;
 use crate::routing::{CallerMatch, RoutingRule, ShapeMatch, VirtualModelDef, WeightedTarget};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,6 +95,37 @@ pub struct BackendDef {
     pub api_base: String,
     pub upstream_model: String,
     pub api_key: Option<String>,
+    /// The wire format this upstream speaks. `OpenAi` for everything that is
+    /// OpenAI-compatible, which is most providers — see `crate::protocol`.
+    pub protocol: Protocol,
+    /// Header the key goes in. Gemini wants `x-goog-api-key`, Anthropic
+    /// `x-api-key`; everything else wants `authorization`.
+    pub auth_header: String,
+    /// Prefix before the key, `Bearer` for the usual case. `None` sends the
+    /// raw key, which is what the two providers above require.
+    pub auth_scheme: Option<String>,
+    /// Supplies `max_tokens` for providers that demand one when the request
+    /// did not set it. `None` means such a request is refused rather than
+    /// silently capped at a number nobody chose.
+    pub default_max_tokens: Option<u32>,
+}
+
+/// Defaults are today's behaviour: an OpenAI-compatible upstream reached with
+/// `Authorization: Bearer`. Every field added for multi-provider support has to
+/// land on that value or an existing deployment changes shape underneath its
+/// operator.
+impl Default for BackendDef {
+    fn default() -> Self {
+        Self {
+            api_base: String::new(),
+            upstream_model: String::new(),
+            api_key: None,
+            protocol: Protocol::OpenAi,
+            auth_header: "authorization".into(),
+            auth_scheme: Some("Bearer".into()),
+            default_max_tokens: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,11 +244,34 @@ pub struct WireBudget {
     pub tokens_used: u64,
 }
 
+/// Every field added after the first release carries `#[serde(default)]`, so
+/// a proxy newer than its control plane still parses an older snapshot and
+/// simply gets the pre-existing behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireBackendDef {
     pub api_base: String,
     pub upstream_model: String,
     pub api_key: Option<String>,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    #[serde(default = "default_auth_header")]
+    pub auth_header: String,
+    #[serde(default = "default_auth_scheme")]
+    pub auth_scheme: Option<String>,
+    #[serde(default)]
+    pub default_max_tokens: Option<u32>,
+}
+
+fn default_protocol() -> String {
+    Protocol::OpenAi.as_str().to_string()
+}
+
+fn default_auth_header() -> String {
+    "authorization".to_string()
+}
+
+fn default_auth_scheme() -> Option<String> {
+    Some("Bearer".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +446,10 @@ impl Snapshot {
                             api_base: b.api_base.clone(),
                             upstream_model: b.upstream_model.clone(),
                             api_key: b.api_key.clone(),
+                            protocol: b.protocol.as_str().to_string(),
+                            auth_header: b.auth_header.clone(),
+                            auth_scheme: b.auth_scheme.clone(),
+                            default_max_tokens: b.default_max_tokens,
                         })
                         .collect(),
                 })
@@ -497,10 +556,31 @@ impl Snapshot {
                     backends: m
                         .backends
                         .into_iter()
-                        .map(|b| BackendDef {
-                            api_base: b.api_base,
-                            upstream_model: b.upstream_model,
-                            api_key: b.api_key,
+                        .filter_map(|b| {
+                            // A protocol this build does not implement drops the
+                            // backend rather than defaulting it to OpenAI, for the
+                            // same reason an undecryptable key drops one: a control
+                            // plane newer than a proxy must never be able to make
+                            // that proxy send a request in a format it cannot speak
+                            // and then mis-read the answer.
+                            let Some(protocol) = Protocol::parse(&b.protocol) else {
+                                tracing::error!(
+                                    protocol = %b.protocol,
+                                    api_base = %b.api_base,
+                                    "dropping backend: unknown upstream protocol; this proxy is \
+                                     older than the control plane that published it"
+                                );
+                                return None;
+                            };
+                            Some(BackendDef {
+                                api_base: b.api_base,
+                                upstream_model: b.upstream_model,
+                                api_key: b.api_key,
+                                protocol,
+                                auth_header: b.auth_header,
+                                auth_scheme: b.auth_scheme,
+                                default_max_tokens: b.default_max_tokens,
+                            })
                         })
                         .collect(),
                 })
@@ -696,6 +776,7 @@ mod tests {
                 api_base: "http://node-a:8000".into(),
                 upstream_model: "qwen3-upstream".into(),
                 api_key: Some("upstream-secret".into()),
+                ..Default::default()
             }],
         });
 

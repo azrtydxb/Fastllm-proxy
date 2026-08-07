@@ -4,6 +4,11 @@
 //! A backend has to fail `unhealthy_after` consecutive probes before it leaves
 //! rotation, so one dropped packet during a busy prefill does not evict a node
 //! that is merely working hard.
+//!
+//! One path serves every protocol: OpenAI-compatible upstreams, Anthropic
+//! (`GET /v1/models`, same shape) and Gemini (`GET /v1beta/models`) all expose
+//! a model listing at `{api_base}/models`, so nothing here needs to know which
+//! wire format the backend speaks.
 
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
@@ -33,9 +38,18 @@ async fn sweep(state: &Arc<AppState>, probe_timeout: Duration) {
         let state = Arc::clone(state);
         tasks.spawn(async move {
             let url = backend.url_for("/models");
-            let request = Request::builder()
-                .method(Method::GET)
-                .uri(&url)
+            let mut builder = Request::builder().method(Method::GET).uri(&url);
+            // The probe has to authenticate, or a backend that requires a key
+            // is permanently unhealthy: a self-hosted vLLM answers `/models`
+            // to anyone, but every hosted provider — OpenRouter, Anthropic,
+            // Gemini, Groq — answers 401, which this sweep reads as "down"
+            // and takes out of rotation while it is serving perfectly well.
+            if let Some(headers) = builder.headers_mut() {
+                for (name, value) in &backend.headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+            let request = builder
                 .body(Full::default())
                 .expect("probe URL was validated at config load");
 

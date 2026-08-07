@@ -205,6 +205,42 @@ E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/models/3     # drop the model and its backends
 ```
 
+## Adding a provider
+
+Most providers need no image change and no restart — a backend row is the
+whole of it, and the proxy picks it up on the next snapshot rebuild. See
+`README.md`'s provider table for verified base URLs. OpenRouter is the
+shortest path to Anthropic and Gemini models *with* tool calling, because it
+speaks OpenAI format:
+
+```bash
+kubectl -n fastllm port-forward svc/fastllm-control 4001:4001 &
+curl -sk -c /tmp/ck -X POST https://127.0.0.1:4001/login \
+  -H 'content-type: application/json' \
+  -d '{"name":"bootstrap","password":"..."}'
+curl -sk -b /tmp/ck -X POST https://127.0.0.1:4001/admin/models \
+  -H 'content-type: application/json' -d '{"name":"claude-sonnet","description":"via OpenRouter"}'
+curl -sk -b /tmp/ck -X POST https://127.0.0.1:4001/admin/models/$ID/backends \
+  -H 'content-type: application/json' \
+  -d '{"api_base":"https://openrouter.ai/api/v1",
+       "upstream_model":"anthropic/claude-sonnet-4",
+       "upstream_api_key":"sk-or-..."}'
+```
+
+Reaching Anthropic or Gemini directly means adding `"protocol":"anthropic"`
+or `"protocol":"gemini"`. Two operational notes:
+
+- Anthropic backends want `"default_max_tokens": 4096` (or whatever suits).
+  Without it, any client request that omits `max_tokens` gets a 400 — the
+  provider requires the field and the proxy will not invent a cap.
+- Translated backends serve `/chat/completions` only, text messages only.
+  Tool calling, images and the embeddings/audio endpoints return 501. Use an
+  OpenRouter backend for those.
+
+The control plane needs egress to the provider and its CA in the trust store;
+public roots are already present in the image, so the hosted providers work
+without `--ca-bundle`.
+
 ## When a Spark's port changes
 
 GPUStack assigns the replica port and it moves on redeploy. If the backend goes

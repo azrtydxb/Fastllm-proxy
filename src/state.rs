@@ -207,6 +207,7 @@ mod tests {
                     api_base: "http://10.0.0.1:8000".into(),
                     upstream_model: name.to_string(),
                     api_key: None,
+                    ..Default::default()
                 }],
             }],
             ..Snapshot::default()

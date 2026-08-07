@@ -20,10 +20,11 @@ use crate::upstream::{BoxError, UpstreamBody};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Frame, Incoming};
-use hyper::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use pin_project_lite::pin_project;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -32,6 +33,7 @@ use std::task::{Context, Poll};
 use tracing::{debug, warn};
 
 use crate::multipart;
+use crate::protocol;
 use crate::registry::{Backend, BackendUid, InflightGuard, Registry};
 use crate::snapshot::{AuthError, Budget, Principal, PrincipalId, Snapshot};
 use crate::state::AppState;
@@ -416,36 +418,87 @@ async fn proxy_request(
         };
         tried.push(backend.uid);
 
-        let upstream_body = match rewrite_model_if_needed(
-            &collected,
-            &requested_model,
-            &backend.upstream_model,
-            model_field.clone(),
-            inject_include_usage,
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    &format!("could not rewrite model name for alias: {e}"),
-                );
-            }
-        };
-
-        let upstream_req =
-            match build_upstream_request(&parts.headers, &backend, &subpath, upstream_body) {
-                Ok(r) => r,
+        // The fork between the two execution modes, and the only branch the
+        // passthrough path pays for. `is_passthrough` is a match on a
+        // `Copy` enum; everything under the `else` is unreachable for an
+        // OpenAI-compatible backend, which is every backend unless an
+        // operator configured otherwise.
+        let (upstream_body, upstream_subpath) = if backend.protocol.is_passthrough() {
+            let body = match rewrite_model_if_needed(
+                &collected,
+                &requested_model,
+                &backend.upstream_model,
+                model_field.clone(),
+                inject_include_usage,
+            ) {
+                Ok(b) => b,
                 Err(e) => {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        &format!("could not build upstream request: {e}"),
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        &format!("could not rewrite model name for alias: {e}"),
                     );
                 }
             };
+            (body, Cow::Borrowed(subpath.as_str()))
+        } else {
+            // Only chat completions are translated. Embeddings, reranking and
+            // the audio routes have no equivalent in either native protocol,
+            // and forwarding an OpenAI-shaped body to an endpoint that cannot
+            // read it would produce a confusing upstream error instead of a
+            // clear local one.
+            if subpath != "/chat/completions" {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "unsupported_endpoint",
+                    &format!(
+                        "{subpath} is not available on a {} backend; only /chat/completions is \
+                         translated",
+                        backend.protocol.as_str()
+                    ),
+                );
+            }
+            match protocol::translate_request(
+                backend.protocol,
+                &collected,
+                &backend.upstream_model,
+                backend.default_max_tokens,
+            ) {
+                Ok(t) => (Bytes::from(t.body), Cow::Owned(t.subpath)),
+                Err(e) => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    // Refusals are the client's to act on and are the same for
+                    // every backend of this protocol, so there is nothing to
+                    // gain by retrying onto another one.
+                    let (status, kind) = match &e {
+                        protocol::TranslateError::Unsupported(_) => {
+                            (StatusCode::NOT_IMPLEMENTED, "unsupported_parameter")
+                        }
+                        _ => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+                    };
+                    return error_response(status, kind, &e.to_string());
+                }
+            }
+        };
+
+        let upstream_req = match build_upstream_request(
+            &parts.headers,
+            &backend,
+            &upstream_subpath,
+            upstream_body,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    &format!("could not build upstream request: {e}"),
+                );
+            }
+        };
 
         // The guard is taken before dispatch and moved into the response body,
         // so in-flight stays elevated for the whole generation.
@@ -500,6 +553,26 @@ async fn proxy_request(
                 // whenever `principal` is `None` (an open snapshot has no
                 // principal to attribute usage to), so this `and_then` never
                 // silently drops tracking that was actually wanted.
+                if !backend.protocol.is_passthrough() {
+                    let sink = needs_usage.then_some(principal).flatten().map(|p| {
+                        protocol::body::UsageSink {
+                            principal_id: p.id,
+                            model: target_model.clone(),
+                            reporter: state.usage.clone(),
+                        }
+                    });
+                    return translated_response(
+                        resp,
+                        guard,
+                        backend.protocol,
+                        protocol::ResponseContext::from_request(
+                            &collected,
+                            target_model.clone(),
+                            prefix,
+                        ),
+                        sink,
+                    );
+                }
                 let tracking = needs_usage
                     .then_some(principal)
                     .flatten()
@@ -625,8 +698,10 @@ fn build_upstream_request(
     if !headers.contains_key(CONTENT_TYPE) {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
-    if let Some(auth) = &backend.auth {
-        headers.insert(HeaderName::from_static("authorization"), auth.clone());
+    // Pre-built at snapshot time: the auth header (whose *name* varies by
+    // provider) plus any constants the protocol requires.
+    for (name, value) in &backend.headers {
+        headers.insert(name.clone(), value.clone());
     }
 
     Ok(builder.body(Full::new(body))?)
@@ -648,6 +723,43 @@ fn finish_response(
         parts.headers.remove(*name);
     }
     Response::from_parts(parts, TrackedBody::new(body, guard, tracking).boxed())
+}
+
+/// Hand a *translated* upstream response to the client.
+///
+/// Differs from [`finish_response`] in one way beyond the body type, and it is
+/// the one that breaks things if missed: the upstream's `content-length`
+/// describes the document we just rewrote, and a translated body is almost
+/// never the same length. Leaving it would either truncate the response at the
+/// client or leave the connection waiting for bytes that never come, so it is
+/// dropped and the response goes out chunked.
+fn translated_response(
+    resp: Response<UpstreamBody>,
+    guard: InflightGuard,
+    protocol: protocol::Protocol,
+    ctx: protocol::ResponseContext,
+    sink: Option<protocol::body::UsageSink>,
+) -> Response<ResBody> {
+    let (mut parts, body) = resp.into_parts();
+    for name in HOP_BY_HOP {
+        parts.headers.remove(*name);
+    }
+    parts.headers.remove(CONTENT_LENGTH);
+    // The upstream's own content type describes its format, not ours: a
+    // native non-streaming response is `application/json` either way, but a
+    // provider that labels its stream differently would mislabel ours.
+    parts.headers.insert(
+        CONTENT_TYPE,
+        if ctx.streaming {
+            HeaderValue::from_static("text/event-stream")
+        } else {
+            HeaderValue::from_static("application/json")
+        },
+    );
+    Response::from_parts(
+        parts,
+        protocol::body::TranslatedBody::new(body, guard, protocol, ctx, sink).boxed_body(),
+    )
 }
 
 /// Everything [`TrackedBody`] needs to turn "the stream ended" into one

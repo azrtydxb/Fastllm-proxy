@@ -149,3 +149,36 @@ below — one implemented, two measured and closed.
 - **Pre-parsed `Uri` per backend per endpoint.** ~0.2%, and it forces an
   endpoint-index coupling between `proxy.rs` and `registry.rs`.
 - **Anything else on the request path.** There is under 1µs available in total.
+
+## Multi-provider support
+
+Done (2026-08-07):
+
+- Every OpenAI-compatible provider — OpenRouter, Groq, DeepSeek, xAI, Together,
+  Fireworks and the rest — reachable with no code, as a backend row. Base URLs
+  are in `README.md`'s provider table.
+- Per-backend `auth_header`/`auth_scheme`, so a provider that wants a raw key
+  in `x-goog-api-key` works. Previously `Bearer` in `authorization` was
+  hardcoded into `Backend::new`.
+- Native Anthropic and Gemini translation behind `backends.protocol`, opt-in
+  per backend, with byte-exact passthrough preserved and pinned by
+  `tests/native_protocols.rs`.
+- Health probes now authenticate. They sent no headers at all, so any keyed
+  provider would have been permanently unhealthy.
+- Backend identity now covers the whole configuration, not just
+  `(api_base, upstream_model)` — rotating an upstream key used to leave the
+  old credential in service until the process restarted, because live backend
+  objects are carried across reloads to preserve in-flight counts.
+
+Deliberately not done, each additive and small:
+
+- Tool calling through a translated backend. Refused with `501` naming the
+  feature; the work is a `tools` ⇄ `tool_use`/`functionDeclarations` mapping
+  plus tool-call deltas in the stream re-framer. Reaching Claude *with* tool
+  calling works today through OpenRouter, which is why this is not urgent.
+- Multimodal (image/audio parts) through a translated backend — same shape of
+  work, same `501` today.
+- Cohere, Bedrock and Vertex. Bedrock needs SigV4 request signing and Vertex
+  needs OAuth2 service-account tokens with background refresh; both put
+  credential machinery near the request path and neither is reachable by
+  configuration alone the way the other 21 providers are.

@@ -19,6 +19,7 @@ flowchart LR
         route[resolve model, evaluate rules]
         limit[rate limit + budget check]
         fwd[forward opaque bytes]
+        xlate["translate<br/>(native protocols only)"]
         snap[(Snapshot<br/>in memory)]
         cache[(last-known-good<br/>on disk)]
     end
@@ -29,9 +30,11 @@ flowchart LR
         pg[(Postgres)]
     end
 
-    backend([vLLM / SGLang<br/>OpenAI-compatible])
+    backend([vLLM / SGLang / OpenRouter<br/>/ any OpenAI-compatible])
 
     client -->|"Bearer sk-…"| auth --> route --> limit --> fwd --> backend
+    limit -.->|"backend.protocol ≠ openai"| xlate
+    xlate -.-> native([Anthropic / Gemini<br/>native API])
     auth -.reads.-> snap
     route -.reads.-> snap
     limit -.reads.-> snap
@@ -70,6 +73,30 @@ principal has a limit — an `RwLock` read plus up to two short mutex-guarded
 bucket operations. No graph walk, no I/O, no lock held across an await, no
 allocation beyond what the body already needed.
 
+## Two execution modes
+
+The dotted branch above is the whole of multi-provider support, and it is
+drawn dotted on purpose: it is not on the default path.
+
+| | passthrough (`protocol = openai`) | translated (`anthropic`, `gemini`) |
+|---|---|---|
+| request body | forwarded as-is, or one splice for a model alias | parsed and re-serialised into the native shape |
+| response body | never parsed; forwarded byte for byte | parsed, re-framed into OpenAI chunks |
+| usage | bounded tail buffer, one parse at end of stream | already parsed, exactly, during translation |
+| endpoints | all seven proxied suffixes | `/chat/completions` only; the rest are `501` |
+| overhead | zero measured against a real vLLM | one parse per frame |
+
+Most providers are the left column, including OpenRouter — which is why
+"support every provider `genai` supports" is mostly a configuration exercise
+and not a code one. Only Anthropic and Gemini, addressed directly rather than
+through an OpenAI-compatible gateway, are the right column.
+
+The boundary is enforced, not merely intended: `tests/native_protocols.rs`
+sends an intentionally odd-but-valid JSON document (unusual whitespace, key
+order no serializer of ours would emit, a field we have no struct for) through
+an `openai` backend and asserts the client receives those exact bytes. Any
+accidental round trip through a parse shows up as a diff.
+
 ## A request, end to end
 
 ```mermaid
@@ -84,7 +111,8 @@ sequenceDiagram
     P->>P: resolve model — virtual models evaluate rules here
     P->>P: authorise the RESOLVED concrete model (403 if ungranted)
     P->>P: rate limit (429) and budget (402)
-    P->>B: forward, original bytes
+    P->>P: translate request — only if backend.protocol ≠ openai
+    P->>B: forward, original bytes (or the translated ones)
     B-->>P: response frames
     P-->>C: same frames, never parsed
     Note over P: tail buffer mirrors the last few KB
@@ -100,7 +128,9 @@ Two decisions in that flow are load-bearing:
   rule edit or a weighted split could hand a caller a model they were never
   granted.
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
-  never per frame. The response is still forwarded as opaque bytes.
+  never per frame. The response is still forwarded as opaque bytes. A
+  translated response is the exception in the cheaper direction: its token
+  counts were already parsed exactly, so it carries no tail buffer at all.
 
 ## Administrative permissions
 
@@ -130,6 +160,8 @@ Two things an operator should know rather than discover:
 | key revoked | effective within the poll interval, ~1s |
 | Postgres down | control plane serves its last built snapshot; proxies unaffected |
 | usage report fails | dropped; never blocks a request |
+| upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion |
+| snapshot names an unknown protocol | that backend is dropped with a logged reason, never silently treated as OpenAI |
 
 Never crash-looping on a cold start is deliberate: under Kubernetes that would
 turn a control-plane outage into a data-plane outage, which is the failure this

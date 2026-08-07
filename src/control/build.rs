@@ -5,6 +5,7 @@
 //! model names, and wildcards expanded against the known model list.
 
 use crate::control::secrets::{self, EncryptionKey};
+use crate::protocol::Protocol;
 use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
 use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
@@ -66,8 +67,19 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
             .await?;
     let all_names: Vec<String> = model_rows.iter().map(|(_, n)| n.clone()).collect();
 
-    let backend_rows: Vec<(i64, String, String, Option<Vec<u8>>)> = sqlx::query_as(
-        "SELECT model_id, api_base, upstream_model, upstream_api_key FROM model_backends",
+    type BackendRow = (
+        i64,
+        String,
+        String,
+        Option<Vec<u8>>,
+        String,
+        String,
+        Option<String>,
+        Option<i32>,
+    );
+    let backend_rows: Vec<BackendRow> = sqlx::query_as(
+        "SELECT model_id, api_base, upstream_model, upstream_api_key, protocol, auth_header, \
+         auth_scheme, default_max_tokens FROM model_backends",
     )
     .fetch_all(pool)
     .await?;
@@ -75,7 +87,8 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
     let mut models = Vec::new();
     for (id, name) in &model_rows {
         let mut backends = Vec::new();
-        for (_, base, upstream, encrypted_key) in backend_rows.iter().filter(|(mid, ..)| mid == id)
+        for (_, base, upstream, encrypted_key, protocol, auth_header, auth_scheme, max_tokens) in
+            backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
             // propagated as a `build_snapshot` error. It used to be: one row
@@ -111,10 +124,28 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
                     }
                 },
             };
+            // The column is CHECK-constrained to the names `Protocol::parse`
+            // knows, so this only fails if the two drift apart — in which case
+            // dropping the backend here surfaces it in the control plane's log
+            // rather than in a proxy's, where the cause would be much further
+            // from the change that caused it.
+            let Some(protocol) = Protocol::parse(protocol) else {
+                tracing::error!(
+                    protocol = %protocol,
+                    model = %name,
+                    api_base = %base,
+                    "dropping backend: protocol is not one this build implements"
+                );
+                continue;
+            };
             backends.push(BackendDef {
                 api_base: base.trim_end_matches('/').to_string(),
                 upstream_model: upstream.clone(),
                 api_key,
+                protocol,
+                auth_header: auth_header.clone(),
+                auth_scheme: auth_scheme.clone(),
+                default_max_tokens: max_tokens.map(|n| n as u32),
             });
         }
         models.push(ModelDef {

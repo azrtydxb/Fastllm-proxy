@@ -6,6 +6,7 @@ pub mod control;
 pub mod health;
 pub mod limiter;
 pub mod multipart;
+pub mod protocol;
 pub mod proxy;
 pub mod reconcile;
 pub mod registry;

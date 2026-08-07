@@ -581,6 +581,14 @@ struct BackendView {
     /// present it upstream), so the only safe thing to say about it here is
     /// whether it is set.
     has_upstream_api_key: bool,
+    /// Which wire format this backend speaks — `openai` for the OpenAI-
+    /// compatible majority, `anthropic` or `gemini` for a natively translated
+    /// one. Surfaced because it changes which request features are available
+    /// (see `crate::protocol`), so an operator debugging a 501 can see it
+    /// without reading the database.
+    protocol: String,
+    auth_header: String,
+    default_max_tokens: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -603,8 +611,10 @@ async fn list_models(
     // `upstream_api_key IS NOT NULL` rather than the column: this query must
     // not be able to return a credential even by accident, so the ciphertext
     // never leaves Postgres on this path at all.
-    let backends: Vec<(i64, i64, String, String, bool)> = sqlx::query_as(
-        "SELECT id, model_id, api_base, upstream_model, upstream_api_key IS NOT NULL
+    type BackendListRow = (i64, i64, String, String, bool, String, String, Option<i32>);
+    let backends: Vec<BackendListRow> = sqlx::query_as(
+        "SELECT id, model_id, api_base, upstream_model, upstream_api_key IS NOT NULL, \
+         protocol, auth_header, default_max_tokens
          FROM model_backends ORDER BY id",
     )
     .fetch_all(&ctx.pool)
@@ -621,12 +631,26 @@ async fn list_models(
                 backends: backends
                     .iter()
                     .filter(|(_, model_id, ..)| *model_id == id)
-                    .map(|(bid, _, api_base, upstream_model, has_key)| BackendView {
-                        id: *bid,
-                        api_base: api_base.clone(),
-                        upstream_model: upstream_model.clone(),
-                        has_upstream_api_key: *has_key,
-                    })
+                    .map(
+                        |(
+                            bid,
+                            _,
+                            api_base,
+                            upstream_model,
+                            has_key,
+                            protocol,
+                            auth_header,
+                            default_max_tokens,
+                        )| BackendView {
+                            id: *bid,
+                            api_base: api_base.clone(),
+                            upstream_model: upstream_model.clone(),
+                            has_upstream_api_key: *has_key,
+                            protocol: protocol.clone(),
+                            auth_header: auth_header.clone(),
+                            default_max_tokens: *default_max_tokens,
+                        },
+                    )
                     .collect(),
             })
             .collect(),
@@ -739,6 +763,55 @@ struct NewBackend {
     /// Encrypted before it reaches Postgres and never readable back through
     /// this API — `GET /admin/models` reports only whether one is set.
     upstream_api_key: Option<String>,
+    /// Everything below defaults to today's behaviour, so a caller (or a
+    /// test) that names none of them gets an OpenAI-compatible backend
+    /// reached with `Authorization: Bearer`, exactly as before.
+    /// Wire format this upstream speaks. Absent means `openai`, which covers
+    /// every OpenAI-compatible provider — vLLM, OpenRouter, Groq, Together,
+    /// DeepSeek and the rest. Only `anthropic` and `gemini` need saying.
+    #[serde(default)]
+    protocol: Option<String>,
+    /// Header the key is sent in, and the prefix before it. Both default to
+    /// `Authorization: Bearer`; the two native protocols set them
+    /// automatically, so an operator normally leaves both unset.
+    #[serde(default)]
+    auth_header: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    /// Supplies `max_tokens` when a request omits one and the provider
+    /// requires it (Anthropic does). Left unset, such a request is refused
+    /// with a message naming this field — deliberately, rather than being
+    /// capped at a number nobody chose.
+    #[serde(default)]
+    default_max_tokens: Option<i32>,
+}
+
+impl NewBackend {
+    /// An OpenAI-compatible backend with nothing special about it — what the
+    /// unit tests below construct, and the shape every field here defaults to.
+    #[cfg(test)]
+    fn openai(api_base: &str, upstream_api_key: Option<String>) -> Self {
+        Self {
+            api_base: api_base.into(),
+            upstream_model: None,
+            upstream_api_key,
+            protocol: None,
+            auth_header: None,
+            auth_scheme: None,
+            default_max_tokens: None,
+        }
+    }
+}
+
+/// Fill in the auth defaults a protocol implies, so an operator adding an
+/// Anthropic backend does not have to know that it wants a raw key in
+/// `x-api-key` rather than a bearer token — and cannot get it wrong.
+fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
+    match protocol {
+        "anthropic" => ("x-api-key", None),
+        "gemini" => ("x-goog-api-key", None),
+        _ => ("authorization", Some("Bearer")),
+    }
 }
 
 async fn post_backend(
@@ -793,14 +866,47 @@ async fn post_backend(
             )
         })?;
 
+    let protocol = body.protocol.unwrap_or_else(|| "openai".into());
+    // Rejected here rather than left to the column's CHECK constraint so the
+    // caller gets the list of valid values instead of a Postgres error, and
+    // before an unusable row exists.
+    if crate::protocol::Protocol::parse(&protocol).is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("protocol {protocol:?} is not one of: openai, anthropic, gemini"),
+        ));
+    }
+    if body.default_max_tokens.is_some_and(|n| n <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "default_max_tokens must be greater than zero".to_string(),
+        ));
+    }
+    let (default_header, default_scheme) = auth_defaults_for(&protocol);
+    let auth_header = body
+        .auth_header
+        .unwrap_or_else(|| default_header.to_string());
+    // An explicitly empty scheme means "send the raw key"; only an absent one
+    // falls back to the protocol's default.
+    let auth_scheme = match body.auth_scheme {
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s),
+        None => default_scheme.map(str::to_string),
+    };
+
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key, \
+         protocol, auth_header, auth_scheme, default_max_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(model_id)
     .bind(&api_base)
     .bind(&upstream_model)
     .bind(encrypted)
+    .bind(&protocol)
+    .bind(&auth_header)
+    .bind(&auth_scheme)
+    .bind(body.default_max_tokens)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| db_error("backend creation", &e))?;
@@ -812,6 +918,10 @@ async fn post_backend(
             "model_id": model_id,
             "api_base": api_base,
             "upstream_model": upstream_model,
+            "protocol": protocol,
+            "auth_header": auth_header,
+            "auth_scheme": auth_scheme,
+            "default_max_tokens": body.default_max_tokens,
         })),
     ))
 }
@@ -2697,11 +2807,10 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite::default(),
             Path(model_id),
-            Json(NewBackend {
-                api_base: "http://route-test:8000/v1/".into(),
-                upstream_model: None,
-                upstream_api_key: Some(upstream_credential.into()),
-            }),
+            Json(NewBackend::openai(
+                "http://route-test:8000/v1/",
+                Some(upstream_credential.into()),
+            )),
         )
         .await
         .unwrap();
@@ -2890,11 +2999,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite::default(),
             Path(-1),
-            Json(NewBackend {
-                api_base: "http://x:8000/v1".into(),
-                upstream_model: None,
-                upstream_api_key: None,
-            }),
+            Json(NewBackend::openai("http://x:8000/v1", None)),
         )
         .await
         .unwrap_err();
