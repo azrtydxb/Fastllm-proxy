@@ -48,11 +48,11 @@ COPY --from=web /web/dist ./web/dist
 # 130MB, most deployments never enable a refined class, and paying that in every
 # image for a feature few turn on is the wrong default. Mount them and point
 # --classifier-tier2-model at the directory.
-ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/model.safetensors \
+ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/model.safetensors \
     /usr/local/share/fastllm/classifier/model.safetensors
-ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/tokenizer.json \
+ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/tokenizer.json \
     /usr/local/share/fastllm/classifier/tokenizer.json
-ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json \
+ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json \
     /usr/local/share/fastllm/classifier/config.json
 
 # Cache mounts are not part of the resulting layer, so the binary has to be

@@ -891,8 +891,12 @@ fn build_app_state(
                 // request, it simply cannot match a rule that names a class.
                 // Refusing to start would turn a classifier problem into an
                 // outage.
-                warn!(error = %e, model = %source, "fast-tier classifier failed to load; \
-                    rules naming a prompt class will not match");
+                // `{:#}` prints the whole anyhow chain: the outer context
+                // says which model, the inner cause says *why*, and it was the
+                // inner one ("permission denied") that identified a Dockerfile
+                // bug the outer message alone could not.
+                warn!(error = format!("{e:#}"), model = %source, "fast-tier classifier failed \
+                    to load; rules naming a prompt class will not match");
                 None
             }
         },
@@ -1233,8 +1237,8 @@ fn register_snapshot_embedder(cli: &Cli) {
     let tier1 = match fastllm_proxy::classifier::tier1::Tier1::load(source) {
         Ok(t) => Some(Arc::new(t)),
         Err(e) => {
-            warn!(error = %e, model = %source, "classifier model failed to load; prompt classes \
-                will be published without centroids and cannot match");
+            warn!(error = format!("{e:#}"), model = %source, "classifier model failed to load; \
+                prompt classes will be published without centroids and cannot match");
             None
         }
     };
