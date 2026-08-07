@@ -65,6 +65,9 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         .env("FASTLLM_DATABASE_URL", database_url)
         .env("FASTLLM_PROXY_TOKEN", PROXY_TOKEN)
         .env("FASTLLM_ENCRYPTION_KEY", encryption_key())
+        // One pool per spawned process against a shared 100-connection
+        // server; the default of 8 exhausts it once enough tests run at once.
+        .env("FASTLLM_DATABASE_MAX_CONNECTIONS", "2")
         // Debug so that if this ever hangs again the captured stderr says
         // where, instead of being empty.
         .env("FASTLLM_LOG", "debug")

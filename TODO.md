@@ -172,16 +172,83 @@ Done (2026-08-07):
 
 Deliberately not done, each additive and small:
 
-- Tool calling through a translated backend. Refused with `501` naming the
-  feature; the work is a `tools` ⇄ `tool_use`/`functionDeclarations` mapping
-  plus tool-call deltas in the stream re-framer. Reaching Claude *with* tool
-  calling works today through OpenRouter, which is why this is not urgent.
-- Multimodal (image/audio parts) through a translated backend — same shape of
-  work, same `501` today.
+- **Tool calling through a translated backend.** Refused today with a `501`
+  naming the feature (`protocol::mod.rs`'s `check_supported`), and reaching
+  Claude *with* tool calling already works through OpenRouter, which is why
+  this is not urgent. What it needs, concretely:
+
+  1. **Request, Anthropic.** `tools[].function.{name,description,parameters}`
+     becomes `tools[].{name,description,input_schema}` — near enough a rename,
+     since both take JSON Schema. `tool_choice` maps
+     `auto`/`none`/`required`/`{function:{name}}` onto
+     `{type:auto|any|tool,name}`, with `none` having no direct equivalent
+     (drop the tools instead of sending an unsupported value).
+  2. **Request, Gemini.** The same schema becomes
+     `tools[].functionDeclarations[]`, and `tool_choice` becomes
+     `toolConfig.functionCallingConfig.mode` = `AUTO`/`ANY`/`NONE`.
+  3. **Conversation history.** This is the part that is not a rename. An
+     OpenAI transcript carries `assistant.tool_calls[]` and separate
+     `role:"tool"` messages keyed by `tool_call_id`. Anthropic carries
+     `tool_use` and `tool_result` blocks *inside* user/assistant messages;
+     Gemini uses `functionCall`/`functionResponse` parts. So
+     `OpenAiRequest::split_system` — which today flattens every message to a
+     string and refuses anything else — has to become a real message mapper
+     that pairs each result back to its call. The `role:"tool"` arm that
+     currently returns `Unsupported` is where this lands.
+  4. **Non-streaming response.** Anthropic `content[]` gains `tool_use` blocks
+     with `{id,name,input}`; those become `choices[0].message.tool_calls[]`
+     with `function.arguments` **stringified**, and `finish_reason` becomes
+     `tool_calls`. The `stop_reason` mapping already handles `tool_use`.
+     Gemini's `functionCall` parts map the same way.
+  5. **Streaming.** The real work. Anthropic streams a tool call as
+     `content_block_start` with a `tool_use` block, then
+     `input_json_delta` fragments carrying *partial JSON*, then
+     `content_block_stop`. OpenAI expects
+     `delta.tool_calls[{index,id,function:{name,arguments}}]` where
+     `arguments` accumulates as a string. So `StreamTranslator` has to track
+     the open block index and emit indexed deltas — the partial JSON passes
+     through as a string and must **not** be parsed mid-flight, which suits the
+     existing design.
+  6. **Refusals shrink.** `check_supported` stops rejecting
+     `tools`/`tool_choice`, and `split_system` stops rejecting `role:"tool"`.
+     Everything else it refuses stays refused.
+
+  Testable without a provider: `src/protocol/tests.rs` already asserts exact
+  request bytes and replays SSE byte-by-byte, so the fixtures extend the same
+  way. Budget it as one focused change per protocol rather than both at once —
+  the streaming re-framer is where the bugs will be.
+- Multimodal (image/audio parts) through a translated backend. Same shape,
+  smaller: `content` parts of type `image_url` become Anthropic `image` blocks
+  with base64 `source`, or Gemini `inline_data`. The refusal lives in
+  `Content::into_text`, which flattens to a string today. No streaming
+  complication — images are input only.
 - Cohere, Bedrock and Vertex. Bedrock needs SigV4 request signing and Vertex
   needs OAuth2 service-account tokens with background refresh; both put
   credential machinery near the request path and neither is reachable by
   configuration alone the way the other 21 providers are.
+
+## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
+
+A full `--include-ignored` run exhausted the dev cluster's connections twice,
+presenting as every end-to-end test failing at once with `PoolTimedOut` — which
+reads as a code failure and is not. The cause was pool arithmetic nobody had
+done: every process that talks to Postgres takes a whole *pool*, not a
+connection, and `control::db::connect` hardcoded 8. Fourteen concurrent tests
+each spawning a proxy is 112 against a limit of 100.
+
+Three changes, because one alone would only move the ceiling:
+
+- Pool size is now `FASTLLM_DATABASE_MAX_CONNECTIONS` (default 8), and every
+  test that spawns a proxy sets it to 2. This is the fix that matters, and it
+  is a real deployment concern too — several proxy replicas against one
+  Postgres hit the same arithmetic.
+- Pools release idle connections after 30s and cap connection lifetime at 30
+  minutes. A process killed mid-test used to park its whole pool until the
+  server timed the sockets out, which is how 86 idle connections accumulated.
+- `max_connections` on the kw cluster raised from 100 to 300, with the memory
+  to back it (limit 512Mi to 2Gi).
+
+After a full suite run the database now settles back to 3 connections.
 
 ## Routing rules (2026-08-07)
 
@@ -258,14 +325,31 @@ Escalation now requires at least two contenders, which is also the
 configuration the measurements were taken on (architecture *against* coding, a
 binary question).
 
+Two more bugs, both found by running it on the cluster rather than by any
+test, and both worth recording for their shape:
+
+- **A `--role proxy` never classified anything.** `AppState` is constructed
+  with a snapshot already in hand, which bypasses `apply_snapshot` — the single
+  write path — and so bypassed the classifier rebuild. A proxy serving an
+  unchanged snapshot classified nothing at all, silently, forever. Every
+  end-to-end test passed because `--role all` writes through the admin API,
+  which triggers a rebuild immediately, so the shape that actually ships was
+  the one shape never exercised. `AppState::prime_derived_views` now exists for
+  exactly this, and is the third bug on this branch caused by something
+  bypassing `apply_snapshot`.
+- **Refining a class silently broke every rule on its parent.** Once
+  `debugging` refined `coding`, a request the refined tier called `debugging`
+  no longer matched a rule saying `{"class": "coding"}`. Refinement is a
+  *sub*-classification, so a refined answer now carries what it refines and
+  satisfies rules on either; a more specific rule placed earlier separates them.
+
+Verified live on kw with both tiers: a coding prompt escalates to the refined
+tier, comes back `debugging`, matches the `coding` rule through the refinement
+relation and reaches the local Spark pool; architecture and chat prompts reach
+the cloud.
+
 Still not done:
 
-- The dev Postgres allows 100 connections, and a full `--include-ignored` run
-  spawns enough proxies to exhaust them — twice now, presenting as every
-  end-to-end test failing at once with `PoolTimedOut`, which looks like a code
-  failure and is not. Either raise `max_connections` on the kw cluster or give
-  the tests a smaller pool; until then, `SELECT pg_terminate_backend(pid) ...
-  WHERE state = 'idle'` is the recovery.
 - No classification cache. The prefix hash the router already computes would
   key one, so a multi-turn conversation classifies once instead of per turn.
   Worth doing only if 115us ever shows up in a profile, which it has not.
