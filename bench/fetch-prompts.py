@@ -129,10 +129,22 @@ def main():
     # architecture questions live; codereview.SE is concrete code. Both are
     # written by programmers about programs, which is exactly what makes the
     # separation hard and therefore worth measuring.
+    # Beyond the architecture question, a spread of *domains* an enterprise
+    # would plausibly route on. Each is its own StackExchange community, so the
+    # boundaries were drawn by the people asking rather than by us — the same
+    # natural-experiment property that made the architecture test trustworthy.
     for config, name in [
         ("softwareengineering", "se_architecture.json"),
         ("codereview", "se_codereview.json"),
         ("devops", "se_devops.json"),
+        ("security", "se_security.json"),
+        ("dba", "se_dba.json"),
+        ("datascience", "se_datascience.json"),
+        ("stats", "se_stats.json"),
+        ("law", "se_law.json"),
+        ("money", "se_money.json"),
+        ("ux", "se_ux.json"),
+        ("writers", "se_writers.json"),
     ]:
         target = 1200
         existing = load(name)

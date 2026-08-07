@@ -62,6 +62,12 @@ path = "src/potion_arch.rs"
 name = "minilm"
 path = "src/minilm.rs"
 
+# Which classes become viable once a second tier exists, and on which tier —
+# see `src/potion_wide.rs`.
+[[bin]]
+name = "potion-wide"
+path = "src/potion_wide.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
