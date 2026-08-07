@@ -921,6 +921,13 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
         Duration::from_secs(cli.health_interval.max(1)),
         Duration::from_secs(cli.health_timeout.max(1)),
     );
+    // Unconditional, unlike `reconcile::spawn` -- every role that reaches
+    // this function owns a `Limiter` and can accumulate idle entries in it
+    // (a deleted principal, a rotated key's old principal), regardless of
+    // whether it also happens to be reconciling shares with a control
+    // plane. See `limiter::Limiter::evict_idle`'s doc comment for why this
+    // is safe to run on its own schedule.
+    fastllm_proxy::limiter::spawn_eviction(Arc::clone(&state.limiter));
 
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
         .parse()

@@ -764,10 +764,14 @@ impl Body for TrackedBody {
                 }
             }
         }
-        // The one parse per request happens here, at clean end-of-stream
-        // only — an aborted stream (the `Err` arm below) has nothing
-        // trustworthy to extract usage from and is left unreported, same as
-        // "no usage found" for any other reason.
+        // The one parse per request happens here, at clean end-of-stream —
+        // but an aborted stream (the `Err` arm below, or the body simply
+        // being dropped mid-poll) is *not* left unreported: `PinnedDrop`
+        // above runs `tracking.finish()` on whatever partial tail the
+        // buffer already holds, same as `usage_tracking.take()` does here.
+        // That is deliberate, not a gap — see `PinnedDrop`'s own doc
+        // comment for why billing whatever was consumed upstream before the
+        // abort is the right call, not the wrong one.
         if let Poll::Ready(None) = &polled {
             if let Some(tracking) = this.usage_tracking.take() {
                 tracking.finish();

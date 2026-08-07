@@ -162,6 +162,14 @@ struct PrincipalState {
     /// than looking idle because none of it got through.
     requests_used: AtomicU64,
     tokens_used: AtomicU64,
+    /// Wall-clock time of this principal's most recent `check` call,
+    /// regardless of which dimension was configured or whether it admitted
+    /// -- what `Limiter::evict_idle` reads to decide whether this entry's
+    /// traffic has gone quiet long enough to reclaim. A `Mutex<Instant>`
+    /// rather than an atomic: `Instant` has no lock-free representation on
+    /// stable Rust, and this is touched at most once per `check` call, no
+    /// more often than the two bucket locks already are.
+    last_seen: Mutex<Instant>,
 }
 
 impl PrincipalState {
@@ -179,6 +187,7 @@ impl PrincipalState {
             tokens_share: AtomicU32::new(SHARE_SCALE),
             requests_used: AtomicU64::new(0),
             tokens_used: AtomicU64::new(0),
+            last_seen: Mutex::new(now),
         }
     }
 }
@@ -222,6 +231,24 @@ pub struct Allowance {
 /// `AppState` owns one `Limiter` for the life of the process; only the
 /// `Limits` passed into `check` on each call comes from the current
 /// snapshot.
+///
+/// `entries` is one unsharded `RwLock<HashMap<..>>`, not sharded across
+/// several locks/maps the way some high-throughput rate limiters split by
+/// key hash. Deliberately: sharding buys concurrency on the *write* path
+/// (inserting a never-before-seen principal, or `evict_idle`'s sweep), and
+/// `check`'s overwhelmingly common case never takes that path at all -- it
+/// is a read lock over an already-populated map, and `parking_lot::RwLock`
+/// allows unlimited concurrent readers with no shared mutable state between
+/// them. The number of distinct entries is bounded by the number of
+/// *rate-limited* principals a real deployment configures, not by request
+/// volume -- tens to low thousands, not millions -- so a single map's
+/// lookup cost and its read-lock's uncontended-fast-path cost both stay
+/// negligible at any scale this proxy actually runs at. Sharding would trade
+/// that simplicity for a real cost (memory overhead per shard, and a global
+/// operation like `evict_idle` or `drain_counts` having to walk N locks
+/// instead of one) to solve a contention problem this workload does not
+/// have. Revisit if `check`'s write path (new-principal inserts) ever shows
+/// up as real contention under load, not before.
 pub struct Limiter {
     entries: parking_lot::RwLock<HashMap<PrincipalId, Arc<PrincipalState>>>,
 }
@@ -232,11 +259,48 @@ impl Default for Limiter {
     }
 }
 
+/// How long a principal's bucket may sit untouched before `evict_idle`
+/// reclaims it. Long enough that a principal with merely bursty (not
+/// abandoned) traffic — an hourly cron job, a human's on-and-off usage
+/// through a day — never gets evicted mid-pattern only to pay for a full
+/// bucket recreation (see `evict_idle`'s doc comment on why that recreation
+/// is safe, just not free of the "first reconciliation after a restart"
+/// cost); short enough that a real deployment's actual churn (principals
+/// deleted, keys rotated to a new principal, a load test's throwaway
+/// principals) does not accumulate for the life of the process the way
+/// nothing before this constant existed prevented.
+pub const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30 * 60);
+
 impl Limiter {
     pub fn new() -> Self {
         Self {
             entries: parking_lot::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Remove every principal's bucket untouched by `check` for at least
+    /// `idle_after`. Nothing on the request path calls this — see
+    /// `main.rs` for where it is scheduled on its own periodic tick,
+    /// mirroring `crate::reconcile`'s "own I/O on its own schedule, never
+    /// on the request path" shape even though this itself does no I/O.
+    ///
+    /// This is the fix for `entries` otherwise growing without bound as
+    /// principals come and go: a deleted principal, a rotated key's old
+    /// principal, a load test's throwaway keys all used to leave a
+    /// `HashMap` entry behind forever, since nothing ever removed one.
+    ///
+    /// Evicting outright (not just "safe to be slow about", but safe
+    /// *at all*) relies on `PrincipalState::new` always starting a fresh
+    /// bucket at full configured capacity and full share (`SHARE_SCALE`) --
+    /// the same generous default a cold-started replica already gets before
+    /// its first reconciliation. A principal whose bucket is evicted and
+    /// then sees traffic again simply looks cold-started again: capacity
+    /// this module's own doc comment already accepts giving away, not a new
+    /// failure mode this eviction introduces.
+    pub fn evict_idle(&self, now: Instant, idle_after: Duration) {
+        self.entries
+            .write()
+            .retain(|_, state| now.saturating_duration_since(*state.last_seen.lock()) < idle_after);
     }
 
     /// One hash lookup (a read lock over a `HashMap`, or -- the first time a
@@ -281,6 +345,7 @@ impl Limiter {
             return Decision::Admitted;
         }
         let state = self.state_for(principal_id, limits, now);
+        *state.last_seen.lock() = now;
         let token_cost = token_cost.max(1) as f64;
 
         // Demand is counted for every configured dimension unconditionally,
@@ -398,6 +463,35 @@ impl Limiter {
             )
         })
     }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries.read().len()
+    }
+}
+
+/// How often `spawn_eviction`'s background sweep runs. A fraction of
+/// [`IDLE_EVICTION_AFTER`] rather than some fixed small number: an entry is
+/// never reclaimed more than one sweep interval later than it strictly had
+/// to be, and there is no reason to poll far more often than that bound
+/// actually needs.
+const EVICTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Spawn the background task that periodically calls [`Limiter::evict_idle`].
+/// Structurally the same shape as `crate::health::spawn`: an owned `Arc`,
+/// its own `tokio::time::interval`, no return value -- nothing on the
+/// request path calls back into this or depends on it running at all
+/// (a process that never called this would simply keep every principal's
+/// bucket forever, the pre-fix behaviour, not a correctness bug).
+pub fn spawn_eviction(limiter: Arc<Limiter>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(EVICTION_SWEEP_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            limiter.evict_idle(Instant::now(), IDLE_EVICTION_AFTER);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -738,6 +832,85 @@ mod tests {
                 Decision::Exceeded { .. }
             ),
             "the 1000th total request must now be rejected"
+        );
+    }
+
+    #[test]
+    fn evict_idle_reclaims_an_entry_untouched_since_before_the_cutoff() {
+        let limiter = Limiter::new();
+        let lim = limits(Some(10), None);
+        let now = Instant::now();
+        limiter.check(1, &lim, 1, now);
+        assert_eq!(limiter.entry_count(), 1);
+
+        let much_later = now + Duration::from_secs(3600);
+        limiter.evict_idle(much_later, Duration::from_secs(60));
+        assert_eq!(
+            limiter.entry_count(),
+            0,
+            "an entry with no traffic in the last hour must be reclaimed by a 60s idle cutoff"
+        );
+    }
+
+    #[test]
+    fn evict_idle_leaves_a_recently_touched_entry_alone() {
+        let limiter = Limiter::new();
+        let lim = limits(Some(10), None);
+        let now = Instant::now();
+        limiter.check(1, &lim, 1, now);
+
+        let soon_after = now + Duration::from_secs(5);
+        limiter.evict_idle(soon_after, Duration::from_secs(60));
+        assert_eq!(
+            limiter.entry_count(),
+            1,
+            "an entry touched 5s ago must survive a 60s idle cutoff"
+        );
+    }
+
+    #[test]
+    fn evict_idle_does_not_reclaim_an_entry_that_keeps_being_touched() {
+        // A principal with steady traffic must never be evicted no matter
+        // how many sweeps run, because every `check` call refreshes
+        // `last_seen` -- this is the property that makes eviction safe for
+        // genuinely active principals, not just idle ones.
+        let limiter = Limiter::new();
+        let lim = limits(Some(10), None);
+        let mut now = Instant::now();
+        limiter.check(1, &lim, 1, now);
+
+        for _ in 0..5 {
+            now += Duration::from_secs(30);
+            limiter.check(1, &lim, 1, now);
+            limiter.evict_idle(now, Duration::from_secs(60));
+            assert_eq!(
+                limiter.entry_count(),
+                1,
+                "a principal touched every 30s must survive a 60s idle cutoff"
+            );
+        }
+    }
+
+    #[test]
+    fn evict_idle_reclaims_the_right_principal_and_only_that_one() {
+        let limiter = Limiter::new();
+        let lim = limits(Some(10), None);
+        let now = Instant::now();
+        limiter.check(1, &lim, 1, now);
+        let later = now + Duration::from_secs(120);
+        limiter.check(2, &lim, 1, later);
+
+        // Principal 1 has been idle for 120s at `later`; principal 2 was
+        // just touched. A 60s cutoff must reclaim exactly principal 1.
+        limiter.evict_idle(later, Duration::from_secs(60));
+        assert_eq!(limiter.entry_count(), 1);
+        assert!(
+            limiter.share_of(2).is_some(),
+            "the recently-touched principal must survive"
+        );
+        assert!(
+            limiter.share_of(1).is_none(),
+            "the long-idle principal must be gone"
         );
     }
 }
