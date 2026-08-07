@@ -437,10 +437,33 @@ pub async fn reencrypt_plaintext_backends<'a, A>(
 where
     A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
 {
+    reencrypt_plaintext_backends_scoped(conn, key, None).await
+}
+
+/// The same sweep, optionally narrowed to one model's backends.
+///
+/// The whole-table form is what an operator wants for a key rotation, and is
+/// right to refuse the batch when it meets a blob it can neither decrypt nor
+/// read as plaintext — guessing at a credential is the one thing it must not
+/// do. But that same property makes the unscoped form untestable against a
+/// database that holds *real* rows encrypted under a *different* key, which is
+/// exactly what this repo's shared dev Postgres now contains. Scoping is how a
+/// test says "these rows are mine"; it is not a weaker check, it is a smaller
+/// one.
+pub async fn reencrypt_plaintext_backends_scoped<'a, A>(
+    conn: A,
+    key: &EncryptionKey,
+    only_model_id: Option<i64>,
+) -> anyhow::Result<usize>
+where
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
+{
     let mut conn = conn.acquire().await?;
     let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, upstream_api_key FROM model_backends WHERE upstream_api_key IS NOT NULL",
+        "SELECT id, upstream_api_key FROM model_backends
+         WHERE upstream_api_key IS NOT NULL AND ($1::bigint IS NULL OR model_id = $1)",
     )
+    .bind(only_model_id)
     .fetch_all(&mut *conn)
     .await?;
 
@@ -1023,7 +1046,13 @@ mod tests {
         .await
         .unwrap();
 
-        let migrated = reencrypt_plaintext_backends(&mut tx, &key).await.unwrap();
+        // Scoped to this test's own model: the shared dev database also holds
+        // real backends encrypted under the deployment's key, which this
+        // test's throwaway key cannot decrypt — and the unscoped sweep is
+        // right to refuse those rather than guess.
+        let migrated = reencrypt_plaintext_backends_scoped(&mut tx, &key, Some(model_id))
+            .await
+            .unwrap();
         assert!(migrated >= 1);
         tx.commit().await.unwrap();
 
@@ -1040,7 +1069,9 @@ mod tests {
         );
 
         // Running it again must be a no-op: the row is already ciphertext.
-        let migrated_again = reencrypt_plaintext_backends(&pool, &key).await.unwrap();
+        let migrated_again = reencrypt_plaintext_backends_scoped(&pool, &key, Some(model_id))
+            .await
+            .unwrap();
         let stored_again: Vec<u8> =
             sqlx::query_scalar("SELECT upstream_api_key FROM model_backends WHERE model_id = $1")
                 .bind(model_id)

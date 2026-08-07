@@ -52,7 +52,7 @@
 
 use fastllm_proxy::limiter::{Decision, Limiter, Limits};
 use fastllm_proxy::registry::Registry;
-use fastllm_proxy::routing::VirtualModelDef;
+use fastllm_proxy::routing::{RequestFacts, VirtualModelDef};
 use fastllm_proxy::snapshot::{hash_key, AuthError, KeyEntry, Principal, Snapshot};
 use fastllm_proxy::tail_buffer::TailBuffer;
 use std::collections::HashMap;
@@ -96,14 +96,19 @@ const _LIMITER_CHECK_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
 /// leading-underscore exemption from the unused-code lint does not extend
 /// to a type only that binding refers to.
 #[allow(dead_code)]
-type ResolveFn = for<'a> fn(
-    &'a VirtualModelDef,
-    Option<&'a Principal>,
-    u64,
-    Option<u64>,
-    u64,
-    &'a Registry,
-) -> Option<String>;
+type ResolveFn =
+    for<'a> fn(&'a VirtualModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Option<String>;
+
+/// The same check for the candidate-list form, which is what `proxy_request`
+/// actually calls now — `resolve` is a thin wrapper over it, so guarding only
+/// the wrapper would leave the function doing the work unpinned.
+///
+/// `#[allow(dead_code)]` for the same reason as `ResolveFn` above: the
+/// leading-underscore exemption on the binding does not reach the type it
+/// refers to.
+#[allow(dead_code)]
+type ResolveCandidatesFn =
+    for<'a> fn(&'a VirtualModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Vec<String>;
 
 /// Same reasoning again for `VirtualModelDef::resolve` (P1 routing rules,
 /// `src/routing.rs`): were it `async fn`, or were `&Registry` swapped for a
@@ -112,6 +117,8 @@ type ResolveFn = for<'a> fn(
 /// this function reads, the routing equivalent of `Snapshot` above, not a
 /// handle to anything that does I/O.
 const _VIRTUAL_MODEL_RESOLVE_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveFn = VirtualModelDef::resolve;
+const _VIRTUAL_MODEL_RESOLVE_CANDIDATES_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveCandidatesFn =
+    VirtualModelDef::resolve_candidates;
 
 /// Same reasoning again for `TailBuffer::push` (P3 usage accounting's
 /// per-frame side, `src/tail_buffer.rs`): were it `async fn`, or were it
@@ -215,23 +222,27 @@ fn limiter_check_body_contains_no_await_or_io_tokens() {
     assert_no_await_or_io_tokens(&body, "Limiter::check");
 }
 
-/// `VirtualModelDef::resolve` (P1 routing rules): matches rules and picks a
-/// target against the in-memory `Registry`/`RoutingRule` state built at
+/// `VirtualModelDef::resolve_candidates` (P1 routing rules): matches rules and
+/// orders targets against the in-memory `Registry`/`RoutingRule` state built at
 /// snapshot time, per `src/routing.rs`'s doc comments — reconciled *into*
 /// the snapshot ahead of time, not looked up per request.
+///
+/// Scans the candidate-list form rather than `resolve`, which is now a
+/// three-line wrapper over it: guarding the wrapper would say nothing about
+/// the function that does the work.
 #[test]
 fn virtual_model_resolve_body_contains_no_await_or_io_tokens() {
     let source = include_str!("../src/routing.rs");
-    let body = extract_fn_body(source, "pub fn resolve(");
+    let body = extract_fn_body(source, "pub fn resolve_candidates(");
 
     assert!(
-        body.contains("select_with_failover"),
-        "sanity check failed: `VirtualModelDef::resolve` no longer calls \
-         `select_with_failover`; either the function was rewritten (update this \
+        body.contains("order_candidates"),
+        "sanity check failed: `VirtualModelDef::resolve_candidates` no longer calls \
+         `order_candidates`; either the function was rewritten (update this \
          test to match) or the extraction above grabbed the wrong span"
     );
 
-    assert_no_await_or_io_tokens(&body, "VirtualModelDef::resolve");
+    assert_no_await_or_io_tokens(&body, "VirtualModelDef::resolve_candidates");
 }
 
 /// `TailBuffer::push` (P3 usage accounting's per-frame side): a bounded

@@ -108,11 +108,12 @@ sequenceDiagram
 
     C->>P: POST /v1/chat/completions
     P->>P: SHA-256 → principal (401 if unknown/expired)
-    P->>P: resolve model — virtual models evaluate rules here
+    P->>P: resolve model — virtual models evaluate rules, producing a fallback chain
     P->>P: authorise the RESOLVED concrete model (403 if ungranted)
     P->>P: rate limit (429) and budget (402)
     P->>P: translate request — only if backend.protocol ≠ openai
     P->>B: forward, original bytes (or the translated ones)
+    B-->>P: 429/5xx → next backend, then the next model in the chain
     B-->>P: response frames
     P-->>C: same frames, never parsed
     Note over P: tail buffer mirrors the last few KB
@@ -126,7 +127,10 @@ Two decisions in that flow are load-bearing:
 - **Authorisation is checked against the resolved concrete model**, never the
   virtual name. A virtual model routes access; it must never grant it, or a
   rule edit or a weighted split could hand a caller a model they were never
-  granted.
+  granted. With a fallback chain this becomes a filter: ungranted candidates
+  are dropped from the chain, so failover only ever moves to a model the caller
+  already had. The "served here" check runs *before* it, so an unknown model is
+  a 404 for everyone and 403-vs-404 cannot be used to probe what exists.
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
   never per frame. The response is still forwarded as opaque bytes. A
   translated response is the exception in the cheaper direction: its token
@@ -158,6 +162,8 @@ Two things an operator should know rather than discover:
 | cold start, no cache | starts, `/health` unhealthy, never crash-loops |
 | snapshot invalid | keeps the previous one, logs once |
 | key revoked | effective within the poll interval, ~1s |
+| a model in a chain returns 429/5xx | the next model in the same rule serves it; nothing reached the client yet |
+| every model in the chain refuses | the last upstream's own status and body are forwarded, not a synthetic 502 |
 | Postgres down | control plane serves its last built snapshot; proxies unaffected |
 | usage report fails | dropped; never blocks a request |
 | upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion |
@@ -182,3 +188,9 @@ split exists to prevent.
   floor bounds total allocation at under 2x the configured limit in the worst
   case (one busy replica, the rest idle), never more.
 - **Policy changes propagate within one snapshot poll**, not instantly.
+- **Two routing conditions are deliberately non-deterministic.**
+  `max_inflight_per_backend` reads live in-flight counters and the time-window
+  conditions read the clock, so identical requests can route differently and
+  prefix affinity stops applying to the traffic they divert. Every other
+  condition is a pure function of the request. This is the same
+  opt-in-visibly line the passthrough/translate split draws.

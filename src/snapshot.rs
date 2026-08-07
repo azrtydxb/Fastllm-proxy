@@ -7,7 +7,10 @@
 
 use crate::limiter::Limits;
 use crate::protocol::Protocol;
-use crate::routing::{CallerMatch, RoutingRule, ShapeMatch, VirtualModelDef, WeightedTarget};
+use crate::routing::{
+    BudgetMatch, CallerMatch, HeaderMatch, LoadMatch, RoutingRule, RuleConditions, ShapeMatch,
+    TimeMatch, VirtualModelDef, WeightedTarget,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -304,15 +307,43 @@ pub struct WireShapeMatch {
     pub min_max_tokens: Option<u64>,
     #[serde(default)]
     pub max_max_tokens: Option<u64>,
+    #[serde(default)]
+    pub stream: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Conditions added after the first release are flat, defaulted fields rather
+/// than a nested object, so a proxy newer than its control plane simply reads
+/// them as unset.
+///
+/// The reverse direction is the one to be careful about: an *older* proxy
+/// reading a snapshot whose rules use a condition it has no field for will
+/// ignore that condition and match more broadly than the operator wrote. The
+/// two planes ship in the same image precisely so this stays theoretical —
+/// roll them together, and prefer a brief window where the control plane is
+/// older over one where it is newer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireRoutingRule {
     #[serde(default)]
     pub caller: WireCallerMatch,
     #[serde(default)]
     pub shape: WireShapeMatch,
     pub targets: Vec<WireWeightedTarget>,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub min_budget_used_percent: Option<u8>,
+    #[serde(default)]
+    pub max_budget_used_percent: Option<u8>,
+    #[serde(default)]
+    pub max_inflight_per_backend: Option<u32>,
+    #[serde(default)]
+    pub after_minute: Option<u16>,
+    #[serde(default)]
+    pub before_minute: Option<u16>,
+    #[serde(default)]
+    pub days: Vec<u8>,
+    #[serde(default)]
+    pub utc_offset_minutes: i16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,15 +495,30 @@ impl Snapshot {
                         .iter()
                         .map(|r| WireRoutingRule {
                             caller: WireCallerMatch {
-                                principals: r.caller.principals.iter().copied().collect(),
-                                roles: r.caller.roles.iter().cloned().collect(),
+                                principals: r
+                                    .conditions
+                                    .caller
+                                    .principals
+                                    .iter()
+                                    .copied()
+                                    .collect(),
+                                roles: r.conditions.caller.roles.iter().cloned().collect(),
                             },
                             shape: WireShapeMatch {
-                                min_prompt_tokens: r.shape.min_prompt_tokens,
-                                max_prompt_tokens: r.shape.max_prompt_tokens,
-                                min_max_tokens: r.shape.min_max_tokens,
-                                max_max_tokens: r.shape.max_max_tokens,
+                                min_prompt_tokens: r.conditions.shape.min_prompt_tokens,
+                                max_prompt_tokens: r.conditions.shape.max_prompt_tokens,
+                                min_max_tokens: r.conditions.shape.min_max_tokens,
+                                max_max_tokens: r.conditions.shape.max_max_tokens,
+                                stream: r.conditions.shape.stream,
                             },
+                            headers: r.conditions.headers.required.iter().cloned().collect(),
+                            min_budget_used_percent: r.conditions.budget.min_used_percent,
+                            max_budget_used_percent: r.conditions.budget.max_used_percent,
+                            max_inflight_per_backend: r.conditions.load.max_inflight_per_backend,
+                            after_minute: r.conditions.time.after_minute,
+                            before_minute: r.conditions.time.before_minute,
+                            days: r.conditions.time.days.clone(),
+                            utc_offset_minutes: r.conditions.time.utc_offset_minutes,
                             targets: r
                                 .targets
                                 .iter()
@@ -597,15 +643,34 @@ impl Snapshot {
                                 .rules
                                 .into_iter()
                                 .map(|r| RoutingRule {
-                                    caller: CallerMatch {
-                                        principals: r.caller.principals.into_iter().collect(),
-                                        roles: r.caller.roles.into_iter().collect(),
-                                    },
-                                    shape: ShapeMatch {
-                                        min_prompt_tokens: r.shape.min_prompt_tokens,
-                                        max_prompt_tokens: r.shape.max_prompt_tokens,
-                                        min_max_tokens: r.shape.min_max_tokens,
-                                        max_max_tokens: r.shape.max_max_tokens,
+                                    conditions: RuleConditions {
+                                        caller: CallerMatch {
+                                            principals: r.caller.principals.into_iter().collect(),
+                                            roles: r.caller.roles.into_iter().collect(),
+                                        },
+                                        shape: ShapeMatch {
+                                            min_prompt_tokens: r.shape.min_prompt_tokens,
+                                            max_prompt_tokens: r.shape.max_prompt_tokens,
+                                            min_max_tokens: r.shape.min_max_tokens,
+                                            max_max_tokens: r.shape.max_max_tokens,
+                                            stream: r.shape.stream,
+                                        },
+                                        headers: HeaderMatch {
+                                            required: r.headers.into_iter().collect(),
+                                        },
+                                        budget: BudgetMatch {
+                                            min_used_percent: r.min_budget_used_percent,
+                                            max_used_percent: r.max_budget_used_percent,
+                                        },
+                                        load: LoadMatch {
+                                            max_inflight_per_backend: r.max_inflight_per_backend,
+                                        },
+                                        time: TimeMatch {
+                                            after_minute: r.after_minute,
+                                            before_minute: r.before_minute,
+                                            days: r.days,
+                                            utc_offset_minutes: r.utc_offset_minutes,
+                                        },
                                     },
                                     targets: r
                                         .targets

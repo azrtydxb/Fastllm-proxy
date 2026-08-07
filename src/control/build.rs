@@ -487,10 +487,8 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, V
                         return None;
                     }
                 };
-                let (caller, shape) = parsed.into_caller_and_shape();
                 Some(RoutingRule {
-                    caller,
-                    shape,
+                    conditions: parsed.into_conditions(),
                     targets: targets_for(*rule_id, &rule_target_rows),
                 })
             })
@@ -786,7 +784,7 @@ mod tests {
         assert_eq!(vm.rules.len(), 1);
         let rule = &vm.rules[0];
         assert_eq!(
-            rule.caller.roles,
+            rule.conditions.caller.roles,
             ["canary".to_string()].into_iter().collect()
         );
         assert_eq!(

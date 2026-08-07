@@ -1166,6 +1166,12 @@ async fn post_rule(
     Path(virtual_model_id): Path<i64>,
     Json(body): Json<NewRule>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Validated at write time so a malformed `"25:00"` or a `days: [8]` is a
+    // 400 the operator sees immediately, rather than a rule that parses,
+    // stores, and then silently never matches — the failure this repo keeps
+    // catching by review instead of by test.
+    crate::routing::validate_match_json(&body.match_condition)
+        .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
     let id: i64 = sqlx::query_scalar(
@@ -3143,7 +3149,7 @@ mod tests {
             .expect("the virtual model created over the admin API must be in the snapshot");
         assert_eq!(published.rules.len(), 1);
         assert_eq!(
-            published.rules[0].caller.roles,
+            published.rules[0].conditions.caller.roles,
             ["canary".to_string()].into_iter().collect()
         );
         assert_eq!(published.rules[0].targets[0].model, primary_name);

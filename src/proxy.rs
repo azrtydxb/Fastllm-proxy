@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 
 use crate::multipart;
 use crate::protocol;
-use crate::registry::{Backend, BackendUid, InflightGuard, Registry};
+use crate::registry::{Backend, BackendUid, InflightGuard, Pool, Registry};
 use crate::snapshot::{AuthError, Budget, Principal, PrincipalId, Snapshot};
 use crate::state::AppState;
 use crate::tail_buffer::TailBuffer;
@@ -183,30 +183,28 @@ struct BodyPeek {
 /// call, which is the wrong trade for an interface shared with the rest of
 /// the request path's error responses.
 #[allow(clippy::result_large_err)]
-fn resolve_target_model(
+fn resolve_target_models(
     requested_model: &str,
     snapshot: &Snapshot,
-    principal: Option<&Principal>,
-    body_len: usize,
-    max_tokens: Option<u64>,
+    facts: &crate::routing::RequestFacts<'_>,
     prefix: u64,
     registry: &Registry,
-) -> Result<String, Response<ResBody>> {
+) -> Result<Vec<String>, Response<ResBody>> {
     let Some(vm) = snapshot.virtual_models.get(requested_model) else {
-        return Ok(requested_model.to_string());
+        return Ok(vec![requested_model.to_string()]);
     };
-    let prompt_tokens = crate::routing::estimate_prompt_tokens(body_len);
-    vm.resolve(principal, prompt_tokens, max_tokens, prefix, registry)
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::NOT_FOUND,
-                "model_not_found",
-                &format!(
-                    "virtual model {requested_model:?} has no viable target for this request; \
-                     check its routing rules and defaults"
-                ),
-            )
-        })
+    let candidates = vm.resolve_candidates(facts, prefix, registry);
+    if candidates.is_empty() {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            &format!(
+                "virtual model {requested_model:?} has no viable target for this request; \
+                 check its routing rules and defaults"
+            ),
+        ));
+    }
+    Ok(candidates)
 }
 
 async fn proxy_request(
@@ -308,48 +306,79 @@ async fn proxy_request(
     // *and* keeps cache locality once a concrete model is chosen.
     let prefix = state.router.prefix_key(&collected);
 
-    let target_model = match resolve_target_model(
-        &requested_model,
-        snapshot,
-        principal,
-        collected.len(),
+    let facts = crate::routing::RequestFacts {
+        caller: principal,
+        prompt_tokens: crate::routing::estimate_prompt_tokens(collected.len()),
         max_tokens,
-        prefix,
-        &registry,
-    ) {
-        Ok(m) => m,
-        Err(rejection) => {
-            state.requests_failed.fetch_add(1, Ordering::Relaxed);
-            return rejection;
-        }
+        streaming,
+        headers: &parts.headers,
+        // One clock read, and only for a virtual model — `resolve_target_models`
+        // returns before touching this for an ordinary name.
+        now: chrono::Utc::now(),
     };
+    let candidates =
+        match resolve_target_models(&requested_model, snapshot, &facts, prefix, &registry) {
+            Ok(c) => c,
+            Err(rejection) => {
+                state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                return rejection;
+            }
+        };
 
-    let Some(pool) = registry.pool(&target_model) else {
+    // Served-here before authorised, and that order is load bearing. It is
+    // pinned by `tests/rbac.rs`: a model this proxy does not serve is a 404
+    // whether or not the caller was granted it, so "403 vs 404" cannot be used
+    // to probe which models exist. Authorising first would turn every unknown
+    // name into a 403 and leak exactly that.
+    //
+    // A candidate whose pool is empty (every backend dropped for an
+    // undecryptable key, say) drops out here rather than failing the request,
+    // so a working fallback behind it still gets its turn.
+    let served: Vec<(String, Pool)> = candidates
+        .iter()
+        .filter_map(|m| registry.pool(m).map(|p| (m.clone(), Arc::clone(p))))
+        .collect();
+    if served.is_empty() {
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let known = registry.model_names().join(", ");
+        let wanted = candidates.first().map(String::as_str).unwrap_or("");
         return error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
-            &format!("model {target_model:?} is not served here; available: [{known}]"),
+            &format!("model {wanted:?} is not served here; available: [{known}]"),
         );
-    };
-    let pool = Arc::clone(pool);
+    }
 
     // Authorisation is a set lookup against the pre-flattened grant list, not
     // a walk of the RBAC graph, and costs nothing measurable. Checked against
-    // `target_model` — see `resolve_target_model`'s doc comment for why a
-    // virtual model's *resolved* concrete target is what gets authorised,
-    // never the virtual name by itself.
-    if let Some(principal) = principal {
-        if !principal.may_invoke(&target_model) {
-            state.requests_failed.fetch_add(1, Ordering::Relaxed);
-            return error_response(
-                StatusCode::FORBIDDEN,
-                "model_access_denied",
-                &format!("key is not permitted to use model {target_model:?}"),
-            );
-        }
-    }
+    // every *resolved concrete* candidate — see `resolve_target_models` for
+    // why a virtual model's targets are what get authorised, never the virtual
+    // name by itself.
+    //
+    // Ungranted candidates are dropped from the chain rather than failing the
+    // request outright: failover then only ever moves to a model this caller
+    // was already granted, so one fallback chain can span models with
+    // different grants without any of them widening anyone's reach. When that
+    // empties the chain the request is refused, naming the target the rule
+    // actually chose.
+    let routable: Vec<(String, Pool)> = match principal {
+        Some(p) => served
+            .iter()
+            .filter(|(m, _)| p.may_invoke(m))
+            .cloned()
+            .collect(),
+        None => served.clone(),
+    };
+    let Some((primary_model, _)) = routable.first().cloned() else {
+        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+        let denied = served.first().map(|(m, _)| m.as_str()).unwrap_or_default();
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "model_access_denied",
+            &format!("key is not permitted to use model {denied:?}"),
+        );
+    };
+    let target_model = primary_model;
 
     // Budget enforcement (P3): after the fact, on purpose. Consumption is
     // only known once a response completes (see the design doc's P3
@@ -406,189 +435,236 @@ async fn proxy_request(
     let needs_usage = principal_needs_usage(principal);
     let inject_include_usage = needs_usage && streaming && model_field.is_none();
 
-    let mut tried: Vec<BackendUid> = Vec::new();
     let mut last_error: Option<String> = None;
 
-    // Retries are safe here only because nothing has been written to the client
-    // yet. Once a single upstream frame is forwarded the response is committed
-    // and a failure mid-stream propagates as-is.
-    for attempt in 0..=state.max_retries {
-        let Some(backend) = state.router.pick(&pool, prefix, &tried) else {
-            break;
-        };
-        tried.push(backend.uid);
+    // Two nested loops, and the distinction between them is the whole of
+    // cross-model failover: the inner one moves between *backends of one
+    // model* (a second node of the local pool), the outer one moves between
+    // *models* (the local pool having failed, the cloud provider behind it).
+    //
+    // Before the outer loop existed a 429 from a single-backend model had
+    // nowhere to go, which is exactly what a hosted provider's free tier
+    // returns under load. Health-based selection could not help: the pool was
+    // healthy, it simply refused this request.
+    //
+    // Retries at either level are safe only because nothing has been written
+    // to the client yet. Once a single upstream frame is forwarded the response
+    // is committed and a failure mid-stream propagates as-is.
+    for (model_index, (candidate_model, pool)) in routable.iter().enumerate() {
+        let more_models_after_this = model_index + 1 < routable.len();
+        let mut tried: Vec<BackendUid> = Vec::new();
 
-        // The fork between the two execution modes, and the only branch the
-        // passthrough path pays for. `is_passthrough` is a match on a
-        // `Copy` enum; everything under the `else` is unreachable for an
-        // OpenAI-compatible backend, which is every backend unless an
-        // operator configured otherwise.
-        let (upstream_body, upstream_subpath) = if backend.protocol.is_passthrough() {
-            let body = match rewrite_model_if_needed(
-                &collected,
-                &requested_model,
-                &backend.upstream_model,
-                model_field.clone(),
-                inject_include_usage,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
+        for attempt in 0..=state.max_retries {
+            let Some(backend) = state.router.pick(pool, prefix, &tried) else {
+                break;
+            };
+            tried.push(backend.uid);
+
+            // The fork between the two execution modes, and the only branch the
+            // passthrough path pays for. `is_passthrough` is a match on a
+            // `Copy` enum; everything under the `else` is unreachable for an
+            // OpenAI-compatible backend, which is every backend unless an
+            // operator configured otherwise.
+            let (upstream_body, upstream_subpath) = if backend.protocol.is_passthrough() {
+                let body = match rewrite_model_if_needed(
+                    &collected,
+                    &requested_model,
+                    &backend.upstream_model,
+                    model_field.clone(),
+                    inject_include_usage,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            &format!("could not rewrite model name for alias: {e}"),
+                        );
+                    }
+                };
+                (body, Cow::Borrowed(subpath.as_str()))
+            } else {
+                // Only chat completions are translated. Embeddings, reranking and
+                // the audio routes have no equivalent in either native protocol,
+                // and forwarding an OpenAI-shaped body to an endpoint that cannot
+                // read it would produce a confusing upstream error instead of a
+                // clear local one.
+                if subpath != "/chat/completions" {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
                     return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        &format!("could not rewrite model name for alias: {e}"),
-                    );
-                }
-            };
-            (body, Cow::Borrowed(subpath.as_str()))
-        } else {
-            // Only chat completions are translated. Embeddings, reranking and
-            // the audio routes have no equivalent in either native protocol,
-            // and forwarding an OpenAI-shaped body to an endpoint that cannot
-            // read it would produce a confusing upstream error instead of a
-            // clear local one.
-            if subpath != "/chat/completions" {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "unsupported_endpoint",
-                    &format!(
+                        StatusCode::NOT_IMPLEMENTED,
+                        "unsupported_endpoint",
+                        &format!(
                         "{subpath} is not available on a {} backend; only /chat/completions is \
                          translated",
                         backend.protocol.as_str()
                     ),
-                );
-            }
-            match protocol::translate_request(
-                backend.protocol,
-                &collected,
-                &backend.upstream_model,
-                backend.default_max_tokens,
-            ) {
-                Ok(t) => (Bytes::from(t.body), Cow::Owned(t.subpath)),
-                Err(e) => {
-                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                    // Refusals are the client's to act on and are the same for
-                    // every backend of this protocol, so there is nothing to
-                    // gain by retrying onto another one.
-                    let (status, kind) = match &e {
-                        protocol::TranslateError::Unsupported(_) => {
-                            (StatusCode::NOT_IMPLEMENTED, "unsupported_parameter")
-                        }
-                        _ => (StatusCode::BAD_REQUEST, "invalid_request_error"),
-                    };
-                    return error_response(status, kind, &e.to_string());
-                }
-            }
-        };
-
-        let upstream_req = match build_upstream_request(
-            &parts.headers,
-            &backend,
-            &upstream_subpath,
-            upstream_body,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    &format!("could not build upstream request: {e}"),
-                );
-            }
-        };
-
-        // The guard is taken before dispatch and moved into the response body,
-        // so in-flight stays elevated for the whole generation.
-        let guard = InflightGuard::acquire(Arc::clone(&backend));
-
-        let dispatch = state.client.request(upstream_req);
-        let result = match tokio::time::timeout(state.upstream_headers_timeout, dispatch).await {
-            Ok(r) => r,
-            Err(_) => {
-                backend.note_error();
-                last_error = Some(format!(
-                    "upstream {} did not send headers within {:?}",
-                    backend.api_base, state.upstream_headers_timeout
-                ));
-                warn!(backend = %backend.api_base, "upstream headers timeout");
-                continue;
-            }
-        };
-
-        match result {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_server_error() {
-                    backend.note_error();
-                    // A 5xx before any bytes were forwarded is worth another
-                    // node — but only if there *is* another node. Retrying into
-                    // an empty candidate set would discard this response and
-                    // answer with a synthetic 502, throwing away the upstream's
-                    // own diagnostics; on a single-node pool that is every 5xx.
-                    // 4xx is the client's fault and retrying just multiplies it.
-                    if attempt < state.max_retries && state.router.has_candidate(&pool, &tried) {
-                        last_error =
-                            Some(format!("upstream {} returned {}", backend.api_base, status));
-                        debug!(backend = %backend.api_base, %status, "retrying on another backend");
-                        continue;
-                    }
-                }
-                if status.is_client_error() || status.is_server_error() {
-                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    state.requests_ok.fetch_add(1, Ordering::Relaxed);
-                }
-                debug!(
-                    backend = %backend.api_base,
-                    requested_model = %requested_model,
-                    model = %target_model,
-                    stream = streaming,
-                    %status,
-                    "proxied"
-                );
-                // `needs_usage` (`principal_needs_usage`) is already `false`
-                // whenever `principal` is `None` (an open snapshot has no
-                // principal to attribute usage to), so this `and_then` never
-                // silently drops tracking that was actually wanted.
-                if !backend.protocol.is_passthrough() {
-                    let sink = needs_usage.then_some(principal).flatten().map(|p| {
-                        protocol::body::UsageSink {
-                            principal_id: p.id,
-                            model: target_model.clone(),
-                            reporter: state.usage.clone(),
-                        }
-                    });
-                    return translated_response(
-                        resp,
-                        guard,
-                        backend.protocol,
-                        protocol::ResponseContext::from_request(
-                            &collected,
-                            target_model.clone(),
-                            prefix,
-                        ),
-                        sink,
                     );
                 }
-                let tracking = needs_usage
-                    .then_some(principal)
-                    .flatten()
-                    .map(|p| UsageTracking {
-                        tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
-                        principal_id: p.id,
-                        model: target_model.clone(),
-                        reporter: state.usage.clone(),
-                    });
-                return finish_response(resp, guard, tracking);
-            }
-            Err(e) => {
-                backend.note_error();
-                last_error = Some(format!("upstream {} unreachable: {e}", backend.api_base));
-                warn!(backend = %backend.api_base, error = %e, "upstream request failed");
-                continue;
+                match protocol::translate_request(
+                    backend.protocol,
+                    &collected,
+                    &backend.upstream_model,
+                    backend.default_max_tokens,
+                ) {
+                    Ok(t) => (Bytes::from(t.body), Cow::Owned(t.subpath)),
+                    Err(e) => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        // Refusals are the client's to act on and are the same for
+                        // every backend of this protocol, so there is nothing to
+                        // gain by retrying onto another one.
+                        let (status, kind) = match &e {
+                            protocol::TranslateError::Unsupported(_) => {
+                                (StatusCode::NOT_IMPLEMENTED, "unsupported_parameter")
+                            }
+                            _ => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+                        };
+                        return error_response(status, kind, &e.to_string());
+                    }
+                }
+            };
+
+            let upstream_req = match build_upstream_request(
+                &parts.headers,
+                &backend,
+                &upstream_subpath,
+                upstream_body,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        &format!("could not build upstream request: {e}"),
+                    );
+                }
+            };
+
+            // The guard is taken before dispatch and moved into the response body,
+            // so in-flight stays elevated for the whole generation.
+            let guard = InflightGuard::acquire(Arc::clone(&backend));
+
+            let dispatch = state.client.request(upstream_req);
+            let result = match tokio::time::timeout(state.upstream_headers_timeout, dispatch).await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    backend.note_error();
+                    last_error = Some(format!(
+                        "upstream {} did not send headers within {:?}",
+                        backend.api_base, state.upstream_headers_timeout
+                    ));
+                    warn!(backend = %backend.api_base, "upstream headers timeout");
+                    if !state.router.has_candidate(pool, &tried) && more_models_after_this {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    // 429 joins 5xx as retryable, and it is the reason cross-model
+                    // failover exists: a hosted provider answering "rate limited"
+                    // is not broken, it is simply refusing *this* request, and the
+                    // right answer is another provider rather than the client's
+                    // problem. Every other 4xx is the client's fault and retrying
+                    // it just multiplies it.
+                    let retryable =
+                        status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+                    if retryable {
+                        backend.note_error();
+                        // Another node of this same model, if there is one — but
+                        // only if there *is* one. Retrying into an empty candidate
+                        // set would discard this response and answer with a
+                        // synthetic 502, throwing away the upstream's own
+                        // diagnostics; on a single-node pool that is every 5xx.
+                        if attempt < state.max_retries && state.router.has_candidate(pool, &tried) {
+                            last_error =
+                                Some(format!("upstream {} returned {}", backend.api_base, status));
+                            debug!(backend = %backend.api_base, %status, "retrying on another backend");
+                            continue;
+                        }
+                        // This model is exhausted; the chain may still have another.
+                        if more_models_after_this {
+                            last_error = Some(format!(
+                                "model {candidate_model:?} returned {status} from {}",
+                                backend.api_base
+                            ));
+                            debug!(
+                                backend = %backend.api_base,
+                                model = %candidate_model,
+                                %status,
+                                "failing over to the next model in the chain"
+                            );
+                            break;
+                        }
+                    }
+                    if status.is_client_error() || status.is_server_error() {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        state.requests_ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    debug!(
+                        backend = %backend.api_base,
+                        requested_model = %requested_model,
+                        model = %candidate_model,
+                        stream = streaming,
+                        %status,
+                        "proxied"
+                    );
+                    // `needs_usage` (`principal_needs_usage`) is already `false`
+                    // whenever `principal` is `None` (an open snapshot has no
+                    // principal to attribute usage to), so this `and_then` never
+                    // silently drops tracking that was actually wanted.
+                    if !backend.protocol.is_passthrough() {
+                        // Attributed to the model that actually answered, not the
+                        // head of the chain: after a failover those differ, and
+                        // billing the model that refused the request would make
+                        // the usage record a fiction.
+                        let sink = needs_usage.then_some(principal).flatten().map(|p| {
+                            protocol::body::UsageSink {
+                                principal_id: p.id,
+                                model: candidate_model.clone(),
+                                reporter: state.usage.clone(),
+                            }
+                        });
+                        return translated_response(
+                            resp,
+                            guard,
+                            backend.protocol,
+                            protocol::ResponseContext::from_request(
+                                &collected,
+                                candidate_model.clone(),
+                                prefix,
+                            ),
+                            sink,
+                        );
+                    }
+                    let tracking =
+                        needs_usage
+                            .then_some(principal)
+                            .flatten()
+                            .map(|p| UsageTracking {
+                                tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
+                                principal_id: p.id,
+                                model: candidate_model.clone(),
+                                reporter: state.usage.clone(),
+                            });
+                    return finish_response(resp, guard, tracking);
+                }
+                Err(e) => {
+                    backend.note_error();
+                    last_error = Some(format!("upstream {} unreachable: {e}", backend.api_base));
+                    warn!(backend = %backend.api_base, error = %e, "upstream request failed");
+                    if !state.router.has_candidate(pool, &tried) && more_models_after_this {
+                        break;
+                    }
+                    continue;
+                }
             }
         }
     }
@@ -1485,16 +1561,18 @@ model_list:
             budget: None,
         };
 
-        let target = resolve_target_model(
-            "vm",
-            &snapshot,
-            Some(&granted_concrete_only),
-            0,
-            None,
-            0,
-            &registry,
-        )
-        .expect("the virtual model has a viable default target");
+        let headers = HeaderMap::new();
+        let facts = crate::routing::RequestFacts {
+            caller: Some(&granted_concrete_only),
+            prompt_tokens: 0,
+            max_tokens: None,
+            streaming: false,
+            headers: &headers,
+            now: chrono::Utc::now(),
+        };
+        let target = resolve_target_models("vm", &snapshot, &facts, 0, &registry)
+            .expect("the virtual model has a viable default target")
+            .remove(0);
         assert_eq!(target, "concrete-a");
 
         assert!(
@@ -1510,15 +1588,25 @@ model_list:
     }
 
     /// A virtual model whose name collides with nothing still resolves
-    /// straight through: `resolve_target_model` on a name that is not in
+    /// straight through: `resolve_target_models` on a name that is not in
     /// `snapshot.virtual_models` is the identity function, so ordinary
     /// (concrete) routing is completely unaffected by this feature existing.
     #[test]
     fn a_concrete_model_name_resolves_to_itself() {
         let registry = registry_with_two_models();
         let snapshot = Snapshot::default();
-        let target =
-            resolve_target_model("concrete-a", &snapshot, None, 0, None, 0, &registry).unwrap();
+        let headers = HeaderMap::new();
+        let facts = crate::routing::RequestFacts {
+            caller: None,
+            prompt_tokens: 0,
+            max_tokens: None,
+            streaming: false,
+            headers: &headers,
+            now: chrono::Utc::now(),
+        };
+        let target = resolve_target_models("concrete-a", &snapshot, &facts, 0, &registry)
+            .unwrap()
+            .remove(0);
         assert_eq!(target, "concrete-a");
     }
 }

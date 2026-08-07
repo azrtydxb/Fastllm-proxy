@@ -182,3 +182,40 @@ Deliberately not done, each additive and small:
   needs OAuth2 service-account tokens with background refresh; both put
   credential machinery near the request path and neither is reachable by
   configuration alone the way the other 21 providers are.
+
+## Routing rules (2026-08-07)
+
+Done:
+
+- **Cross-model failover.** A rule's targets are an ordered chain, tried on
+  5xx, 429 or an unreachable upstream. 429 is newly retryable — it is what a
+  hosted provider's free tier returns, and health checks cannot see it because
+  the pool is healthy and merely refusing. Ungranted candidates are filtered
+  out, so failover never widens reach.
+- **Header conditions** (`headers`), the cheapest useful knob: the client
+  labels its own workload.
+- **Streaming condition** (`stream`), a good proxy for "is a human waiting".
+- **Budget conditions** (`min/max_budget_used_percent`), to degrade instead of
+  refusing at the 402 cliff.
+- **Capacity spill** (`max_inflight_per_backend`), expressed as a ceiling on a
+  rule's own targets so spilling is ordinary first-match-wins ordering rather
+  than a second mechanism.
+- **Time windows** (`after`/`before`/`days`/`utc_offset_minutes`), with
+  midnight wrap-around.
+- Write-time validation, so a malformed condition is a 400 rather than a rule
+  that silently never matches.
+
+No migration was needed: conditions live in `routing_rules.match_json` (JSONB)
+and targets were already an ordered weighted list.
+
+Rejected, with reasons:
+
+- **Regex/content matching on the prompt.** Scanning user text on the request
+  path, easy to get subtly wrong, and it invites a policy engine to grow inside
+  a gateway.
+- **Semantic routing** (embed the prompt, route by similarity) is the idea
+  worth having instead, and it needs its own design: an embedding per request
+  is a network call on the hot path, which is the one thing this architecture
+  forbids. Any viable version has to answer where the embedding comes from
+  (in-process model? cached by prefix? computed only for a sampled subset?)
+  before it is worth building.
