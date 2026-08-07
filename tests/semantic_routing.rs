@@ -212,6 +212,10 @@ async fn grant_all(pool: &sqlx::PgPool, principal_id: i64, role_name: &str) {
 struct Fixture {
     key: String,
     virtual_name: String,
+    /// Only read by the classification test, which is gated on the
+    /// `classifier` feature — without it, nothing routes to the coding model
+    /// and there is nothing to assert against.
+    #[cfg_attr(not(feature = "classifier"), allow(dead_code))]
     coding_base: String,
     default_base: String,
 }
