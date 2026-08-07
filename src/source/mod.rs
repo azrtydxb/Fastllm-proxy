@@ -12,6 +12,7 @@ pub mod http;
 
 use crate::snapshot::Snapshot;
 use crate::state::AppState;
+#[cfg(test)]
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +63,17 @@ impl<S: SnapshotSource> SnapshotSource for WithLegacyMasterKey<S> {
 
 /// One poll. Swaps only when the source reports a new version, so a steady
 /// state costs one HTTP request with an ETag and no allocation.
+/// Test-only, and `#[cfg(test)]` deliberately.
+///
+/// This writes straight to an `ArcSwap<Snapshot>`, which is exactly what
+/// production must NOT do: `AppState::apply_snapshot` is the single write
+/// path, and it rebuilds the routing registry in the same call so the two
+/// can never diverge. A review caught that divergence as a Critical bug once
+/// already. `spawn_poller` goes through `apply_snapshot`; this function
+/// survives only so the tests below can exercise the "unchanged version does
+/// not swap" contract against a bare cell, and compiling it out of release
+/// builds means nobody can reintroduce the bypass by calling it.
+#[cfg(test)]
 pub async fn poll_once(
     source: &impl SnapshotSource,
     cell: &ArcSwap<Snapshot>,

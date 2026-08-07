@@ -30,9 +30,12 @@ Known gaps carried forward rather than silently fixed:
   backend. `/snapshot` must still be TLS wherever a backend has a real
   credential. See README.md's "Encryption at rest" section.
 
-Deliberately not covered by P0: rate limits (P2), usage and budgets (P3),
-virtual models and routing (P1), the management UI (P4), and `POST /usage`
-(the wire protocol has it; nothing sends to it until P2).
+All later phases are now implemented too: virtual models and rule-based
+routing (P1), rate limits with reconciliation (P2), usage accounting and
+budgets (P3), and the embedded management UI with session authentication
+(P4). `POST /usage` is wired end to end — the data plane's tail buffer reads
+the upstream's real token counts and the control plane folds them into
+`budgets.tokens_used`.
 
 ## Features
 
