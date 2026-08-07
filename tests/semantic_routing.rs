@@ -7,6 +7,12 @@
 //! different model — and, just as importantly, that a deployment which defines
 //! no classes behaves exactly as it did before the feature existed.
 //!
+//! The classification test is gated on the `classifier` feature: without it the
+//! binary compiles fine and the CLI flag is still accepted, but `classify`
+//! always returns `None`, so a rule naming a class can never match. Running
+//! that assertion in a build with no classifier would fail for a reason that
+//! has nothing to do with the code under test.
+//!
 //! Needs the classifier model, which is downloaded once and cached by
 //! `model2vec-rs`:
 //!
@@ -303,6 +309,7 @@ const CODING_EXAMPLES: &[&str] = &[
     "Refactor this class to use dependency injection.",
 ];
 
+#[cfg(feature = "classifier")]
 const CHAT_EXAMPLES: &[&str] = &[
     "What is the capital of France?",
     "Tell me a joke about computers.",
@@ -330,6 +337,7 @@ fn wait_for_routing(port: u16, key: &str, model: &str) {
 
 /// The headline: a coding prompt and a chat prompt, identical in every way the
 /// other rule conditions can see, reach different models.
+#[cfg(feature = "classifier")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres and the classifier model"]
 async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {

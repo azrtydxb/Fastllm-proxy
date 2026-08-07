@@ -48,6 +48,16 @@ jobs:
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
         run: cargo test --features control --locked -- --include-ignored
+      # Semantic routing is behind a feature, so the run above never compiles
+      # it — and a test that needs it is `#[cfg]`d out rather than failing for
+      # the wrong reason. This run is what actually exercises it. The model is
+      # fetched from HuggingFace on first use and cached by the runner.
+      - name: Clippy (classifier)
+        run: cargo clippy --all-targets --features "control classifier-tier2" -- -D warnings
+      - name: Test (classifier)
+        env:
+          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+        run: cargo test --features "control classifier" --locked -- --include-ignored
 
   publish:
     # Only what lands on main or a tag becomes an image; a PR just gets tested.
