@@ -511,6 +511,67 @@ mod tests {
     }
 
     #[test]
+    fn a_reconciled_share_that_is_never_literally_zero_still_admits_traffic() {
+        // End-to-end pin for the idle-replica bug: `control::reconcile`'s
+        // floor (see its `share_of`) guarantees this replica never receives
+        // an `Allowance` of exactly 0.0 for a principal it hasn't seen
+        // traffic from. This test is the other half -- confirming that once
+        // such a nonzero-but-small share is applied here, `check` actually
+        // admits requests with it, rather than `effective_capacity`
+        // rounding it back down to nothing.
+        let limiter = Limiter::new();
+        let lim = limits(Some(100), None);
+        let now = Instant::now();
+        // Touch the principal once so a bucket exists to apply a share to.
+        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+
+        // A small but nonzero floor share, as the idle-replica fix hands
+        // out -- e.g. 1/4 live replicas.
+        limiter.apply_allowances(&[Allowance {
+            principal_id: 1,
+            requests_share: 0.25,
+            tokens_share: 0.25,
+        }]);
+
+        // effective_capacity = 100 * 0.25 = 25, so 25 requests should be
+        // admitted, not zero.
+        for i in 0..25 {
+            assert_eq!(
+                limiter.check(1, &lim, 1, now),
+                Decision::Admitted,
+                "request {i} of 25 should be admitted under a nonzero floor share"
+            );
+        }
+    }
+
+    #[test]
+    fn a_literal_zero_share_would_deny_every_request_demonstrating_why_the_floor_matters() {
+        // Documents the bug this module's callers must never reintroduce:
+        // if `control::reconcile` ever again handed back a literal 0.0
+        // share for a principal with traffic elsewhere, `Limiter` itself
+        // has no independent floor -- it trusts the share it's given. This
+        // is why the floor lives in `control::reconcile::share_of`, not
+        // here: by the time `Limiter::check` sees a share, it must already
+        // be safe to multiply in.
+        let limiter = Limiter::new();
+        let lim = limits(Some(100), None);
+        let now = Instant::now();
+        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+
+        limiter.apply_allowances(&[Allowance {
+            principal_id: 1,
+            requests_share: 0.0,
+            tokens_share: 0.0,
+        }]);
+
+        assert!(
+            matches!(limiter.check(1, &lim, 1, now), Decision::Exceeded { .. }),
+            "a literal-zero share denies every request, which is exactly why \
+             control::reconcile::share_of must never produce one while total > 0"
+        );
+    }
+
+    #[test]
     fn a_rejected_request_still_counts_as_observed_demand() {
         // Otherwise a replica that is mostly rejecting a principal's traffic
         // would look idle to the reconciler and never earn a larger share

@@ -95,20 +95,64 @@ impl ReconcileState {
         let total_requests: u64 = per_replica.values().map(|c| c.requests).sum();
         let total_tokens: u64 = per_replica.values().map(|c| c.tokens).sum();
         let mine = per_replica.get(replica_id).copied();
+        let live_replicas = per_replica.len();
 
         Share {
-            requests: share_of(mine.map(|c| c.requests).unwrap_or(0), total_requests),
-            tokens: share_of(mine.map(|c| c.tokens).unwrap_or(0), total_tokens),
+            requests: share_of(
+                mine.map(|c| c.requests).unwrap_or(0),
+                total_requests,
+                live_replicas,
+            ),
+            tokens: share_of(
+                mine.map(|c| c.tokens).unwrap_or(0),
+                total_tokens,
+                live_replicas,
+            ),
         }
     }
 }
 
-fn share_of(mine: u64, total: u64) -> f64 {
+/// `live_replicas` is every replica this principal has a fresh report from
+/// (including `mine` itself, and including replicas that reported zero) --
+/// i.e. `per_replica.len()` at the point this is called.
+fn share_of(mine: u64, total: u64, live_replicas: usize) -> f64 {
     if total == 0 {
-        1.0
-    } else {
-        (mine as f64 / total as f64).clamp(0.0, 1.0)
+        // Nobody has reported any traffic for this principal at all: there
+        // is nothing to divide, and answering 0.0 would round every
+        // replica's first few seconds down to no allowance on all of them
+        // at once, until a second report changes the total away from zero.
+        return 1.0;
     }
+    if mine == 0 {
+        // `mine == 0` with `total > 0` means *other* replicas have seen
+        // this principal's traffic but this one has not -- an idle
+        // replica, not a starved one. The naive `0 / total = 0.0` answer is
+        // the real-production bug this floor exists to close:
+        // `Limiter::check` multiplies the share straight into
+        // `effective_capacity` (limiter.rs), and a capacity of exactly zero
+        // makes `BucketState::take` reject *every* request for the rest of
+        // the window no matter how far under its limit the principal
+        // actually is on this replica -- total denial while under limit,
+        // not the bounded over-admission this module's doc comment already
+        // accepts as the design's cost.
+        //
+        // Floor at `1/live_replicas`: the natural "everyone gets an equal
+        // slice" allowance for a replica with no demand history to divide
+        // by. It costs at most one window of modest spare capacity sitting
+        // idle on this replica (self-correcting at the next report, and
+        // strictly milder than total denial); it comes out of nobody else's
+        // share, because it is not subtracted from `total` -- a busy
+        // replica's own `mine / total` is computed independently below and
+        // is never reduced to pay for an idle peer's floor. That means the
+        // sum of every replica's share can exceed 1.0 while some replica is
+        // idle, but only ever by that idle replica's own floor, and it
+        // collapses back to summing to exactly 1.0 the moment every replica
+        // has nonzero demand again (the normal, steady-state case) -- which
+        // is exactly when staying tight to the configured limit matters
+        // most.
+        return (1.0 / live_replicas.max(1) as f64).min(1.0);
+    }
+    (mine as f64 / total as f64).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -270,6 +314,88 @@ mod tests {
                 requests: 0.1,
                 tokens: 0.1
             }
+        );
+    }
+
+    /// Regression test for the real-production bug: a replica that saw zero
+    /// traffic for a principal in the last window must not be handed a
+    /// literal-zero share, or `Limiter::check` denies every request for that
+    /// principal on this replica no matter how far under its limit it is.
+    #[test]
+    fn an_idle_replica_does_not_collapse_to_a_zero_share() {
+        let state = ReconcileState::new();
+        let now = Instant::now();
+        state.report("busy", 1, 100, 100, now);
+        let idle = state.report("idle", 1, 0, 0, now);
+        assert!(
+            idle.requests > 0.0,
+            "an idle replica must still get some allowance"
+        );
+        assert!(
+            idle.tokens > 0.0,
+            "an idle replica must still get some allowance"
+        );
+        // Two live replicas -> the floor is 1/2.
+        assert_eq!(idle.requests, 0.5);
+        assert_eq!(idle.tokens, 0.5);
+    }
+
+    /// The floor an idle replica gets must not be paid for by shrinking a
+    /// genuinely busy replica's own share -- otherwise fixing the idle case
+    /// would create a new, milder version of the same starvation bug for the
+    /// replica that is actually handling the traffic.
+    #[test]
+    fn an_idle_replicas_floor_does_not_shrink_a_busy_peers_share() {
+        let state = ReconcileState::new();
+        let now = Instant::now();
+        let busy = state.report("busy", 1, 100, 100, now);
+        assert_eq!(
+            busy,
+            Share {
+                requests: 1.0,
+                tokens: 1.0
+            },
+            "busy was the only report at the time it asked"
+        );
+        state.report("idle", 1, 0, 0, now);
+        let busy_again = state.report("busy", 1, 100, 100, now);
+        assert_eq!(
+            busy_again,
+            Share {
+                requests: 1.0,
+                tokens: 1.0
+            },
+            "an idle peer's floor must not come out of the busy replica's own share"
+        );
+    }
+
+    /// In the normal case -- every replica has some genuine, unequal demand,
+    /// nobody idle -- the floor never applies, and shares must add up to
+    /// exactly the configured limit's worth, never more. This is the
+    /// property that would break if the idle-replica floor above were
+    /// applied unconditionally instead of only when `mine == 0`.
+    #[test]
+    fn steady_state_shares_never_sum_above_one() {
+        let state = ReconcileState::new();
+        let now = Instant::now();
+        state.report("a", 1, 500, 500, now);
+        state.report("b", 1, 300, 300, now);
+        state.report("c", 1, 200, 200, now);
+        // Re-report each now that all three are visible, to read back the
+        // final, fully-aggregated share for every one of them.
+        let a = state.report("a", 1, 500, 500, now);
+        let b = state.report("b", 1, 300, 300, now);
+        let c = state.report("c", 1, 200, 200, now);
+
+        let total_requests = a.requests + b.requests + c.requests;
+        let total_tokens = a.tokens + b.tokens + c.tokens;
+        assert!(
+            (total_requests - 1.0).abs() < 1e-9,
+            "expected shares to sum to exactly 1.0, got {total_requests}"
+        );
+        assert!(
+            (total_tokens - 1.0).abs() < 1e-9,
+            "expected shares to sum to exactly 1.0, got {total_tokens}"
         );
     }
 }
