@@ -297,6 +297,26 @@ fn main() {
             }),
     );
 
+    // Is ten classes too many, or are *those* ten the problem? no_robots'
+    // Generation / Brainstorm / Chat are three names for "write me something
+    // open-ended" and overlap by construction; a customer defining their own
+    // classes would not draw them that way. This set keeps the categories that
+    // describe a distinct *task* and drops the fuzzy generative trio, so the
+    // two runs differ in which classes exist rather than in how many.
+    const TASK_SHAPED: &[&str] = &[
+        "Coding",
+        "Summarize",
+        "Rewrite",
+        "Extract",
+        "Classify",
+        "Closed QA",
+    ];
+    let task_shaped: Vec<Labelled> = no_robots
+        .iter()
+        .filter(|r| TASK_SHAPED.contains(&r.category.as_str()))
+        .cloned()
+        .collect();
+
     for (name, repo) in MODELS {
         print!("{name} ... ");
         use std::io::Write;
@@ -321,7 +341,12 @@ fn main() {
             print_report(
                 "10-way category",
                 &evaluate(&model, &no_robots, *cap, 0.7),
-                false,
+                true,
+            );
+            print_report(
+                "6 task-shaped classes",
+                &evaluate(&model, &task_shaped, *cap, 0.7),
+                true,
             );
             print_report(
                 "reasoning vs lookup",
