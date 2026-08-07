@@ -213,12 +213,11 @@ Rejected, with reasons:
 - **Regex/content matching on the prompt.** Scanning user text on the request
   path, easy to get subtly wrong, and it invites a policy engine to grow inside
   a gateway.
-- **Semantic routing** (embed the prompt, route by similarity) is the idea
-  worth having instead, and it needs its own design: an embedding per request
-  is a network call on the hot path, which is the one thing this architecture
-  forbids. Any viable version has to answer where the embedding comes from
-  (in-process model? cached by prefix? computed only for a sampled subset?)
-  before it is worth building.
+- **Semantic routing** (embed the prompt, route by similarity) was the idea
+  worth having instead. It has since been built — see "Semantic routing" below.
+  The objection recorded here was that an embedding per request would be a
+  network call on the hot path; the answer turned out to be an in-process
+  static embedding at ~115µs, which is neither a network call nor measurable.
 
 ## Semantic routing (2026-08-07)
 
@@ -261,6 +260,12 @@ binary question).
 
 Still not done:
 
+- The dev Postgres allows 100 connections, and a full `--include-ignored` run
+  spawns enough proxies to exhaust them — twice now, presenting as every
+  end-to-end test failing at once with `PoolTimedOut`, which looks like a code
+  failure and is not. Either raise `max_connections` on the kw cluster or give
+  the tests a smaller pool; until then, `SELECT pg_terminate_backend(pid) ...
+  WHERE state = 'idle'` is the recovery.
 - No classification cache. The prefix hash the router already computes would
   key one, so a multi-turn conversation classifies once instead of per turn.
   Worth doing only if 115us ever shows up in a profile, which it has not.
