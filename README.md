@@ -188,23 +188,32 @@ with callbacks and caching off — anything that would slow it down without bein
 intrinsic to it is turned off, because a comparison that misconfigures the
 other side proves nothing. Manifests are in [bench/compare/](bench/compare/).
 
-**With a real GPU in the path**, three interleaved rounds (A/B/A/B, to cancel
-drift on a shared GPU), median of medians:
+**With a real GPU in the path**, 7-8 interleaved A/B pairs per concurrency
+level. Ratios are computed *within* each pair, because absolute throughput on a
+shared GPU drifts between sessions and only the paired comparison cancels it.
+Backend attribution was verified from each vLLM replica's
+`vllm:request_success_total`: both gateways spread across both replicas
+(fastllm-proxy 13/14, LiteLLM 15/11 over one run), so neither was accidentally
+running against half the hardware.
 
-| concurrency | TTFT p50 | | throughput | |
-|---|---|---|---|---|
-| | fastllm-proxy | LiteLLM | fastllm-proxy | LiteLLM |
-| 1 | 149 ms | **136 ms** | 34.6 tok/s | 34.6 tok/s |
-| 4 | **183 ms** | 293 ms | **98.0 tok/s** | 84.2 tok/s |
-| 8 | **173 ms** | 191 ms | **150.4 tok/s** | 143.4 tok/s |
+| | fastllm-proxy | LiteLLM | median ratio |
+|---|---|---|---|
+| TTFT p50, 4 streams | **161 ms** (134-277) | 189 ms (160-544) | **1.28x** |
+| TTFT p50, 8 streams | **173 ms** (165-184) | 201 ms (186-469) | **1.14x** |
+| throughput, 4 streams | 74 tok/s | 69 tok/s | 1.09x |
+| throughput, 8 streams | 133 tok/s | 122 tok/s | 1.03x |
 
-At concurrency 1 it is a tie, and LiteLLM took that round — inference dominates
-so completely that the gateway is invisible, and this is run-to-run noise on a
-shared GPU. The gap opens as concurrency rises: **+16% throughput at 4
-concurrent streams, +5% at 8**, with lower and much steadier TTFT.
+**Throughput is close to a wash.** At 8 concurrent streams the median advantage
+is 3%, which is inside the run-to-run noise of a shared GPU. At concurrency 1
+(not tabled) it is a tie, and LiteLLM won some rounds. If your bottleneck is the
+GPU, the gateway barely moves your token rate — that is the honest headline for
+a single-GPU deployment.
 
-That is the honest headline for a single-GPU deployment: *if your bottleneck is
-the GPU, the gateway barely matters.*
+**Latency and its consistency are where the difference is real.** Median TTFT is
+14-28% lower, and the spread matters more than the median: across eight rounds
+at 8 concurrent streams, fastllm-proxy's TTFT stayed within **165-184 ms** while
+LiteLLM's ranged **186-469 ms**. A p50 that moves by 20 ms and a p50 that moves
+by 280 ms are different products even when their medians are close.
 
 **With the GPU removed from the path** — a mock upstream that answers instantly,
 so the gateway is the only thing left to measure:
