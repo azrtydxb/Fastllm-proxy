@@ -3976,6 +3976,8 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_service_account_credential_is_validated_when_the_backend_is_created() {
         let (ctx, _cache) = test_ctx().await;
+        // Backends cascade from the model, so tracking the model is enough.
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "gcp-validate-");
         let model_name = unique_name("gcp-validate");
         let (_, model) = post_model(
             State(ctx.clone()),
