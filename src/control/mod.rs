@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod build;
 pub mod db;
+pub mod gcp;
 pub mod import;
 pub mod reconcile;
 pub mod secrets;

@@ -108,6 +108,34 @@ Verified base URLs for the OpenAI-compatible set:
 | Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
 | GitHub Models | `https://models.github.ai/inference` |
 | Ollama | `http://localhost:11434` |
+| Cohere | `https://api.cohere.ai/compatibility/v1` |
+| Amazon Bedrock | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` |
+| Google Vertex AI | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` |
+
+**Bedrock** needs no request signing. Its OpenAI-compatible endpoint takes a
+Bedrock API key as an ordinary bearer token, so it is a plain backend row like
+any other — create the key in the Bedrock console and put it in
+`upstream_api_key`.
+
+**Vertex AI** is the one provider that cannot be reached with a static secret:
+it wants an OAuth2 access token, and those expire hourly. Give it the service
+account's JSON key file and say so:
+
+```bash
+-d '{"api_base":"https://europe-west1-aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west1/endpoints/openapi",
+     "upstream_model":"google/gemini-2.5-flash",
+     "credential_kind":"gcp_service_account",
+     "upstream_api_key":"<the whole service-account JSON key file>"}'
+```
+
+The control plane exchanges the key file for an access token while building
+each snapshot, caches it until five minutes before expiry, and ships the
+*token*. The data plane never learns this backend is different — it presents a
+bearer credential exactly as it would a static one, and performs no I/O to
+obtain it. A key file that is not one is rejected when the backend is created,
+rather than becoming a backend that disappears from routing on the next
+rebuild. If minting fails later — a revoked key, a role removed — that one
+backend drops out with the reason logged, and every other model keeps serving.
 
 **Anthropic and Gemini** speak their own wire formats and are reached by
 setting `protocol`. The auth header and scheme are filled in automatically —

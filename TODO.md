@@ -147,18 +147,66 @@ Verified end to end through a real proxy against a mock Anthropic provider
 (`tests/native_protocols.rs`), both turns: the call comes back, and the
 transcript carrying its result translates on the way in.
 
-Deliberately not done, each additive and small:
+Nothing outstanding here: the two items that used to follow — multimodal, and
+the three remaining providers — are both built. See below.
 
-- Multimodal (image/audio parts) through a translated backend. The same shape
-  as the tool calling above, and smaller: `content` parts of type
-  `image_url` become Anthropic `image` blocks
-  with base64 `source`, or Gemini `inline_data`. The refusal lives in
-  `Content::into_text`, which flattens to a string today. No streaming
-  complication — images are input only.
-- Cohere, Bedrock and Vertex. Bedrock needs SigV4 request signing and Vertex
-  needs OAuth2 service-account tokens with background refresh; both put
-  credential machinery near the request path and neither is reachable by
-  configuration alone the way the other 21 providers are.
+## Image and audio input through translated backends — done
+
+`Content::into_text` flattened every message to a string, so a multimodal
+request to a native backend was a 501. Parts now keep their order, because
+order carries meaning: the same words before and after an image ask different
+questions. Adjacent text still joins, so a text-only turn goes out as a bare
+string exactly as before.
+
+Media never causes a fetch. `data:` URLs translate inline with the base64
+untouched; a remote URL is handed to Anthropic, which resolves it itself.
+Downloading it here would be a network call while serving a request.
+
+Two cases are refused by name rather than approximated: a remote URL for
+Gemini, whose `fileData.fileUri` only addresses Google's own Files API, and
+audio for Anthropic, which has no audio input at all. Media in a system prompt
+or a tool result is still refused — neither protocol has a form for it, and
+keeping only the text would discard the image being asked about.
+
+## Cohere, Bedrock and Vertex — done
+
+The entry that used to sit here said Bedrock needed SigV4 request signing and
+that none of the three was reachable by configuration. That is no longer true,
+and the correction is most of the work:
+
+- **Cohere** ships an OpenAI-compatible endpoint at
+  `https://api.cohere.ai/compatibility/v1`. A backend row, no code.
+- **Bedrock** now serves the Chat Completions API at
+  `bedrock-runtime.<region>.amazonaws.com/openai/v1` and authenticates with a
+  Bedrock API key as a bearer token. No SigV4, no credential machinery, no
+  code — a backend row.
+- **Vertex AI** is the one that genuinely needed code, and it is the one the
+  old entry described correctly: an OAuth2 access token that expires hourly.
+
+Vertex is built as `credential_kind = 'gcp_service_account'` (migration 0016).
+The column then holds the service account's JSON key file rather than a usable
+credential, and `src/control/gcp.rs` exchanges it for an access token during
+snapshot build — RS256 assertion signed with `ring`, posted to Google's token
+endpoint over the crate's one shared HTTP client.
+
+Three things decided the shape:
+
+- **It belongs in the control plane.** Minting is a network call, and the
+  request path performs no I/O. The control plane already rebuilds and ships
+  snapshots on a schedule, so the token travels as an ordinary `api_key` and
+  the data plane never learns the difference — no new hot-path field, no
+  refresh timer in the proxy.
+- **The cache is not optional.** Rebuilds run about every second; minting per
+  rebuild would be thousands of token requests an hour to re-derive an
+  hour-long value. Tokens are cached per service account and reused until five
+  minutes before expiry.
+- **Failures stay contained.** A revoked key drops that one backend with the
+  reason logged, exactly as a failed decrypt does, rather than failing the
+  whole rebuild and taking unrelated models offline.
+
+Not verified against Google's live endpoint: this deployment has no GCP
+service account. The JWT assembly, base64url encoding, credential validation
+and error paths are unit-tested; the token exchange itself is not.
 
 ## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
 

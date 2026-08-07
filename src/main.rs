@@ -506,6 +506,10 @@ async fn run_control(cli: Cli) -> Result<()> {
         // silently stops matching after a restart.
         #[cfg(feature = "classifier")]
         register_snapshot_embedder(&cli);
+        // Before the first build, for the same reason as the embedder above: a
+        // backend whose credential has to be minted would otherwise be missing
+        // from the very first snapshot, and unroutable until the next rebuild.
+        register_token_minter(&cli)?;
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
         let cache: Arc<dyn fastllm_proxy::control::api::SnapshotSink> =
@@ -558,13 +562,14 @@ async fn run_all(cli: Cli) -> Result<()> {
         // silently stops matching after a restart.
         #[cfg(feature = "classifier")]
         register_snapshot_embedder(&cli);
-        let pool = fastllm_proxy::control::db::connect(&db_url).await?;
-        let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
 
-        debug!("startup: snapshot built, loading tuning config");
+        debug!("startup: loading tuning config");
         let tuning_cfg = load_tuning_config(cli.config.as_ref())?;
         let tuning = tuning_cfg.fastllm.clone();
         let interner = Interner::default();
+        // Built before the first snapshot, not after: minting a Vertex access
+        // token needs it, and a backend whose credential could not be minted
+        // is dropped from the snapshot it was being built for.
         let client = Arc::new(upstream::Upstream::new(
             upstream::Config {
                 max_idle_per_host: cli.pool_max_idle,
@@ -573,6 +578,9 @@ async fn run_all(cli: Cli) -> Result<()> {
             },
             tls_config(cli.ca_bundle.as_deref())?,
         ));
+        fastllm_proxy::control::gcp::init(Arc::clone(&client));
+        let pool = fastllm_proxy::control::db::connect(&db_url).await?;
+        let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
         let master_key = cli
             .master_key
             .clone()
@@ -1234,6 +1242,25 @@ impl fastllm_proxy::control::build::PromptClassEmbedder for SnapshotEmbedder {
 /// centroids, and `--role all` ends up loading it twice. Two copies of a 61MB
 /// table is the cheaper mistake than sharing one across a boundary the two
 /// roles otherwise keep clean.
+/// Give the control plane the HTTP client it needs to mint access tokens.
+///
+/// `--role control` proxies nothing, so it has no client of its own; this is
+/// the one it gets. `--role all` shares the client it already has rather than
+/// standing up a second pool.
+#[cfg(feature = "control")]
+fn register_token_minter(cli: &Cli) -> Result<()> {
+    let client = Arc::new(upstream::Upstream::new(
+        upstream::Config {
+            max_idle_per_host: cli.pool_max_idle,
+            idle_timeout: Duration::from_secs(90),
+            connect_timeout: Duration::from_secs(5),
+        },
+        tls_config(cli.ca_bundle.as_deref())?,
+    ));
+    fastllm_proxy::control::gcp::init(client);
+    Ok(())
+}
+
 #[cfg(all(feature = "control", feature = "classifier"))]
 fn register_snapshot_embedder(cli: &Cli) {
     let Some(source) = cli.classifier_model.as_deref() else {

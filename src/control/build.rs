@@ -4,6 +4,7 @@
 //! path is a set lookup: roles are resolved to permissions, permissions to
 //! model names, and wildcards expanded against the known model list.
 
+use crate::control::gcp;
 use crate::control::secrets::{self, EncryptionKey};
 use crate::protocol::Protocol;
 use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
@@ -92,10 +93,11 @@ pub async fn build_snapshot_with(
         String,
         Option<String>,
         Option<i32>,
+        String,
     );
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
         "SELECT model_id, api_base, upstream_model, upstream_api_key, protocol, auth_header, \
-         auth_scheme, default_max_tokens FROM model_backends",
+         auth_scheme, default_max_tokens, credential_kind FROM model_backends",
     )
     .fetch_all(pool)
     .await?;
@@ -103,8 +105,17 @@ pub async fn build_snapshot_with(
     let mut models = Vec::new();
     for (id, name) in &model_rows {
         let mut backends = Vec::new();
-        for (_, base, upstream, encrypted_key, protocol, auth_header, auth_scheme, max_tokens) in
-            backend_rows.iter().filter(|(mid, ..)| mid == id)
+        for (
+            _,
+            base,
+            upstream,
+            encrypted_key,
+            protocol,
+            auth_header,
+            auth_scheme,
+            max_tokens,
+            credential_kind,
+        ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
             // propagated as a `build_snapshot` error. It used to be: one row
@@ -139,6 +150,42 @@ pub async fn build_snapshot_with(
                         continue;
                     }
                 },
+            };
+            // A service-account key file is not a credential the proxy can
+            // present; it is exchanged for a short-lived access token here, so
+            // the snapshot carries an ordinary bearer token and the data plane
+            // never learns this backend was different. A failure is contained
+            // to this backend for the same reason a decrypt failure is: an
+            // expired key or a revoked account must not take every unrelated
+            // model offline.
+            let api_key = if credential_kind == "gcp_service_account" {
+                match api_key.as_deref() {
+                    Some(json) => match gcp::access_token(json).await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            tracing::error!(
+                                error = %format!("{e:#}"),
+                                model = %name,
+                                api_base = %base,
+                                "dropping backend: could not mint a Google access token from its \
+                                 service account; excluded from this snapshot rather than failing \
+                                 the whole rebuild"
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
+                        tracing::error!(
+                            model = %name,
+                            api_base = %base,
+                            "dropping backend: credential_kind is gcp_service_account but no \
+                             upstream_api_key is set"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                api_key
             };
             // The column is CHECK-constrained to the names `Protocol::parse`
             // knows, so this only fails if the two drift apart — in which case

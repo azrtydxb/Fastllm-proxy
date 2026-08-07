@@ -31,7 +31,7 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 
 ## Providers
 
-**Twenty providers work today, and adding one is a row in a table — not a code change, not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list.
+**Twenty-three providers work today, and adding one is a row in a table — not a code change, not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list.
 
 | reached as-is (OpenAI-compatible) | |
 |---|---|
@@ -41,6 +41,9 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 | Z.ai · BigModel · Aliyun DashScope · Qwen Cloud | |
 | Moonshot / Kimi · Baidu Qianfan · AIHubMix | |
 | GitHub Models · Ollama · vLLM · SGLang · llama.cpp | self-hosted or hosted, same row shape |
+| **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
+| **Cohere** | `https://api.cohere.ai/compatibility/v1` |
+| **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [docs/api.md](docs/api.md#providers) for the service-account credential |
 
 | reached through their own wire format | |
 |---|---|

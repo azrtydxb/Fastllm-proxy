@@ -245,6 +245,12 @@ curl -sk -b /tmp/ck -X POST https://127.0.0.1:4001/admin/models/$ID/backends \
        "upstream_api_key":"sk-or-..."}'
 ```
 
+Bedrock and Cohere are ordinary rows: both speak OpenAI format with a bearer
+key, and Bedrock needs no SigV4 signing. Vertex AI takes the service account's
+JSON key file plus `"credential_kind":"gcp_service_account"` — the control
+plane mints and refreshes the access token, so the proxy pods need no Google
+credentials and no egress to `oauth2.googleapis.com`; the control plane does.
+
 Reaching Anthropic or Gemini directly means adding `"protocol":"anthropic"`
 or `"protocol":"gemini"`. Two operational notes:
 

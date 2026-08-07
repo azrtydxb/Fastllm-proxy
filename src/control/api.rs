@@ -785,6 +785,13 @@ struct NewBackend {
     /// capped at a number nobody chose.
     #[serde(default)]
     default_max_tokens: Option<i32>,
+    /// How to read `upstream_api_key`. Absent means `static` — the key is the
+    /// credential. `gcp_service_account` means it is a Google service-account
+    /// key file, which the control plane exchanges for an access token on
+    /// every snapshot build; that is what Vertex AI needs, and the only
+    /// provider here that cannot use a static secret.
+    #[serde(default)]
+    credential_kind: Option<String>,
 }
 
 impl NewBackend {
@@ -800,6 +807,7 @@ impl NewBackend {
             auth_header: None,
             auth_scheme: None,
             default_max_tokens: None,
+            credential_kind: None,
         }
     }
 }
@@ -883,6 +891,30 @@ async fn post_backend(
             "default_max_tokens must be greater than zero".to_string(),
         ));
     }
+    let credential_kind = body.credential_kind.unwrap_or_else(|| "static".into());
+    if !matches!(credential_kind.as_str(), "static" | "gcp_service_account") {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account"
+            ),
+        ));
+    }
+    // Checked at write time because the alternative is a backend that looks
+    // configured, disappears from routing on the next rebuild, and explains
+    // itself only in the control plane's log.
+    if credential_kind == "gcp_service_account"
+        && !body
+            .upstream_api_key
+            .as_deref()
+            .is_some_and(crate::control::gcp::ServiceAccount::looks_like_one)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credential_kind gcp_service_account needs upstream_api_key to be the service              account's JSON key file, with `client_email` and `private_key`"
+                .to_string(),
+        ));
+    }
     let (default_header, default_scheme) = auth_defaults_for(&protocol);
     let auth_header = body
         .auth_header
@@ -897,8 +929,8 @@ async fn post_backend(
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key, \
-         protocol, auth_header, auth_scheme, default_max_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+         protocol, auth_header, auth_scheme, default_max_tokens, credential_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(model_id)
     .bind(&api_base)
@@ -908,6 +940,7 @@ async fn post_backend(
     .bind(&auth_header)
     .bind(&auth_scheme)
     .bind(body.default_max_tokens)
+    .bind(&credential_kind)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| db_error("backend creation", &e))?;
@@ -923,6 +956,7 @@ async fn post_backend(
             "auth_header": auth_header,
             "auth_scheme": auth_scheme,
             "default_max_tokens": body.default_max_tokens,
+            "credential_kind": credential_kind,
         })),
     ))
 }
@@ -3934,6 +3968,109 @@ mod tests {
     /// error or create a row — `apply_usage_to_budgets`'s `UPDATE` simply
     /// matches zero rows, same as any other principal with nothing
     /// configured.
+    /// A backend declaring a service-account credential must be rejected at
+    /// write time if the credential is not one. Left to snapshot build, the
+    /// mistake becomes a backend that looks configured in the API, is missing
+    /// from routing, and says so only in the control plane's log.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_service_account_credential_is_validated_when_the_backend_is_created() {
+        let (ctx, _cache) = test_ctx().await;
+        let model_name = unique_name("gcp-validate");
+        let (_, model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let model_id = model.0["id"].as_i64().unwrap();
+
+        let vertex = |key: Option<String>, kind: Option<&str>| {
+            NewBackend {
+            api_base: "https://europe-west1-aiplatform.googleapis.com/v1/projects/p/locations/europe-west1/endpoints/openapi".into(),
+            upstream_model: None,
+            upstream_api_key: key,
+            protocol: None,
+            auth_header: None,
+            auth_scheme: None,
+            default_max_tokens: None,
+            credential_kind: kind.map(str::to_string),
+        }
+        };
+
+        // A plain API key is not a service-account key file.
+        let err = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+            Json(vertex(
+                Some("sk-not-a-key-file".into()),
+                Some("gcp_service_account"),
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Nor is no credential at all.
+        let err = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+            Json(vertex(None, Some("gcp_service_account"))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // An unknown kind names the valid ones rather than reaching the
+        // column's CHECK constraint as a Postgres error.
+        let err = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+            Json(vertex(Some("x".into()), Some("iam_role"))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // A real key file shape is accepted, and the kind is echoed back so an
+        // operator can see which credential path a backend is on.
+        let key_file = serde_json::json!({
+            "type": "service_account",
+            "client_email": "vertex@example.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+        })
+        .to_string();
+        let (status, created) = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+            Json(vertex(Some(key_file), Some("gcp_service_account"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.0["credential_kind"], "gcp_service_account");
+
+        // And the default stays `static`, so every existing caller is
+        // unaffected by the field existing.
+        let (_, plain) = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+            Json(NewBackend::openai("http://plain:8000/v1", None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.0["credential_kind"], "static");
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn a_usage_report_for_an_unbudgeted_principal_creates_no_budget_row() {
