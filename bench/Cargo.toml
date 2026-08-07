@@ -28,6 +28,14 @@ path = "src/micro.rs"
 name = "load"
 path = "src/load.rs"
 
+# Evaluates Model2Vec static embedding models as a routing classifier (see
+# `src/potion.rs`). Lives in `bench` rather than the proxy so the decision of
+# *whether* to embed a model at all stays separable from the proxy's own
+# dependency tree — nothing here ships in the image.
+[[bin]]
+name = "potion"
+path = "src/potion.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
@@ -36,3 +44,4 @@ http-body-util = "0.1"
 bytes = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+model2vec-rs = "0.2"
