@@ -6,6 +6,11 @@ It fronts several inference backends (vLLM, SGLang, llama.cpp — anything speak
 
 It reads LiteLLM-format config files unchanged, so it drops into an existing `sparkrun proxy` setup without rewriting anything.
 
+## Architecture
+
+Component and request-flow diagrams, and the consistency guarantees stated
+plainly, are in [docs/architecture.md](docs/architecture.md).
+
 ## Why
 
 Two separate things go wrong when a conventional gateway sits in front of prefix-caching inference engines.
