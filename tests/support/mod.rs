@@ -73,14 +73,32 @@ pub async fn bootstrap_login_user(pool: &sqlx::PgPool, name: &str) {
 /// return the `Cookie`-ready `fastllm_session=...` value — call
 /// `bootstrap_login_user` first so the principal (and its password) exist.
 pub fn login_cookie(admin_port: u16, name: &str) -> String {
-    let resp = ureq::post(&format!("http://127.0.0.1:{admin_port}/login"))
-        .send_json(ureq::json!({ "name": name, "password": TEST_PASSWORD }))
-        .expect("test admin login must succeed");
-    let raw = resp
-        .header("set-cookie")
-        .expect("login must set a session cookie")
-        .to_string();
-    raw.split(';').next().unwrap().trim().to_string()
+    // Retried, because the admin API listens on a *different* port from the
+    // one the callers' `wait_healthy` polls: a proxy answering `/health` has
+    // not necessarily bound its admin listener yet. That race was always here
+    // and only started failing once enough test binaries ran in parallel to
+    // widen the window — which is the worst way for a harness bug to announce
+    // itself, since it looks like a product failure in whichever test lost.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last;
+    loop {
+        match ureq::post(&format!("http://127.0.0.1:{admin_port}/login"))
+            .send_json(ureq::json!({ "name": name, "password": TEST_PASSWORD }))
+        {
+            Ok(resp) => {
+                let raw = resp
+                    .header("set-cookie")
+                    .expect("login must set a session cookie")
+                    .to_string();
+                return raw.split(';').next().unwrap().trim().to_string();
+            }
+            Err(e) => last = e.to_string(),
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("admin login on port {admin_port} never succeeded within 30s: {last}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
 }
 
 /// Deletes tracked rows on drop. Foreign keys from `model_backends`,

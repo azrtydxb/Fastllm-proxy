@@ -325,6 +325,31 @@ const CHAT_EXAMPLES: &[&str] = &[
     "Give me three ideas for a team offsite.",
 ];
 
+/// Wait until every class reports a centroid.
+///
+/// Not a fixed sleep: the control plane rebuilds the snapshot on its own
+/// schedule, and how long that takes depends on what else is running. Polling
+/// the state the test actually depends on is the difference between a test
+/// that is slow and one that is flaky.
+#[cfg_attr(not(feature = "classifier"), allow(dead_code))]
+fn wait_for_routable_classes(admin_port: u16, cookie: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let classes = admin_get(admin_port, cookie, "/admin/prompt-classes");
+        let routable = classes
+            .as_array()
+            .map(|a| a.iter().filter(|c| c["routable"] == true).count())
+            .unwrap_or(0);
+        if routable >= expected {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("only {routable} of {expected} classes became routable within 30s: {classes}");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn wait_for_routing(port: u16, key: &str, model: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -381,8 +406,7 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
         );
     }
     wait_for_routing(port, &fx.key, &fx.virtual_name);
-    // Give the rebuilder a moment to publish centroids.
-    std::thread::sleep(Duration::from_secs(3));
+    wait_for_routable_classes(admin_port, &cookie, 2);
 
     let coding = routed_to(
         port,
@@ -432,16 +456,30 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix).await;
 
+    // Deliberately *not* coding examples. Every test in this file shares one
+    // Postgres, so every proxy embeds every class that exists — and two classes
+    // seeded with near-identical prompts produce near-identical centroids, which
+    // collapses the margin between them below any floor. That is real product
+    // behaviour (see `POST /admin/prompt-classes/evaluate`, which exists to
+    // surface exactly this), but here it would make one test fail because of
+    // another test's data.
     admin_post(
         admin_port,
         &cookie,
         "/admin/prompt-classes",
         serde_json::json!({
-            "name": format!("coding-{suffix}"),
-            "examples": CODING_EXAMPLES,
+            "name": format!("gardening-{suffix}"),
+            "examples": [
+                "When should I prune my apple trees?",
+                "What is the best mulch for a vegetable bed?",
+                "How often should tomatoes be watered in a greenhouse?",
+                "My hydrangeas have yellow leaves, what is wrong?",
+            ],
         }),
     );
     wait_for_routing(port, &fx.key, &fx.virtual_name);
+    // No classifier here, so the class never becomes routable — wait for the
+    // snapshot to carry the class at all, then assert it does not match.
     std::thread::sleep(Duration::from_secs(3));
 
     let body = routed_to(
