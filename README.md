@@ -177,12 +177,67 @@ Two findings worth knowing before configuring classes:
   its space is anisotropic. Confidence floors are calibrated per class *and*
   per tier.
 
+### Against LiteLLM
+
+Measured 2026-08-07 on the kw cluster. Both gateways: **one replica, 4 CPU /
+6 GiB limits, pinned to the same otherwise-idle 8-core arm64 node, reached over
+NodePort** (not a kube-vip LoadBalancer VIP, so the VIP's L2 path is not in the
+measurement). Same two vLLM backends, same model, same prompts, same load
+generator on the same LAN. LiteLLM runs 4 uvicorn workers in `PRODUCTION` mode
+with callbacks and caching off — anything that would slow it down without being
+intrinsic to it is turned off, because a comparison that misconfigures the
+other side proves nothing. Manifests are in [bench/compare/](bench/compare/).
+
+**With a real GPU in the path**, three interleaved rounds (A/B/A/B, to cancel
+drift on a shared GPU), median of medians:
+
+| concurrency | TTFT p50 | | throughput | |
+|---|---|---|---|---|
+| | fastllm-proxy | LiteLLM | fastllm-proxy | LiteLLM |
+| 1 | 149 ms | **136 ms** | 34.6 tok/s | 34.6 tok/s |
+| 4 | **183 ms** | 293 ms | **98.0 tok/s** | 84.2 tok/s |
+| 8 | **173 ms** | 191 ms | **150.4 tok/s** | 143.4 tok/s |
+
+At concurrency 1 it is a tie, and LiteLLM took that round — inference dominates
+so completely that the gateway is invisible, and this is run-to-run noise on a
+shared GPU. The gap opens as concurrency rises: **+16% throughput at 4
+concurrent streams, +5% at 8**, with lower and much steadier TTFT.
+
+That is the honest headline for a single-GPU deployment: *if your bottleneck is
+the GPU, the gateway barely matters.*
+
+**With the GPU removed from the path** — a mock upstream that answers instantly,
+so the gateway is the only thing left to measure:
+
+| concurrency | TTFT p50, fastllm-proxy | TTFT p50, LiteLLM | ratio |
+|---|---|---|---|
+| 1 | **9.7 ms** | 70.4 ms | 7.3x |
+| 8 | **14.3 ms** | 224.8 ms | 15.7x |
+| 32 | **37.4 ms** | 705.5 ms | 18.9x |
+
+This is what the gateway itself costs, and it is where the architecture shows:
+the gap *widens* with concurrency rather than narrowing. It also sets the
+ceiling on what the choice can ever be worth to you — you only get it back when
+the GPU is not the bottleneck, which means many backends, short generations, or
+high concurrency.
+
+Two caveats, both against our own favour:
+
+- **The mock throughput numbers are not usable and are not quoted.** Under the
+  mock's instant-burst framing LiteLLM delivered 101 SSE events and 600
+  characters where fastllm-proxy delivered 199 and 1194 — roughly half the
+  payload. Against the real vLLM both delivered 38 events and matching content,
+  so this is an artefact of the mock's pacing rather than something LiteLLM does
+  in production. Only TTFT is quoted from that run, and only as indicative.
+- **kube-proxy and two LAN hops are inside both sets of numbers.** They inflate
+  both sides equally, which compresses the ratios — so the pure gateway
+  difference is larger than what is reported here, not smaller.
+
 ### What has not been measured
 
-There is no benchmark here against another gateway. The comparisons above are
-against a direct connection and against a dumb TCP relay — the floor and the
-ceiling — not against LiteLLM, Envoy or anything else. Claims of the form
-"faster than X" are not made because that measurement has not been run.
+LiteLLM is the only other gateway measured; Envoy, Kong, Portkey and the rest
+are not. And every number here comes from one cluster, on arm64, on one day.
+Re-measure on your own hardware before betting on any of it.
 
 Reproduce any of this with `cargo run -p bench --release --bin realbench`
 (and siblings) — see [bench/](bench/).

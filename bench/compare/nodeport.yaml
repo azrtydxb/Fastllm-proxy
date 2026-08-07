@@ -1,0 +1,46 @@
+# Fair-comparison harness.
+#
+# Every difference between the two deployments that is not the gateway itself
+# has been removed:
+#
+#   - one replica each (fastllm-proxy normally runs two, which would give it
+#     two accept queues behind one address — a real advantage, but not one that
+#     tells you anything about the code)
+#   - identical CPU and memory limits
+#   - both pinned to the same otherwise-idle node, so neither gets a warmer
+#     page cache or a quieter neighbour
+#   - NodePort rather than a kube-vip LoadBalancer VIP, so the measurement does
+#     not include the VIP's ARP/L2 path. kube-proxy is still in front of both,
+#     equally.
+#
+# The remaining shared costs (kube-proxy, the LAN hop from the load generator,
+# the LAN hop to the mock upstream) inflate *both* sides by the same amount,
+# which compresses the measured ratio. The real difference between the gateways
+# is therefore larger than what this reports, not smaller.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-bench
+  namespace: fastllm
+spec:
+  type: NodePort
+  selector: { app: fastllm-proxy }
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 31400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-bench
+  namespace: fastllm
+spec:
+  type: NodePort
+  selector: { app: litellm }
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 31401

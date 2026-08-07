@@ -1,0 +1,91 @@
+# LiteLLM, deployed on kw as the comparison gateway.
+#
+# Configured to be as close to fastllm-proxy's deployment as the two products
+# allow: same two Spark backends, same model name, same cluster, same node
+# class, no database, no callbacks, no caching. Anything that would slow
+# LiteLLM down without being intrinsic to it is turned off, because a
+# comparison that misconfigures the other side proves nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: fastllm
+data:
+  config.yaml: |
+    model_list:
+      # The mock upstream: answers instantly and streams with no think time, so
+      # whatever sits in front of it is the bottleneck. This is the comparison
+      # that isolates gateway cost from GPU time.
+      - model_name: mock
+        litellm_params:
+          model: hosted_vllm/mock
+          api_base: http://192.168.10.211:9000/v1
+          api_key: none
+      - model_name: qwen3-6-35b-a3b-nvfp4
+        litellm_params:
+          model: hosted_vllm/qwen3-6-35b-a3b-nvfp4
+          api_base: http://192.168.10.245:40045/v1
+          api_key: none
+      - model_name: qwen3-6-35b-a3b-nvfp4
+        litellm_params:
+          model: hosted_vllm/qwen3-6-35b-a3b-nvfp4
+          api_base: http://192.168.10.246:40013/v1
+          api_key: none
+    litellm_settings:
+      # No logging callbacks, no success handlers: those are optional in
+      # LiteLLM and would be an unfair tax here.
+      drop_params: true
+    general_settings:
+      master_key: sk-bench-master-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: fastllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: litellm }
+  template:
+    metadata:
+      labels: { app: litellm }
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-latest
+          args: ["--config", "/config/config.yaml", "--port", "4000", "--num_workers", "4"]
+          ports:
+            - containerPort: 4000
+          env:
+            - name: LITELLM_MASTER_KEY
+              value: sk-bench-master-key
+            - name: LITELLM_MODE
+              value: PRODUCTION
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          resources:
+            # Deliberately generous, and matched to what fastllm-proxy's own
+            # deployment is allowed. Starving the comparison would be a way of
+            # winning that proves nothing.
+            requests: { cpu: "2", memory: "2Gi" }
+            limits: { cpu: "4", memory: "6Gi" }
+      volumes:
+        - name: config
+          configMap: { name: litellm-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: fastllm
+  annotations:
+    kube-vip.io/loadbalancerIPs: 192.168.10.128
+spec:
+  type: LoadBalancer
+  selector: { app: litellm }
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000

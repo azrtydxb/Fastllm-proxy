@@ -134,8 +134,13 @@ async fn main() {
         .unwrap_or_else(|_| "1".into())
         .parse()
         .unwrap();
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
-    eprintln!("upstream on {port}, {tokens} sse frames per response");
+    // Loopback by default — this is a benchmark tool and should not be
+    // reachable by accident. `HOST=0.0.0.0` is what a cross-machine comparison
+    // needs, where the gateways under test run on a cluster and the mock has to
+    // be reachable from it.
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let listener = TcpListener::bind((host.as_str(), port)).await.unwrap();
+    eprintln!("upstream on {host}:{port}, {tokens} sse frames per response");
     loop {
         let (stream, _) = listener.accept().await.unwrap();
         CONNS.fetch_add(1, Ordering::Relaxed);
