@@ -16,6 +16,7 @@ flowchart LR
 
     subgraph dp["Data plane — --role proxy"]
         auth[authenticate + authorise]
+        classify["classify prompt<br/>(only if classes exist)"]
         route[resolve model, evaluate rules]
         limit[rate limit + budget check]
         fwd[forward opaque bytes]
@@ -108,6 +109,7 @@ sequenceDiagram
 
     C->>P: POST /v1/chat/completions
     P->>P: SHA-256 → principal (401 if unknown/expired)
+    P->>P: classify prompt — only when classes are configured
     P->>P: resolve model — virtual models evaluate rules, producing a fallback chain
     P->>P: authorise the RESOLVED concrete model (403 if ungranted)
     P->>P: rate limit (429) and budget (402)
@@ -188,6 +190,11 @@ split exists to prevent.
   floor bounds total allocation at under 2x the configured limit in the worst
   case (one busy replica, the rest idle), never more.
 - **Policy changes propagate within one snapshot poll**, not instantly.
+- **Semantic classification is deterministic and costs nothing when unused.**
+  With no prompt classes configured it is one atomic load and a length check.
+  With classes, the fast tier is ~115µs of pure CPU; the refined tier is loaded
+  only if some rule names a class that refines a fast-tier one, so a deployment
+  that does not use it cannot pay for it. See [semantic routing](classifier.md).
 - **Two routing conditions are deliberately non-deterministic.**
   `max_inflight_per_backend` reads live in-flight counters and the time-window
   conditions read the clock, so identical requests can route differently and

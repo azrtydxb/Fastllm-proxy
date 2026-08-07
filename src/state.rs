@@ -70,6 +70,28 @@ pub struct AppState {
     /// background task (spawned in `Http`-mode `--role proxy` only, see
     /// `main.rs`) can hold its own handle without holding all of `AppState`.
     pub limiter: Arc<crate::limiter::Limiter>,
+
+    /// Prompt classifier, rebuilt from the snapshot on every `apply_snapshot`
+    /// so the centroids a request is scored against are always the ones the
+    /// control plane most recently published.
+    ///
+    /// `ArcSwap` for the same reason `registry` is: the request path reads it
+    /// without a lock, and a reload replaces it wholesale.
+    #[cfg(feature = "classifier")]
+    pub classifier: ArcSwap<crate::classifier::Classifier>,
+
+    /// The two embedding models, loaded at most once each.
+    ///
+    /// Tier 2 is a `OnceLock` rather than eagerly loaded because that is the
+    /// whole gate: a deployment whose rules never name a refined class never
+    /// initialises it, never maps 130MB of weights, and never pays its ~85ms
+    /// startup. See `crate::classifier`'s module doc comment.
+    #[cfg(feature = "classifier")]
+    pub tier1: Option<Arc<crate::classifier::tier1::Tier1>>,
+    #[cfg(feature = "classifier-tier2")]
+    pub tier2_path: Option<String>,
+    #[cfg(feature = "classifier-tier2")]
+    pub tier2: std::sync::OnceLock<Option<Arc<crate::classifier::tier2::Tier2>>>,
 }
 
 impl AppState {
@@ -89,8 +111,95 @@ impl AppState {
     /// until a restart — is what this single-entry-point design exists to
     /// make structurally impossible to reintroduce.
     pub fn apply_snapshot(&self, snap: Snapshot) -> anyhow::Result<usize> {
+        #[cfg(feature = "classifier")]
+        self.rebuild_classifier(&snap);
         self.snapshot.store(Arc::new(snap));
         self.rebuild_registry_from_snapshot()
+    }
+
+    /// Rebuild the classifier from a snapshot's published centroids.
+    ///
+    /// Called from `apply_snapshot` alongside the registry rebuild, for the
+    /// same reason: two views derived from one snapshot must not be able to
+    /// diverge, so they are refreshed in the same call rather than by whoever
+    /// remembers to.
+    #[cfg(feature = "classifier")]
+    fn rebuild_classifier(&self, snap: &Snapshot) {
+        use crate::classifier::{Classifier, PromptClass, Tier};
+        let classes = snap
+            .prompt_classes
+            .iter()
+            .filter_map(|c| {
+                // A class the control plane could not embed, or one naming a
+                // tier this build does not understand, is dropped rather than
+                // defaulted — the same rule the snapshot applies to a backend
+                // whose protocol it cannot parse.
+                if c.centroid.is_empty() {
+                    return None;
+                }
+                Some(PromptClass {
+                    name: c.name.clone(),
+                    tier: Tier::parse(&c.tier)?,
+                    centroid: Some(c.centroid.clone()),
+                    min_margin: c.min_margin,
+                    refines: c.refines.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.classifier.store(Arc::new(Classifier::new(classes)));
+    }
+
+    /// Classify a request body, or `None` when there is nothing to classify
+    /// against.
+    ///
+    /// The early return is the fast path's guarantee: with no classes
+    /// configured this costs one atomic load and a length check, so a
+    /// deployment that does not use semantic routing pays nothing for its
+    /// existence.
+    #[cfg(feature = "classifier")]
+    pub fn classify(&self, body: &[u8]) -> Option<String> {
+        let classifier = self.classifier.load();
+        if classifier.is_empty() {
+            return None;
+        }
+        let tier1 = self.tier1.as_ref()?;
+        let text = std::str::from_utf8(body).ok()?;
+        let embedding = tier1.embed(text);
+        let result = classifier.classify(&embedding, || self.refined_embedding(text));
+        result.map(|c| c.class)
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    pub fn classify(&self, _body: &[u8]) -> Option<String> {
+        None
+    }
+
+    /// Embed with the transformer, loading it on first use.
+    ///
+    /// Only ever called when an active refined class named the tier-1 answer,
+    /// so the load itself is gated on configuration rather than on a flag.
+    #[cfg(feature = "classifier-tier2")]
+    fn refined_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        let loaded = self.tier2.get_or_init(|| {
+            let path = self.tier2_path.as_ref()?;
+            match crate::classifier::tier2::Tier2::load(path) {
+                Ok(t) => Some(Arc::new(t)),
+                Err(e) => {
+                    // Logged once, not per request: `OnceLock` means a failed
+                    // load stays failed, and every later request quietly falls
+                    // back to the fast tier's answer.
+                    tracing::error!(error = %e, path = %path, "tier-2 classifier failed to load; \
+                        refined classes will fall back to the fast tier");
+                    None
+                }
+            }
+        });
+        loaded.as_ref()?.embed(text)
+    }
+
+    #[cfg(all(feature = "classifier", not(feature = "classifier-tier2")))]
+    fn refined_embedding(&self, _text: &str) -> Option<Vec<f32>> {
+        None
     }
 
     /// Rebuild the routing `Registry` from the snapshot already stored in
@@ -179,6 +288,14 @@ mod tests {
             tls,
         ));
         AppState {
+            #[cfg(feature = "classifier")]
+            classifier: ArcSwap::from_pointee(crate::classifier::Classifier::default()),
+            #[cfg(feature = "classifier")]
+            tier1: None,
+            #[cfg(feature = "classifier-tier2")]
+            tier2_path: None,
+            #[cfg(feature = "classifier-tier2")]
+            tier2: std::sync::OnceLock::new(),
             registry: ArcSwap::from_pointee(Registry::default()),
             router: Router::new(Policy::CacheAffinity, 64, 64, 0, 0.0),
             client,

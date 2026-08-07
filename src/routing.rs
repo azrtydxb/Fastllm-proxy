@@ -275,6 +275,30 @@ impl TimeMatch {
     }
 }
 
+/// What the prompt is about, as decided by `crate::classifier`.
+///
+/// The one condition whose input is not read directly off the request: it is
+/// the output of a classifier that ran before rule evaluation. Matching is
+/// still a string comparison — all the work happened once, before this.
+///
+/// An unclassified request (below the class's confidence floor, or no
+/// classifier in this build) fails any rule that names a class, which is what
+/// makes "unclassified falls through to the next rule" true rather than
+/// aspirational.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassMatch {
+    pub class: Option<String>,
+}
+
+impl ClassMatch {
+    fn matches(&self, classified_as: Option<&str>) -> bool {
+        match &self.class {
+            None => true,
+            Some(want) => classified_as == Some(want.as_str()),
+        }
+    }
+}
+
 /// Approximate request shape: estimated prompt size and requested
 /// `max_tokens`, both already available before routing — `max_tokens` is read
 /// from the same JSON body already parsed once for `model`
@@ -380,6 +404,9 @@ pub struct MatchConditionJson {
     pub days: Vec<u8>,
     #[serde(default)]
     pub utc_offset_minutes: i16,
+    /// Name of a prompt class this rule requires. See `crate::classifier`.
+    #[serde(default)]
+    pub class: Option<String>,
 }
 
 /// `"HH:MM"` to minutes past midnight.
@@ -426,6 +453,9 @@ pub fn validate_match_json(c: &MatchConditionJson) -> Result<(), String> {
             return Err(format!("{field} must be between 0 and 100"));
         }
     }
+    if c.class.as_deref().is_some_and(str::is_empty) {
+        return Err("class must not be empty".to_string());
+    }
     if !(-1440..=1440).contains(&c.utc_offset_minutes) {
         return Err("utc_offset_minutes must be between -1440 and 1440".to_string());
     }
@@ -471,6 +501,7 @@ impl MatchConditionJson {
                 days: self.days,
                 utc_offset_minutes: self.utc_offset_minutes,
             },
+            class: ClassMatch { class: self.class },
         }
     }
 }
@@ -484,6 +515,7 @@ pub struct RuleConditions {
     pub budget: BudgetMatch,
     pub load: LoadMatch,
     pub time: TimeMatch,
+    pub class: ClassMatch,
 }
 
 /// One rule in a virtual model's ordered chain: match conditions AND'd
@@ -506,6 +538,10 @@ pub struct RequestFacts<'a> {
     pub streaming: bool,
     pub headers: &'a HeaderMap,
     pub now: DateTime<Utc>,
+    /// What the classifier decided, or `None` when the request was not
+    /// classified — no classes configured, no classifier in this build, or the
+    /// best class did not clear its confidence floor.
+    pub class: Option<&'a str>,
 }
 
 impl RoutingRule {
@@ -516,6 +552,7 @@ impl RoutingRule {
         let c = &self.conditions;
         c.shape
             .matches(facts.prompt_tokens, facts.max_tokens, facts.streaming)
+            && c.class.matches(facts.class)
             && c.caller.matches(facts.caller)
             && c.budget.matches(facts.caller)
             && c.time.matches(facts.now)
@@ -705,6 +742,7 @@ mod tests {
             streaming: false,
             headers,
             now: fixed_now(),
+            class: None,
         }
     }
 

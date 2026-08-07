@@ -306,6 +306,12 @@ async fn proxy_request(
     // *and* keeps cache locality once a concrete model is chosen.
     let prefix = state.router.prefix_key(&collected);
 
+    // Classification runs before rule evaluation, and only when this snapshot
+    // actually has classes — `classify` returns `None` immediately otherwise,
+    // so a deployment that routes on caller or shape alone never touches an
+    // embedding model. Tier 2 is gated one level further in, on whether any
+    // active class refines the one tier 1 chose (`crate::classifier`).
+    let classification = state.classify(&collected);
     let facts = crate::routing::RequestFacts {
         caller: principal,
         prompt_tokens: crate::routing::estimate_prompt_tokens(collected.len()),
@@ -315,6 +321,7 @@ async fn proxy_request(
         // One clock read, and only for a virtual model — `resolve_target_models`
         // returns before touching this for an ordinary name.
         now: chrono::Utc::now(),
+        class: classification.as_deref(),
     };
     let candidates =
         match resolve_target_models(&requested_model, snapshot, &facts, prefix, &registry) {
@@ -1569,6 +1576,7 @@ model_list:
             streaming: false,
             headers: &headers,
             now: chrono::Utc::now(),
+            class: None,
         };
         let target = resolve_target_models("vm", &snapshot, &facts, 0, &registry)
             .expect("the virtual model has a viable default target")
@@ -1603,6 +1611,7 @@ model_list:
             streaming: false,
             headers: &headers,
             now: chrono::Utc::now(),
+            class: None,
         };
         let target = resolve_target_models("concrete-a", &snapshot, &facts, 0, &registry)
             .unwrap()

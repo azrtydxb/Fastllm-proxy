@@ -20,7 +20,7 @@ fastllm-proxy addresses both: routing is prefix-aware, and response bodies are n
 
 - **Cache-affinity routing** with a load escape hatch. A shared prefix goes back to the node that already has its KV cache, unless that node is meaningfully hotter than the least-loaded one.
 - **Opaque response bodies.** Upstream frames reach the client exactly as they arrived — never deserialised, never re-encoded, never buffered.
-- **Cache-affinity routing, virtual models and rule-based routing** — see below.
+- **Cache-affinity routing, virtual models, rule-based and semantic routing** — see below.
 - **20 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
@@ -81,15 +81,30 @@ Route on any of these:
 
 **Failover is part of routing, not a separate retry layer.** A rule's targets are tried in order on `5xx`, on `429`, and on an unreachable upstream — before any byte reaches the client. `429` counts because a hosted provider refusing a request is not the same as being unhealthy. Failover never widens reach: a candidate the caller lacks a grant on is dropped from the chain. Details in [docs/api.md](docs/api.md#routing-rules).
 
-### Semantic routing — measured, not yet shipped
+### Semantic routing
 
-Routing on *what a prompt is about* is designed and benchmarked but **not implemented in the request path yet**; the conditions above are what works today. What the measurements found, over ~21k human-labelled prompts:
+Route on **what a prompt is about**. A class is a name plus example prompts — no training step, no model to fine-tune, no labelled corpus. The control plane averages the examples into a centroid; the request path embeds the prompt and takes the nearest one.
 
-- A static embedding classifies in **115 µs** and reaches 82–98% precision on subject-matter classes — coding, maths, chat, legal, finance, security, databases, devops. Twelve viable classes on that tier alone.
-- It cannot separate classes that share a subject and differ by intent (architecture vs. debugging), because it has no word order. A transformer tier at **3.3 ms** recovers that, and is designed to run only when a rule names a class that needs it.
-- Task-shaped classes (summarise / rewrite / extract) fail on *both* tiers. Classify by subject, not by verb.
+```bash
+curl -X POST https://control/admin/prompt-classes -b "$SESSION" \
+  -d '{"name":"coding","examples":["Why does this Rust code fail the borrow checker?", "..."]}'
+```
+```jsonc
+{"position": 0, "class": "coding", "targets": ["claude-sonnet"]}
+```
 
-Full findings, per-class precision and the benchmark harness: [docs/classifier.md](docs/classifier.md).
+**Two tiers, and you only pay for the second when you ask for it.**
+
+| | model | cost | separates |
+|---|---|---|---|
+| fast | static embedding | **115 µs** | subject matter — coding, maths, chat, legal, finance, security, databases, devops |
+| refined | transformer | 3.3 ms | same subject, different intent — architecture vs. debugging |
+
+The refined tier is gated on configuration, not a flag: if no rule names a class that needs it, the transformer is never loaded and no request can pay for it. When it is enabled, only requests the fast tier landed on a competing class escalate — under a tenth of traffic in practice, putting the average added cost near 0.2 ms.
+
+Measured over ~21k human-labelled prompts, the fast tier reaches **82–98% precision** on twelve classes. Below a per-class confidence floor a rule simply does not match and the next rule catches the request, which is a routing decision rather than an error.
+
+Two findings worth knowing before defining classes — **classify by subject, not by verb** (summarise / rewrite / extract fail on *both* tiers), and check `POST /admin/prompt-classes/evaluate`, which reports which of your classes collide. Full per-class numbers and the benchmark harness: [docs/classifier.md](docs/classifier.md).
 
 ## How it compares
 

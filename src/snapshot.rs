@@ -8,8 +8,8 @@
 use crate::limiter::Limits;
 use crate::protocol::Protocol;
 use crate::routing::{
-    BudgetMatch, CallerMatch, HeaderMatch, LoadMatch, RoutingRule, RuleConditions, ShapeMatch,
-    TimeMatch, VirtualModelDef, WeightedTarget,
+    BudgetMatch, CallerMatch, ClassMatch, HeaderMatch, LoadMatch, RoutingRule, RuleConditions,
+    ShapeMatch, TimeMatch, VirtualModelDef, WeightedTarget,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -131,6 +131,26 @@ impl Default for BackendDef {
     }
 }
 
+/// One prompt class as the snapshot carries it.
+///
+/// Deliberately not `crate::classifier::PromptClass`: this type exists in every
+/// build, including one compiled without the `classifier` feature, because the
+/// wire format is the contract between planes and a control plane that has
+/// classes must be readable by a proxy that cannot use them. The conversion
+/// lives behind the feature flag.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptClassDef {
+    pub name: String,
+    /// `"fast"` or `"refined"`.
+    pub tier: String,
+    /// Normalised mean of the class's example embeddings. Empty when the
+    /// control plane could not embed them, which drops the class from routing
+    /// rather than letting it match at some arbitrary distance.
+    pub centroid: Vec<f32>,
+    pub min_margin: f32,
+    pub refines: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDef {
     pub name: String,
@@ -149,6 +169,14 @@ pub struct Snapshot {
     /// mode: virtual models are a control-plane-only feature (P1 depends on
     /// P0's database), and a bare YAML config has nowhere to store rules.
     pub virtual_models: HashMap<String, VirtualModelDef>,
+    /// Prompt classes with their centroids, already averaged and normalised by
+    /// the control plane. Empty unless an operator defined classes *and* the
+    /// build carries a classifier — see `crate::classifier`.
+    ///
+    /// Shipped as part of the snapshot rather than fetched, for the same reason
+    /// grants are: the request path may not do I/O, so anything it compares
+    /// against has to arrive before the request does.
+    pub prompt_classes: Vec<PromptClassDef>,
     /// When true the proxy serves without authenticating, matching today's
     /// behaviour when no master key is configured.
     pub open: bool,
@@ -204,6 +232,8 @@ pub struct WireSnapshot {
     /// failing to deserialise it outright.
     #[serde(default)]
     pub virtual_models: Vec<WireVirtualModel>,
+    #[serde(default)]
+    pub prompt_classes: Vec<WirePromptClass>,
     pub open: bool,
 }
 
@@ -344,6 +374,25 @@ pub struct WireRoutingRule {
     pub days: Vec<u8>,
     #[serde(default)]
     pub utc_offset_minutes: i16,
+    #[serde(default)]
+    pub class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WirePromptClass {
+    pub name: String,
+    #[serde(default = "default_tier")]
+    pub tier: String,
+    #[serde(default)]
+    pub centroid: Vec<f32>,
+    #[serde(default)]
+    pub min_margin: f32,
+    #[serde(default)]
+    pub refines: Vec<String>,
+}
+
+fn default_tier() -> String {
+    "fast".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,6 +534,17 @@ impl Snapshot {
                         .collect(),
                 })
                 .collect(),
+            prompt_classes: self
+                .prompt_classes
+                .iter()
+                .map(|c| WirePromptClass {
+                    name: c.name.clone(),
+                    tier: c.tier.clone(),
+                    centroid: c.centroid.clone(),
+                    min_margin: c.min_margin,
+                    refines: c.refines.clone(),
+                })
+                .collect(),
             virtual_models: self
                 .virtual_models
                 .values()
@@ -519,6 +579,7 @@ impl Snapshot {
                             before_minute: r.conditions.time.before_minute,
                             days: r.conditions.time.days.clone(),
                             utc_offset_minutes: r.conditions.time.utc_offset_minutes,
+                            class: r.conditions.class.class.clone(),
                             targets: r
                                 .targets
                                 .iter()
@@ -631,6 +692,17 @@ impl Snapshot {
                         .collect(),
                 })
                 .collect(),
+            prompt_classes: w
+                .prompt_classes
+                .into_iter()
+                .map(|c| PromptClassDef {
+                    name: c.name,
+                    tier: c.tier,
+                    centroid: c.centroid,
+                    min_margin: c.min_margin,
+                    refines: c.refines,
+                })
+                .collect(),
             virtual_models: w
                 .virtual_models
                 .into_iter()
@@ -671,6 +743,7 @@ impl Snapshot {
                                             days: r.days,
                                             utc_offset_minutes: r.utc_offset_minutes,
                                         },
+                                        class: ClassMatch { class: r.class },
                                     },
                                     targets: r
                                         .targets
@@ -722,6 +795,7 @@ impl Snapshot {
             principals: principals.into_iter().map(|p| (p.id, p)).collect(),
             models,
             virtual_models: HashMap::new(),
+            prompt_classes: Vec::new(),
             open: false,
         }
     }
@@ -927,6 +1001,7 @@ mod tests {
         );
 
         let wire = WireSnapshot {
+            prompt_classes: Vec::new(),
             version: 1,
             keys,
             principals: vec![],

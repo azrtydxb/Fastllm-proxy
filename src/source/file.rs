@@ -100,6 +100,10 @@ impl SnapshotSource for FileSource {
 
         let open = keys.is_empty();
         Ok(Some(Snapshot {
+            // `File` mode has nowhere to store example prompts, so semantic
+            // routing is a control-plane feature the same way virtual models
+            // are.
+            prompt_classes: Vec::new(),
             version,
             keys,
             principals,

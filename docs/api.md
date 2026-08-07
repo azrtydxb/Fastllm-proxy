@@ -54,6 +54,11 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `DELETE /admin/models/{id}` | Cascades to that model's backends |
 | `POST /admin/models/{id}/backends` | `{"api_base":..., "upstream_model":..., "upstream_api_key":..., "protocol":..., "auth_header":..., "auth_scheme":..., "default_max_tokens":...}`. Everything after the credential is optional and defaults to an OpenAI-compatible upstream reached with `Authorization: Bearer`. The credential is encrypted before it reaches Postgres and cannot be read back |
 | `DELETE /admin/backends/{id}` | Remove one backend from a pool |
+| `GET /admin/prompt-classes` | Classes, example counts, and whether each is *routable* (has a centroid) |
+| `POST /admin/prompt-classes` | `{"name":..., "tier":"fast"\|"refined", "min_margin":..., "refines":[...], "examples":[...]}` |
+| `POST /admin/prompt-classes/{id}/examples` | Add one example prompt |
+| `DELETE /admin/prompt-classes/{id}` | Cascades to its examples and refinements |
+| `POST /admin/prompt-classes/evaluate` | Which classes sit too close to be told apart |
 | `GET /admin/roles` | Roles and the permissions each one grants |
 | `GET /admin/limits` | Every principal with a configured rate limit |
 | `PUT /admin/principals/{id}/limits` | `{"requests_per_min":..., "tokens_per_min":...}`. Either or both; upserts the one row this principal may have |
@@ -152,6 +157,7 @@ list is a **fallback chain**, not just a split.
 | `headers` | exact header values, all must match | request |
 | `min/max_budget_used_percent` | how much of the caller's budget is spent | snapshot |
 | `max_inflight_per_backend` | how busy this rule's own targets are | **live cluster state** |
+| `class` | which prompt class the classifier assigned — see [semantic routing](classifier.md) |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window | **clock** |
 
 The last two rows are marked because they matter: every other condition is a

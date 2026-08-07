@@ -219,3 +219,41 @@ Rejected, with reasons:
   forbids. Any viable version has to answer where the embedding comes from
   (in-process model? cached by prefix? computed only for a sampled subset?)
   before it is worth building.
+
+## Semantic routing (2026-08-07)
+
+Shipped. A prompt class is a name plus example prompts; the control plane
+averages them into a centroid that ships in the snapshot, and the request path
+takes the nearest one. No training step, no corpus, no model to fine-tune —
+adding a class is a snapshot rebuild like adding a backend.
+
+Two tiers, gated on configuration rather than on a flag. The fast tier
+(potion-code-16M, a static token-vector lookup) runs at ~115us and separates
+subject matter. The refined tier (bge-small, a transformer) runs at ~3.3ms and
+separates classes that share a subject but differ in intent. If no routing rule
+names a class that refines a fast-tier one, the transformer is never loaded and
+no request can pay for it — `Classifier::escalate_from` is empty, and the fast
+path is one atomic load and a length check.
+
+Behind two cargo features: `classifier` pulls model2vec-rs, `classifier-tier2`
+additionally pulls ONNX Runtime. The default build carries neither.
+
+Measured, not assumed — every number is in docs/classifier.md, with the
+benchmark harness in bench/. The findings that shaped it: classify by subject
+rather than by verb (task-shaped classes fail on both tiers); class count is
+not the problem, class definition is; and margins are not comparable across
+models, so confidence floors are per class *and* per tier.
+
+Not done, and recorded so it is not mistaken for done:
+
+- `POST /admin/prompt-classes/evaluate` reports centroid collisions but not
+  leave-one-out precision and recall over the operator's own examples. That is
+  the diagnostic that turns "how many classes should I have" from an opinion
+  into a measurement.
+- Refined-tier weights are not baked into the image (130MB for a feature most
+  deployments will not enable). Mount them and set --classifier-tier2-model.
+- No classification cache. The prefix hash the router already computes would
+  key one, so a multi-turn conversation classifies once instead of per turn.
+  Worth doing only if 115us ever shows up in a profile, which it has not.
+- Routing on *difficulty* remains out of scope: the 96% GSM8K-versus-lookup
+  separation most likely measures genre rather than difficulty.

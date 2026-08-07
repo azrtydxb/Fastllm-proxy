@@ -98,6 +98,23 @@ struct Cli {
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 
+    /// Directory or HuggingFace repo id for the fast-tier classifier model.
+    ///
+    /// A directory is what a container should use: the Dockerfile bakes the
+    /// model in so startup does no network I/O. Unset means semantic routing
+    /// is unavailable — prompt classes are still stored and listed, they just
+    /// cannot match, and every rule naming one falls through.
+    #[arg(long, env = "FASTLLM_CLASSIFIER_MODEL")]
+    classifier_model: Option<String>,
+
+    /// Directory holding the refined-tier ONNX model and tokeniser.
+    ///
+    /// Loaded lazily, and only if some routing rule names a class that refines
+    /// a fast-tier one — see `crate::classifier`. Unset means refined classes
+    /// silently fall back to the fast tier's answer.
+    #[arg(long, env = "FASTLLM_CLASSIFIER_TIER2_MODEL")]
+    classifier_tier2_model: Option<String>,
+
     /// Forwarding only (default), the control plane and forwarding in one
     /// process, or the admin API and database only.
     #[arg(long, value_enum, default_value_t = Role::Proxy, env = "FASTLLM_ROLE")]
@@ -483,6 +500,12 @@ async fn run_control(cli: Cli) -> Result<()> {
             .database_url
             .clone()
             .context("--role control requires --database-url")?;
+        // Registered before the first build so the very first snapshot carries
+        // centroids — otherwise classes would be unroutable until the next
+        // rebuild, which is the kind of gap nobody notices until a rule
+        // silently stops matching after a restart.
+        #[cfg(feature = "classifier")]
+        register_snapshot_embedder(&cli);
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
         let cache: Arc<dyn fastllm_proxy::control::api::SnapshotSink> =
@@ -529,6 +552,12 @@ async fn run_all(cli: Cli) -> Result<()> {
             .database_url
             .clone()
             .context("--role all requires --database-url")?;
+        // Registered before the first build so the very first snapshot carries
+        // centroids — otherwise classes would be unroutable until the next
+        // rebuild, which is the kind of gap nobody notices until a rule
+        // silently stops matching after a restart.
+        #[cfg(feature = "classifier")]
+        register_snapshot_embedder(&cli);
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
 
@@ -849,6 +878,26 @@ fn build_app_state(
         "starting"
     );
 
+    #[cfg(feature = "classifier")]
+    let tier1 = match cli.classifier_model.as_deref() {
+        None => None,
+        Some(source) => match fastllm_proxy::classifier::tier1::Tier1::load(source) {
+            Ok(t) => {
+                info!(model = %source, "fast-tier classifier loaded");
+                Some(Arc::new(t))
+            }
+            Err(e) => {
+                // Not fatal: a proxy that cannot classify still serves every
+                // request, it simply cannot match a rule that names a class.
+                // Refusing to start would turn a classifier problem into an
+                // outage.
+                warn!(error = %e, model = %source, "fast-tier classifier failed to load; \
+                    rules naming a prompt class will not match");
+                None
+            }
+        },
+    };
+
     Ok(Arc::new(AppState {
         registry: ArcSwap::from_pointee(registry),
         router: Router::new(
@@ -865,6 +914,14 @@ fn build_app_state(
         snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
         max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
         max_retries: cli.max_retries,
+        #[cfg(feature = "classifier")]
+        classifier: ArcSwap::from_pointee(fastllm_proxy::classifier::Classifier::default()),
+        #[cfg(feature = "classifier")]
+        tier1,
+        #[cfg(feature = "classifier-tier2")]
+        tier2_path: cli.classifier_tier2_model.clone(),
+        #[cfg(feature = "classifier-tier2")]
+        tier2: std::sync::OnceLock::new(),
         upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),
         unhealthy_after: tuning.unhealthy_after.max(1),
         started: Instant::now(),
@@ -1114,6 +1171,80 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+}
+
+/// Builds prompt-class centroids for the control plane.
+///
+/// Lives here rather than in `control::build` because it is the one place both
+/// the `control` and `classifier` features are known to be present; `build`
+/// itself must compile without a classifier and simply publish classes with no
+/// centroid.
+#[cfg(all(feature = "control", feature = "classifier"))]
+struct SnapshotEmbedder {
+    tier1: Option<Arc<fastllm_proxy::classifier::tier1::Tier1>>,
+    #[cfg(feature = "classifier-tier2")]
+    tier2_path: Option<String>,
+    #[cfg(feature = "classifier-tier2")]
+    tier2: std::sync::OnceLock<Option<Arc<fastllm_proxy::classifier::tier2::Tier2>>>,
+}
+
+#[cfg(all(feature = "control", feature = "classifier"))]
+impl fastllm_proxy::control::build::PromptClassEmbedder for SnapshotEmbedder {
+    fn fast(&self, prompts: &[String]) -> Option<Vec<f32>> {
+        let t = self.tier1.as_ref()?;
+        fastllm_proxy::classifier::centroid(&t.embed_batch(prompts))
+    }
+
+    #[cfg(feature = "classifier-tier2")]
+    fn refined(&self, prompts: &[String]) -> Option<Vec<f32>> {
+        // Loaded on demand here too: a control plane whose operator defined no
+        // refined classes never touches the transformer either.
+        let loaded = self.tier2.get_or_init(|| {
+            let path = self.tier2_path.as_ref()?;
+            match fastllm_proxy::classifier::tier2::Tier2::load(path) {
+                Ok(t) => Some(Arc::new(t)),
+                Err(e) => {
+                    warn!(error = %e, path = %path, "refined-tier classifier failed to load");
+                    None
+                }
+            }
+        });
+        fastllm_proxy::classifier::centroid(&loaded.as_ref()?.embed_batch(prompts)?)
+    }
+
+    #[cfg(not(feature = "classifier-tier2"))]
+    fn refined(&self, _prompts: &[String]) -> Option<Vec<f32>> {
+        None
+    }
+}
+
+/// Load the classifier models and hand them to `control::build`.
+///
+/// Separate from the data plane's own `tier1`: `--role control` never serves a
+/// request, so it needs the model only to average example prompts into
+/// centroids, and `--role all` ends up loading it twice. Two copies of a 61MB
+/// table is the cheaper mistake than sharing one across a boundary the two
+/// roles otherwise keep clean.
+#[cfg(all(feature = "control", feature = "classifier"))]
+fn register_snapshot_embedder(cli: &Cli) {
+    let Some(source) = cli.classifier_model.as_deref() else {
+        return;
+    };
+    let tier1 = match fastllm_proxy::classifier::tier1::Tier1::load(source) {
+        Ok(t) => Some(Arc::new(t)),
+        Err(e) => {
+            warn!(error = %e, model = %source, "classifier model failed to load; prompt classes \
+                will be published without centroids and cannot match");
+            None
+        }
+    };
+    fastllm_proxy::control::build::set_prompt_class_embedder(Box::new(SnapshotEmbedder {
+        tier1,
+        #[cfg(feature = "classifier-tier2")]
+        tier2_path: cli.classifier_tier2_model.clone(),
+        #[cfg(feature = "classifier-tier2")]
+        tier2: std::sync::OnceLock::new(),
+    }));
 }
 
 #[cfg(test)]

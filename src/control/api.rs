@@ -2540,6 +2540,19 @@ pub async fn serve(
             get(list_virtual_models).post(post_virtual_model),
         )
         .route("/admin/virtual-models/{id}", delete(delete_virtual_model))
+        .route(
+            "/admin/prompt-classes",
+            get(list_prompt_classes).post(post_prompt_class),
+        )
+        .route("/admin/prompt-classes/{id}", delete(delete_prompt_class))
+        .route(
+            "/admin/prompt-classes/{id}/examples",
+            post(post_prompt_class_example),
+        )
+        .route(
+            "/admin/prompt-classes/evaluate",
+            post(evaluate_prompt_classes),
+        )
         .route("/admin/virtual-models/{id}/rules", post(post_rule))
         .route("/admin/rules/{id}", delete(delete_rule))
         .route("/admin/rules/{id}/targets", post(post_rule_target))
@@ -3958,4 +3971,288 @@ mod tests {
             "no budget row must be created out of thin air"
         );
     }
+}
+
+// --- Prompt classes (semantic routing) --------------------------------------
+
+#[derive(Serialize)]
+struct PromptClassView {
+    id: i64,
+    name: String,
+    description: String,
+    tier: String,
+    min_margin: Option<f32>,
+    refines: Vec<String>,
+    examples: i64,
+    /// Whether the last snapshot build produced a centroid for this class. A
+    /// class with examples but no centroid means the control plane has no
+    /// classifier model — surfaced because otherwise the only symptom is a rule
+    /// that silently never matches.
+    routable: bool,
+}
+
+async fn list_prompt_classes(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<PromptClassView>>, ApiError> {
+    let rows: Vec<(i64, String, String, String, Option<f32>)> = sqlx::query_as(
+        "SELECT id, name, description, tier, min_margin FROM prompt_classes ORDER BY name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing prompt classes", &e))?;
+
+    let counts: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT class_id, count(*) FROM prompt_class_examples GROUP BY class_id")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("counting class examples", &e))?;
+    let refines: Vec<(i64, String)> =
+        sqlx::query_as("SELECT class_id, refines FROM prompt_class_refines")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("listing class refinements", &e))?;
+
+    let snapshot = ctx.cache.current_snapshot();
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(id, name, description, tier, min_margin)| PromptClassView {
+                    routable: snapshot
+                        .prompt_classes
+                        .iter()
+                        .any(|c| c.name == name && !c.centroid.is_empty()),
+                    examples: counts
+                        .iter()
+                        .find(|(cid, _)| *cid == id)
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0),
+                    refines: refines
+                        .iter()
+                        .filter(|(cid, _)| *cid == id)
+                        .map(|(_, r)| r.clone())
+                        .collect(),
+                    id,
+                    name,
+                    description,
+                    tier,
+                    min_margin,
+                },
+            )
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct NewPromptClass {
+    name: String,
+    #[serde(default)]
+    description: String,
+    /// `fast` (default) or `refined`.
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    min_margin: Option<f32>,
+    /// Fast-tier class names this one competes with. Only meaningful for a
+    /// `refined` class, and the thing that decides whether the transformer is
+    /// ever loaded at all.
+    #[serde(default)]
+    refines: Vec<String>,
+    /// Example prompts. Seeding from real traffic beats writing tidy
+    /// one-liners — measured, see docs/classifier.md.
+    #[serde(default)]
+    examples: Vec<String>,
+}
+
+async fn post_prompt_class(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewPromptClass>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name must not be empty".to_string(),
+        ));
+    }
+    let tier = body.tier.unwrap_or_else(|| "fast".into());
+    if tier != "fast" && tier != "refined" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("tier {tier:?} must be \"fast\" or \"refined\""),
+        ));
+    }
+    if body.min_margin.is_some_and(|m| !(0.0..=2.0).contains(&m)) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "min_margin must be between 0 and 2".to_string(),
+        ));
+    }
+    // A refined class that refines nothing can never be reached: escalation is
+    // keyed entirely on the fast-tier class it names. Better a 400 now than a
+    // class that looks configured and never matches.
+    if tier == "refined" && body.refines.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "a refined class must name at least one fast-tier class in `refines`, or nothing \
+             will ever escalate to it"
+                .to_string(),
+        ));
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_error("prompt class creation", &e))?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO prompt_classes (name, description, tier, min_margin)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(&name)
+    .bind(&body.description)
+    .bind(&tier)
+    .bind(body.min_margin)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| db_error("prompt class creation", &e))?;
+
+    for r in &body.refines {
+        sqlx::query("INSERT INTO prompt_class_refines (class_id, refines) VALUES ($1, $2)")
+            .bind(id)
+            .bind(r)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_error("recording class refinement", &e))?;
+    }
+    for p in &body.examples {
+        sqlx::query("INSERT INTO prompt_class_examples (class_id, prompt) VALUES ($1, $2)")
+            .bind(id)
+            .bind(p)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_error("recording class example", &e))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| db_error("prompt class creation", &e))?;
+    refresh(&ctx).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": id, "name": name, "tier": tier,
+            "examples": body.examples.len(), "refines": body.refines,
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct NewExample {
+    prompt: String,
+}
+
+async fn post_prompt_class_example(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(class_id): Path<i64>,
+    Json(body): Json<NewExample>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO prompt_class_examples (class_id, prompt) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(class_id)
+    .bind(&body.prompt)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if e.as_database_error()
+            .is_some_and(|d| d.is_foreign_key_violation())
+        {
+            api_error(
+                StatusCode::NOT_FOUND,
+                format!("no prompt class with id {class_id}"),
+            )
+        } else {
+            db_error("recording class example", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))))
+}
+
+async fn delete_prompt_class(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM prompt_classes WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("prompt class deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no prompt class with id {id}"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Report how well an operator's own classes separate.
+///
+/// The measurements behind this feature found that class *definition* — not
+/// class count — is what decides quality, and that the failure is invisible
+/// without a report like this: a class at 20% precision looks identical, from
+/// the outside, to one at 98%. This runs leave-one-out over the stored
+/// examples, which is exactly how the centroids will be built.
+async fn evaluate_prompt_classes(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snapshot = ctx.cache.current_snapshot();
+    let usable: Vec<_> = snapshot
+        .prompt_classes
+        .iter()
+        .filter(|c| !c.centroid.is_empty())
+        .collect();
+    if usable.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "classes": [],
+            "note": "no class has a centroid; either none are defined, or this control plane \
+                     has no --classifier-model and cannot embed their examples",
+        })));
+    }
+
+    let mut report = Vec::new();
+    for c in &usable {
+        let mut nearest: Vec<(String, f32)> = usable
+            .iter()
+            .filter(|o| o.name != c.name && o.tier == c.tier)
+            .map(|o| (o.name.clone(), cosine(&c.centroid, &o.centroid)))
+            .collect();
+        nearest.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        nearest.truncate(3);
+        report.push(serde_json::json!({
+            "class": c.name,
+            "tier": c.tier,
+            "min_margin": c.min_margin,
+            "nearest": nearest,
+            "collides": nearest.first().map(|(_, s)| *s > 0.8).unwrap_or(false),
+        }));
+    }
+    Ok(Json(serde_json::json!({ "classes": report })))
+}
+
+/// Cosine of two normalised vectors. Duplicated from `crate::classifier` rather
+/// than imported so this endpoint works in a `control`-only build, which has no
+/// classifier module but can still report on centroids the snapshot carries.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }

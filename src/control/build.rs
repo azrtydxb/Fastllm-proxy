@@ -7,6 +7,7 @@
 use crate::control::secrets::{self, EncryptionKey};
 use crate::protocol::Protocol;
 use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
+use crate::snapshot::PromptClassDef;
 use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -61,6 +62,21 @@ pub fn flatten_grants(
 /// snapshot itself. `/snapshot` must be TLS wherever a backend has a real
 /// credential, same as before this module existed.
 pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Result<Snapshot> {
+    build_snapshot_with(pool, key, embedder()).await
+}
+
+/// The same build, with an embedder for prompt-class centroids.
+///
+/// `embed` is passed in rather than constructed here so that this module does
+/// not depend on the `classifier` feature: a control plane built without it
+/// still builds snapshots, and simply publishes classes with empty centroids —
+/// which the request path then ignores, rather than matching them at some
+/// arbitrary distance.
+pub async fn build_snapshot_with(
+    pool: &PgPool,
+    key: &EncryptionKey,
+    embed: Option<&dyn PromptClassEmbedder>,
+) -> anyhow::Result<Snapshot> {
     let model_rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, name FROM models ORDER BY name")
             .fetch_all(pool)
@@ -263,14 +279,125 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
         .fetch_one(pool)
         .await?;
 
+    let prompt_classes = build_prompt_classes(pool, embed).await?;
+
     Ok(Snapshot {
         version: version as u64,
         keys,
         principals,
         models,
         virtual_models,
+        prompt_classes,
         open: false,
     })
+}
+
+/// Turns a class's example prompts into one normalised centroid.
+///
+/// A trait rather than a concrete type so `build` stays free of the
+/// `classifier` feature; `main.rs` supplies the implementation when the build
+/// has one.
+/// Process-wide embedder, registered once at startup.
+///
+/// A global rather than a parameter threaded through every `build_snapshot`
+/// call site: the model is genuinely process-level state — one set of weights,
+/// loaded once, shared by the startup build and every admin-triggered rebuild —
+/// and threading it through would put a `classifier`-feature type in the
+/// signature of a function that must compile without that feature.
+static EMBEDDER: std::sync::OnceLock<Box<dyn PromptClassEmbedder>> = std::sync::OnceLock::new();
+
+/// Register the embedder. Later calls are ignored; there is one model.
+pub fn set_prompt_class_embedder(embedder: Box<dyn PromptClassEmbedder>) {
+    let _ = EMBEDDER.set(embedder);
+}
+
+fn embedder() -> Option<&'static dyn PromptClassEmbedder> {
+    EMBEDDER.get().map(|b| b.as_ref())
+}
+
+pub trait PromptClassEmbedder: Send + Sync {
+    /// Embed for the fast tier. Never fails to the caller — an implementation
+    /// that cannot embed returns `None` and the class is published without a
+    /// centroid.
+    fn fast(&self, prompts: &[String]) -> Option<Vec<f32>>;
+    /// Embed for the refined tier. `None` when this build or this deployment
+    /// has no transformer, which is the common case.
+    fn refined(&self, prompts: &[String]) -> Option<Vec<f32>>;
+}
+
+/// Default margin when a class does not set one.
+///
+/// 0.10 is where `potion-code-16M` classified 88% of real traffic at 99.9%
+/// accuracy on the coding-versus-everything split (see docs/classifier.md). It
+/// is a starting point an operator should tune per class against their own
+/// examples, not a universal constant — which is exactly why the column is
+/// nullable rather than defaulted in the schema.
+const DEFAULT_MIN_MARGIN: f32 = 0.10;
+
+async fn build_prompt_classes(
+    pool: &PgPool,
+    embed: Option<&dyn PromptClassEmbedder>,
+) -> anyhow::Result<Vec<PromptClassDef>> {
+    let rows: Vec<(i64, String, String, Option<f32>)> =
+        sqlx::query_as("SELECT id, name, tier, min_margin FROM prompt_classes ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let examples: Vec<(i64, String)> =
+        sqlx::query_as("SELECT class_id, prompt FROM prompt_class_examples ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+    let refines: Vec<(i64, String)> =
+        sqlx::query_as("SELECT class_id, refines FROM prompt_class_refines")
+            .fetch_all(pool)
+            .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, name, tier, min_margin) in rows {
+        let prompts: Vec<String> = examples
+            .iter()
+            .filter(|(cid, _)| *cid == id)
+            .map(|(_, p)| p.clone())
+            .collect();
+
+        // A class with no examples has nothing to be the mean of. Published
+        // with an empty centroid so the admin API can still show it — the
+        // request path drops it — rather than silently vanishing from a list
+        // the operator is looking at.
+        let centroid = if prompts.is_empty() {
+            tracing::warn!(class = %name, "prompt class has no example prompts; it cannot match anything");
+            Vec::new()
+        } else {
+            match embed {
+                Some(e) if tier == "refined" => e.refined(&prompts).unwrap_or_default(),
+                Some(e) => e.fast(&prompts).unwrap_or_default(),
+                None => Vec::new(),
+            }
+        };
+        if centroid.is_empty() && !prompts.is_empty() {
+            tracing::warn!(
+                class = %name, tier = %tier,
+                "prompt class could not be embedded; excluded from routing. Is the classifier \
+                 feature built and --classifier-model set?"
+            );
+        }
+
+        out.push(PromptClassDef {
+            name: name.clone(),
+            tier,
+            centroid,
+            min_margin: min_margin.unwrap_or(DEFAULT_MIN_MARGIN),
+            refines: refines
+                .iter()
+                .filter(|(cid, _)| *cid == id)
+                .map(|(_, r)| r.clone())
+                .collect(),
+        });
+    }
+    Ok(out)
 }
 
 /// P3's three fixed window lengths. Deliberately *not* calendar arithmetic —

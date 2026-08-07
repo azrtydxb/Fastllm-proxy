@@ -1,9 +1,27 @@
 # Semantic routing
 
-**Status: measured and designed, not yet in the request path.** The routing
-conditions that work today are in [the API reference](api.md#routing-rules).
-This page records what the measurements found, so the design decisions have
-their evidence attached and nobody re-litigates them from intuition.
+**Status: shipped**, behind the `classifier` cargo feature and a
+`--classifier-model` pointing at the model (the Docker image bakes one in and
+sets it). This page records the measurements behind the design, so the
+decisions have their evidence attached and nobody re-litigates them from
+intuition.
+
+Define a class with example prompts, then name it in a routing rule:
+
+```bash
+curl -X POST https://control/admin/prompt-classes -b "$SESSION" \
+  -H 'content-type: application/json' \
+  -d '{"name":"coding","min_margin":0.05,
+       "examples":["Why does this Rust code fail the borrow checker?",
+                   "My unit test throws NullPointerException on line 42."]}'
+```
+```jsonc
+{"position": 0, "class": "coding", "targets": ["claude-sonnet"]}
+```
+
+`POST /admin/prompt-classes/evaluate` reports which classes sit too close
+together to be told apart. A pair above ~0.8 is one region with two names, and
+no threshold separates them.
 
 Everything here is reproducible:
 
@@ -136,13 +154,16 @@ a real transformer and would batch well on a GPU, but this workload is
 single-request and latency-critical — there is nothing to batch — and the GPUs
 in this deployment are busy serving the model. Both tiers stay on CPU.
 
-## What is left to build
+## What is not built
 
-The dispatch logic, per-class floors and the escalation gate exist and are unit
-tested (`src/classifier/`). Still to do: the `prompt_classes` schema, centroid
-building in the control plane, the `class` rule condition, the request-path
-wiring, admin CRUD plus an endpoint that reports per-class precision over an
-operator's own examples, and baking the model files into the image.
+Refined-tier weights are **not** baked into the image: they are 130MB, most
+deployments never enable a refined class, and paying that in every image for a
+feature few turn on is the wrong default. Mount them and point
+`--classifier-tier2-model` at the directory.
+
+`evaluate` reports centroid collisions but not yet leave-one-out precision and
+recall over an operator's own examples — the diagnostic that turns "how many
+classes should I have" into a measurement rather than an opinion.
 
 One thing deliberately out of scope: routing on *difficulty*. GSM8K separates
 from factual lookup at 96%, but GSM8K has a very distinctive narrative-maths

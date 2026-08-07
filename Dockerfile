@@ -39,11 +39,27 @@ COPY bench ./bench
 # build`) produces.
 COPY --from=web /web/dist ./web/dist
 
+# The fast-tier classifier model, baked in so a proxy never reaches the network
+# to start serving. ~61MB of static token vectors — see `src/classifier` for why
+# this tier is a lookup table rather than a transformer, and docs/classifier.md
+# for the measurements that chose this model over its neighbours.
+#
+# The refined tier's ONNX weights are deliberately *not* baked in: they are
+# 130MB, most deployments never enable a refined class, and paying that in every
+# image for a feature few turn on is the wrong default. Mount them and point
+# --classifier-tier2-model at the directory.
+ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/model.safetensors \
+    /usr/local/share/fastllm/classifier/model.safetensors
+ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/tokenizer.json \
+    /usr/local/share/fastllm/classifier/tokenizer.json
+ADD https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json \
+    /usr/local/share/fastllm/classifier/config.json
+
 # Cache mounts are not part of the resulting layer, so the binary has to be
 # copied out of the target directory inside the same step that produced it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked \
+    cargo build --release --locked --features "control classifier" \
  && cp target/release/fastllm-proxy /usr/local/bin/fastllm-proxy
 
 FROM debian:bookworm-slim
@@ -56,6 +72,7 @@ RUN apt-get update \
  && useradd --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin fastllm
 
 COPY --from=build /usr/local/bin/fastllm-proxy /usr/local/bin/fastllm-proxy
+COPY --from=build /usr/local/share/fastllm/classifier /usr/local/share/fastllm/classifier
 
 USER 65532:65532
 EXPOSE 4000
@@ -64,6 +81,7 @@ EXPOSE 4000
 # the wrong one for a container, where the kubelet has to reach it.
 ENV FASTLLM_HOST=0.0.0.0 \
     FASTLLM_PORT=4000 \
-    FASTLLM_CONFIG=/etc/fastllm/config.yaml
+    FASTLLM_CONFIG=/etc/fastllm/config.yaml \
+    FASTLLM_CLASSIFIER_MODEL=/usr/local/share/fastllm/classifier
 
 ENTRYPOINT ["/usr/local/bin/fastllm-proxy"]
