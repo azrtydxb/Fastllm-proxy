@@ -309,6 +309,26 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
 /// `coding` and `chat` classes of its own. A test class named `coding` competes
 /// with those and the winner is a coin flip; horticulture competes with nothing.
 /// The point under test is that a class routes, not which words it contains.
+/// A second, distant domain, so the negative case is deterministic.
+///
+/// Asserting that a prompt is *unclassified* is not: with only a couple of
+/// classes defined, every prompt is nearest to one of them and a permissive
+/// floor lets it through. Which is correct behaviour — a class set that covers
+/// two topics will happily assign a third topic to whichever is closer. So the
+/// negative case here is a prompt that classifies cleanly into a class **no
+/// rule names**, which falls through for a reason the test controls.
+#[cfg(feature = "classifier")]
+const MARITIME_EXAMPLES: &[&str] = &[
+    "How do I calculate great-circle distance between two ports?",
+    "What draft can this vessel manage through the canal?",
+    "When does demurrage start accruing on a bill of lading?",
+    "Which incoterm puts the freight cost on the buyer?",
+    "How is laytime counted for a voyage charter?",
+    "What is the difference between a bareboat and a time charter?",
+    "Which flag state registry suits a coastal cargo vessel?",
+    "How do I read a vessel's stability booklet?",
+];
+
 #[cfg(feature = "classifier")]
 const HORTICULTURE_EXAMPLES: &[&str] = &[
     "When should I prune my apple trees?",
@@ -394,19 +414,28 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
 
     // One class, seeded with example prompts. This is the whole of the
     // configuration — no training step, no model to fine-tune.
-    admin_post(
+    for (name, examples) in [
+        (format!("horticulture-{suffix}"), HORTICULTURE_EXAMPLES),
+        (format!("maritime-{suffix}"), MARITIME_EXAMPLES),
+    ] {
+        admin_post(
+            admin_port,
+            &cookie,
+            "/admin/prompt-classes",
+            serde_json::json!({
+                "name": name, "tier": "fast", "min_margin": 0.02, "examples": examples,
+            }),
+        );
+    }
+    wait_for_routing(port, &fx.key, &fx.virtual_name);
+    wait_for_routable_classes(
         admin_port,
         &cookie,
-        "/admin/prompt-classes",
-        serde_json::json!({
-            "name": format!("horticulture-{suffix}"),
-            "tier": "fast",
-            "min_margin": 0.02,
-            "examples": HORTICULTURE_EXAMPLES,
-        }),
+        &[
+            format!("horticulture-{suffix}"),
+            format!("maritime-{suffix}"),
+        ],
     );
-    wait_for_routing(port, &fx.key, &fx.virtual_name);
-    wait_for_routable_classes(admin_port, &cookie, &[format!("horticulture-{suffix}")]);
 
     // The probe is one of the class's own seed prompts, on purpose.
     //
@@ -423,14 +452,10 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
         "a horticulture question should reach the class's model, got: {matched}"
     );
 
-    // Nothing to do with horticulture, and not a seed of any class this test
-    // defined, so the rule must not fire.
-    let unmatched = routed_to(
-        port,
-        &fx.key,
-        &fx.virtual_name,
-        "Why does this Rust code fail the borrow checker on the second loop?",
-    );
+    // Classifies cleanly as `maritime`, which no rule names — so it falls
+    // through to the default for a reason this test controls, rather than by
+    // hoping nothing matches.
+    let unmatched = routed_to(port, &fx.key, &fx.virtual_name, MARITIME_EXAMPLES[0]);
     assert!(
         unmatched.contains(&fx.default_base),
         "a prompt outside the class should fall through to the default, got: {unmatched}"
@@ -475,12 +500,12 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
         &cookie,
         "/admin/prompt-classes",
         serde_json::json!({
-            "name": format!("shipping-{suffix}"),
+            "name": format!("conveyancing-{suffix}"),
             "examples": [
-                "How do I calculate great-circle distance between two ports?",
-                "What draft can this vessel manage through the canal?",
-                "When does demurrage start accruing on a bill of lading?",
-                "Which incoterm puts the freight cost on the buyer?",
+                "What searches are required before exchanging contracts?",
+                "Who pays the stamp duty on a leasehold assignment?",
+                "How long is the standard completion period after exchange?",
+                "What is an indemnity policy for a missing building regulation?",
             ],
         }),
     );
@@ -505,7 +530,7 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     // Looked up by name, not by position: the list is every class in the
     // database, including ones other tests in this file created.
     let classes = admin_get(admin_port, &cookie, "/admin/prompt-classes");
-    let name = format!("shipping-{suffix}");
+    let name = format!("conveyancing-{suffix}");
     let c = classes
         .as_array()
         .unwrap()
