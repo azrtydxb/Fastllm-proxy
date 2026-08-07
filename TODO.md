@@ -211,9 +211,9 @@ transcript carrying its result translates on the way in.
 
 Deliberately not done, each additive and small:
 
-- Multimodal (image/audio parts) through a translated backend. Same shape as
-  tool calling below but smaller,
-  smaller: `content` parts of type `image_url` become Anthropic `image` blocks
+- Multimodal (image/audio parts) through a translated backend. The same shape
+  as the tool calling above, and smaller: `content` parts of type
+  `image_url` become Anthropic `image` blocks
   with base64 `source`, or Gemini `inline_data`. The refusal lives in
   `Content::into_text`, which flattens to a string today. No streaming
   complication — images are input only.
