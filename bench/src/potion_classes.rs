@@ -93,7 +93,7 @@ impl Rng {
 /// Spherical k-means: vectors are unit-length, so cosine similarity is the
 /// distance and the mean-then-renormalise step is the correct update.
 fn kmeans(vectors: &[Vec<f32>], k: usize, iterations: usize) -> (Vec<Vec<f32>>, Vec<usize>) {
-    let mut rng = Rng(0xC1A5_5E5_u64 | 1);
+    let mut rng = Rng(0x0C1A_55E5_u64 | 1);
     // k-means++ seeding, which matters here: uniform seeding on text
     // embeddings reliably lands several centroids inside the one dense blob of
     // generic prose and leaves the interesting sparse regions unclaimed.
@@ -356,7 +356,7 @@ fn main() {
     println!("(what the embedding separates when nobody imposes a taxonomy)\n");
     let (centroids, assignment) = kmeans(&vectors, K, 25);
 
-    for c in 0..K {
+    for (c, centre) in centroids.iter().enumerate() {
         let members: Vec<usize> = assignment
             .iter()
             .enumerate()
@@ -384,13 +384,13 @@ fn main() {
         // whose "class" would be a poor routing target however it is named.
         let cohesion: f32 = members
             .iter()
-            .map(|&i| cosine(&vectors[i], &centroids[c]))
+            .map(|&i| cosine(&vectors[i], centre))
             .sum::<f32>()
             / members.len() as f32;
 
         let mut nearest: Vec<(usize, f32)> = members
             .iter()
-            .map(|&i| (i, cosine(&vectors[i], &centroids[c])))
+            .map(|&i| (i, cosine(&vectors[i], centre)))
             .collect();
         nearest.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
