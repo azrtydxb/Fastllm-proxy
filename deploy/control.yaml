@@ -82,7 +82,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-bb5335c
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-d3b569b
           imagePullPolicy: Always
           args:
             - --role=control
