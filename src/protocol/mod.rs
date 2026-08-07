@@ -115,7 +115,8 @@ type SplitMessages = (Option<String>, Vec<Turn>);
 pub struct Turn {
     /// `"user"` or `"assistant"`.
     pub role: String,
-    pub text: String,
+    /// Text and media, in the order the client wrote them.
+    pub content: Vec<ContentItem>,
     /// Calls this assistant turn made.
     pub tool_calls: Vec<OpenAiToolCall>,
     /// Results this turn carries. Attached to the *user* turn that follows the
@@ -134,7 +135,17 @@ pub struct ToolResult {
 
 impl Turn {
     fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.tool_calls.is_empty() && self.tool_results.is_empty()
+        self.content
+            .iter()
+            .all(|c| c.as_text().is_some_and(str::is_empty))
+            && self.tool_calls.is_empty()
+            && self.tool_results.is_empty()
+    }
+
+    /// Whether this turn is text and nothing else — the shape both adapters
+    /// keep emitting as a bare string rather than a block array.
+    fn only_text(&self) -> bool {
+        self.content.iter().all(|c| c.as_text().is_some())
     }
 }
 
@@ -294,29 +305,145 @@ pub struct ContentPart {
     pub kind: String,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<ImageUrl>,
+    #[serde(default)]
+    pub input_audio: Option<InputAudio>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageUrl {
+    /// Either a `data:` URL carrying the bytes inline, or a remote one.
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InputAudio {
+    /// Base64, always — OpenAI has no remote form for audio.
+    pub data: String,
+    /// `"wav"` or `"mp3"`; a bare extension, not a media type.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+/// One piece of a message, after roles are normalised but before either native
+/// protocol's shape is applied.
+#[derive(Debug, Clone)]
+pub enum ContentItem {
+    Text(String),
+    /// Media the client sent inline, still base64 exactly as it arrived.
+    Inline {
+        mime: String,
+        data: String,
+    },
+    /// Media named by a URL the proxy does not resolve.
+    ///
+    /// Fetching it would be a network call while serving a request, which this
+    /// proxy does not do — see `tests/no_io_on_hot_path.rs`. So the URL is
+    /// handed to the provider to fetch, and refused for a provider that cannot.
+    Remote {
+        url: String,
+    },
+}
+
+impl ContentItem {
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+/// Split a `data:` URL into its media type and base64 payload.
+///
+/// Only the base64 form is accepted. The percent-encoded form is legal in the
+/// RFC and decoding it would mean re-encoding to base64 for both providers —
+/// work on the request path for a shape no OpenAI client emits.
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mime = meta.strip_suffix(";base64")?;
+    let mime = if mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        mime
+    };
+    Some((mime.to_string(), data.to_string()))
 }
 
 impl Content {
     /// Flatten to plain text, refusing anything that is not text.
     ///
-    /// Images and audio parts are the interesting case: concatenating only the
-    /// text parts of a multimodal message would send a coherent-looking
-    /// request that had quietly discarded the image the whole question was
-    /// about.
+    /// For the places where only text is meaningful — a system prompt, a tool
+    /// result — concatenating just the text parts of a multimodal message
+    /// would send a coherent-looking request that had quietly discarded the
+    /// image the whole question was about.
     fn into_text(self) -> Result<String, TranslateError> {
-        match self {
-            Self::Text(s) => Ok(s),
-            Self::Parts(parts) => {
-                let mut out = String::new();
-                for part in parts {
-                    if part.kind != "text" {
-                        return Err(TranslateError::Unsupported("non-text content parts"));
-                    }
-                    out.push_str(part.text.as_deref().unwrap_or_default());
-                }
-                Ok(out)
+        let mut out = String::new();
+        for item in self.into_items()? {
+            match item {
+                ContentItem::Text(t) => out.push_str(&t),
+                _ => return Err(TranslateError::Unsupported("media in this position")),
             }
         }
+        Ok(out)
+    }
+
+    /// Preserve the parts, and their order.
+    ///
+    /// Order carries meaning — "what is wrong with this?" before an image reads
+    /// differently from the same words after it — so parts are kept in
+    /// sequence rather than being sorted into text-then-media.
+    fn into_items(self) -> Result<Vec<ContentItem>, TranslateError> {
+        let parts = match self {
+            Self::Text(s) => return Ok(vec![ContentItem::Text(s)]),
+            Self::Parts(parts) => parts,
+        };
+        let mut out: Vec<ContentItem> = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part.kind.as_str() {
+                // Adjacent text joins rather than becoming two blocks: it was
+                // one message before the client split it, and both providers
+                // read a single string more predictably than a list of
+                // fragments.
+                "text" => {
+                    let text = part.text.unwrap_or_default();
+                    match out.last_mut() {
+                        Some(ContentItem::Text(prev)) => prev.push_str(&text),
+                        _ => out.push(ContentItem::Text(text)),
+                    }
+                }
+                "image_url" => {
+                    let url = part.image_url.map(|i| i.url).ok_or_else(|| {
+                        TranslateError::Malformed("image_url part has no url".into())
+                    })?;
+                    out.push(match parse_data_url(&url) {
+                        Some((mime, data)) => ContentItem::Inline { mime, data },
+                        None => ContentItem::Remote { url },
+                    });
+                }
+                "input_audio" => {
+                    let audio = part.input_audio.ok_or_else(|| {
+                        TranslateError::Malformed("input_audio part has no audio".into())
+                    })?;
+                    // OpenAI names the container (`wav`), providers want a
+                    // media type (`audio/wav`).
+                    let mime = format!("audio/{}", audio.format.as_deref().unwrap_or("wav"));
+                    out.push(ContentItem::Inline {
+                        mime,
+                        data: audio.data,
+                    });
+                }
+                other => {
+                    return Err(TranslateError::Unsupported(match other {
+                        "file" => "file content parts",
+                        _ => "an unrecognised content part type",
+                    }))
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -394,9 +521,14 @@ impl OpenAiRequest {
         let mut names: HashMap<String, String> = HashMap::new();
 
         for msg in self.messages {
-            let text = match msg.content {
-                Some(c) => c.into_text()?,
-                None => String::new(),
+            // A system prompt and a tool result are text by definition; only a
+            // user or assistant turn can carry media, so the cheap flattening
+            // stays where it is still correct.
+            let is_turn = matches!(msg.role.as_str(), "user" | "assistant");
+            let (text, content) = match (msg.content, is_turn) {
+                (Some(c), true) => (String::new(), c.into_items()?),
+                (Some(c), false) => (c.into_text()?, Vec::new()),
+                (None, _) => (String::new(), Vec::new()),
             };
             match msg.role.as_str() {
                 "system" | "developer" => system.push(text),
@@ -407,14 +539,14 @@ impl OpenAiRequest {
                     }
                     turns.push(Turn {
                         role: "assistant".into(),
-                        text,
+                        content,
                         tool_calls,
                         tool_results: Vec::new(),
                     });
                 }
                 "user" => turns.push(Turn {
                     role: "user".into(),
-                    text,
+                    content,
                     ..Turn::default()
                 }),
                 "tool" | "function" => {
@@ -432,7 +564,7 @@ impl OpenAiRequest {
                     // made three calls in parallel gets one reply carrying all
                     // three, which is the shape both native protocols require.
                     match turns.last_mut() {
-                        Some(t) if t.role == "user" && t.text.is_empty() => {
+                        Some(t) if t.role == "user" && t.content.is_empty() => {
                             t.tool_results.push(result)
                         }
                         _ => turns.push(Turn {

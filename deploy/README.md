@@ -251,9 +251,9 @@ or `"protocol":"gemini"`. Two operational notes:
 - Anthropic backends want `"default_max_tokens": 4096` (or whatever suits).
   Without it, any client request that omits `max_tokens` gets a 400 — the
   provider requires the field and the proxy will not invent a cap.
-- Translated backends serve `/chat/completions` only. Text and tool calling
-  work, streaming included; images and the embeddings/audio endpoints return
-  501. Use an OpenRouter backend for those.
+- Translated backends serve `/chat/completions` only. Text, tool calling and
+  image/audio input all work, streaming included; the embeddings/audio
+  endpoints return 501. Use an OpenRouter backend for those.
 
 The control plane needs egress to the provider and its CA in the trust store;
 public roots are already present in the image, so the hosted providers work

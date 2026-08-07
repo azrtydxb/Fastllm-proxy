@@ -86,6 +86,7 @@ drawn dotted on purpose: it is not on the default path.
 | usage | bounded tail buffer, one parse at end of stream | already parsed, exactly, during translation |
 | endpoints | all seven proxied suffixes | `/chat/completions` only; the rest are `501` |
 | tool calling | passthrough, untouched | translated both directions, streaming included |
+| image/audio input | passthrough, untouched | `data:` URLs translated inline; never fetched |
 | overhead | zero measured against a real vLLM | one parse per frame |
 
 Most providers are the left column, including OpenRouter — which is why

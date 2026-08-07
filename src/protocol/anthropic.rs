@@ -11,9 +11,9 @@ use serde_json::json;
 use serde_json::Value;
 
 use super::{
-    synthetic_id, AssistantMessage, Choice, Completion, OpenAiFunctionCall, OpenAiRequest,
-    OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator, TranslateError,
-    TranslatedRequest, Turn, Usage,
+    synthetic_id, AssistantMessage, Choice, Completion, ContentItem, OpenAiFunctionCall,
+    OpenAiRequest, OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator,
+    TranslateError, TranslatedRequest, Turn, Usage,
 };
 
 /// The version header Anthropic requires on every request. Sent by the
@@ -42,7 +42,7 @@ pub fn translate_request(
     let mut body = json!({
         "model": upstream_model,
         "max_tokens": max_tokens,
-        "messages": merge_consecutive(turns),
+        "messages": merge_consecutive(turns)?,
     });
     let obj = body.as_object_mut().expect("constructed as an object");
     if let Some(system) = system {
@@ -124,7 +124,7 @@ fn map_tool_choice(choice: Value) -> Option<Value> {
 /// Returns a bare string for the ordinary text-only turn — the shape both this
 /// API and its own clients use — and an array only once there is tool traffic
 /// that a string cannot express.
-fn blocks(turn: &Turn) -> Vec<Value> {
+fn blocks(turn: &Turn) -> Result<Vec<Value>, TranslateError> {
     let mut out = Vec::new();
     // Results first. Anthropic requires every `tool_result` to precede any
     // other block in the message that carries it.
@@ -135,8 +135,32 @@ fn blocks(turn: &Turn) -> Vec<Value> {
             "content": r.text,
         }));
     }
-    if !turn.text.is_empty() {
-        out.push(json!({"type": "text", "text": turn.text}));
+    for item in &turn.content {
+        match item {
+            ContentItem::Text(t) if t.is_empty() => {}
+            ContentItem::Text(t) => out.push(json!({"type": "text", "text": t})),
+            ContentItem::Inline { mime, data } => {
+                // Anthropic takes images inline and has no audio input at all.
+                // Sending audio as an image block would be rejected upstream
+                // with a message about the media type, several layers from the
+                // client that sent it.
+                if !mime.starts_with("image/") {
+                    return Err(TranslateError::Unsupported(
+                        "audio input for an Anthropic backend",
+                    ));
+                }
+                out.push(json!({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime, "data": data},
+                }));
+            }
+            // Anthropic fetches the URL itself, which is why this is expressible
+            // here and not for Gemini.
+            ContentItem::Remote { url } => out.push(json!({
+                "type": "image",
+                "source": {"type": "url", "url": url},
+            })),
+        }
     }
     for call in &turn.tool_calls {
         out.push(json!({
@@ -152,7 +176,7 @@ fn blocks(turn: &Turn) -> Vec<Value> {
                 .unwrap_or_else(|_| json!({})),
         }));
     }
-    out
+    Ok(out)
 }
 
 /// Fold consecutive same-role turns into one.
@@ -161,12 +185,13 @@ fn blocks(turn: &Turn) -> Vec<Value> {
 /// and real clients emit them (a system-turned-user preamble followed by the
 /// actual question). Merging is the difference between those clients working
 /// and getting a 400 they cannot act on.
-fn merge_consecutive(turns: Vec<Turn>) -> Vec<Value> {
-    let mut out: Vec<(String, Vec<Value>)> = Vec::with_capacity(turns.len());
+fn merge_consecutive(turns: Vec<Turn>) -> Result<Vec<Value>, TranslateError> {
+    let mut out: Vec<(String, Vec<Value>, bool)> = Vec::with_capacity(turns.len());
     for turn in &turns {
-        let mut next = blocks(turn);
+        let mut next = blocks(turn)?;
         match out.last_mut() {
-            Some((prev_role, prev)) if *prev_role == turn.role => {
+            Some((prev_role, prev, prev_plain)) if *prev_role == turn.role => {
+                *prev_plain = *prev_plain && turn.only_text();
                 // Two adjacent text blocks were one message before the split
                 // and read as one afterwards, so they join with the blank line
                 // rather than arriving as two blocks.
@@ -186,22 +211,23 @@ fn merge_consecutive(turns: Vec<Turn>) -> Vec<Value> {
                 }
                 prev.append(&mut next);
             }
-            _ => out.push((turn.role.clone(), next)),
+            _ => out.push((turn.role.clone(), next, turn.only_text())),
         }
     }
-    out.into_iter()
-        .map(|(role, mut blocks)| {
+    Ok(out
+        .into_iter()
+        .map(|(role, mut blocks, plain)| {
             // Merging can leave a result behind a text block; the ordering rule
             // is on the message, so it is re-applied after the merge.
             blocks.sort_by_key(|b| u8::from(b["type"] != "tool_result"));
             match blocks.as_slice() {
-                [only] if only["type"] == "text" => {
+                [only] if plain && only["type"] == "text" => {
                     json!({"role": role, "content": only["text"]})
                 }
                 _ => json!({"role": role, "content": blocks}),
             }
         })
-        .collect()
+        .collect())
 }
 
 fn finish_reason(stop_reason: Option<&str>) -> Option<String> {

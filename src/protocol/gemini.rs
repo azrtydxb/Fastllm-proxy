@@ -11,9 +11,9 @@ use serde_json::json;
 use serde_json::Value;
 
 use super::{
-    synthetic_id, synthetic_tool_id, AssistantMessage, Choice, Completion, OpenAiFunctionCall,
-    OpenAiRequest, OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator,
-    TranslateError, TranslatedRequest, Turn, Usage,
+    synthetic_id, synthetic_tool_id, AssistantMessage, Choice, Completion, ContentItem,
+    OpenAiFunctionCall, OpenAiRequest, OpenAiToolCall, ResponseContext, SseEvent, StopField,
+    StreamTranslator, TranslateError, TranslatedRequest, Turn, Usage,
 };
 
 pub fn translate_request(
@@ -33,7 +33,10 @@ pub fn translate_request(
     let tool_choice = req.tool_choice.take();
     let (system, turns) = req.split_system()?;
 
-    let contents: Vec<Value> = turns.iter().map(parts).collect();
+    let contents: Vec<Value> = turns
+        .iter()
+        .map(parts)
+        .collect::<Result<_, TranslateError>>()?;
 
     let mut body = json!({ "contents": contents });
     let obj = body.as_object_mut().expect("constructed as an object");
@@ -117,7 +120,7 @@ pub fn translate_request(
 /// The assistant role is spelled `model`. Results go back under the `user`
 /// role — Gemini has no separate role for them — which is why they were
 /// attached to a user turn upstream.
-fn parts(turn: &Turn) -> Value {
+fn parts(turn: &Turn) -> Result<Value, TranslateError> {
     let role = if turn.role == "assistant" {
         "model"
     } else {
@@ -134,8 +137,25 @@ fn parts(turn: &Turn) -> Value {
             }
         }));
     }
-    if !turn.text.is_empty() {
-        parts.push(json!({"text": turn.text}));
+    for item in &turn.content {
+        match item {
+            ContentItem::Text(t) if t.is_empty() => {}
+            ContentItem::Text(t) => parts.push(json!({"text": t})),
+            // Gemini takes images *and* audio the same way, which Anthropic
+            // does not — so no media type is refused here.
+            ContentItem::Inline { mime, data } => {
+                parts.push(json!({"inlineData": {"mimeType": mime, "data": data}}))
+            }
+            // `fileData.fileUri` exists but only addresses Google's own Files
+            // API and YouTube, so an arbitrary URL has no expressible form.
+            // Refusing names the fix; silently dropping the image would leave a
+            // question about a picture the model never saw.
+            ContentItem::Remote { .. } => {
+                return Err(TranslateError::Unsupported(
+                    "a remote image URL for a Gemini backend; send a data: URL",
+                ))
+            }
+        }
     }
     for call in &turn.tool_calls {
         parts.push(json!({
@@ -146,7 +166,7 @@ fn parts(turn: &Turn) -> Value {
             }
         }));
     }
-    json!({"role": role, "parts": parts})
+    Ok(json!({"role": role, "parts": parts}))
 }
 
 /// Wrap a tool's output as the object Gemini requires.

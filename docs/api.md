@@ -134,11 +134,21 @@ Two things to know before choosing native over OpenRouter:
   wonder why answers stop mid-sentence.
 - **Translated backends serve `/chat/completions` only.** Text and tool
   calling work, streaming included — `tools`, `tool_choice`, `tool_calls` and
-  `role: "tool"` messages all translate, in both directions. Images, `n > 1`,
-  `logprobs`, `seed`, `response_format`, the deprecated `functions`
-  parameter, and the embeddings/rerank/audio endpoints return `501` naming
-  what was unsupported, rather than quietly doing less than was asked.
-  Requests needing those should go to an OpenAI-compatible backend.
+  `role: "tool"` messages all translate, in both directions, as do image and
+  audio content parts. `n > 1`, `logprobs`, `seed`, `response_format`, the
+  deprecated `functions` parameter, and the embeddings/rerank/audio endpoints
+  return `501` naming what was unsupported, rather than quietly doing less
+  than was asked. Requests needing those should go to an OpenAI-compatible
+  backend.
+
+  **Media never causes a fetch.** A `data:` URL carries the bytes inline and
+  translates exactly, base64 untouched. A remote `https://` URL is handed to
+  Anthropic, which fetches it itself; for Gemini it is a `501` naming the fix,
+  because `fileData.fileUri` only addresses Google's own Files API. The proxy
+  does not download it in either case — that would be a network call while
+  serving a request, which `tests/no_io_on_hot_path.rs` forbids. Audio reaches
+  Gemini as `inlineData`; Anthropic has no audio input, so it is a `501` rather
+  than an image block with an audio media type that fails upstream.
 
   Two details a client can observe. Gemini supplies no tool-call id, so the
   proxy synthesises one — stable within a response, which is all a client

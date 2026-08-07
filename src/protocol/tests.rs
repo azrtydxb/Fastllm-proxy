@@ -266,17 +266,19 @@ fn more_than_one_choice_is_refused_but_exactly_one_is_fine() {
     .is_ok());
 }
 
-/// The dangerous case: concatenating only the text parts would send a
-/// coherent-looking request that had thrown away the image being asked about.
+/// A system prompt has no multimodal form in either protocol, and quietly
+/// keeping only its text would throw away the image being asked about.
 #[test]
-fn multimodal_content_is_refused_rather_than_flattened_to_its_text_parts() {
+fn media_outside_a_conversation_turn_is_refused_rather_than_dropped() {
     let err = refusal(json!({
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "What is in this image?"},
-            {"type": "image_url", "image_url": {"url": "http://example/x.png"}},
-        ]}],
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+            ]},
+            {"role": "user", "content": "Hi"},
+        ],
     }));
-    assert_eq!(err, TranslateError::Unsupported("non-text content parts"));
+    assert_eq!(err, TranslateError::Unsupported("media in this position"));
 }
 
 #[test]
@@ -937,4 +939,183 @@ fn gemini_streams_a_whole_call_in_one_frame() {
     let (_, finish, done, _) = replay(&out);
     assert_eq!(finish.as_deref(), Some("tool_calls"));
     assert!(done);
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal
+// ---------------------------------------------------------------------------
+
+/// Order carries meaning — the same words before and after an image ask
+/// different questions — so parts keep their sequence rather than being sorted
+/// into text-then-media.
+#[test]
+fn an_inline_image_keeps_its_place_among_the_text() {
+    let body = json!({
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "What is wrong with"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KAAA="}},
+            {"type": "text", "text": "this?"},
+        ]}],
+    });
+    let (anthropic, _) = translated(Protocol::Anthropic, body.clone(), None);
+    assert_eq!(
+        anthropic["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "What is wrong with"},
+            {"type": "image", "source": {"type": "base64",
+                "media_type": "image/png", "data": "iVBORw0KAAA="}},
+            {"type": "text", "text": "this?"},
+        ])
+    );
+
+    let (gemini, _) = translated(Protocol::Gemini, body, None);
+    assert_eq!(
+        gemini["contents"][0]["parts"],
+        json!([
+            {"text": "What is wrong with"},
+            {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KAAA="}},
+            {"text": "this?"},
+        ])
+    );
+}
+
+/// The base64 payload must reach the provider byte for byte. Re-encoding it
+/// would be work on the request path for no gain, and a single altered
+/// character is an image that fails to decode several layers away.
+#[test]
+fn the_base64_payload_is_never_re_encoded() {
+    const DATA: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 5, "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": format!("data:image/gif;base64,{DATA}")}},
+        ]}]}),
+        None,
+    );
+    assert_eq!(body["messages"][0]["content"][0]["source"]["data"], DATA);
+}
+
+/// A remote URL is never fetched — that would be a network call while serving
+/// a request. Anthropic will fetch it itself, so it is expressible there.
+#[test]
+fn a_remote_image_is_handed_to_anthropic_rather_than_downloaded() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 5, "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+        ]}]}),
+        None,
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "image", "source": {"type": "url", "url": "https://example.test/x.png"}})
+    );
+}
+
+/// Gemini's `fileData.fileUri` only addresses Google's own Files API, so an
+/// arbitrary URL has no expressible form. Naming the fix beats dropping the
+/// image and answering a question about a picture the model never saw.
+#[test]
+fn a_remote_image_is_refused_for_gemini_with_the_fix_named() {
+    let err = translate_request(
+        Protocol::Gemini,
+        json!({"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+        ]}]})
+        .to_string()
+        .as_bytes(),
+        "m",
+        Some(10),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        TranslateError::Unsupported("a remote image URL for a Gemini backend; send a data: URL")
+    );
+}
+
+/// Gemini takes audio the same way it takes images; Anthropic has no audio
+/// input at all, and an image block with an audio media type would be rejected
+/// upstream with a message the client cannot act on.
+#[test]
+fn audio_reaches_gemini_and_is_refused_by_name_for_anthropic() {
+    let body = json!({
+        "max_tokens": 5,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Transcribe"},
+            {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}},
+        ]}],
+    });
+    let (gemini, _) = translated(Protocol::Gemini, body.clone(), None);
+    assert_eq!(
+        gemini["contents"][0]["parts"][1],
+        json!({"inlineData": {"mimeType": "audio/wav", "data": "UklGRg=="}})
+    );
+
+    let err = refusal(body);
+    assert_eq!(
+        err,
+        TranslateError::Unsupported("audio input for an Anthropic backend")
+    );
+}
+
+/// A text-only turn must still go out as a bare string, not a one-element block
+/// array — the shape both providers' own clients send, and the one every
+/// existing byte-exact assertion in this file depends on.
+#[test]
+fn adding_media_support_did_not_change_the_text_only_shape() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 5, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+            {"role": "assistant", "content": "ok"},
+        ]}),
+        None,
+    );
+    assert_eq!(body["messages"][0]["content"], json!("ab"));
+    assert_eq!(body["messages"][1]["content"], json!("ok"));
+}
+
+/// Merging two adjacent user turns must not promote a text-only pair into
+/// block form, nor lose the image when one of them carries it.
+#[test]
+fn merging_turns_preserves_media_and_the_plain_text_shape() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 5, "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+            ]},
+        ]}),
+        None,
+    );
+    assert_eq!(
+        body["messages"],
+        json!([{"role": "user", "content": [
+            {"type": "text", "text": "first"},
+            {"type": "image", "source": {"type": "base64",
+                "media_type": "image/png", "data": "AAA"}},
+        ]}])
+    );
+}
+
+/// A `data:` URL that is not base64 is refused rather than forwarded as a
+/// remote URL, which would send the provider a fetch it cannot perform.
+#[test]
+fn a_non_base64_data_url_does_not_masquerade_as_a_remote_one() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 5, "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png,%89PNG"}},
+        ]}]}),
+        None,
+    );
+    // Anthropic can take a URL source, so this is expressible — but it must not
+    // have been mistaken for inline base64 and sent as bytes.
+    assert_eq!(
+        body["messages"][0]["content"][0]["source"]["type"],
+        json!("url")
+    );
 }

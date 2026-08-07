@@ -47,7 +47,7 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 | **Anthropic** | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
 | **Gemini** | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key` |
 
-Tool calling translates in both directions on native backends, streaming included. Native translation is opt-in per backend and byte-exact passthrough is preserved everywhere else — an `openai` backend's response is never parsed, which is where the latency numbers above come from. Full endpoint table and the translation limits are in [docs/api.md](docs/api.md#providers).
+Tool calling translates in both directions on native backends, streaming included, as do image and audio inputs. Native translation is opt-in per backend and byte-exact passthrough is preserved everywhere else — an `openai` backend's response is never parsed, which is where the latency numbers above come from. Full endpoint table and the translation limits are in [docs/api.md](docs/api.md#providers).
 
 ## Routing
 
