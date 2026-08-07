@@ -14,6 +14,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Standard deviation in the same unit the samples are in.
+///
+/// Reported because a median hides the thing that actually shows up as a bad
+/// user experience: two gateways can share a p50 while one of them is quietly
+/// tripling it every few requests.
+fn stddev(xs: &[u64]) -> f64 {
+    if xs.len() < 2 {
+        return 0.0;
+    }
+    let mean = xs.iter().sum::<u64>() as f64 / xs.len() as f64;
+    let var = xs.iter().map(|x| (*x as f64 - mean).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
+    var.sqrt()
+}
+
 fn pct(sorted: &[u64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -111,6 +125,34 @@ async fn main() {
     let mut g = gaps.lock().unwrap().clone();
     t.sort_unstable();
     g.sort_unstable();
+    // Machine-readable output for the concurrency sweep that feeds the charts.
+    // Same measurements either way — only the formatting differs — so a number
+    // in a graph and a number in a terminal cannot drift apart.
+    if std::env::var("JSON").is_ok() {
+        println!(
+            r#"{{"conns":{},"per_conn":{},"ttft_p50":{:.3},"ttft_p90":{:.3},"ttft_p99":{:.3},"ttft_sd":{:.3},"gap_p50":{:.3},"gap_p99":{:.3},"gap_sd":{:.3},"frames":{},"events":{},"tok_s":{:.2},"req_s":{:.2},"secs":{:.3},"samples":{}}}"#,
+            conns,
+            per_conn,
+            pct(&t, 0.50) / 1000.0,
+            pct(&t, 0.90) / 1000.0,
+            pct(&t, 0.99) / 1000.0,
+            stddev(&t) / 1_000_000.0,
+            pct(&g, 0.50) / 1000.0,
+            pct(&g, 0.99) / 1000.0,
+            stddev(&g) / 1_000_000.0,
+            frames.load(Ordering::Relaxed),
+            toks.load(Ordering::Relaxed),
+            toks.load(Ordering::Relaxed) as f64 / secs,
+            // Requests, not tokens, is the throughput measure that survives two
+            // gateways framing a stream differently — and they do: under the
+            // mock's instant-burst pacing LiteLLM emits roughly half the SSE
+            // events for the same content.
+            t.len() as f64 / secs,
+            secs,
+            t.len(),
+        );
+        return;
+    }
     println!(
         "  ttft_ms p50 {:>7.1} p90 {:>7.1} | inter-token_ms p50 {:>6.2} p99 {:>7.2} | frames {:>6} events {:>6} | {:>6.1} tok/s agg | {:.1}s",
         pct(&t, 0.50) / 1000.0,

@@ -194,3 +194,17 @@ split exists to prevent.
   prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
   opt-in-visibly line the passthrough/translate split draws.
+
+## Behaviour notes
+
+- **Retries** only happen before any byte has been forwarded. Once the response is committed a mid-stream failure propagates as-is — it cannot be silently retried without corrupting the stream.
+- **5xx is retried, 4xx is not.** A client error retried across every node is the same client error three times.
+- **The last backend's response is forwarded verbatim.** A 5xx is only retried while another backend remains; when none does, the upstream's own status and body reach the client rather than a synthetic 502. On a single-node pool that means every error keeps the engine's diagnostics.
+- **Audio endpoints take `multipart/form-data`.** `model` is read from the form field and the upload is forwarded byte for byte, content-type and boundary intact. An alias splices the new name into that one field rather than re-encoding the body.
+- **`https://` backends work**, so a TLS-terminated or hosted endpoint can sit in the same config as cluster-local nodes. System root certificates are used, falling back to the bundled Mozilla set.
+- **A backend that fails every probe is still used as a last resort** rather than returning 503. A stale health flag should not turn a recoverable request into an outage.
+- **The client's `Authorization` header is never forwarded.** It authenticates the client to the proxy; the upstream gets the backend's own key or none — in whichever header that provider reads it from.
+- **An OpenAI-compatible backend's response is never parsed.** Bytes are forwarded verbatim, which is why proxied overhead measures at zero; `tests/native_protocols.rs` pins it against an intentionally odd-but-valid payload. Only a backend explicitly configured for a native protocol is translated, and only there is a response body read.
+- **A backend's identity covers its whole configuration.** Rotating an upstream key, or changing a backend's protocol, produces a new routing entry rather than reusing the live one — otherwise a reload would keep serving with the old credential, since backend objects are carried across reloads to preserve their in-flight counts.
+- **Affinity keys hash the raw request prefix**, not parsed fields. JSON does not guarantee field order, but order is stable per client, which is all affinity needs — a client that reorders per request degrades to least-loaded rather than misrouting.
+- **A rate-limited request gets `429` with `Retry-After`**, checked after authorisation and model resolution but before the request is dispatched upstream — nothing is forwarded on a rejected request. See "Rate limits" above.

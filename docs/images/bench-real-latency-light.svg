@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 300" width="560" height="300" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" role="img" aria-label="Time to first token against real vLLM, p50 solid and p99 dotted">
+<line x1="58" y1="264.0" x2="542" y2="264.0" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="267.5" text-anchor="end" font-size="10" fill="#7B8D90">0</text>
+<line x1="58" y1="214.8" x2="542" y2="214.8" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="218.3" text-anchor="end" font-size="10" fill="#7B8D90">1,298</text>
+<line x1="58" y1="165.6" x2="542" y2="165.6" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="169.1" text-anchor="end" font-size="10" fill="#7B8D90">2,596</text>
+<line x1="58" y1="116.4" x2="542" y2="116.4" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="119.9" text-anchor="end" font-size="10" fill="#7B8D90">3,893</text>
+<line x1="58" y1="67.2" x2="542" y2="67.2" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="70.7" text-anchor="end" font-size="10" fill="#7B8D90">5,191</text>
+<line x1="58" y1="18.0" x2="542" y2="18.0" stroke="#D3DEDE" stroke-width="1"/>
+<text x="49" y="21.5" text-anchor="end" font-size="10" fill="#7B8D90">6,489</text>
+<text x="58.0" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">1</text>
+<text x="138.7" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">2</text>
+<text x="219.3" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">4</text>
+<text x="300.0" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">8</text>
+<text x="380.7" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">16</text>
+<text x="461.3" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">32</text>
+<text x="508.5" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">48</text>
+<text x="542.0" y="281" text-anchor="middle" font-size="10" fill="#7B8D90">64</text>
+<text x="280" y="296" text-anchor="middle" font-size="10" fill="#7B8D90">concurrent streams</text>
+<text x="12" y="132" font-size="10" fill="#7B8D90" transform="rotate(-90 12 132)" text-anchor="middle">TTFT (ms)</text>
+<path d="M58.0,260.5 L138.7,260.4 L219.3,259.0 L300.0,257.9 L380.7,255.8 L461.3,252.0 L508.5,231.4 L542.0,137.2" fill="none" stroke="#0F8C79" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="58.0" cy="260.5" r="2.6" fill="#0F8C79"/>
+<circle cx="138.7" cy="260.4" r="2.6" fill="#0F8C79"/>
+<circle cx="219.3" cy="259.0" r="2.6" fill="#0F8C79"/>
+<circle cx="300.0" cy="257.9" r="2.6" fill="#0F8C79"/>
+<circle cx="380.7" cy="255.8" r="2.6" fill="#0F8C79"/>
+<circle cx="461.3" cy="252.0" r="2.6" fill="#0F8C79"/>
+<circle cx="508.5" cy="231.4" r="2.6" fill="#0F8C79"/>
+<circle cx="542.0" cy="137.2" r="2.6" fill="#0F8C79"/>
+<path d="M58.0,258.0 L138.7,259.0 L219.3,258.1 L300.0,257.6 L380.7,255.4 L461.3,250.1 L508.5,235.9 L542.0,142.4" fill="none" stroke="#B4652C" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="58.0" cy="258.0" r="2.6" fill="#B4652C"/>
+<circle cx="138.7" cy="259.0" r="2.6" fill="#B4652C"/>
+<circle cx="219.3" cy="258.1" r="2.6" fill="#B4652C"/>
+<circle cx="300.0" cy="257.6" r="2.6" fill="#B4652C"/>
+<circle cx="380.7" cy="255.4" r="2.6" fill="#B4652C"/>
+<circle cx="461.3" cy="250.1" r="2.6" fill="#B4652C"/>
+<circle cx="508.5" cy="235.9" r="2.6" fill="#B4652C"/>
+<circle cx="542.0" cy="142.4" r="2.6" fill="#B4652C"/>
+<path d="M58.0,257.4 L138.7,258.5 L219.3,257.5 L300.0,256.7 L380.7,241.6 L461.3,234.9 L508.5,136.0 L542.0,77.9" fill="none" stroke="#0F8C79" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.75"/>
+<path d="M58.0,255.7 L138.7,257.9 L219.3,256.3 L300.0,253.2 L380.7,248.6 L461.3,153.3 L508.5,134.3 L542.0,18.0" fill="none" stroke="#B4652C" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.75"/>
+<rect x="62" y="18" width="14" height="3" rx="1.5" fill="#0F8C79"/>
+<text x="82" y="22" font-size="10" fill="#7B8D90">fastllm-proxy</text>
+<rect x="62" y="33" width="14" height="3" rx="1.5" fill="#B4652C"/>
+<text x="82" y="37" font-size="10" fill="#7B8D90">LiteLLM</text>
+</svg>

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 300" width="560" height="300" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" role="img" aria-label="Requests per second against a mock upstream, by concurrency">
+<line x1="58" y1="264.0" x2="542" y2="264.0" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="267.5" text-anchor="end" font-size="10" fill="#6C8084">0</text>
+<line x1="58" y1="214.8" x2="542" y2="214.8" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="218.3" text-anchor="end" font-size="10" fill="#6C8084">127</text>
+<line x1="58" y1="165.6" x2="542" y2="165.6" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="169.1" text-anchor="end" font-size="10" fill="#6C8084">254</text>
+<line x1="58" y1="116.4" x2="542" y2="116.4" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="119.9" text-anchor="end" font-size="10" fill="#6C8084">381</text>
+<line x1="58" y1="67.2" x2="542" y2="67.2" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="70.7" text-anchor="end" font-size="10" fill="#6C8084">508</text>
+<line x1="58" y1="18.0" x2="542" y2="18.0" stroke="#24373A" stroke-width="1"/>
+<text x="49" y="21.5" text-anchor="end" font-size="10" fill="#6C8084">635</text>
+<text x="58.0" y="281" text-anchor="middle" font-size="10" fill="#6C8084">1</text>
+<text x="138.7" y="281" text-anchor="middle" font-size="10" fill="#6C8084">2</text>
+<text x="219.3" y="281" text-anchor="middle" font-size="10" fill="#6C8084">4</text>
+<text x="300.0" y="281" text-anchor="middle" font-size="10" fill="#6C8084">8</text>
+<text x="380.7" y="281" text-anchor="middle" font-size="10" fill="#6C8084">16</text>
+<text x="461.3" y="281" text-anchor="middle" font-size="10" fill="#6C8084">32</text>
+<text x="508.5" y="281" text-anchor="middle" font-size="10" fill="#6C8084">48</text>
+<text x="542.0" y="281" text-anchor="middle" font-size="10" fill="#6C8084">64</text>
+<text x="280" y="296" text-anchor="middle" font-size="10" fill="#6C8084">concurrent streams</text>
+<text x="12" y="132" font-size="10" fill="#6C8084" transform="rotate(-90 12 132)" text-anchor="middle">requests/s</text>
+<path d="M58.0,248.0 L138.7,241.7 L219.3,207.2 L300.0,71.6 L380.7,115.3 L461.3,18.0 L508.5,94.1 L542.0,64.2" fill="none" stroke="#3FCFB4" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="58.0" cy="248.0" r="2.6" fill="#3FCFB4"/>
+<circle cx="138.7" cy="241.7" r="2.6" fill="#3FCFB4"/>
+<circle cx="219.3" cy="207.2" r="2.6" fill="#3FCFB4"/>
+<circle cx="300.0" cy="71.6" r="2.6" fill="#3FCFB4"/>
+<circle cx="380.7" cy="115.3" r="2.6" fill="#3FCFB4"/>
+<circle cx="461.3" cy="18.0" r="2.6" fill="#3FCFB4"/>
+<circle cx="508.5" cy="94.1" r="2.6" fill="#3FCFB4"/>
+<circle cx="542.0" cy="64.2" r="2.6" fill="#3FCFB4"/>
+<path d="M58.0,261.5 L138.7,258.2 L219.3,251.1 L300.0,257.3 L380.7,250.5 L461.3,250.0 L508.5,250.1 L542.0,247.4" fill="none" stroke="#E0954F" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="58.0" cy="261.5" r="2.6" fill="#E0954F"/>
+<circle cx="138.7" cy="258.2" r="2.6" fill="#E0954F"/>
+<circle cx="219.3" cy="251.1" r="2.6" fill="#E0954F"/>
+<circle cx="300.0" cy="257.3" r="2.6" fill="#E0954F"/>
+<circle cx="380.7" cy="250.5" r="2.6" fill="#E0954F"/>
+<circle cx="461.3" cy="250.0" r="2.6" fill="#E0954F"/>
+<circle cx="508.5" cy="250.1" r="2.6" fill="#E0954F"/>
+<circle cx="542.0" cy="247.4" r="2.6" fill="#E0954F"/>
+<rect x="62" y="18" width="14" height="3" rx="1.5" fill="#3FCFB4"/>
+<text x="82" y="22" font-size="10" fill="#6C8084">fastllm-proxy</text>
+<rect x="62" y="33" width="14" height="3" rx="1.5" fill="#E0954F"/>
+<text x="82" y="37" font-size="10" fill="#6C8084">LiteLLM</text>
+</svg>
