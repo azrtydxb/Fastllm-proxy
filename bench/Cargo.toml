@@ -36,6 +36,13 @@ path = "src/load.rs"
 name = "potion"
 path = "src/potion.rs"
 
+# The same evaluation against real labelled data (HuggingFaceH4/no_robots and
+# openai/gsm8k) rather than hand-written prompts — see `src/potion_real.rs`.
+# Run `python3 bench/fetch-prompts.py` first.
+[[bin]]
+name = "potion-real"
+path = "src/potion_real.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
