@@ -149,6 +149,18 @@ measurably an easier one.
 On realistic traffic mixes escalation touches well under a tenth of requests,
 putting the average added cost near 0.2 ms.
 
+## Classes compete globally
+
+Every class in the snapshot is scored on every classified request. Two classes
+seeded with neighbouring prompts produce neighbouring centroids, and the margin
+between them collapses below any floor — so both stop matching and requests fall
+through. `POST /admin/prompt-classes/evaluate` reports exactly this as a
+collision, and it is the first thing to check when a class that looks correct
+stops firing.
+
+Per-request classification is logged at debug with the class, the margin and
+which tier decided, so drift is visible before somebody complains about answers.
+
 ## Memory
 
 Both models ship in the image. Loaded, they cost real memory in whichever

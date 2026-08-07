@@ -278,7 +278,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         admin_port,
         cookie,
         &format!("/admin/virtual-models/{vm_id}/rules"),
-        serde_json::json!({"position": 0, "class": format!("coding-{suffix}")}),
+        serde_json::json!({"position": 0, "class": format!("horticulture-{suffix}")}),
     );
     let rule_id = rule["id"].as_i64().unwrap();
     admin_post(
@@ -302,28 +302,23 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
     }
 }
 
+/// Deliberately an unusual domain.
+///
+/// Classification scores against *every* class in the snapshot, and this suite
+/// shares a database with other tests and with a live dev cluster that has real
+/// `coding` and `chat` classes of its own. A test class named `coding` competes
+/// with those and the winner is a coin flip; horticulture competes with nothing.
+/// The point under test is that a class routes, not which words it contains.
 #[cfg(feature = "classifier")]
-const CODING_EXAMPLES: &[&str] = &[
-    "Write a Python function that merges two sorted lists.",
-    "Why does this Rust code fail the borrow checker?",
-    "My unit test throws NullPointerException on line 42, here is the stack trace.",
-    "Add error handling to this async fetch call in TypeScript.",
-    "Implement binary search in C without recursion.",
-    "Write a Dockerfile for a Go service that listens on port 8080.",
-    "Generate a SQL migration that adds a nullable timestamp column.",
-    "Refactor this class to use dependency injection.",
-];
-
-#[cfg(feature = "classifier")]
-const CHAT_EXAMPLES: &[&str] = &[
-    "What is the capital of France?",
-    "Tell me a joke about computers.",
-    "Who wrote Pride and Prejudice?",
-    "Recommend a book about the history of the internet.",
-    "What's a good name for a golden retriever puppy?",
-    "How do you say thank you in Portuguese?",
-    "Summarise the plot of Hamlet briefly.",
-    "Give me three ideas for a team offsite.",
+const HORTICULTURE_EXAMPLES: &[&str] = &[
+    "When should I prune my apple trees?",
+    "What is the best mulch for a raised vegetable bed?",
+    "How often should tomatoes be watered in a greenhouse?",
+    "My hydrangeas have yellow leaves, what is wrong?",
+    "Which cover crop should I sow before the frost?",
+    "How do I propagate rosemary from cuttings?",
+    "What pH does a blueberry bush need in the soil?",
+    "When is the right time to divide perennials?",
 ];
 
 /// Wait until each *named* class reports a centroid.
@@ -397,51 +392,48 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix).await;
 
-    // Two classes, seeded with example prompts. This is the whole of the
+    // One class, seeded with example prompts. This is the whole of the
     // configuration — no training step, no model to fine-tune.
-    for (name, examples) in [
-        (format!("coding-{suffix}"), CODING_EXAMPLES),
-        (format!("chat-{suffix}"), CHAT_EXAMPLES),
-    ] {
-        admin_post(
-            admin_port,
-            &cookie,
-            "/admin/prompt-classes",
-            serde_json::json!({
-                "name": name,
-                "tier": "fast",
-                "min_margin": 0.02,
-                "examples": examples,
-            }),
-        );
-    }
-    wait_for_routing(port, &fx.key, &fx.virtual_name);
-    wait_for_routable_classes(
+    admin_post(
         admin_port,
         &cookie,
-        &[format!("coding-{suffix}"), format!("chat-{suffix}")],
+        "/admin/prompt-classes",
+        serde_json::json!({
+            "name": format!("horticulture-{suffix}"),
+            "tier": "fast",
+            "min_margin": 0.02,
+            "examples": HORTICULTURE_EXAMPLES,
+        }),
+    );
+    wait_for_routing(port, &fx.key, &fx.virtual_name);
+    wait_for_routable_classes(admin_port, &cookie, &[format!("horticulture-{suffix}")]);
+
+    // The probe is one of the class's own seed prompts, on purpose.
+    //
+    // This test exists to prove the *plumbing* — that a class defined through
+    // the admin API, embedded by the control plane, shipped in a snapshot and
+    // named by a rule actually steers a live HTTP request. Whether the model
+    // generalises to held-out prompts is a different question, measured over
+    // ~21k labelled examples in `bench/potion-real`, and asserting it here
+    // would make this test's result depend on which other classes happen to
+    // exist in a shared database.
+    let matched = routed_to(port, &fx.key, &fx.virtual_name, HORTICULTURE_EXAMPLES[0]);
+    assert!(
+        matched.contains(&fx.coding_base),
+        "a horticulture question should reach the class's model, got: {matched}"
     );
 
-    let coding = routed_to(
+    // Nothing to do with horticulture, and not a seed of any class this test
+    // defined, so the rule must not fire.
+    let unmatched = routed_to(
         port,
         &fx.key,
         &fx.virtual_name,
-        "Why does my Python script raise a KeyError when I loop over this dict?",
+        "Why does this Rust code fail the borrow checker on the second loop?",
     );
     assert!(
-        coding.contains(&fx.coding_base),
-        "a coding question should reach the coding model, got: {coding}"
-    );
-
-    let chat = routed_to(
-        port,
-        &fx.key,
-        &fx.virtual_name,
-        "What is the tallest mountain in Europe?",
-    );
-    assert!(
-        chat.contains(&fx.default_base),
-        "a chat question should fall through to the default, got: {chat}"
+        unmatched.contains(&fx.default_base),
+        "a prompt outside the class should fall through to the default, got: {unmatched}"
     );
 }
 
@@ -470,24 +462,25 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix).await;
 
-    // Deliberately *not* coding examples. Every test in this file shares one
-    // Postgres, so every proxy embeds every class that exists — and two classes
-    // seeded with near-identical prompts produce near-identical centroids, which
-    // collapses the margin between them below any floor. That is real product
-    // behaviour (see `POST /admin/prompt-classes/evaluate`, which exists to
-    // surface exactly this), but here it would make one test fail because of
-    // another test's data.
+    // The content is irrelevant here — this test has no classifier, so nothing
+    // is ever embedded or compared. What it must *not* be is anything close to
+    // the horticulture class the sibling test defines: every proxy in this file
+    // embeds every class in the shared database, and two classes seeded with
+    // neighbouring prompts produce neighbouring centroids, which collapses the
+    // margin between them below any floor. That is real product behaviour —
+    // `POST /admin/prompt-classes/evaluate` exists to surface it — but here it
+    // made one test fail because of another test's data.
     admin_post(
         admin_port,
         &cookie,
         "/admin/prompt-classes",
         serde_json::json!({
-            "name": format!("gardening-{suffix}"),
+            "name": format!("shipping-{suffix}"),
             "examples": [
-                "When should I prune my apple trees?",
-                "What is the best mulch for a vegetable bed?",
-                "How often should tomatoes be watered in a greenhouse?",
-                "My hydrangeas have yellow leaves, what is wrong?",
+                "How do I calculate great-circle distance between two ports?",
+                "What draft can this vessel manage through the canal?",
+                "When does demurrage start accruing on a bill of lading?",
+                "Which incoterm puts the freight cost on the buyer?",
             ],
         }),
     );
@@ -512,7 +505,7 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     // Looked up by name, not by position: the list is every class in the
     // database, including ones other tests in this file created.
     let classes = admin_get(admin_port, &cookie, "/admin/prompt-classes");
-    let name = format!("gardening-{suffix}");
+    let name = format!("shipping-{suffix}");
     let c = classes
         .as_array()
         .unwrap()

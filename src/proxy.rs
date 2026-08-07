@@ -314,7 +314,19 @@ async fn proxy_request(
     let classification = state.classify(&collected);
     #[cfg(feature = "classifier")]
     let (class_name, class_refines) = match &classification {
-        Some(c) => (Some(c.class.as_str()), c.refines.as_slice()),
+        Some(c) => {
+            // Logged because a classifier whose quality drifts as traffic
+            // changes is otherwise invisible until somebody complains about
+            // answers. The margin is the number an operator tunes `min_margin`
+            // against, and the tier says how often the expensive path is taken.
+            debug!(
+                class = %c.class,
+                margin = c.margin,
+                tier = c.tier.as_str(),
+                "classified"
+            );
+            (Some(c.class.as_str()), c.refines.as_slice())
+        }
         None => (None, &[][..]),
     };
     #[cfg(not(feature = "classifier"))]
