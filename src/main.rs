@@ -1194,13 +1194,12 @@ struct SnapshotEmbedder {
 
 #[cfg(all(feature = "control", feature = "classifier"))]
 impl fastllm_proxy::control::build::PromptClassEmbedder for SnapshotEmbedder {
-    fn fast(&self, prompts: &[String]) -> Option<Vec<f32>> {
-        let t = self.tier1.as_ref()?;
-        fastllm_proxy::classifier::centroid(&t.embed_batch(prompts))
+    fn fast(&self, prompts: &[String]) -> Option<Vec<Vec<f32>>> {
+        Some(self.tier1.as_ref()?.embed_batch(prompts))
     }
 
     #[cfg(feature = "classifier-tier2")]
-    fn refined(&self, prompts: &[String]) -> Option<Vec<f32>> {
+    fn refined(&self, prompts: &[String]) -> Option<Vec<Vec<f32>>> {
         // Loaded on demand here too: a control plane whose operator defined no
         // refined classes never touches the transformer either.
         let loaded = self.tier2.get_or_init(|| {
@@ -1213,11 +1212,11 @@ impl fastllm_proxy::control::build::PromptClassEmbedder for SnapshotEmbedder {
                 }
             }
         });
-        fastllm_proxy::classifier::centroid(&loaded.as_ref()?.embed_batch(prompts)?)
+        loaded.as_ref()?.embed_batch(prompts)
     }
 
     #[cfg(not(feature = "classifier-tier2"))]
-    fn refined(&self, _prompts: &[String]) -> Option<Vec<f32>> {
+    fn refined(&self, _prompts: &[String]) -> Option<Vec<Vec<f32>>> {
         None
     }
 }

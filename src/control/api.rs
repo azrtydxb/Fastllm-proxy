@@ -10,6 +10,7 @@ use crate::control::secrets::EncryptionKey;
 use crate::routing::MatchConditionJson;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
 use crate::usage::UsageEvent;
+use crate::vector::cosine;
 use arc_swap::ArcSwap;
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
@@ -2553,6 +2554,10 @@ pub async fn serve(
             "/admin/prompt-classes/evaluate",
             post(evaluate_prompt_classes),
         )
+        .route(
+            "/admin/fallback-model",
+            get(get_fallback_model).put(put_fallback_model),
+        )
         .route("/admin/virtual-models/{id}/rules", post(post_rule))
         .route("/admin/rules/{id}", delete(delete_rule))
         .route("/admin/rules/{id}/targets", post(post_rule_target))
@@ -4204,55 +4209,257 @@ async fn delete_prompt_class(
 
 /// Report how well an operator's own classes separate.
 ///
-/// The measurements behind this feature found that class *definition* — not
-/// class count — is what decides quality, and that the failure is invisible
-/// without a report like this: a class at 20% precision looks identical, from
-/// the outside, to one at 98%. This runs leave-one-out over the stored
-/// examples, which is exactly how the centroids will be built.
+/// Two diagnostics, because they fail differently. **Centroid similarity** is
+/// cheap and predicts trouble before any traffic flows: a pair above ~0.8 is one
+/// region of the space with two names, and no threshold separates them.
+/// **Leave-one-out precision and recall** is the empirical one: each example is
+/// scored against centroids built from the *other* examples of its class, which
+/// is exactly how a real prompt will be scored.
+///
+/// The measurements this feature is built on found that class *definition*, not
+/// class count, decides quality — and that the failure is invisible without a
+/// report like this, because a class at 20% precision looks identical from the
+/// outside to one at 98%.
 async fn evaluate_prompt_classes(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snapshot = ctx.cache.current_snapshot();
-    let usable: Vec<_> = snapshot
-        .prompt_classes
-        .iter()
-        .filter(|c| !c.centroid.is_empty())
-        .collect();
-    if usable.is_empty() {
+    let rows: Vec<(i64, String, String, Option<f32>)> =
+        sqlx::query_as("SELECT id, name, tier, min_margin FROM prompt_classes ORDER BY name")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("listing prompt classes", &e))?;
+    if rows.is_empty() {
+        return Ok(Json(
+            serde_json::json!({"classes": [], "note": "no prompt classes are defined"}),
+        ));
+    }
+
+    let Some(embedder) = crate::control::build::prompt_class_embedder() else {
         return Ok(Json(serde_json::json!({
             "classes": [],
-            "note": "no class has a centroid; either none are defined, or this control plane \
-                     has no --classifier-model and cannot embed their examples",
+            "note": "this control plane has no --classifier-model, so it cannot embed examples \
+                     and cannot report on them",
+        })));
+    };
+
+    let examples: Vec<(i64, String)> =
+        sqlx::query_as("SELECT class_id, prompt FROM prompt_class_examples ORDER BY id")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("listing class examples", &e))?;
+
+    // Embedded per tier: the two spaces are not comparable, so a fast class and
+    // a refined one are never scored against each other.
+    struct Embedded {
+        name: String,
+        tier: String,
+        min_margin: Option<f32>,
+        prompts: Vec<String>,
+        vectors: Vec<Vec<f32>>,
+    }
+    let mut sets: Vec<Embedded> = Vec::new();
+    for (id, name, tier, min_margin) in rows {
+        let prompts: Vec<String> = examples
+            .iter()
+            .filter(|(cid, _)| *cid == id)
+            .map(|(_, p)| p.clone())
+            .collect();
+        if prompts.is_empty() {
+            continue;
+        }
+        let vectors = match tier.as_str() {
+            "refined" => embedder.refined(&prompts),
+            _ => embedder.fast(&prompts),
+        };
+        let Some(vectors) = vectors else { continue };
+        sets.push(Embedded {
+            name,
+            tier,
+            min_margin,
+            prompts,
+            vectors,
+        });
+    }
+    if sets.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "classes": [],
+            "note": "no class has example prompts that could be embedded",
         })));
     }
 
+    // Leave-one-out. Every example is classified against centroids that exclude
+    // it; scoring against a centroid that contains the example inflates every
+    // number, and at these sample sizes enough to change which class looks
+    // usable.
+    let mut true_positive: HashMap<&str, usize> = HashMap::new();
+    let mut predicted: HashMap<&str, usize> = HashMap::new();
+    let mut margins: HashMap<&str, Vec<f32>> = HashMap::new();
+    let mut confusions: Vec<serde_json::Value> = Vec::new();
+
+    for (i, set) in sets.iter().enumerate() {
+        for (held, vector) in set.vectors.iter().enumerate() {
+            let mut scored: Vec<(&str, f32)> = sets
+                .iter()
+                .enumerate()
+                .filter(|(_, other)| other.tier == set.tier)
+                .filter_map(|(j, other)| {
+                    let subset: Vec<Vec<f32>> = other
+                        .vectors
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, _)| !(i == j && *k == held))
+                        .map(|(_, v)| v.clone())
+                        .collect();
+                    crate::vector::centroid(&subset)
+                        .map(|c| (other.name.as_str(), cosine(vector, &c)))
+                })
+                .collect();
+            if scored.is_empty() {
+                continue;
+            }
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let winner = scored[0].0;
+            let margin = scored[0].1 - scored.get(1).map(|s| s.1).unwrap_or(0.0);
+            *predicted.entry(winner).or_default() += 1;
+            margins.entry(set.name.as_str()).or_default().push(margin);
+            if winner == set.name {
+                *true_positive.entry(winner).or_default() += 1;
+            } else if confusions.len() < 20 {
+                // The example itself, truncated: an operator fixing a weak
+                // class needs to see *which* prompt went the wrong way, not
+                // only that one did.
+                confusions.push(serde_json::json!({
+                    "actual": set.name,
+                    "predicted": winner,
+                    "example": set.prompts.get(held).map(|p| p.chars().take(120).collect::<String>()),
+                }));
+            }
+        }
+    }
+
     let mut report = Vec::new();
-    for c in &usable {
-        let mut nearest: Vec<(String, f32)> = usable
+    for set in &sets {
+        let name = set.name.as_str();
+        let tp = *true_positive.get(name).unwrap_or(&0) as f64;
+        let pred = *predicted.get(name).unwrap_or(&0) as f64;
+        let support = set.vectors.len() as f64;
+        let ms = margins.get(name).cloned().unwrap_or_default();
+        let mean_margin = if ms.is_empty() {
+            0.0
+        } else {
+            ms.iter().sum::<f32>() / ms.len() as f32
+        };
+        let worst_margin = ms.iter().copied().fold(f32::INFINITY, f32::min);
+
+        // Nearest neighbour in the same tier, from full centroids.
+        let mine = crate::vector::centroid(&set.vectors);
+        let mut nearest: Vec<(String, f32)> = sets
             .iter()
-            .filter(|o| o.name != c.name && o.tier == c.tier)
-            .map(|o| (o.name.clone(), cosine(&c.centroid, &o.centroid)))
+            .filter(|o| o.name != set.name && o.tier == set.tier)
+            .filter_map(|o| {
+                let c = crate::vector::centroid(&o.vectors)?;
+                Some((o.name.clone(), cosine(mine.as_deref().unwrap_or(&[]), &c)))
+            })
             .collect();
         nearest.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         nearest.truncate(3);
+
+        let precision = if pred > 0.0 { tp / pred } else { 0.0 };
+        let recall = if support > 0.0 { tp / support } else { 0.0 };
         report.push(serde_json::json!({
-            "class": c.name,
-            "tier": c.tier,
-            "min_margin": c.min_margin,
+            "class": name,
+            "tier": set.tier,
+            "examples": support as usize,
+            "precision": precision,
+            "recall": recall,
+            "mean_margin": mean_margin,
+            "worst_margin": if worst_margin.is_finite() { worst_margin } else { 0.0 },
+            "min_margin": set.min_margin,
             "nearest": nearest,
             "collides": nearest.first().map(|(_, s)| *s > 0.8).unwrap_or(false),
+            // The two things an operator should act on, said plainly rather
+            // than left to be inferred from four numbers.
+            "verdict": if nearest.first().map(|(_, s)| *s > 0.8).unwrap_or(false) {
+                "collides with another class; merge or redefine them"
+            } else if precision >= 0.85 {
+                "good"
+            } else if precision >= 0.70 {
+                "usable; consider more examples or a higher min_margin"
+            } else {
+                "weak; this class will misroute"
+            },
         }));
     }
-    Ok(Json(serde_json::json!({ "classes": report })))
+    Ok(Json(
+        serde_json::json!({ "classes": report, "confusions": confusions }),
+    ))
 }
 
-/// Cosine of two normalised vectors. Duplicated from `crate::classifier` rather
-/// than imported so this endpoint works in a `control`-only build, which has no
-/// classifier module but can still report on centroids the snapshot carries.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
+// --- Deployment-wide fallback model -----------------------------------------
+
+async fn get_fallback_model(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM models WHERE is_fallback LIMIT 1")
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("reading the fallback model", &e))?;
+    Ok(Json(match row {
+        Some((id, name)) => serde_json::json!({"id": id, "name": name}),
+        None => serde_json::json!({"id": null, "name": null}),
+    }))
+}
+
+#[derive(Deserialize)]
+struct FallbackModel {
+    /// `null` clears it, leaving no deployment-wide last resort.
+    model_id: Option<i64>,
+}
+
+/// Set (or clear) the model every routing chain falls back to.
+///
+/// One statement pair in a transaction, because "at most one model is the
+/// fallback" is enforced by a partial unique index: clearing before setting is
+/// not tidiness, it is what stops the insert failing against the old value.
+async fn put_fallback_model(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<FallbackModel>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_error("setting the fallback model", &e))?;
+    sqlx::query("UPDATE models SET is_fallback = false WHERE is_fallback")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_error("clearing the previous fallback model", &e))?;
+
+    let mut name = None;
+    if let Some(id) = body.model_id {
+        let updated: Option<String> =
+            sqlx::query_scalar("UPDATE models SET is_fallback = true WHERE id = $1 RETURNING name")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| db_error("setting the fallback model", &e))?;
+        let Some(found) = updated else {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                format!("no model with id {id}"),
+            ));
+        };
+        name = Some(found);
     }
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    tx.commit()
+        .await
+        .map_err(|e| db_error("setting the fallback model", &e))?;
+    refresh(&ctx).await;
+    Ok(Json(
+        serde_json::json!({"model_id": body.model_id, "name": name}),
+    ))
 }

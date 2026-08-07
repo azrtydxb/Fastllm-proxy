@@ -280,6 +280,10 @@ pub async fn build_snapshot_with(
         .await?;
 
     let prompt_classes = build_prompt_classes(pool, embed).await?;
+    let fallback_model: Option<String> =
+        sqlx::query_scalar("SELECT name FROM models WHERE is_fallback LIMIT 1")
+            .fetch_optional(pool)
+            .await?;
 
     Ok(Snapshot {
         version: version as u64,
@@ -288,6 +292,7 @@ pub async fn build_snapshot_with(
         models,
         virtual_models,
         prompt_classes,
+        fallback_model,
         open: false,
     })
 }
@@ -316,13 +321,19 @@ fn embedder() -> Option<&'static dyn PromptClassEmbedder> {
 }
 
 pub trait PromptClassEmbedder: Send + Sync {
-    /// Embed for the fast tier. Never fails to the caller — an implementation
-    /// that cannot embed returns `None` and the class is published without a
-    /// centroid.
-    fn fast(&self, prompts: &[String]) -> Option<Vec<f32>>;
-    /// Embed for the refined tier. `None` when this build or this deployment
+    /// Embed each prompt for the fast tier. Per prompt rather than pre-averaged
+    /// so the admin API can hold one example out and score it against the rest
+    /// — the difference between reporting that a class exists and reporting
+    /// whether it works.
+    fn fast(&self, prompts: &[String]) -> Option<Vec<Vec<f32>>>;
+    /// The same for the refined tier. `None` when this build or this deployment
     /// has no transformer, which is the common case.
-    fn refined(&self, prompts: &[String]) -> Option<Vec<f32>>;
+    fn refined(&self, prompts: &[String]) -> Option<Vec<Vec<f32>>>;
+}
+
+/// The registered embedder, for callers outside snapshot building.
+pub fn prompt_class_embedder() -> Option<&'static dyn PromptClassEmbedder> {
+    embedder()
 }
 
 /// Default margin when a class does not set one.
@@ -371,11 +382,13 @@ async fn build_prompt_classes(
             tracing::warn!(class = %name, "prompt class has no example prompts; it cannot match anything");
             Vec::new()
         } else {
-            match embed {
-                Some(e) if tier == "refined" => e.refined(&prompts).unwrap_or_default(),
-                Some(e) => e.fast(&prompts).unwrap_or_default(),
-                None => Vec::new(),
-            }
+            let each = match embed {
+                Some(e) if tier == "refined" => e.refined(&prompts),
+                Some(e) => e.fast(&prompts),
+                None => None,
+            };
+            each.and_then(|v| crate::vector::centroid(&v))
+                .unwrap_or_default()
         };
         if centroid.is_empty() && !prompts.is_empty() {
             tracing::warn!(

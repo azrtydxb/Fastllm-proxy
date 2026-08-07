@@ -23,3 +23,4 @@ pub mod state;
 pub mod tail_buffer;
 pub mod upstream;
 pub mod usage;
+pub mod vector;

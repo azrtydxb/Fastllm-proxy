@@ -177,6 +177,13 @@ pub struct Snapshot {
     /// grants are: the request path may not do I/O, so anything it compares
     /// against has to arrive before the request does.
     pub prompt_classes: Vec<PromptClassDef>,
+    /// Model to try when a request's whole routing chain is exhausted.
+    ///
+    /// Appended as the last candidate for every request, virtual or concrete.
+    /// Still subject to authorisation like any other candidate: a caller who
+    /// was never granted it does not reach it, so a fallback cannot widen
+    /// anyone's access.
+    pub fallback_model: Option<String>,
     /// When true the proxy serves without authenticating, matching today's
     /// behaviour when no master key is configured.
     pub open: bool,
@@ -234,6 +241,8 @@ pub struct WireSnapshot {
     pub virtual_models: Vec<WireVirtualModel>,
     #[serde(default)]
     pub prompt_classes: Vec<WirePromptClass>,
+    #[serde(default)]
+    pub fallback_model: Option<String>,
     pub open: bool,
 }
 
@@ -534,6 +543,7 @@ impl Snapshot {
                         .collect(),
                 })
                 .collect(),
+            fallback_model: self.fallback_model.clone(),
             prompt_classes: self
                 .prompt_classes
                 .iter()
@@ -692,6 +702,7 @@ impl Snapshot {
                         .collect(),
                 })
                 .collect(),
+            fallback_model: w.fallback_model,
             prompt_classes: w
                 .prompt_classes
                 .into_iter()
@@ -796,6 +807,7 @@ impl Snapshot {
             models,
             virtual_models: HashMap::new(),
             prompt_classes: Vec::new(),
+            fallback_model: None,
             open: false,
         }
     }
@@ -1002,6 +1014,7 @@ mod tests {
 
         let wire = WireSnapshot {
             prompt_classes: Vec::new(),
+            fallback_model: None,
             version: 1,
             keys,
             principals: vec![],

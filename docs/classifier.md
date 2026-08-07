@@ -19,9 +19,12 @@ curl -X POST https://control/admin/prompt-classes -b "$SESSION" \
 {"position": 0, "class": "coding", "targets": ["claude-sonnet"]}
 ```
 
-`POST /admin/prompt-classes/evaluate` reports which classes sit too close
-together to be told apart. A pair above ~0.8 is one region with two names, and
-no threshold separates them.
+`POST /admin/prompt-classes/evaluate` reports, per class, leave-one-out
+precision and recall over your own examples, the mean and worst margin, the
+nearest other classes, the examples that were misclassified, and a verdict.
+Two classes whose centroids sit above ~0.8 are one region with two names and no
+threshold separates them — the report says so rather than leaving you to infer
+it from four numbers.
 
 Everything here is reproducible:
 
@@ -154,16 +157,24 @@ a real transformer and would batch well on a GPU, but this workload is
 single-request and latency-critical — there is nothing to batch — and the GPUs
 in this deployment are busy serving the model. Both tiers stay on CPU.
 
+## Refined classes come in pairs
+
+A refined class only takes effect when at least **two** of them refine the same
+fast-tier class. That is not a limitation, it is the shape of the question: the
+measurement behind this feature is binary — architecture *against* coding, at
+93.3% — and a lone refined class has nothing to be compared against.
+
+With one contender there is no runner-up, so the margin degenerates to a raw
+similarity score, and a margin-shaped floor like 0.10 is met by almost any
+prompt's similarity to almost any centroid. That one class would then capture
+every request the fast tier assigned to the class it refines. Escalation with
+fewer than two contenders is therefore skipped and the fast tier's answer
+stands.
+
+So to split coding into architecture and debugging, define *both* as refined
+classes, both refining `coding`.
+
 ## What is not built
-
-Refined-tier weights are **not** baked into the image: they are 130MB, most
-deployments never enable a refined class, and paying that in every image for a
-feature few turn on is the wrong default. Mount them and point
-`--classifier-tier2-model` at the directory.
-
-`evaluate` reports centroid collisions but not yet leave-one-out precision and
-recall over an operator's own examples — the diagnostic that turns "how many
-classes should I have" into a measurement rather than an opinion.
 
 One thing deliberately out of scope: routing on *difficulty*. GSM8K separates
 from factual lookup at 96%, but GSM8K has a very distinctive narrative-maths

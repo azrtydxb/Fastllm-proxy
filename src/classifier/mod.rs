@@ -179,9 +179,8 @@ impl Classifier {
             let score = cosine(embedding, centroid);
             match best {
                 Some((_, top)) if score <= top => runner_up = runner_up.max(score),
-                Some((prev, top)) => {
+                Some((_, top)) => {
                     runner_up = runner_up.max(top);
-                    let _ = prev;
                     best = Some((class, score));
                 }
                 None => best = Some((class, score)),
@@ -231,6 +230,21 @@ impl Classifier {
             .filter(|c| c.tier == Tier::Refined && c.refines.contains(&first.class))
             .map(|c| c.name.as_str())
             .collect();
+        // Escalation needs something to choose *between*. With a single
+        // refined contender there is no runner-up, so its margin degenerates to
+        // a raw similarity score — and a threshold tuned as a margin (0.10) is
+        // met by almost any prompt's raw similarity to almost any centroid.
+        // The effect would be that one refined class silently captures every
+        // request the fast tier assigned to the class it refines, which is the
+        // opposite of what a refinement is for.
+        //
+        // The measurement this feature is built on is a *binary* one —
+        // architecture against coding at 93.3% — so the configuration that
+        // works is a refined class per side, both refining the same fast class.
+        // Until the second one exists, the fast tier's answer stands.
+        if contenders.len() < 2 {
+            return Some(first);
+        }
         let Some(refined_embedding) = embed_refined() else {
             // The transformer is unavailable (not built in, or failed to load).
             // Tier 1's answer stands: a degraded routing decision beats
@@ -247,48 +261,7 @@ impl Classifier {
     }
 }
 
-/// Cosine similarity of two already-normalised vectors.
-///
-/// Both sides are normalised when they are built — centroids at snapshot build,
-/// request embeddings in `tier1::embed` — so this is a plain dot product, which
-/// is what keeps a classification to a few hundred nanoseconds on top of the
-/// embedding itself.
-#[inline]
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return f32::NEG_INFINITY;
-    }
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-/// Normalise in place. A zero vector is left alone rather than producing NaNs.
-pub fn normalise(v: &mut [f32]) {
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in v.iter_mut() {
-            *x /= norm;
-        }
-    }
-}
-
-/// Normalised mean of a set of embeddings — how a class centroid is built.
-pub fn centroid(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
-    let first = vectors.first()?;
-    let mut sum = vec![0.0f32; first.len()];
-    for v in vectors {
-        if v.len() != sum.len() {
-            continue;
-        }
-        for (s, x) in sum.iter_mut().zip(v) {
-            *s += x;
-        }
-    }
-    for s in sum.iter_mut() {
-        *s /= vectors.len() as f32;
-    }
-    normalise(&mut sum);
-    Some(sum)
-}
+pub use crate::vector::{centroid, cosine, normalise};
 
 /// Shared handle, so a snapshot swap replaces the classifier without the
 /// request path taking a lock.

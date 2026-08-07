@@ -85,28 +85,57 @@ fn a_refined_class_only_opens_the_door_for_the_classes_it_names() {
     assert_eq!(got.unwrap().class, "chat");
     assert!(!called, "chat is not in any refined class's `refines` list");
 
-    // A coding prompt is.
+    // A coding prompt is — but a lone refined class has nothing to be compared
+    // against, so it does not escalate either. See the two-contender test below.
     let mut called = false;
-    let _ = c.classify(&axis(4, 0), || {
+    let got = c.classify(&axis(4, 0), || {
         called = true;
         Some(axis(4, 2))
     });
     assert!(
-        called,
-        "coding is refined by architecture, so tier 2 must run"
+        !called,
+        "one refined contender is not a choice; do not escalate"
+    );
+    assert_eq!(got.unwrap().class, "coding");
+}
+
+/// The bug this guards: with a single refined contender there is no runner-up,
+/// so the margin degenerates to a raw similarity score, a margin-shaped floor
+/// like 0.10 is met by almost anything, and that one class silently captures
+/// every request the fast tier assigned to the class it refines.
+#[test]
+fn a_lone_refined_class_never_captures_the_class_it_refines() {
+    let c = Classifier::new(vec![
+        class("coding", Tier::Fast, axis(4, 0), 0.05, &[]),
+        class("architecture", Tier::Refined, axis(4, 2), 0.10, &["coding"]),
+    ]);
+    // The refined embedding points straight at `architecture`: raw similarity
+    // 1.0, which would clear any margin-shaped floor.
+    let got = c.classify(&axis(4, 0), || Some(axis(4, 2))).unwrap();
+    assert_eq!(
+        got.class, "coding",
+        "a refinement with nothing to choose between must not overturn tier 1"
     );
 }
 
+/// The configuration that works, and the one the measurements were taken on: a
+/// refined class per side of the distinction, both refining the same fast class,
+/// so tier 2 answers a binary question.
 #[test]
-fn tier2_can_overturn_tier1() {
+fn tier2_can_overturn_tier1_when_there_are_two_sides_to_choose_between() {
     let c = Classifier::new(vec![
         class("coding", Tier::Fast, axis(4, 0), 0.05, &[]),
         class("chat", Tier::Fast, axis(4, 1), 0.05, &[]),
         class("architecture", Tier::Refined, axis(4, 2), 0.05, &["coding"]),
+        class("debugging", Tier::Refined, axis(4, 3), 0.05, &["coding"]),
     ]);
     let got = c.classify(&axis(4, 0), || Some(axis(4, 2))).unwrap();
     assert_eq!(got.class, "architecture");
     assert_eq!(got.tier, Tier::Refined);
+
+    // And the other side wins when the prompt leans that way.
+    let got = c.classify(&axis(4, 0), || Some(axis(4, 3))).unwrap();
+    assert_eq!(got.class, "debugging");
 }
 
 /// The common shape, and the one that keeps escalation cheap in practice: most
@@ -137,6 +166,7 @@ fn an_unavailable_tier2_degrades_rather_than_failing() {
         class("coding", Tier::Fast, axis(4, 0), 0.05, &[]),
         class("chat", Tier::Fast, axis(4, 1), 0.05, &[]),
         class("architecture", Tier::Refined, axis(4, 2), 0.05, &["coding"]),
+        class("debugging", Tier::Refined, axis(4, 3), 0.05, &["coding"]),
     ]);
     let got = c.classify(&axis(4, 0), || None).unwrap();
     assert_eq!(got.class, "coding");

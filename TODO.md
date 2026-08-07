@@ -244,16 +244,39 @@ rather than by verb (task-shaped classes fail on both tiers); class count is
 not the problem, class definition is; and margins are not comparable across
 models, so confidence floors are per class *and* per tier.
 
-Not done, and recorded so it is not mistaken for done:
+`POST /admin/prompt-classes/evaluate` reports leave-one-out precision, recall,
+mean and worst margin, nearest neighbours, the misclassified examples
+themselves, and a verdict per class. Both classifier models are baked into the
+image; nothing loads the refined one unless a rule names a refined class.
 
-- `POST /admin/prompt-classes/evaluate` reports centroid collisions but not
-  leave-one-out precision and recall over the operator's own examples. That is
-  the diagnostic that turns "how many classes should I have" from an opinion
-  into a measurement.
-- Refined-tier weights are not baked into the image (130MB for a feature most
-  deployments will not enable). Mount them and set --classifier-tier2-model.
+One bug found while finishing this, and worth recording because the shape
+recurs: escalation with a *single* refined contender had no runner-up, so the
+margin degenerated to a raw similarity score. A margin-shaped floor like 0.10
+is met by almost any prompt's raw similarity to almost any centroid, so one
+refined class would have silently captured every request the fast tier assigned
+to the class it refines — the exact opposite of what a refinement is for.
+Escalation now requires at least two contenders, which is also the
+configuration the measurements were taken on (architecture *against* coding, a
+binary question).
+
+Still not done:
+
 - No classification cache. The prefix hash the router already computes would
   key one, so a multi-turn conversation classifies once instead of per turn.
   Worth doing only if 115us ever shows up in a profile, which it has not.
 - Routing on *difficulty* remains out of scope: the 96% GSM8K-versus-lookup
   separation most likely measures genre rather than difficulty.
+
+## Fallback model (2026-08-07)
+
+Every routing chain now ends at a deployment-wide fallback, set with
+`PUT /admin/fallback-model`. Rule-level failover only reaches targets that rule
+named, and a rule author cannot anticipate every way a chain runs out — every
+backend unreachable, every provider rate-limiting, a model whose backends were
+all dropped for an undecryptable credential. It applies to plain concrete model
+names too, not only virtual ones.
+
+Still subject to authorisation, like every other candidate: a caller never
+granted the fallback does not reach it, so it cannot widen anyone's access.
+Enforced by a partial unique index rather than convention, so "at most one
+model is the fallback" cannot drift into two.

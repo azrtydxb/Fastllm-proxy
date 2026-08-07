@@ -298,6 +298,7 @@ fn authorisation_reads_only_the_snapshot() {
     );
     let snap = Snapshot {
         prompt_classes: Vec::new(),
+        fallback_model: None,
         version: 1,
         keys,
         principals,

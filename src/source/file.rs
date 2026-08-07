@@ -104,6 +104,9 @@ impl SnapshotSource for FileSource {
             // routing is a control-plane feature the same way virtual models
             // are.
             prompt_classes: Vec::new(),
+            // `File` mode has no place to mark one, and its whole point is a
+            // single YAML that says exactly what it says.
+            fallback_model: None,
             version,
             keys,
             principals,

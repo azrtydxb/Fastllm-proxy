@@ -58,7 +58,9 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `POST /admin/prompt-classes` | `{"name":..., "tier":"fast"\|"refined", "min_margin":..., "refines":[...], "examples":[...]}` |
 | `POST /admin/prompt-classes/{id}/examples` | Add one example prompt |
 | `DELETE /admin/prompt-classes/{id}` | Cascades to its examples and refinements |
-| `POST /admin/prompt-classes/evaluate` | Which classes sit too close to be told apart |
+| `POST /admin/prompt-classes/evaluate` | Per-class precision, recall, margins, nearest neighbours and a verdict — leave-one-out over your own examples |
+| `GET /admin/fallback-model` | The model every routing chain falls back to |
+| `PUT /admin/fallback-model` | `{"model_id": 42}` to set it, `{"model_id": null}` to clear it |
 | `GET /admin/roles` | Roles and the permissions each one grants |
 | `GET /admin/limits` | Every principal with a configured rate limit |
 | `PUT /admin/principals/{id}/limits` | `{"requests_per_min":..., "tokens_per_min":...}`. Either or both; upserts the one row this principal may have |

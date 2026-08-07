@@ -341,6 +341,19 @@ async fn proxy_request(
     // A candidate whose pool is empty (every backend dropped for an
     // undecryptable key, say) drops out here rather than failing the request,
     // so a working fallback behind it still gets its turn.
+    // The deployment-wide last resort, appended to every chain — virtual or
+    // concrete. A rule author cannot anticipate every way a chain runs out
+    // (every backend unreachable, every provider rate-limiting, a model whose
+    // backends were all dropped for an undecryptable credential), and this is
+    // what catches those. Skipped when it is already in the chain, so a rule
+    // that names it does not get it twice.
+    let mut candidates = candidates;
+    if let Some(fallback) = &snapshot.fallback_model {
+        if !candidates.iter().any(|c| c == fallback) {
+            candidates.push(fallback.clone());
+        }
+    }
+
     let served: Vec<(String, Pool)> = candidates
         .iter()
         .filter_map(|m| registry.pool(m).map(|p| (m.clone(), Arc::clone(p))))

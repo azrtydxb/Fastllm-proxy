@@ -758,3 +758,104 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
     );
     assert_eq!(status, 201, "{text}");
 }
+
+/// The deployment-wide last resort.
+///
+/// Rule-level failover only reaches targets that rule named. A chain whose
+/// every model is unreachable has nowhere left to go — and a rule author cannot
+/// anticipate every way that happens. The fallback catches those, and it
+/// applies to a plain concrete model name too, not only a virtual one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_fallback_model_catches_a_chain_that_ran_out() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, p1, p2) = (14851, 14852, 14853, 14854);
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    // The primary is dead: nothing is listening on p1 at all.
+    let rescue = Upstream::new("rescue", 200);
+    spawn_upstream(p2, rescue.clone()).await;
+
+    let admin_name = format!("fo-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+    let fx = provision(&pool, admin_port, &cookie, &suffix, p1, p2).await;
+
+    // No chain at all: the virtual model's only target is the dead primary.
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!("/admin/virtual-models/{}/defaults", fx.vm_id),
+        serde_json::json!({
+            "model_id": fx.model_id(&fx.primary), "weight": 100, "position": 0
+        }),
+    );
+    wait_for_virtual_model(port, &fx.key, &fx.virtual_name);
+
+    let req = serde_json::json!({
+        "model": fx.virtual_name,
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+
+    // Without a fallback the request has nowhere to go.
+    let (status, _) = chat(port, &fx.key, req.clone());
+    assert_eq!(status, 502, "a dead single-target chain should fail");
+
+    // Name the second model as the deployment-wide fallback.
+    let rescue_id = fx.model_id(&fx.secondary);
+    ureq::put(&format!(
+        "http://127.0.0.1:{admin_port}/admin/fallback-model"
+    ))
+    .set("cookie", &cookie)
+    .send_json(serde_json::json!({"model_id": rescue_id}))
+    .expect("setting the fallback model");
+    std::thread::sleep(Duration::from_secs(3));
+
+    let before = rescue.hits();
+    let (status, body) = chat(port, &fx.key, req);
+    assert_eq!(status, 200, "the fallback should have served it: {body}");
+    assert_eq!(served_by(&body), "rescue");
+    assert!(rescue.hits() > before);
+
+    // It applies to a concrete model name too, not only a virtual one.
+    let (status, body) = chat(
+        port,
+        &fx.key,
+        serde_json::json!({
+            "model": fx.primary,
+            "messages": [{"role": "user", "content": "hello"}],
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        served_by(&body),
+        "rescue",
+        "a dead concrete model should also reach the fallback"
+    );
+
+    // Clearing it restores the previous behaviour, so this is not a one-way door.
+    ureq::put(&format!(
+        "http://127.0.0.1:{admin_port}/admin/fallback-model"
+    ))
+    .set("cookie", &cookie)
+    .send_json(serde_json::json!({"model_id": serde_json::Value::Null}))
+    .expect("clearing the fallback model");
+    std::thread::sleep(Duration::from_secs(3));
+    let (status, _) = chat(
+        port,
+        &fx.key,
+        serde_json::json!({
+            "model": fx.primary,
+            "messages": [{"role": "user", "content": "hello"}],
+        }),
+    );
+    assert_eq!(status, 502, "cleared means cleared");
+}

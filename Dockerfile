@@ -44,10 +44,11 @@ COPY --from=web /web/dist ./web/dist
 # this tier is a lookup table rather than a transformer, and docs/classifier.md
 # for the measurements that chose this model over its neighbours.
 #
-# The refined tier's ONNX weights are deliberately *not* baked in: they are
-# 130MB, most deployments never enable a refined class, and paying that in every
-# image for a feature few turn on is the wrong default. Mount them and point
-# --classifier-tier2-model at the directory.
+# The refined tier's ONNX weights are baked in too. They cost ~130MB of image,
+# which is real, but the alternative is an operator discovering at configuration
+# time that the tier they just enabled needs files nobody told them to mount.
+# Nothing loads them unless a routing rule names a refined class, so the runtime
+# cost of carrying them is zero.
 ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/model.safetensors \
     /usr/local/share/fastllm/classifier/model.safetensors
 ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/tokenizer.json \
@@ -55,11 +56,22 @@ ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/t
 ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json \
     /usr/local/share/fastllm/classifier/config.json
 
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx \
+    /usr/local/share/fastllm/classifier-tier2/model.onnx
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer.json \
+    /usr/local/share/fastllm/classifier-tier2/tokenizer.json
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/config.json \
+    /usr/local/share/fastllm/classifier-tier2/config.json
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/special_tokens_map.json \
+    /usr/local/share/fastllm/classifier-tier2/special_tokens_map.json
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer_config.json \
+    /usr/local/share/fastllm/classifier-tier2/tokenizer_config.json
+
 # Cache mounts are not part of the resulting layer, so the binary has to be
 # copied out of the target directory inside the same step that produced it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked --features "control classifier" \
+    cargo build --release --locked --features "control classifier-tier2" \
  && cp target/release/fastllm-proxy /usr/local/bin/fastllm-proxy
 
 FROM debian:bookworm-slim
@@ -73,6 +85,7 @@ RUN apt-get update \
 
 COPY --from=build /usr/local/bin/fastllm-proxy /usr/local/bin/fastllm-proxy
 COPY --from=build /usr/local/share/fastllm/classifier /usr/local/share/fastllm/classifier
+COPY --from=build /usr/local/share/fastllm/classifier-tier2 /usr/local/share/fastllm/classifier-tier2
 
 USER 65532:65532
 EXPOSE 4000
@@ -82,6 +95,7 @@ EXPOSE 4000
 ENV FASTLLM_HOST=0.0.0.0 \
     FASTLLM_PORT=4000 \
     FASTLLM_CONFIG=/etc/fastllm/config.yaml \
-    FASTLLM_CLASSIFIER_MODEL=/usr/local/share/fastllm/classifier
+    FASTLLM_CLASSIFIER_MODEL=/usr/local/share/fastllm/classifier \
+    FASTLLM_CLASSIFIER_TIER2_MODEL=/usr/local/share/fastllm/classifier-tier2
 
 ENTRYPOINT ["/usr/local/bin/fastllm-proxy"]

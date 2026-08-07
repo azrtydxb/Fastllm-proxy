@@ -79,6 +79,8 @@ Route on any of these:
 {"position": 0, "min_budget_used_percent": 80, "targets": ["local-qwen"]}
 ```
 
+**One model catches everything.** `PUT /admin/fallback-model` names a deployment-wide last resort, appended to every chain — virtual or concrete — for the case a rule author did not anticipate. It is authorised like any other candidate, so it cannot widen anyone's access.
+
 **Failover is part of routing, not a separate retry layer.** A rule's targets are tried in order on `5xx`, on `429`, and on an unreachable upstream — before any byte reaches the client. `429` counts because a hosted provider refusing a request is not the same as being unhealthy. Failover never widens reach: a candidate the caller lacks a grant on is dropped from the chain. Details in [docs/api.md](docs/api.md#routing-rules).
 
 ### Semantic routing
@@ -100,7 +102,7 @@ curl -X POST https://control/admin/prompt-classes -b "$SESSION" \
 | fast | static embedding | **115 µs** | subject matter — coding, maths, chat, legal, finance, security, databases, devops |
 | refined | transformer | 3.3 ms | same subject, different intent — architecture vs. debugging |
 
-The refined tier is gated on configuration, not a flag: if no rule names a class that needs it, the transformer is never loaded and no request can pay for it. When it is enabled, only requests the fast tier landed on a competing class escalate — under a tenth of traffic in practice, putting the average added cost near 0.2 ms.
+The refined tier is gated on configuration, not a flag: if no rule names a class that needs it, the transformer is never loaded and no request can pay for it. Refined classes come in pairs — two of them refining the same fast class, because the question they answer is binary. When it is enabled, only requests the fast tier landed on a competing class escalate — under a tenth of traffic in practice, putting the average added cost near 0.2 ms.
 
 Measured over ~21k human-labelled prompts, the fast tier reaches **82–98% precision** on twelve classes. Below a per-class confidence floor a rule simply does not match and the next rule catches the request, which is a routing decision rather than an error.
 
