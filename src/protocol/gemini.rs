@@ -11,9 +11,9 @@ use serde_json::json;
 use serde_json::Value;
 
 use super::{
-    synthetic_id, synthetic_tool_id, AssistantMessage, Choice, Completion, OpenAiFunctionCall, OpenAiRequest,
-    OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator, TranslateError,
-    TranslatedRequest, Turn, Usage,
+    synthetic_id, synthetic_tool_id, AssistantMessage, Choice, Completion, OpenAiFunctionCall,
+    OpenAiRequest, OpenAiToolCall, ResponseContext, SseEvent, StopField, StreamTranslator,
+    TranslateError, TranslatedRequest, Turn, Usage,
 };
 
 pub fn translate_request(
@@ -75,9 +75,10 @@ pub fn translate_request(
                 // 400.
                 if let Some(schema) = &f.parameters {
                     let schema = prune_schema(schema.clone());
-                    if schema.get("properties").is_some_and(|p| {
-                        p.as_object().is_some_and(|p| !p.is_empty())
-                    }) {
+                    if schema
+                        .get("properties")
+                        .is_some_and(|p| p.as_object().is_some_and(|p| !p.is_empty()))
+                    {
                         decl["parameters"] = schema;
                     }
                 }

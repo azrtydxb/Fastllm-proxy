@@ -814,7 +814,10 @@ fn replay_tool_calls(out: &[u8]) -> Vec<(String, String, String)> {
             if index == calls.len() {
                 calls.push((
                     delta["id"].as_str().unwrap_or_default().to_string(),
-                    delta["function"]["name"].as_str().unwrap_or_default().to_string(),
+                    delta["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
                     String::new(),
                 ));
             }

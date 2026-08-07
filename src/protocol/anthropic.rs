@@ -174,9 +174,11 @@ fn merge_consecutive(turns: Vec<Turn>) -> Vec<Value> {
                     (Some(last), Some(first))
                         if last["type"] == "text" && first["type"] == "text" =>
                     {
-                        let joined =
-                            format!("{}\n\n{}", last["text"].as_str().unwrap_or_default(),
-                                first["text"].as_str().unwrap_or_default());
+                        let joined = format!(
+                            "{}\n\n{}",
+                            last["text"].as_str().unwrap_or_default(),
+                            first["text"].as_str().unwrap_or_default()
+                        );
                         last["text"] = json!(joined);
                         next.remove(0);
                     }

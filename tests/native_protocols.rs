@@ -865,7 +865,6 @@ async fn a_passthrough_backend_is_forwarded_byte_for_byte() {
     );
 }
 
-
 const ANTHROPIC_TOOL_BODY: &str = r#"{"id":"msg_tool","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_e2e","name":"get_weather","input":{"city":"Paris"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":9}}"#;
 
 /// Tool calling end to end, through a real proxy rather than the translator
@@ -942,7 +941,10 @@ async fn a_tool_call_round_trips_through_an_anthropic_backend() {
 
     let out: serde_json::Value = serde_json::from_str(&body).expect("response is JSON");
     assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
-    assert_eq!(out["choices"][0]["message"]["content"], serde_json::Value::Null);
+    assert_eq!(
+        out["choices"][0]["message"]["content"],
+        serde_json::Value::Null
+    );
     let call = &out["choices"][0]["message"]["tool_calls"][0];
     assert_eq!(call["id"], "toolu_e2e");
     assert_eq!(call["function"]["name"], "get_weather");
