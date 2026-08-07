@@ -137,6 +137,61 @@ fn admin_get_with_cookie(admin_port: u16, path: &str, cookie: Option<&str>) -> u
     }
 }
 
+/// Same shape as `admin_get_with_cookie`, for the mutating verbs the RBAC
+/// permission-mapping tests below need — a body is always sent (even if
+/// `{}`), since every route those tests call takes one.
+fn admin_write_with_cookie(
+    admin_port: u16,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: serde_json::Value,
+) -> u16 {
+    let url = format!("http://127.0.0.1:{admin_port}{path}");
+    let mut req = match method {
+        "POST" => ureq::post(&url),
+        "PUT" => ureq::put(&url),
+        "DELETE" => ureq::delete(&url),
+        other => panic!("admin_write_with_cookie: unsupported method {other}"),
+    };
+    if let Some(c) = cookie {
+        req = req.set("cookie", c);
+    }
+    match req.send_json(body) {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("{method} {path} failed: {e}"),
+    }
+}
+
+/// Creates a `kind = 'user'` principal named `name`, with [`support::TEST_PASSWORD`]
+/// already set, holding exactly the roles named in `roles` (or none at all
+/// for an empty slice) — the building block every permission-mapping test
+/// below needs: a login-capable principal whose grants are precisely
+/// controlled, unlike `support::bootstrap_login_user`'s fixed `admin` grant.
+async fn user_with_roles(pool: &sqlx::PgPool, name: &str, roles: &[&str]) -> i64 {
+    let principal_id: i64 = sqlx::query_scalar(
+        "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
+    )
+    .bind(name)
+    .bind(support::TEST_PASSWORD_HASH)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    for role in roles {
+        sqlx::query(
+            "INSERT INTO principal_roles (principal_id, role_id)
+             SELECT $1, id FROM roles WHERE name = $2",
+        )
+        .bind(principal_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    principal_id
+}
+
 /// A request with no `Cookie` header at all is refused, a request with a
 /// bogus one is refused the same way, a correct login sets a cookie that is
 /// then accepted, and logout invalidates it — the whole session lifecycle
@@ -165,12 +220,29 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
     // ever *runs* against a binary built with it. The hash below is
     // `hash_password("correct horse battery staple")`'s real output —
     // regenerate it with that function if the password below ever changes.
-    sqlx::query("INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2)")
-        .bind(&name)
-        .bind("$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO4tt+y8yYwgA$b9DCigRtGIAy9y9xRa9Lip7A9pBHRU+4AMK9lJkXDOA")
-        .execute(&pool)
-        .await
-        .unwrap();
+    let principal_id: i64 = sqlx::query_scalar(
+        "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
+    )
+    .bind(&name)
+    .bind("$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO4tt+y8yYwgA$b9DCigRtGIAy9y9xRa9Lip7A9pBHRU+4AMK9lJkXDOA")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // This test exercises the session lifecycle (cookie set on login,
+    // accepted on /admin/*, cleared on logout) end to end, which needs a
+    // real /admin/* route to probe with a valid session -- not the
+    // permission-mapping RBAC finds elsewhere in this suite. Grant `admin`
+    // so `GET /admin/models` below is answered on the strength of the
+    // session alone, the same way it was before RequireRead started
+    // checking permissions too.
+    sqlx::query(
+        "INSERT INTO principal_roles (principal_id, role_id)
+         SELECT $1, id FROM roles WHERE name = 'admin'",
+    )
+    .bind(principal_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let port = 14721;
     let admin_port = 14722;
@@ -420,4 +492,176 @@ async fn healthz_is_unauthenticated_and_does_not_widen_the_session_gate() {
         401,
         "/admin/keys must still require a session even though /healthz does not"
     );
+}
+
+/// The real-production bug this suite exists to close: before
+/// `RequirePermission` (`src/control/api.rs`), `require_session` alone
+/// decided access to every `/admin/*` route, so any principal a password
+/// was ever set for — including a service account meant only for read-only
+/// UI access — was a full admin. This pins the fix's read/write split: a
+/// principal holding only `usage:read` (no role in `migrations/0001_init.sql`
+/// grants that in isolation, so this test creates its own role with exactly
+/// that one permission) can list through `GET /admin/keys`, but `POST
+/// /admin/keys` — a write, `key:create` — is refused.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_principal_with_only_a_read_permission_can_list_but_not_create() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let role_name = unique_name("rbac-read-only-role");
+    let _cleanup = TestCleanup::new()
+        .track_exact("roles", "name", role_name.clone())
+        .track_prefix("principals", "name", "rbac-reader-");
+    sqlx::query("INSERT INTO roles (name, description) VALUES ($1, 'test: usage:read only')")
+        .bind(&role_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission_id)
+         SELECT r.id, p.id FROM roles r, permissions p
+         WHERE r.name = $1 AND p.verb = 'usage:read' AND p.resource = '*'",
+    )
+    .bind(&role_name)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let name = unique_name("rbac-reader");
+    user_with_roles(&pool, &name, &[&role_name]).await;
+
+    let port = 14730;
+    let admin_port = 14731;
+    let _p = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &name);
+
+    assert_eq!(
+        admin_get_with_cookie(admin_port, "/admin/keys", Some(&cookie)),
+        200,
+        "usage:read must be enough to list keys"
+    );
+    assert_eq!(
+        admin_write_with_cookie(
+            admin_port,
+            "POST",
+            "/admin/keys",
+            Some(&cookie),
+            ureq::json!({ "name": "should-not-be-created", "principal_id": 1 }),
+        ),
+        403,
+        "usage:read must not be enough to create a key -- that needs key:create"
+    );
+}
+
+/// The other half of the same fix: a principal with a valid session but no
+/// admin permission at all — `principal_roles` holds nothing for it — is
+/// refused on every `/admin/*` route with 403, not 401. The session itself
+/// is still good (login succeeds, the cookie is accepted as a *session*):
+/// the distinction this test exists to pin is "authenticated but not
+/// authorised" against "not authenticated at all", which a caller needs to
+/// tell apart from the response.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_principal_with_no_admin_permissions_gets_403_everywhere_but_can_still_authenticate() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let name = unique_name("rbac-no-perms");
+    let _cleanup = TestCleanup::new().track_exact("principals", "name", name.clone());
+    // No role at all -- `user_with_roles` with an empty slice.
+    user_with_roles(&pool, &name, &[]).await;
+
+    let port = 14732;
+    let admin_port = 14733;
+    let _p = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &name);
+
+    // The session is real: a route with no permission requirement of its
+    // own would accept it. `/admin/*` has no such route, so this is proven
+    // negatively below -- every route this test tries is refused, but the
+    // *reason* is 403 (checked explicitly), never 401 (which would mean the
+    // login/cookie itself, not the permission check, was what failed).
+    for (method, path, body) in [
+        ("GET", "/admin/keys", None),
+        ("GET", "/admin/principals", None),
+        ("GET", "/admin/models", None),
+        ("GET", "/admin/roles", None),
+        ("GET", "/admin/limits", None),
+        ("GET", "/admin/budgets", None),
+        ("GET", "/admin/health", None),
+        (
+            "POST",
+            "/admin/keys",
+            Some(ureq::json!({ "name": "x", "principal_id": 1 })),
+        ),
+        (
+            "POST",
+            "/admin/principals",
+            Some(ureq::json!({ "name": "x" })),
+        ),
+    ] {
+        let status = match body {
+            None => admin_get_with_cookie(admin_port, path, Some(&cookie)),
+            Some(b) => admin_write_with_cookie(admin_port, method, path, Some(&cookie), b),
+        };
+        assert_eq!(
+            status, 403,
+            "{method} {path} with a session but no permission must be 403, got {status}"
+        );
+    }
+}
+
+/// The flip side of the two tests above, and the one that keeps the fix
+/// from making the control plane unusable: the very first admin login
+/// (`fastllm-proxy set-password`, which `control::auth::bootstrap_admin_user`
+/// backs) grants the `admin` role automatically when the principal holds no
+/// role yet, and `admin` carries every permission `migrations/0001_init.sql`
+/// seeds. This exercises that path exactly as `set-password` does — through
+/// `bootstrap_admin_user`'s own SQL shape via a raw grant against the
+/// `admin` role, since this file cannot call `control::auth::*` directly
+/// (see the module doc comment on `support::bootstrap_login_user`) — and
+/// then proves the resulting principal can reach a read route, a
+/// `key:create` route and a `config:write` route, one from each permission
+/// bucket `RequirePermission` checks.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn the_bootstrap_admin_can_do_everything() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let name = unique_name("rbac-bootstrap-admin");
+    let _cleanup = TestCleanup::new()
+        .track_exact("principals", "name", name.clone())
+        .track_prefix("principals", "name", "rbac-bootstrap-admin-vm-owner-");
+    user_with_roles(&pool, &name, &["admin"]).await;
+
+    let port = 14734;
+    let admin_port = 14735;
+    let _p = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &name);
+
+    assert_eq!(
+        admin_get_with_cookie(admin_port, "/admin/keys", Some(&cookie)),
+        200,
+        "admin must be able to read"
+    );
+    let owner_name = unique_name("rbac-bootstrap-admin-vm-owner");
+    let create_status = admin_write_with_cookie(
+        admin_port,
+        "POST",
+        "/admin/principals",
+        Some(&cookie),
+        ureq::json!({ "name": owner_name, "kind": "service_account" }),
+    );
+    assert_eq!(create_status, 201, "admin must be able to write config");
 }

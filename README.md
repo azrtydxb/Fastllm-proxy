@@ -166,13 +166,26 @@ Every `/admin/*` route (including `PUT /admin/principals/{id}/password` below) r
 
 `--proxy-token` still gates `/snapshot`, `/usage` and `/limits/reconcile` — those are proxy *processes* authenticating to the control plane, not humans, and have no password to present; sessions and the proxy token are deliberately separate mechanisms for separate callers.
 
+**A session alone is not enough.** `require_session` only establishes *who* is calling; every `/admin/*` handler additionally checks *what* that principal may do, via `RequirePermission` (`src/control/api.rs`), against the same `roles → role_permissions → permissions` model `migrations/0001_init.sql` seeds and the data-plane's own `model:invoke` authorisation already uses. A session with no matching permission gets 403, not 200 — a principal that can log in is not, by that fact alone, an administrator. This closes what was previously a real gap: any principal a password was ever set for (via `PUT /admin/principals/{id}/password`) was a full admin, because nothing checked further than "is this a valid session".
+
+Every admin route needs one of four permissions, seeded by `migrations/0001_init.sql`:
+
+| Permission | Routes |
+|---|---|
+| `usage:read` | Every `GET /admin/*` route (keys, principals, models, virtual models, roles, limits, budgets, health) |
+| `key:create` | `POST /admin/keys` |
+| `key:revoke` | `DELETE /admin/keys/{id}` |
+| `config:write` | Every other write: principals (create/delete/roles/**password**), models, backends, virtual models, routing rules and targets, limits, budgets |
+
+There is no finer-grained permission for "manage principals" or "manage virtual models" than `config:write` — the schema does not seed one, and inventing a permission per table would multiply roles for no operator-visible benefit. The built-in `operator` role holds everything except `model:invoke` (i.e. all four of the above); `admin` holds everything including `model:invoke`. A role with `usage:read` alone can list and view but never create, revoke or reconfigure anything — the shape a read-only UI viewer or an audit tool needs.
+
 **Bootstrapping the first login.** A freshly migrated database has no session anyone can obtain — every `principals` row starts with `password_hash IS NULL`. Run this once, with the same database access `import` already requires:
 
 ```bash
 fastllm-proxy set-password --name admin --password '...' --database-url postgres://...
 ```
 
-Creates the named principal if it does not exist yet (as `kind = 'user'`), sets its password, and grants it the `admin` role if it has no role at all yet. Safe to run again later to reset a forgotten password. `PUT /admin/principals/{id}/password` (session-gated, for every login *after* the first) does the same password-setting step through the admin API/UI once at least one session exists.
+Creates the named principal if it does not exist yet (as `kind = 'user'`), sets its password, and grants it the `admin` role if it has no role at all yet — the one way to reach every `config:write`/`key:create`/`key:revoke`/`usage:read` route before any session-driven role grant is possible. Safe to run again later to reset a forgotten password. `PUT /admin/principals/{id}/password` (session-gated *and* `config:write`-gated, for every login *after* the first) does the same password-setting step through the admin API/UI once at least one session exists — deliberately behind `config:write`, not merely a session: it is the route that hands a principal a working login, so only a caller already trusted to reconfigure the system may grant one to somebody else.
 
 Network isolation is still the right default even with a login in front of `/admin/*` — the same reason a login-gated internal tool still belongs on an internal network rather than a public LoadBalancer. **Keep the admin port off the public listener**: bind it to a cluster-internal Service or localhost only. `deploy/control.yaml` does this with a ClusterIP Service kept off the LoadBalancer VIP; do not merge them.
 

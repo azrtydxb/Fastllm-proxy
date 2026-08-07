@@ -40,18 +40,33 @@ pub const TEST_PASSWORD: &str = "correct horse battery staple";
 pub const TEST_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO4tt+y8yYwgA$b9DCigRtGIAy9y9xRa9Lip7A9pBHRU+4AMK9lJkXDOA";
 
 /// Create a `kind = 'user'` principal named `name` with [`TEST_PASSWORD`]
-/// already set, so a caller can immediately `login_cookie` as it. No role
-/// grant: `require_session` (the only check `/admin/*` performs today) asks
-/// only "is this a valid session", not "does this principal hold a
-/// particular role" — the same all-or-nothing shape the proxy-token gate it
-/// replaced had.
+/// already set and the `admin` role granted, so a caller can immediately
+/// `login_cookie` as it and use every `/admin/*` route. `/admin/*` is now
+/// gated on both a valid session (`require_session`) *and* a permission the
+/// matched route requires (`RequirePermission` — see `src/control/api.rs`),
+/// so a caller of this helper that meant "give me a working admin session
+/// for some other test" (`budgets.rs`, `virtual_models.rs`) would otherwise
+/// start getting 403s that test was never meant to exercise. A test that
+/// specifically wants a *narrower* principal — the RBAC finding this helper
+/// predates — grants its own role directly instead of using this one; see
+/// `admin_auth.rs`'s permission-mapping tests.
 pub async fn bootstrap_login_user(pool: &sqlx::PgPool, name: &str) {
-    sqlx::query("INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2)")
-        .bind(name)
-        .bind(TEST_PASSWORD_HASH)
-        .execute(pool)
-        .await
-        .unwrap();
+    let principal_id: i64 = sqlx::query_scalar(
+        "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
+    )
+    .bind(name)
+    .bind(TEST_PASSWORD_HASH)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO principal_roles (principal_id, role_id)
+         SELECT $1, id FROM roles WHERE name = 'admin'",
+    )
+    .bind(principal_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// `POST /login` as `name`/[`TEST_PASSWORD`] against a running admin API and

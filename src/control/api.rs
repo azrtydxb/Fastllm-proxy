@@ -11,7 +11,8 @@ use crate::routing::MatchConditionJson;
 use crate::snapshot::{constant_time_eq, hash_key, Snapshot};
 use crate::usage::UsageEvent;
 use arc_swap::ArcSwap;
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
@@ -139,9 +140,11 @@ struct Ctx {
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
-/// body that says what was wrong. `/admin/*` has no authentication and no UI
-/// yet, so the error body is the entire diagnostic an operator gets — a bare
-/// status code just means reading the SQL to find out which id was the typo.
+/// body that says what was wrong. `/admin/*` is authenticated (`require_session`)
+/// and authorised (`RequirePermission`) and has a management UI (`control::ui`),
+/// but none of that changes the diagnostic an operator gets on failure — a bare
+/// status code would still just mean reading the SQL to find out which id was
+/// the typo.
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -150,7 +153,8 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
 
 /// For failures the caller could not have caused and cannot act on. The
 /// structured `sqlx::Error` goes to the log, not to the response: it can name
-/// columns and constraints, and `/admin/*` is unauthenticated.
+/// columns and constraints, and an authenticated, authorised operator still
+/// has no legitimate use for that level of internal detail over the wire.
 fn db_error(op: &str, e: &sqlx::Error) -> ApiError {
     tracing::error!(error = %e, op, "admin API database call failed");
     api_error(
@@ -183,6 +187,7 @@ struct NewKeyResponse {
 
 async fn post_key(
     State(ctx): State<Ctx>,
+    _perm: RequireKeyCreate,
     Json(body): Json<NewKey>,
 ) -> Result<Json<NewKeyResponse>, (StatusCode, Json<serde_json::Value>)> {
     let (key, id) = create_key(&ctx.pool, &body.name, body.principal_id, body.expires_at)
@@ -224,7 +229,11 @@ fn key_creation_error(e: &sqlx::Error, principal_id: i64) -> (StatusCode, Json<s
     }
 }
 
-async fn revoke_key(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+async fn revoke_key(
+    State(ctx): State<Ctx>,
+    _perm: RequireKeyRevoke,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("UPDATE api_keys SET disabled = TRUE WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
@@ -278,7 +287,10 @@ type KeyListRow = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
-async fn list_keys(State(ctx): State<Ctx>) -> Result<Json<Vec<KeyView>>, ApiError> {
+async fn list_keys(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<KeyView>>, ApiError> {
     let rows: Vec<KeyListRow> = sqlx::query_as(
         "SELECT k.id, k.prefix, k.name, k.principal_id, p.name, k.expires_at, k.disabled,
                 k.created_at, k.last_used_at
@@ -342,7 +354,10 @@ type PrincipalRow = (
     Vec<String>,
 );
 
-async fn list_principals(State(ctx): State<Ctx>) -> Result<Json<Vec<PrincipalView>>, ApiError> {
+async fn list_principals(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<PrincipalView>>, ApiError> {
     let rows: Vec<PrincipalRow> = sqlx::query_as(
         "SELECT p.id, p.kind, p.name, p.email, p.disabled, p.created_at,
                 COALESCE(
@@ -391,6 +406,7 @@ const PRINCIPAL_KINDS: [&str; 2] = ["user", "service_account"];
 
 async fn post_principal(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Json(body): Json<NewPrincipal>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let kind = body.kind.unwrap_or_else(|| "service_account".to_string());
@@ -443,6 +459,7 @@ async fn post_principal(
 
 async fn delete_principal(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     // ON DELETE CASCADE takes this principal's keys and role grants with it
@@ -471,6 +488,7 @@ struct RoleGrant {
 
 async fn grant_role(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(principal_id): Path<i64>,
     Json(body): Json<RoleGrant>,
 ) -> Result<StatusCode, ApiError> {
@@ -527,6 +545,7 @@ async fn grant_role(
 
 async fn revoke_role(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path((principal_id, role)): Path<(i64, String)>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query(
@@ -572,7 +591,10 @@ struct ModelView {
     backends: Vec<BackendView>,
 }
 
-async fn list_models(State(ctx): State<Ctx>) -> Result<Json<Vec<ModelView>>, ApiError> {
+async fn list_models(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<ModelView>>, ApiError> {
     let models: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, description FROM models ORDER BY name")
             .fetch_all(&ctx.pool)
@@ -639,6 +661,7 @@ async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Erro
 
 async fn post_model(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Json(body): Json<NewModel>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     if body.name.trim().is_empty() {
@@ -687,7 +710,11 @@ async fn post_model(
     ))
 }
 
-async fn delete_model(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+async fn delete_model(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM models WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
@@ -716,6 +743,7 @@ struct NewBackend {
 
 async fn post_backend(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(model_id): Path<i64>,
     Json(body): Json<NewBackend>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -790,6 +818,7 @@ async fn post_backend(
 
 async fn delete_backend(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM model_backends WHERE id = $1")
@@ -854,6 +883,7 @@ type TargetRow = (i64, i64, i64, String, i32, i32);
 
 async fn list_virtual_models(
     State(ctx): State<Ctx>,
+    _perm: RequireRead,
 ) -> Result<Json<Vec<VirtualModelView>>, ApiError> {
     let vms: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, description FROM virtual_models ORDER BY name")
@@ -941,6 +971,7 @@ struct NewVirtualModel {
 
 async fn post_virtual_model(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Json(body): Json<NewVirtualModel>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     if body.name.trim().is_empty() {
@@ -988,6 +1019,7 @@ async fn post_virtual_model(
 
 async fn delete_virtual_model(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     // ON DELETE CASCADE (migrations/0008) takes this virtual model's rules
@@ -1020,6 +1052,7 @@ struct NewRule {
 
 async fn post_rule(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(virtual_model_id): Path<i64>,
     Json(body): Json<NewRule>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -1064,7 +1097,11 @@ async fn post_rule(
     ))
 }
 
-async fn delete_rule(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+async fn delete_rule(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM routing_rules WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
@@ -1099,6 +1136,7 @@ fn default_target_weight() -> i32 {
 
 async fn post_rule_target(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(rule_id): Path<i64>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -1139,6 +1177,7 @@ async fn post_rule_target(
 
 async fn delete_rule_target(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM rule_targets WHERE id = $1")
@@ -1158,6 +1197,7 @@ async fn delete_rule_target(
 
 async fn post_default_target(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(virtual_model_id): Path<i64>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -1199,6 +1239,7 @@ async fn post_default_target(
 
 async fn delete_default_target(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM virtual_model_defaults WHERE id = $1")
@@ -1232,7 +1273,10 @@ struct RoleView {
     permissions: Vec<PermissionView>,
 }
 
-async fn list_roles(State(ctx): State<Ctx>) -> Result<Json<Vec<RoleView>>, ApiError> {
+async fn list_roles(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<RoleView>>, ApiError> {
     let roles: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, description FROM roles ORDER BY name")
             .fetch_all(&ctx.pool)
@@ -1283,7 +1327,10 @@ struct LimitView {
     tokens_per_min: Option<i32>,
 }
 
-async fn list_limits(State(ctx): State<Ctx>) -> Result<Json<Vec<LimitView>>, ApiError> {
+async fn list_limits(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<LimitView>>, ApiError> {
     let rows: Vec<(i64, String, Option<i32>, Option<i32>)> = sqlx::query_as(
         "SELECT l.principal_id, p.name, l.requests_per_min, l.tokens_per_min
          FROM limits l JOIN principals p ON p.id = l.principal_id
@@ -1320,6 +1367,7 @@ struct PutLimits {
 /// the existing row rather than erroring or creating a second one.
 async fn put_limits(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(principal_id): Path<i64>,
     Json(body): Json<PutLimits>,
 ) -> Result<StatusCode, ApiError> {
@@ -1373,6 +1421,7 @@ async fn put_limits(
 
 async fn delete_limits(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(principal_id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM limits WHERE principal_id = $1")
@@ -1411,7 +1460,10 @@ struct BudgetView {
     window_start: chrono::DateTime<chrono::Utc>,
 }
 
-async fn list_budgets(State(ctx): State<Ctx>) -> Result<Json<Vec<BudgetView>>, ApiError> {
+async fn list_budgets(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<BudgetView>>, ApiError> {
     type BudgetRow = (i64, String, i64, i64, String, chrono::DateTime<chrono::Utc>);
     let rows: Vec<BudgetRow> = sqlx::query_as(
         "SELECT b.principal_id, p.name, b.tokens_total, b.tokens_used, b.budget_window, b.window_start
@@ -1454,6 +1506,7 @@ struct PutBudget {
 /// roll over on its own, are for.
 async fn put_budget(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(principal_id): Path<i64>,
     Json(body): Json<PutBudget>,
 ) -> Result<StatusCode, ApiError> {
@@ -1504,6 +1557,7 @@ async fn put_budget(
 
 async fn delete_budget(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(principal_id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM budgets WHERE principal_id = $1")
@@ -2005,26 +2059,208 @@ async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResponse
 /// proxy token alone" (`/snapshot`, `/usage` and `/limits/reconcile` still
 /// are, deliberately — those are proxy processes, not humans, and have no
 /// password to present).
+///
+/// Authenticates *who* is calling and stops there — it deliberately does not
+/// decide *what* they may do. That is `RequirePermission`'s job, run as an
+/// extractor inside each handler once the session is known to be real. The
+/// two are split into separate layers rather than one, because "no session"
+/// and "a session, but not permitted to do this" are different failures a
+/// caller needs to tell apart (401 vs 403), and because a route can only
+/// know which permission it needs from inside its own handler — this
+/// `from_fn` layer has no way to see which of the many routes it wraps a
+/// given request is bound for.
 async fn require_session(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     let Some(token) = session_cookie(&headers) else {
         return Err(api_error(StatusCode::UNAUTHORIZED, "no session cookie"));
     };
-    if crate::control::auth::authenticate_session(&ctx.pool, &token)
-        .await
-        .is_none()
-    {
+    let Some(principal_id) = crate::control::auth::authenticate_session(&ctx.pool, &token).await
+    else {
         return Err(api_error(
             StatusCode::UNAUTHORIZED,
             "invalid or expired session",
         ));
-    }
+    };
+    // Stashed in the request's extensions rather than threaded through as a
+    // handler argument from here: this middleware runs once per request
+    // before axum has even matched which handler it is bound for, so this is
+    // the only place a resolved principal id has to go. `RequirePermission`
+    // (below) reads it back out inside the matched handler's own extractor
+    // chain.
+    request
+        .extensions_mut()
+        .insert(AdminPrincipal(principal_id));
     Ok(next.run(request).await)
 }
+
+/// The authenticated caller of an `/admin/*` request — `require_session`'s
+/// output and `RequirePermission`'s input. A newtype rather than a bare
+/// `i64` so it cannot be confused with some other `i64` extension a future
+/// route adds, and so it is not `Clone`-and-forgettable the way threading a
+/// raw id through would be.
+#[derive(Debug, Clone, Copy)]
+struct AdminPrincipal(i64);
+
+/// Every permission `/admin/*` routes check against, named for the
+/// `permissions.verb` column value each one maps to. Deliberately only
+/// these four (plus `model:invoke`, irrelevant here — that one gates the
+/// *data* plane, resolved once per snapshot build in
+/// `control::build::flatten_grants`, not checked per admin request): the
+/// vocabulary `migrations/0001_init.sql` already seeds, not a parallel
+/// permission scheme invented for this file. A route that does not fit any
+/// of the three specific verbs (`key:create`, `key:revoke`) falls back to
+/// `config:write` — the schema has no finer-grained permission for
+/// "manage principals" or "manage virtual models" than that, and inventing
+/// one per table would multiply roles for no operator-visible benefit; see
+/// `admin_routes` in `serve` for the full mapping, route by route.
+mod admin_permission {
+    /// Listing/viewing state: `GET /admin/*`. Named for `usage:read`
+    /// because that is the one read-shaped verb migration 0001 seeds — nothing
+    /// admin-visible needs a second one when this covers keys, principals,
+    /// models, roles, limits and budgets equally well; none of them expose
+    /// anything more sensitive than usage itself already does.
+    pub const READ: &str = "usage:read";
+    pub const KEY_CREATE: &str = "key:create";
+    pub const KEY_REVOKE: &str = "key:revoke";
+    /// Every other admin write: principals, roles, models, backends, virtual
+    /// models, routing rules and targets, limits, budgets, passwords.
+    pub const CONFIG_WRITE: &str = "config:write";
+}
+
+/// `true` if `principal_id` holds a role granting `verb` on `'*'` — every
+/// admin permission migration 0001 seeds is scoped to `'*'`, unlike
+/// `model:invoke` (`model/*`), so there is nothing finer to match against
+/// resource here the way `Principal::may_invoke` matches model names.
+async fn principal_has_permission(
+    pool: &PgPool,
+    principal_id: i64,
+    verb: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM principal_roles pr
+             JOIN role_permissions rp ON rp.role_id = pr.role_id
+             JOIN permissions p ON p.id = rp.permission_id
+             WHERE pr.principal_id = $1 AND p.verb = $2
+         )",
+    )
+    .bind(principal_id)
+    .bind(verb)
+    .fetch_one(pool)
+    .await
+}
+
+/// One zero-sized marker type per permission `RequirePermission` (below) can
+/// be instantiated with. A `const VERB: &'static str` generic parameter
+/// would say the same thing more directly, but stable Rust at this crate's
+/// pinned `rust-version = "1.82"` does not allow `&str` as a const generic
+/// (`adt_const_params` is nightly-only) — a trait with an associated
+/// constant is the stable equivalent, at the cost of one marker struct per
+/// permission instead of one string literal.
+trait AdminPermission {
+    const VERB: &'static str;
+}
+
+struct ReadPermission;
+impl AdminPermission for ReadPermission {
+    const VERB: &'static str = admin_permission::READ;
+}
+
+struct KeyCreatePermission;
+impl AdminPermission for KeyCreatePermission {
+    const VERB: &'static str = admin_permission::KEY_CREATE;
+}
+
+struct KeyRevokePermission;
+impl AdminPermission for KeyRevokePermission {
+    const VERB: &'static str = admin_permission::KEY_REVOKE;
+}
+
+struct ConfigWritePermission;
+impl AdminPermission for ConfigWritePermission {
+    const VERB: &'static str = admin_permission::CONFIG_WRITE;
+}
+
+/// An extractor, not a second `from_fn` middleware layer: which permission a
+/// request needs depends on which route matched, and axum's `from_fn`
+/// layers run *before* routing has picked a handler, so they cannot see
+/// that. Adding `RequireRead`/`RequireKeyCreate`/`RequireKeyRevoke`/
+/// `RequireConfigWrite` (the aliases below) as a handler argument runs this
+/// once axum already knows which handler — and therefore which permission —
+/// applies, and its `Rejection = ApiError` turns a missing grant into 403
+/// automatically, the same way a bad `Path<i64>` already turns into 400
+/// without every handler writing that check by hand.
+struct RequirePermission<P>(std::marker::PhantomData<P>);
+
+// A hand-written `impl` rather than `#[derive(Default)]`: the derive would
+// add a `where P: Default` bound that `P` (a zero-sized marker type that
+// never needs to be constructed on its own) has no reason to satisfy.
+// `RequireRead::default()` and friends are how the tests below build one of
+// these directly, bypassing `FromRequestParts` — a generic type *alias*
+// bound to a concrete `P` cannot be called as a tuple-struct constructor in
+// Rust (`RequireRead::default()` does not compile, only
+// `RequirePermission::<ReadPermission>(..)` or this would), so `default()`
+// is the ergonomic way to spell "the permission this alias names, satisfied
+// unconditionally" at each of those call sites.
+impl<P> Default for RequirePermission<P> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<P> FromRequestParts<Ctx> for RequirePermission<P>
+where
+    P: AdminPermission + Send + Sync + 'static,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        // `require_session` (the `from_fn` layer every `/admin/*` route is
+        // wrapped in) always runs first and always inserts this — its
+        // absence here would mean this extractor is used on a route that
+        // is not behind that layer, a wiring bug rather than a caller
+        // error, so a 500 rather than a 401/403 correctly signals that
+        // rather than being mistaken for an unauthenticated request.
+        let Some(AdminPrincipal(principal_id)) = parts.extensions.get::<AdminPrincipal>().copied()
+        else {
+            tracing::error!(
+                "RequirePermission ran with no AdminPrincipal in request extensions; \
+                 is this route mounted outside require_session?"
+            );
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "authorisation check misconfigured; see server logs",
+            ));
+        };
+        let allowed = principal_has_permission(&state.pool, principal_id, P::VERB)
+            .await
+            .map_err(|e| db_error("checking admin permission", &e))?;
+        if allowed {
+            Ok(Self(std::marker::PhantomData))
+        } else {
+            Err(api_error(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "principal {principal_id} lacks the {:?} permission",
+                    P::VERB
+                ),
+            ))
+        }
+    }
+}
+
+/// Named aliases for `RequirePermission`'s four concrete instantiations —
+/// every admin handler below takes one of these as a parameter rather than
+/// spelling out `RequirePermission<SomeMarker>`, purely for readability at
+/// each call site.
+type RequireRead = RequirePermission<ReadPermission>;
+type RequireKeyCreate = RequirePermission<KeyCreatePermission>;
+type RequireKeyRevoke = RequirePermission<KeyRevokePermission>;
+type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
 
 #[derive(Deserialize)]
 struct SetPassword {
@@ -2037,8 +2273,20 @@ struct SetPassword {
 /// `/admin/*` route; bootstrapping the very *first* user (when no session
 /// can possibly exist yet) is `fastllm-proxy set-password`'s job instead
 /// (`main.rs`), not this route's.
+///
+/// Also gated by `RequireConfigWrite`, deliberately not something narrower:
+/// this is the route that promotes a principal to `kind = 'user'` and hands
+/// it a working login, which is exactly the step a service-account-turned-UI
+/// -viewer's password must not silently pass through unauthorised (see the
+/// design note on the real-production bug this closes — every principal
+/// with a password was previously a full admin, because nothing here
+/// checked anything at all). Requiring `config:write` means only a caller
+/// already trusted to reconfigure the system can hand out a new login,
+/// which is the same trust boundary the schema already draws for every
+/// other administrative write.
 async fn put_password(
     State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
     Path(id): Path<i64>,
     Json(body): Json<SetPassword>,
 ) -> Result<StatusCode, ApiError> {
@@ -2071,7 +2319,7 @@ async fn put_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn admin_health(State(ctx): State<Ctx>) -> Json<HealthView> {
+async fn admin_health(State(ctx): State<Ctx>, _perm: RequireRead) -> Json<HealthView> {
     Json(HealthView {
         snapshot_rebuild_failures: ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
     })
@@ -2145,7 +2393,17 @@ pub async fn serve(
     // `/admin/*` route including the UI's own data source — layered with
     // that middleware exactly once here rather than checked inside each
     // handler, so a new route added later is protected by construction
-    // instead of by remembering to add a check.
+    // instead of by remembering to add a check. `require_session` only
+    // establishes *who* is calling, though (see its own doc comment); *what*
+    // they may do is each handler's own `RequireRead`/`RequireKeyCreate`/
+    // `RequireKeyRevoke`/`RequireConfigWrite` argument, so — unlike session
+    // gating — a route added here without also adding one of those
+    // extractors to its handler is reachable by any authenticated principal
+    // regardless of role. There is no equivalent "layered once" trick for
+    // that half, because the permission a route needs depends on which one
+    // it is (`GET` vs `POST /admin/keys` at the very first line below need
+    // different permissions despite sharing a path), which per-route
+    // middleware can't see and per-handler extractors can.
     let admin_routes = Router::new()
         .route("/admin/keys", get(list_keys).post(post_key))
         .route("/admin/keys/{id}", delete(revoke_key))
@@ -2399,6 +2657,7 @@ mod tests {
 
         let (status, created) = post_principal(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -2412,6 +2671,7 @@ mod tests {
 
         grant_role(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(RoleGrant {
                 role: "inference".into(),
@@ -2422,6 +2682,7 @@ mod tests {
 
         let (_, model) = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -2434,6 +2695,7 @@ mod tests {
         let upstream_credential = "sk-upstream-must-never-come-back";
         let (_, backend) = post_backend(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(model_id),
             Json(NewBackend {
                 api_base: "http://route-test:8000/v1/".into(),
@@ -2468,7 +2730,9 @@ mod tests {
             .any(|p| p.name == principal_name && p.allow_all));
 
         // The credential must not come back out of the read route, in any form.
-        let listed = list_models(State(ctx.clone())).await.unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
         let json = serde_json::to_string(&listed.0).unwrap();
         assert!(!json.contains(upstream_credential));
         assert!(json.contains("has_upstream_api_key"));
@@ -2484,6 +2748,7 @@ mod tests {
 
         revoke_role(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path((principal_id, "inference".to_string())),
         )
         .await
@@ -2497,15 +2762,27 @@ mod tests {
             "a revoked role must reach the published snapshot too"
         );
 
-        delete_backend(State(ctx.clone()), Path(backend_id))
-            .await
-            .unwrap();
-        delete_model(State(ctx.clone()), Path(model_id))
-            .await
-            .unwrap();
-        delete_principal(State(ctx.clone()), Path(principal_id))
-            .await
-            .unwrap();
+        delete_backend(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(backend_id),
+        )
+        .await
+        .unwrap();
+        delete_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(model_id),
+        )
+        .await
+        .unwrap();
+        delete_principal(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+        )
+        .await
+        .unwrap();
         assert!(
             !cache
                 .current_snapshot()
@@ -2528,6 +2805,7 @@ mod tests {
         let principal_name = unique_name("key-listing-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -2543,7 +2821,9 @@ mod tests {
             .await
             .unwrap();
 
-        let listed = list_keys(State(ctx.clone())).await.unwrap();
+        let listed = list_keys(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
         let mine = listed.0.iter().find(|k| k.id == id).unwrap();
         assert_eq!(mine.principal, principal_name);
         assert_eq!(mine.name, key_name);
@@ -2571,16 +2851,18 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
 
         for (status, body) in [
-            delete_model(State(ctx.clone()), Path(-1))
+            delete_model(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
                 .await
                 .unwrap_err(),
-            delete_backend(State(ctx.clone()), Path(-1))
+            delete_backend(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
                 .await
                 .unwrap_err(),
-            delete_principal(State(ctx.clone()), Path(-1))
+            delete_principal(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
                 .await
                 .unwrap_err(),
-            revoke_key(State(ctx.clone()), Path(-1)).await.unwrap_err(),
+            revoke_key(State(ctx.clone()), RequireKeyRevoke::default(), Path(-1))
+                .await
+                .unwrap_err(),
         ] {
             assert_eq!(status, StatusCode::NOT_FOUND);
             let message = body.0["error"].as_str().unwrap();
@@ -2589,6 +2871,7 @@ mod tests {
 
         let (status, body) = grant_role(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(1),
             Json(RoleGrant {
                 role: "not-a-role".into(),
@@ -2605,6 +2888,7 @@ mod tests {
 
         let (status, body) = post_backend(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(-1),
             Json(NewBackend {
                 api_base: "http://x:8000/v1".into(),
@@ -2619,6 +2903,7 @@ mod tests {
 
         let (status, _) = post_principal(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewPrincipal {
                 name: unique_name("bad-kind"),
                 kind: Some("robot".into()),
@@ -2637,7 +2922,9 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn roles_are_listed_with_their_permissions() {
         let (ctx, _cache) = test_ctx().await;
-        let roles = list_roles(State(ctx)).await.unwrap();
+        let roles = list_roles(State(ctx), RequireRead::default())
+            .await
+            .unwrap();
         let inference = roles.0.iter().find(|r| r.name == "inference").unwrap();
         assert!(inference
             .permissions
@@ -2666,6 +2953,7 @@ mod tests {
 
         let (_, primary) = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: primary_name.clone(),
                 description: String::new(),
@@ -2677,6 +2965,7 @@ mod tests {
 
         let (_, secondary) = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: secondary_name.clone(),
                 description: String::new(),
@@ -2689,6 +2978,7 @@ mod tests {
         let vm_name = unique_name("vm-route-canary");
         let (status, vm) = post_virtual_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewVirtualModel {
                 name: vm_name.clone(),
                 description: String::new(),
@@ -2701,6 +2991,7 @@ mod tests {
 
         let (_, rule) = post_rule(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(vm_id),
             Json(NewRule {
                 position: 0,
@@ -2716,6 +3007,7 @@ mod tests {
 
         let _ = post_rule_target(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(rule_id),
             Json(NewTarget {
                 model_id: primary_id,
@@ -2728,6 +3020,7 @@ mod tests {
 
         let _ = post_default_target(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(vm_id),
             Json(NewTarget {
                 model_id: secondary_id,
@@ -2752,7 +3045,9 @@ mod tests {
         assert_eq!(published.default_targets[0].model, secondary_name);
 
         // `GET /admin/virtual-models` mirrors the same rows.
-        let listed = list_virtual_models(State(ctx.clone())).await.unwrap();
+        let listed = list_virtual_models(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
         let listed_vm = listed.0.iter().find(|v| v.name == vm_name).unwrap();
         assert_eq!(listed_vm.rules.len(), 1);
         assert_eq!(listed_vm.rules[0].targets[0].model, primary_name);
@@ -2760,9 +3055,13 @@ mod tests {
 
         // Deleting the virtual model cascades its rules and targets, and the
         // deletion reaches the published snapshot the same way creation did.
-        delete_virtual_model(State(ctx.clone()), Path(vm_id))
-            .await
-            .unwrap();
+        delete_virtual_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(vm_id),
+        )
+        .await
+        .unwrap();
         assert!(
             !cache
                 .current_snapshot()
@@ -2788,6 +3087,7 @@ mod tests {
 
         let (status, _) = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: name.clone(),
                 description: String::new(),
@@ -2799,6 +3099,7 @@ mod tests {
 
         let err = post_virtual_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewVirtualModel {
                 name: name.clone(),
                 description: String::new(),
@@ -2812,6 +3113,7 @@ mod tests {
         let other_name = unique_name("vm-collision-reverse");
         let (status, _) = post_virtual_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewVirtualModel {
                 name: other_name.clone(),
                 description: String::new(),
@@ -2823,6 +3125,7 @@ mod tests {
 
         let err = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: other_name,
                 description: String::new(),
@@ -2920,7 +3223,7 @@ mod tests {
             "a failed rebuild must increment the counter GET /admin/health reports"
         );
 
-        let health = admin_health(State(ctx.clone())).await;
+        let health = admin_health(State(ctx.clone()), RequireRead::default()).await;
         assert_eq!(health.0.snapshot_rebuild_failures, after);
     }
 
@@ -2994,6 +3297,7 @@ mod tests {
         let principal_name = unique_name("usage-basic-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -3007,6 +3311,7 @@ mod tests {
         let model_name = unique_name("usage-basic-model");
         let _ = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -3086,6 +3391,7 @@ mod tests {
         let principal_name = unique_name("usage-principal-survives");
         let (_, created) = post_principal(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -3099,6 +3405,7 @@ mod tests {
         let model_name = unique_name("usage-model-survives");
         let _ = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -3182,6 +3489,7 @@ mod tests {
 
         put_limits(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutLimits {
                 requests_per_min: Some(7),
@@ -3205,15 +3513,21 @@ mod tests {
             })
         );
 
-        let listed = list_limits(State(ctx.clone())).await.unwrap();
+        let listed = list_limits(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
         assert!(listed
             .0
             .iter()
             .any(|l| l.principal_id == principal_id && l.requests_per_min == Some(7)));
 
-        delete_limits(State(ctx.clone()), Path(principal_id))
-            .await
-            .unwrap();
+        delete_limits(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+        )
+        .await
+        .unwrap();
         let published_after_delete = cache
             .current_snapshot()
             .principals
@@ -3235,6 +3549,7 @@ mod tests {
         let principal_id = make_principal(&ctx, &unique_name("empty-limits-principal")).await;
         let err = put_limits(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutLimits {
                 requests_per_min: None,
@@ -3252,9 +3567,13 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new().track_prefix("principals", "name", "no-limit-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-limit-principal")).await;
-        let err = delete_limits(State(ctx.clone()), Path(principal_id))
-            .await
-            .expect_err("no row to delete");
+        let err = delete_limits(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+        )
+        .await
+        .expect_err("no row to delete");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
@@ -3318,6 +3637,7 @@ mod tests {
 
         put_budget(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: 500,
@@ -3341,15 +3661,21 @@ mod tests {
             })
         );
 
-        let listed = list_budgets(State(ctx.clone())).await.unwrap();
+        let listed = list_budgets(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
         assert!(listed
             .0
             .iter()
             .any(|b| b.principal_id == principal_id && b.tokens_total == 500));
 
-        delete_budget(State(ctx.clone()), Path(principal_id))
-            .await
-            .unwrap();
+        delete_budget(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+        )
+        .await
+        .unwrap();
         let published_after_delete = cache
             .current_snapshot()
             .principals
@@ -3372,6 +3698,7 @@ mod tests {
 
         let err = put_budget(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: 100,
@@ -3384,6 +3711,7 @@ mod tests {
 
         let err = put_budget(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: 0,
@@ -3402,9 +3730,13 @@ mod tests {
         let _cleanup =
             TestCleanup::new().track_prefix("principals", "name", "no-budget-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-budget-principal")).await;
-        let err = delete_budget(State(ctx.clone()), Path(principal_id))
-            .await
-            .expect_err("no row to delete");
+        let err = delete_budget(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+        )
+        .await
+        .expect_err("no row to delete");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
@@ -3424,6 +3756,7 @@ mod tests {
         let model_name = unique_name("budget-usage-model");
         let _ = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -3433,6 +3766,7 @@ mod tests {
         .unwrap();
         put_budget(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: 1000,
@@ -3482,6 +3816,7 @@ mod tests {
         let model_name = unique_name("no-budget-usage-model");
         let _ = post_model(
             State(ctx.clone()),
+            RequireConfigWrite::default(),
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
