@@ -19,7 +19,12 @@ RUN npm install
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1-bookworm AS build
+# Trixie, not bookworm, and specifically because of ONNX Runtime. The prebuilt
+# `ort` static library is compiled against a newer libstdc++ than bookworm
+# ships, so linking it there fails on symbols like `_M_replace_cold` and
+# `__cxa_call_terminate`. The runtime stage below must match: a binary linked
+# against trixie's libstdc++ will not start on bookworm.
+FROM rust:1-trixie AS build
 WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
@@ -74,7 +79,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --features "control classifier-tier2" \
  && cp target/release/fastllm-proxy /usr/local/bin/fastllm-proxy
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # ca-certificates is what makes an `https://` api_base work: the proxy prefers
 # the system root store and only falls back to its bundled copy.
