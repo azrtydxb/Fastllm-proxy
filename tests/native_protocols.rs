@@ -476,7 +476,16 @@ async fn an_anthropic_backend_receives_the_messages_api_and_answers_an_openai_cl
     assert_eq!(seen.path, "/v1/messages", "Messages API path");
     let sent: serde_json::Value = serde_json::from_str(&seen.body).expect("upstream body is JSON");
     assert_eq!(sent["model"], serde_json::json!("provider-model-name"));
-    assert_eq!(sent["system"], serde_json::json!("Be terse."));
+    // A content block rather than a bare string, so it can carry the cache
+    // breakpoint that makes a repeated system prompt cost 90% less.
+    assert_eq!(
+        sent["system"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "Be terse.",
+            "cache_control": {"type": "ephemeral"},
+        }])
+    );
     assert_eq!(sent["max_tokens"], serde_json::json!(64));
     assert_eq!(
         sent["messages"],
