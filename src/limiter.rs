@@ -52,13 +52,33 @@ impl Limits {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Decision {
-    Admitted,
+    /// Admitted, with what to tell the client about its remaining allowance.
+    ///
+    /// `None` when this principal has no limits configured: publishing
+    /// `x-ratelimit-remaining: 0` to an unlimited caller is worse than
+    /// publishing nothing, because a well-behaved client would back off
+    /// against a limit that does not exist.
+    Admitted(Option<RateLimitStatus>),
     /// How long until at least one more unit would be available, for the
     /// `Retry-After` header. Rounded up by the caller -- fractional seconds
     /// are not a meaningful unit for that header.
-    Exceeded {
-        retry_after: Duration,
-    },
+    Exceeded { retry_after: Duration },
+}
+
+/// What a client needs to pace itself, in the `x-ratelimit-*` shape every
+/// provider publishes.
+///
+/// Read from the buckets after the commit that admitted the request, while
+/// their locks are already held — two float reads rather than a second pass
+/// over the limiter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateLimitStatus {
+    pub requests_limit: Option<u32>,
+    pub requests_remaining: Option<u32>,
+    pub tokens_limit: Option<u32>,
+    pub tokens_remaining: Option<u32>,
+    /// Until the tighter dimension has refilled completely.
+    pub reset_after: Duration,
 }
 
 /// A single dimension's bucket. `available` and `last_refill` are protected
@@ -342,7 +362,7 @@ impl Limiter {
         now: Instant,
     ) -> Decision {
         if limits.is_unlimited() {
-            return Decision::Admitted;
+            return Decision::Admitted(None);
         }
         let state = self.state_for(principal_id, limits, now);
         *state.last_seen.lock() = now;
@@ -401,7 +421,42 @@ impl Limiter {
         if let Some((bucket, capacity)) = tokens_bucket.as_mut() {
             bucket.commit(token_cost, *capacity, now);
         }
-        Decision::Admitted
+
+        // Read while the locks are still held, so what is reported is what this
+        // request actually left behind rather than a later snapshot another
+        // request may already have moved.
+        //
+        // Floored, not rounded: 0.6 of a request is not one a client can spend,
+        // and rounding up to 1 invites a retry certain to be refused.
+        let left = |b: &Option<(parking_lot::MutexGuard<'_, BucketState>, f64)>| {
+            b.as_ref().map(|(g, _)| g.available.max(0.0).floor() as u32)
+        };
+        // A token bucket has no discrete window to reset, so "when is the
+        // allowance back" is the honest reading of `x-ratelimit-reset`. A full
+        // bucket reports 0.
+        let refill = |b: &Option<(parking_lot::MutexGuard<'_, BucketState>, f64)>| {
+            b.as_ref().map_or(0.0, |(g, capacity)| {
+                let per_sec = capacity / 60.0;
+                if per_sec <= 0.0 {
+                    60.0
+                } else {
+                    ((capacity - g.available).max(0.0) / per_sec).min(60.0)
+                }
+            })
+        };
+        let status = RateLimitStatus {
+            requests_limit: limits.requests_per_min,
+            requests_remaining: left(&requests_bucket),
+            tokens_limit: limits.tokens_per_min,
+            tokens_remaining: left(&tokens_bucket),
+            // The tighter dimension decides, for the same reason it decides
+            // `retry_after` above: a client cannot usefully retry before the
+            // slower of the two has recovered.
+            reset_after: Duration::from_secs_f64(
+                refill(&requests_bucket).max(refill(&tokens_bucket)).ceil(),
+            ),
+        };
+        Decision::Admitted(Some(status))
     }
 
     fn state_for(
@@ -510,9 +565,11 @@ mod tests {
         let limiter = Limiter::new();
         let now = Instant::now();
         for _ in 0..1000 {
-            assert_eq!(
-                limiter.check(1, &Limits::default(), 1, now),
-                Decision::Admitted,
+            assert!(
+                matches!(
+                    limiter.check(1, &Limits::default(), 1, now),
+                    Decision::Admitted(_)
+                ),
                 "an unconfigured principal must never be denied"
             );
         }
@@ -527,15 +584,14 @@ mod tests {
         let lim = limits(Some(3), None);
         let now = Instant::now();
         for i in 0..3 {
-            assert_eq!(
-                limiter.check(1, &lim, 1, now),
-                Decision::Admitted,
+            assert!(
+                matches!(limiter.check(1, &lim, 1, now), Decision::Admitted(_)),
                 "request {i} of 3 should be admitted"
             );
         }
         match limiter.check(1, &lim, 1, now) {
             Decision::Exceeded { retry_after } => assert!(retry_after > Duration::ZERO),
-            Decision::Admitted => panic!("the 4th request must be rejected"),
+            Decision::Admitted(_) => panic!("the 4th request must be rejected"),
         }
     }
 
@@ -548,7 +604,10 @@ mod tests {
         let lim = limits(Some(60), None);
         let now = Instant::now();
         for _ in 0..60 {
-            assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+            assert!(matches!(
+                limiter.check(1, &lim, 1, now),
+                Decision::Admitted(_)
+            ));
         }
         match limiter.check(1, &lim, 1, now) {
             Decision::Exceeded { retry_after } => {
@@ -558,7 +617,7 @@ mod tests {
                     "expected roughly 1s, got {retry_after:?}"
                 );
             }
-            Decision::Admitted => panic!("bucket must be empty"),
+            Decision::Admitted(_) => panic!("bucket must be empty"),
         }
     }
 
@@ -568,7 +627,10 @@ mod tests {
         let lim = limits(Some(60), None); // 1 token/sec
         let now = Instant::now();
         for _ in 0..60 {
-            assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+            assert!(matches!(
+                limiter.check(1, &lim, 1, now),
+                Decision::Admitted(_)
+            ));
         }
         assert!(matches!(
             limiter.check(1, &lim, 1, now),
@@ -578,9 +640,8 @@ mod tests {
         // Simulate elapsed time by advancing the clock passed in, rather
         // than sleeping -- deterministic and instant.
         let later = now + Duration::from_secs(5);
-        assert_eq!(
-            limiter.check(1, &lim, 1, later),
-            Decision::Admitted,
+        assert!(
+            matches!(limiter.check(1, &lim, 1, later), Decision::Admitted(_)),
             "5 seconds at 1/sec should have refilled at least one slot"
         );
     }
@@ -592,9 +653,8 @@ mod tests {
         let lim = limits(Some(1000), Some(5));
         let now = Instant::now();
 
-        assert_eq!(
-            limiter.check(1, &lim, 5, now),
-            Decision::Admitted,
+        assert!(
+            matches!(limiter.check(1, &lim, 5, now), Decision::Admitted(_)),
             "exactly the token budget in one request"
         );
         assert!(
@@ -605,7 +665,10 @@ mod tests {
         // The mirror case: requests/min is the tight dimension.
         let limiter2 = Limiter::new();
         let lim2 = limits(Some(1), Some(1_000_000));
-        assert_eq!(limiter2.check(2, &lim2, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter2.check(2, &lim2, 1, now),
+            Decision::Admitted(_)
+        ));
         assert!(
             matches!(limiter2.check(2, &lim2, 1, now), Decision::Exceeded { .. }),
             "requests/min must reject even though tokens/min has huge headroom left"
@@ -621,8 +684,14 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(2), None);
         let now = Instant::now();
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
         // Same limit value, but a distinct `Limits` instance -- simulating a
         // snapshot rebuild that reproduced the identical configured limit.
         let lim_after_reload = limits(Some(2), None);
@@ -638,7 +707,10 @@ mod tests {
         let lim = limits(Some(100), None);
         let now = Instant::now();
         // Touch the principal once so a bucket exists to reconcile.
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
         assert_eq!(limiter.share_of(1), Some((1.0, 1.0)));
 
         limiter.apply_allowances(&[Allowance {
@@ -654,7 +726,10 @@ mod tests {
         // are admitted before the bucket is actually empty at the new,
         // narrower capacity.
         for _ in 0..25 {
-            assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+            assert!(matches!(
+                limiter.check(1, &lim, 1, now),
+                Decision::Admitted(_)
+            ));
         }
         assert!(matches!(
             limiter.check(1, &lim, 1, now),
@@ -696,7 +771,10 @@ mod tests {
         let lim = limits(Some(100), None);
         let now = Instant::now();
         // Touch the principal once so a bucket exists to apply a share to.
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
 
         // A small but nonzero floor share, as the idle-replica fix hands
         // out -- e.g. 1/4 live replicas.
@@ -709,9 +787,8 @@ mod tests {
         // effective_capacity = 100 * 0.25 = 25, so 25 requests should be
         // admitted, not zero.
         for i in 0..25 {
-            assert_eq!(
-                limiter.check(1, &lim, 1, now),
-                Decision::Admitted,
+            assert!(
+                matches!(limiter.check(1, &lim, 1, now), Decision::Admitted(_)),
                 "request {i} of 25 should be admitted under a nonzero floor share"
             );
         }
@@ -729,7 +806,10 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(100), None);
         let now = Instant::now();
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
 
         limiter.apply_allowances(&[Allowance {
             principal_id: 1,
@@ -752,7 +832,10 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(1), None);
         let now = Instant::now();
-        assert_eq!(limiter.check(1, &lim, 1, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 1, now),
+            Decision::Admitted(_)
+        ));
         assert!(matches!(
             limiter.check(1, &lim, 1, now),
             Decision::Exceeded { .. }
@@ -777,7 +860,10 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(1), Some(1_000_000));
         let now = Instant::now();
-        assert_eq!(limiter.check(1, &lim, 500, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 500, now),
+            Decision::Admitted(_)
+        ));
         assert!(matches!(
             limiter.check(1, &lim, 500, now),
             Decision::Exceeded { .. }
@@ -805,7 +891,10 @@ mod tests {
         let lim = limits(Some(1000), Some(10));
         let now = Instant::now();
         // One admitted call spends all 10 tokens and 1 of 1000 requests.
-        assert_eq!(limiter.check(1, &lim, 10, now), Decision::Admitted);
+        assert!(matches!(
+            limiter.check(1, &lim, 10, now),
+            Decision::Admitted(_)
+        ));
         // Tokens alone rejects this one -- requests still has 999 of 1000
         // left, vast headroom.
         assert!(matches!(
@@ -820,9 +909,11 @@ mod tests {
         // more would be admitted here before this dimension also 429s.
         let requests_only = limits(Some(1000), None);
         for i in 0..999 {
-            assert_eq!(
-                limiter.check(1, &requests_only, 1, now),
-                Decision::Admitted,
+            assert!(
+                matches!(
+                    limiter.check(1, &requests_only, 1, now),
+                    Decision::Admitted(_)
+                ),
                 "request {i} of the remaining 999 should be admitted"
             );
         }

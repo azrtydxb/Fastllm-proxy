@@ -117,6 +117,35 @@ Bedrock API key as an ordinary bearer token, so it is a plain backend row like
 any other — create the key in the Bedrock console and put it in
 `upstream_api_key`.
 
+### Rate limit headers
+
+Every response from a principal with limits configured carries the de-facto
+`x-ratelimit-*` shape, so a client that already paces itself against OpenAI
+needs no new code:
+
+```
+x-ratelimit-limit-requests / x-ratelimit-remaining-requests
+x-ratelimit-limit-tokens   / x-ratelimit-remaining-tokens
+x-ratelimit-reset
+```
+
+Remaining is floored, not rounded — 0.6 of a request is not one a client can
+spend. `x-ratelimit-reset` is seconds until the allowance is fully back; a
+token bucket has no discrete window to reset, so that is the honest reading,
+and a full bucket reports 0. A principal with no limits gets no headers at all,
+because publishing `remaining: 0` to an unlimited caller would make a
+well-behaved client back off against a limit that does not exist.
+
+### Retries
+
+A retry waits 25ms, then 50ms, then 100ms, plus up to 50% jitter, and doubles
+that for a 429 — a provider that just said "too many requests" means it.
+Bounded deliberately: the delay is paid by a client still waiting for its
+answer, so this is a retry budget measured against one request's patience, not
+a background job's. Jitter is keyed on the request rather than an RNG, since
+the data plane has no random source in a `--no-default-features` build and all
+that matters is that simultaneous retries decorrelate.
+
 ### Cost
 
 Models carry a price per **million** tokens, in micro-units of whatever

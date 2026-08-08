@@ -530,6 +530,11 @@ async fn proxy_request(
         }
     }
 
+    // Carried to the response so a client can pace itself, which is the whole
+    // point of publishing it: without these a caller only learns a limit
+    // exists by being refused by it.
+    let mut rate_limit_status = None;
+
     // Rate limiting (P2): one hash lookup and a short, synchronous
     // decrement — see `crate::limiter`'s doc comment for why this stays off
     // the I/O path the same way authorisation does. `Principal::limits ==
@@ -550,16 +555,18 @@ async fn proxy_request(
             let token_cost = prompt_tokens
                 .saturating_add(max_tokens.unwrap_or(0))
                 .min(u32::MAX as u64) as u32;
-            if let crate::limiter::Decision::Exceeded { retry_after } =
-                state
-                    .limiter
-                    .check(principal.id, limits, token_cost, std::time::Instant::now())
+            match state
+                .limiter
+                .check(principal.id, limits, token_cost, std::time::Instant::now())
             {
-                state.requests_failed.fetch_add(1, Ordering::Relaxed);
-                state
-                    .telemetry
-                    .record_rejection(crate::telemetry::Rejection::RateLimited);
-                return rate_limited_response(retry_after);
+                crate::limiter::Decision::Admitted(status) => rate_limit_status = status,
+                crate::limiter::Decision::Exceeded { retry_after } => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .record_rejection(crate::telemetry::Rejection::RateLimited);
+                    return rate_limited_response(retry_after);
+                }
             }
         }
     }
@@ -728,6 +735,7 @@ async fn proxy_request(
                                 Some(format!("upstream {} returned {}", backend.api_base, status));
                             state.telemetry.retries.fetch_add(1, Ordering::Relaxed);
                             debug!(backend = %backend.api_base, %status, "retrying on another backend");
+                            backoff(attempt, status, prefix).await;
                             continue;
                         }
                         // This model is exhausted; the chain may still have another.
@@ -803,7 +811,7 @@ async fn proxy_request(
                                 reporter: state.usage.clone(),
                             }
                         });
-                        return translated_response(
+                        let mut resp = translated_response(
                             resp,
                             guard,
                             backend.protocol,
@@ -823,6 +831,10 @@ async fn proxy_request(
                                 .on_backend(Arc::clone(&backend)),
                             ),
                         );
+                        if let Some(status) = &rate_limit_status {
+                            stamp_rate_limit_headers(&mut resp, status);
+                        }
+                        return resp;
                     }
                     let tracking =
                         needs_usage
@@ -842,7 +854,7 @@ async fn proxy_request(
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             });
-                    return finish_response(
+                    let mut resp = finish_response(
                         resp,
                         guard,
                         tracking,
@@ -856,6 +868,10 @@ async fn proxy_request(
                             .on_backend(Arc::clone(&backend)),
                         ),
                     );
+                    if let Some(status) = &rate_limit_status {
+                        stamp_rate_limit_headers(&mut resp, status);
+                    }
+                    return resp;
                 }
                 Err(e) => {
                     backend.note_error();
@@ -1332,6 +1348,61 @@ fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> 
 ///
 /// No currency symbol: the unit is whatever the operator priced models in, and
 /// asserting dollars in a message would be wrong for anyone who did not.
+/// Wait a little before retrying, and a little longer each time.
+///
+/// Retries used to be immediate. Against a 5xx that merely wastes an attempt;
+/// against a 429 it is actively counterproductive, since hammering a provider
+/// that just said "too many requests" is what a rate limiter exists to stop.
+///
+/// Deliberately small and bounded — 25ms, 50ms, 100ms — because this delay is
+/// paid by a client that is still waiting for its answer. This is a retry
+/// budget measured against one request's patience, not a background job's.
+///
+/// Jitter comes from the request's own prefix hash rather than an RNG: the
+/// data plane has no random source in a `--no-default-features` build, and the
+/// property that matters is only that a thundering herd of simultaneous
+/// retries does not stay in lockstep. Different requests hash differently,
+/// which is exactly the decorrelation needed.
+async fn backoff(attempt: usize, status: StatusCode, prefix: u64) {
+    let base_ms = 25u64 << attempt.min(2);
+    // Up to +50%, keyed on the request.
+    let jitter_ms = prefix % (base_ms / 2 + 1);
+    let mut wait = std::time::Duration::from_millis(base_ms + jitter_ms);
+    // A provider that said "too many requests" means it; give it longer than a
+    // transient 5xx gets, still inside what a waiting client will tolerate.
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        wait *= 2;
+    }
+    tokio::time::sleep(wait).await;
+}
+
+/// Publish the caller's remaining allowance on a response.
+///
+/// The `x-ratelimit-*` names are the de-facto shape every provider uses; a
+/// client that already paces itself against OpenAI needs no new code to pace
+/// itself against this. Without them a caller only learns a limit exists by
+/// being refused by it.
+fn stamp_rate_limit_headers(
+    resp: &mut Response<ResBody>,
+    status: &crate::limiter::RateLimitStatus,
+) {
+    let headers = resp.headers_mut();
+    let mut put = |name: &'static str, value: u64| {
+        if let Ok(v) = HeaderValue::from_str(&value.to_string()) {
+            headers.insert(name, v);
+        }
+    };
+    if let (Some(limit), Some(remaining)) = (status.requests_limit, status.requests_remaining) {
+        put("x-ratelimit-limit-requests", u64::from(limit));
+        put("x-ratelimit-remaining-requests", u64::from(remaining));
+    }
+    if let (Some(limit), Some(remaining)) = (status.tokens_limit, status.tokens_remaining) {
+        put("x-ratelimit-limit-tokens", u64::from(limit));
+        put("x-ratelimit-remaining-tokens", u64::from(remaining));
+    }
+    put("x-ratelimit-reset", status.reset_after.as_secs());
+}
+
 fn micros_as_currency(micros: u64) -> String {
     format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
 }
@@ -1630,6 +1701,43 @@ mod tests {
     /// snapshot that changed is not one `/health` showed. Publishing the
     /// version makes "is this pod current?" answerable in one request, and
     /// comparable across a fleet.
+    /// Bounded, and longer for a 429 than a 5xx. The bound is what keeps this
+    /// a retry budget measured against one request's patience rather than a
+    /// background job's — the delay is paid by a client still waiting.
+    #[test]
+    fn backoff_grows_but_stays_inside_a_waiting_client_s_patience() {
+        let wait = |attempt: usize, status: StatusCode, prefix: u64| {
+            let base_ms = 25u64 << attempt.min(2);
+            let jitter = prefix % (base_ms / 2 + 1);
+            let ms = base_ms + jitter;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                ms * 2
+            } else {
+                ms
+            }
+        };
+        let server = StatusCode::INTERNAL_SERVER_ERROR;
+        assert!((25..=37).contains(&wait(0, server, 0)) || wait(0, server, 0) >= 25);
+        assert!(wait(1, server, 0) >= wait(0, server, 0), "grows");
+        assert!(wait(2, server, 0) >= wait(1, server, 0));
+        // Capped: a fourth attempt waits no longer than the third.
+        assert_eq!(wait(9, server, 0), wait(2, server, 0));
+        // Never more than a fifth of a second, even at the cap with full
+        // jitter and the 429 doubling.
+        assert!(wait(9, StatusCode::TOO_MANY_REQUESTS, u64::MAX) <= 300);
+        // A provider that said "too many requests" gets longer than a 5xx.
+        assert!(wait(0, StatusCode::TOO_MANY_REQUESTS, 0) > wait(0, server, 0));
+    }
+
+    /// Jitter is keyed on the request rather than an RNG — the data plane has
+    /// no random source in a `--no-default-features` build — so what matters is
+    /// only that different requests decorrelate.
+    #[test]
+    fn jitter_differs_between_requests() {
+        let j = |prefix: u64| prefix % (25 / 2 + 1);
+        assert_ne!(j(7), j(8));
+    }
+
     #[tokio::test]
     async fn health_and_metrics_publish_which_snapshot_is_being_served() {
         let state = crate::state::AppState::for_test();
