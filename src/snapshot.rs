@@ -75,14 +75,46 @@ impl Principal {
 /// whole design exists to avoid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
-    pub tokens_total: u64,
+    /// `None` when this budget caps only spend.
+    pub tokens_total: Option<u64>,
     pub tokens_used: u64,
+    /// Micro-dollars. `None` when this budget caps only tokens.
+    ///
+    /// Money rather than tokens is what an operator actually wants to cap: a
+    /// token budget treats a frontier model and a local 7B as equal when their
+    /// prices differ by two orders of magnitude.
+    pub cost_total_micros: Option<u64>,
+    pub cost_used_micros: u64,
 }
 
 impl Budget {
+    /// Whether either cap has been reached.
+    ///
+    /// A budget with neither cap set is not exhausted — that is a budget row
+    /// carrying only usage, which is a reporting choice rather than a limit,
+    /// and treating it as "0 of 0, exhausted" would refuse every request from a
+    /// principal nobody meant to restrict.
     #[inline]
     pub fn exhausted(&self) -> bool {
-        self.tokens_used >= self.tokens_total
+        self.tokens_total.is_some_and(|t| self.tokens_used >= t)
+            || self
+                .cost_total_micros
+                .is_some_and(|c| self.cost_used_micros >= c)
+    }
+
+    /// Which cap was hit, for an error message that tells the caller what to
+    /// fix. `None` when the budget is not exhausted.
+    pub fn exceeded_kind(&self) -> Option<&'static str> {
+        if self.tokens_total.is_some_and(|t| self.tokens_used >= t) {
+            Some("tokens")
+        } else if self
+            .cost_total_micros
+            .is_some_and(|c| self.cost_used_micros >= c)
+        {
+            Some("cost")
+        } else {
+            None
+        }
     }
 }
 
@@ -282,8 +314,17 @@ pub struct WireLimits {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WireBudget {
-    pub tokens_total: u64,
+    /// `#[serde(default)]` throughout, per the rule below: a proxy newer than
+    /// its control plane parses an older snapshot and gets a token-only budget,
+    /// and an older proxy ignores the cost fields and enforces tokens — neither
+    /// direction starts refusing requests over a field it cannot see.
+    #[serde(default)]
+    pub tokens_total: Option<u64>,
     pub tokens_used: u64,
+    #[serde(default)]
+    pub cost_total_micros: Option<u64>,
+    #[serde(default)]
+    pub cost_used_micros: u64,
 }
 
 /// Every field added after the first release carries `#[serde(default)]`, so
@@ -522,6 +563,8 @@ impl Snapshot {
                     budget: p.budget.map(|b| WireBudget {
                         tokens_total: b.tokens_total,
                         tokens_used: b.tokens_used,
+                        cost_total_micros: b.cost_total_micros,
+                        cost_used_micros: b.cost_used_micros,
                     }),
                 })
                 .collect(),
@@ -662,6 +705,8 @@ impl Snapshot {
                             budget: p.budget.map(|b| Budget {
                                 tokens_total: b.tokens_total,
                                 tokens_used: b.tokens_used,
+                                cost_total_micros: b.cost_total_micros,
+                                cost_used_micros: b.cost_used_micros,
                             }),
                         },
                     )
@@ -817,6 +862,56 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
+
+    /// A budget may cap tokens, money, or both, and a request is refused when
+    /// *either* is reached — the caps are limits, not a combined allowance.
+    #[test]
+    fn either_cap_exhausts_a_budget() {
+        let b = |tokens: Option<u64>, used: u64, cost: Option<u64>, spent: u64| Budget {
+            tokens_total: tokens,
+            tokens_used: used,
+            cost_total_micros: cost,
+            cost_used_micros: spent,
+        };
+        assert!(!b(Some(100), 99, None, 0).exhausted());
+        assert!(b(Some(100), 100, None, 0).exhausted());
+        assert!(b(None, 0, Some(500), 500).exhausted());
+        // Tokens fine, money gone: still refused, and it says which.
+        let out_of_money = b(Some(1000), 1, Some(500), 500);
+        assert!(out_of_money.exhausted());
+        assert_eq!(out_of_money.exceeded_kind(), Some("cost"));
+        assert_eq!(
+            b(Some(10), 10, Some(500), 0).exceeded_kind(),
+            Some("tokens")
+        );
+    }
+
+    /// A budget row with neither cap is a reporting choice, not a limit.
+    /// Treating it as "0 of 0" would refuse every request from a principal
+    /// nobody meant to restrict.
+    #[test]
+    fn a_budget_with_no_caps_refuses_nothing() {
+        let b = Budget {
+            tokens_total: None,
+            tokens_used: 9_999_999,
+            cost_total_micros: None,
+            cost_used_micros: 9_999_999,
+        };
+        assert!(!b.exhausted());
+        assert_eq!(b.exceeded_kind(), None);
+    }
+
+    /// The wire format's cost fields default, so a proxy newer than its control
+    /// plane parses an older snapshot and enforces the token cap it can see
+    /// rather than refusing everything over a field that is missing.
+    #[test]
+    fn an_older_snapshot_without_cost_fields_still_parses() {
+        let wire: WireBudget =
+            serde_json::from_str(r#"{"tokens_total":100,"tokens_used":10}"#).unwrap();
+        assert_eq!(wire.tokens_total, Some(100));
+        assert_eq!(wire.cost_total_micros, None);
+        assert_eq!(wire.cost_used_micros, 0);
+    }
     use super::*;
     use std::time::{Duration, SystemTime};
 

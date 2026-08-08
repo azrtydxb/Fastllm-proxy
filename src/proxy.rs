@@ -1328,13 +1328,31 @@ fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> 
 /// operator raises the budget. 402 Payment Required is the one status in the
 /// spec whose stated meaning — access denied pending some accounting action,
 /// not merely "try again soon" — actually matches that.
+/// Micro-dollars as a plain decimal amount.
+///
+/// No currency symbol: the unit is whatever the operator priced models in, and
+/// asserting dollars in a message would be wrong for anyone who did not.
+fn micros_as_currency(micros: u64) -> String {
+    format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
 fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
     let body = serde_json::json!({
         "error": {
-            "message": format!(
-                "token budget exhausted: {} of {} tokens used for the current window",
-                budget.tokens_used, budget.tokens_total
-            ),
+            // Names which cap was hit, because "budget exhausted" leaves an
+            // operator guessing between raising tokens and raising spend.
+            "message": match budget.exceeded_kind() {
+                Some("cost") => format!(
+                    "spend budget exhausted: {} of {} used for the current window",
+                    micros_as_currency(budget.cost_used_micros),
+                    micros_as_currency(budget.cost_total_micros.unwrap_or(0)),
+                ),
+                _ => format!(
+                    "token budget exhausted: {} of {} tokens used for the current window",
+                    budget.tokens_used,
+                    budget.tokens_total.unwrap_or(0),
+                ),
+            },
             "type": "budget_exceeded",
             "code": StatusCode::PAYMENT_REQUIRED.as_u16(),
         }
@@ -1742,8 +1760,10 @@ mod tests {
         assert!(principal_needs_usage(Some(&principal(
             None,
             Some(Budget {
-                tokens_total: 10,
+                tokens_total: Some(10),
                 tokens_used: 0,
+                cost_total_micros: None,
+                cost_used_micros: 0,
             })
         ))));
     }
@@ -1751,8 +1771,10 @@ mod tests {
     #[test]
     fn budget_exceeded_uses_402_not_429() {
         let resp = budget_exceeded_response(&Budget {
-            tokens_total: 10,
+            tokens_total: Some(10),
             tokens_used: 10,
+            cost_total_micros: None,
+            cost_used_micros: 0,
         });
         assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
     }

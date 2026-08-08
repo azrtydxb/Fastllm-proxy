@@ -663,6 +663,16 @@ struct NewModel {
     name: String,
     #[serde(default)]
     description: String,
+    /// Price per *million* tokens, in micro-units — the unit every provider
+    /// publishes, and an integer so the arithmetic is exact.
+    ///
+    /// Unset leaves the model unpriced: usage is still recorded, but cost is
+    /// left NULL rather than assumed zero, so unpriced is visible instead of
+    /// looking free.
+    #[serde(default)]
+    input_price_per_mtok: Option<i64>,
+    #[serde(default)]
+    output_price_per_mtok: Option<i64>,
 }
 
 /// A model and a virtual model sharing a name would make the `model` field
@@ -708,26 +718,30 @@ async fn post_model(
             ),
         ));
     }
-    let id: i64 =
-        sqlx::query_scalar("INSERT INTO models (name, description) VALUES ($1, $2) RETURNING id")
-            .bind(&body.name)
-            .bind(&body.description)
-            .fetch_one(&ctx.pool)
-            .await
-            .map_err(|e| {
-                if is_unique_violation(&e) {
-                    api_error(
-                        StatusCode::CONFLICT,
-                        format!(
-                            "a model named {:?} already exists; add another backend to it with \
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(&body.name)
+    .bind(&body.description)
+    .bind(body.input_price_per_mtok)
+    .bind(body.output_price_per_mtok)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "a model named {:?} already exists; add another backend to it with \
                              POST /admin/models/{{id}}/backends instead of creating a second model",
-                            body.name
-                        ),
-                    )
-                } else {
-                    db_error("model creation", &e)
-                }
-            })?;
+                    body.name
+                ),
+            )
+        } else {
+            db_error("model creation", &e)
+        }
+    })?;
     refresh(&ctx).await;
     Ok((
         StatusCode::CREATED,
@@ -1644,7 +1658,14 @@ async fn list_budgets(
 
 #[derive(Deserialize)]
 struct PutBudget {
-    tokens_total: i64,
+    /// Either cap, or both. At least one is required — a budget with neither
+    /// limits nothing and would be a silent no-op.
+    #[serde(default)]
+    tokens_total: Option<i64>,
+    /// Micro-units of whatever currency `models` were priced in. Integer in the
+    /// smallest unit anyone quotes, so there is no rounding mode to get wrong.
+    #[serde(default)]
+    cost_total_micros: Option<i64>,
     window: String,
 }
 
@@ -1661,10 +1682,23 @@ async fn put_budget(
     Path(principal_id): Path<i64>,
     Json(body): Json<PutBudget>,
 ) -> Result<StatusCode, ApiError> {
-    if body.tokens_total <= 0 {
+    if body.tokens_total.is_none() && body.cost_total_micros.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "a budget needs tokens_total, cost_total_micros, or both; one with neither \
+             limits nothing",
+        ));
+    }
+    if body.tokens_total.is_some_and(|t| t <= 0) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "tokens_total must be a positive number of tokens",
+        ));
+    }
+    if body.cost_total_micros.is_some_and(|c| c <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "cost_total_micros must be a positive amount",
         ));
     }
     if !BUDGET_WINDOWS.contains(&body.window.as_str()) {
@@ -1678,14 +1712,17 @@ async fn put_budget(
         ));
     }
     sqlx::query(
-        "INSERT INTO budgets (principal_id, tokens_total, budget_window)
-         VALUES ($1, $2, $3)
+        "INSERT INTO budgets (principal_id, tokens_total, cost_total_micros, budget_window)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (principal_id)
-         DO UPDATE SET tokens_total = EXCLUDED.tokens_total, budget_window = EXCLUDED.budget_window,
+         DO UPDATE SET tokens_total = EXCLUDED.tokens_total,
+                        cost_total_micros = EXCLUDED.cost_total_micros,
+                        budget_window = EXCLUDED.budget_window,
                         updated_at = now()",
     )
     .bind(principal_id)
     .bind(body.tokens_total)
+    .bind(body.cost_total_micros)
     .bind(&body.window)
     .execute(&ctx.pool)
     .await
@@ -2024,7 +2061,7 @@ async fn post_usage(
     // a `NOT NULL` foreign key the `INSERT` could violate) are what makes an
     // unresolvable row silently absent from `RETURNING` instead of failing
     // the statement outright.
-    let accepted_rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+    let accepted_rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[])
@@ -2032,13 +2069,25 @@ async fn post_usage(
                      duration_ms, ttft_ms, status, requested_model)
          )
          INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
-                                   duration_ms, ttft_ms, status, requested_model)
+                                   duration_ms, ttft_ms, status, requested_model, cost_micros)
          SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at,
-                i.duration_ms, i.ttft_ms, i.status, i.requested_model
+                i.duration_ms, i.ttft_ms, i.status, i.requested_model,
+                -- Computed here, from the price at the time the request
+                -- happened, and stored. Deriving it on read would let a later
+                -- price change silently rewrite history; what a request cost is
+                -- a fact about when it ran.
+                --
+                -- NULL when the model is unpriced, so unpriced is visible
+                -- rather than looking free.
+                CASE WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
+                     THEN NULL
+                     ELSE (i.prompt_tokens     * COALESCE(m.input_price_per_mtok, 0)
+                         + i.completion_tokens * COALESCE(m.output_price_per_mtok, 0)) / 1000000
+                END
          FROM input i
          JOIN principals p ON p.id = i.principal_id
          JOIN models m ON m.name = i.model_name
-         RETURNING id, principal_id, prompt_tokens, completion_tokens",
+         RETURNING id, principal_id, prompt_tokens, completion_tokens, COALESCE(cost_micros, 0)",
     )
     .bind(&principal_ids)
     .bind(&models)
@@ -2081,21 +2130,28 @@ async fn post_usage(
 /// missed budget increment only means enforcement is stale until the next
 /// successful one — not that billing data was lost. This mirrors `refresh`'s
 /// same reasoning a few lines below.
-async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, i64, i64, i64)]) {
-    let mut totals: HashMap<i64, i64> = HashMap::new();
-    for (_id, principal_id, prompt_tokens, completion_tokens) in accepted_rows {
-        *totals.entry(*principal_id).or_insert(0) += prompt_tokens + completion_tokens;
+async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, i64, i64, i64, i64)]) {
+    // Tokens and cost accrue together, in one statement per principal: they
+    // describe the same requests, and updating them separately would leave a
+    // window where a budget had spent the money but not the tokens.
+    let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
+    for (_id, principal_id, prompt_tokens, completion_tokens, cost_micros) in accepted_rows {
+        let entry = totals.entry(*principal_id).or_insert((0, 0));
+        entry.0 += prompt_tokens + completion_tokens;
+        entry.1 += cost_micros;
     }
-    for (principal_id, total) in totals {
-        if total <= 0 {
+    for (principal_id, (total, cost)) in totals {
+        if total <= 0 && cost <= 0 {
             continue;
         }
         if let Err(e) = sqlx::query(
-            "UPDATE budgets SET tokens_used = tokens_used + $2, updated_at = now()
+            "UPDATE budgets SET tokens_used = tokens_used + $2, \
+             cost_used_micros = cost_used_micros + $3, updated_at = now()
              WHERE principal_id = $1",
         )
         .bind(principal_id)
         .bind(total)
+        .bind(cost)
         .execute(pool)
         .await
         {
@@ -2870,6 +2926,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3136,6 +3194,8 @@ mod tests {
             Json(NewModel {
                 name: primary_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3148,6 +3208,8 @@ mod tests {
             Json(NewModel {
                 name: secondary_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3270,6 +3332,8 @@ mod tests {
             Json(NewModel {
                 name: name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3308,6 +3372,8 @@ mod tests {
             Json(NewModel {
                 name: other_name,
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3498,6 +3564,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3596,6 +3664,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3673,6 +3743,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -3904,7 +3976,8 @@ mod tests {
             RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
-                tokens_total: 500,
+                tokens_total: Some(500),
+                cost_total_micros: None,
                 window: "daily".into(),
             }),
         )
@@ -3920,7 +3993,9 @@ mod tests {
         assert_eq!(
             published,
             Some(crate::snapshot::Budget {
-                tokens_total: 500,
+                cost_total_micros: None,
+                cost_used_micros: 0,
+                tokens_total: Some(500),
                 tokens_used: 0,
             })
         );
@@ -3965,7 +4040,8 @@ mod tests {
             RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
-                tokens_total: 100,
+                tokens_total: Some(100),
+                cost_total_micros: None,
                 window: "fortnightly".into(),
             }),
         )
@@ -3978,7 +4054,8 @@ mod tests {
             RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
-                tokens_total: 0,
+                tokens_total: Some(0),
+                cost_total_micros: None,
                 window: "daily".into(),
             }),
         )
@@ -4024,6 +4101,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -4033,7 +4112,8 @@ mod tests {
             RequireConfigWrite::default(),
             Path(principal_id),
             Json(PutBudget {
-                tokens_total: 1000,
+                tokens_total: Some(1000),
+                cost_total_micros: None,
                 window: "monthly".into(),
             }),
         )
@@ -4086,6 +4166,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await
@@ -4189,6 +4271,8 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
             }),
         )
         .await

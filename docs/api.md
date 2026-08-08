@@ -117,6 +117,38 @@ Bedrock API key as an ordinary bearer token, so it is a plain backend row like
 any other — create the key in the Bedrock console and put it in
 `upstream_api_key`.
 
+### Cost
+
+Models carry a price per **million** tokens, in micro-units of whatever
+currency you quote in — an integer in the smallest unit anyone publishes, so
+the arithmetic is exact and there is no rounding mode to get wrong. `3000000`
+is $3.00 per million tokens.
+
+```bash
+-d '{"name":"claude-sonnet","input_price_per_mtok":3000000,"output_price_per_mtok":15000000}'
+```
+
+Every usage row then carries `cost_micros`, computed at ingest from the price
+**at the time the request ran** and stored rather than derived — a later price
+change must not silently rewrite what last month cost. A model with no price is
+left NULL rather than zero, so unpriced is visible instead of looking free.
+
+Budgets cap tokens, money, or both:
+
+```bash
+curl -X PUT .../admin/principals/42/budget \
+  -d '{"cost_total_micros":500000000,"window":"monthly"}'   # $500/month
+```
+
+A request is refused when **either** cap is reached, and the 402 names which
+one — "budget exhausted" alone leaves an operator guessing between raising
+tokens and raising spend. Both counters roll together at the window boundary,
+since they measure the same window.
+
+`min/max_budget_used_percent` routing conditions read whichever cap is closest
+to its limit, so a rule meant to degrade before the cliff still fires for a
+principal running out of money rather than tokens.
+
 **Checking a proxy is current.** `snapshot_version` on `/health` — and
 `fastllm_snapshot_version` on `/metrics` — is the version of the configuration
 that process is actually serving, stamped by the control plane and so

@@ -162,14 +162,26 @@ impl BudgetMatch {
         let Some(budget) = caller.and_then(|c| c.budget.as_ref()) else {
             return false;
         };
-        if budget.tokens_total == 0 {
+        // Whichever cap is closest to being hit. A budget capping both tokens
+        // and spend is "80% used" when *either* is, because that is the one
+        // about to refuse requests — taking only tokens would let a rule meant
+        // to degrade before the cliff miss a principal running out of money.
+        let pct = |used: u64, total: Option<u64>| {
+            total.filter(|t| *t > 0).map(|t| {
+                used.saturating_mul(100)
+                    .saturating_div(t)
+                    .min(u64::from(u8::MAX)) as u8
+            })
+        };
+        let Some(used) = pct(budget.tokens_used, budget.tokens_total)
+            .into_iter()
+            .chain(pct(budget.cost_used_micros, budget.cost_total_micros))
+            .max()
+        else {
+            // No cap at all: there is no percentage of nothing, so a rule
+            // keyed on one cannot match rather than matching everything.
             return false;
-        }
-        let used = budget
-            .tokens_used
-            .saturating_mul(100)
-            .saturating_div(budget.tokens_total)
-            .min(u64::from(u8::MAX)) as u8;
+        };
         if self.min_used_percent.is_some_and(|min| used < min) {
             return false;
         }
@@ -1171,7 +1183,9 @@ mod tests {
     fn principal_with_budget(used: u64, total: u64) -> Principal {
         let mut p = principal(1, &[]);
         p.budget = Some(crate::snapshot::Budget {
-            tokens_total: total,
+            tokens_total: Some(total),
+            cost_total_micros: None,
+            cost_used_micros: 0,
             tokens_used: used,
         });
         p

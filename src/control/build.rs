@@ -552,16 +552,34 @@ fn rolled_over(
 /// comment): rollover checks run once per snapshot rebuild against at most a
 /// few dozen budgets, not on the request path.
 async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64, Budget>> {
-    type BudgetRow = (i64, i64, i64, chrono::DateTime<chrono::Utc>, String);
+    type BudgetRow = (
+        i64,
+        Option<i64>,
+        i64,
+        chrono::DateTime<chrono::Utc>,
+        String,
+        Option<i64>,
+        i64,
+    );
     let rows: Vec<BudgetRow> = sqlx::query_as(
-        "SELECT principal_id, tokens_total, tokens_used, window_start, budget_window FROM budgets",
+        "SELECT principal_id, tokens_total, tokens_used, window_start, budget_window, \
+         cost_total_micros, cost_used_micros FROM budgets",
     )
     .fetch_all(pool)
     .await?;
 
     let now = chrono::Utc::now();
     let mut budgets = HashMap::with_capacity(rows.len());
-    for (principal_id, tokens_total, tokens_used, window_start, window_str) in rows {
+    for (
+        principal_id,
+        tokens_total,
+        tokens_used,
+        window_start,
+        window_str,
+        cost_total_micros,
+        cost_used_micros,
+    ) in rows
+    {
         // An unparseable `window` value can only reach here via hand-written
         // SQL bypassing the CHECK constraint — contained to this one row
         // (never rolled over, reported as-is) rather than failing the whole
@@ -578,33 +596,40 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
             budgets.insert(
                 principal_id,
                 Budget {
-                    tokens_total: tokens_total.max(0) as u64,
+                    tokens_total: tokens_total.map(|t| t.max(0) as u64),
                     tokens_used: tokens_used.max(0) as u64,
+                    cost_total_micros: cost_total_micros.map(|c| c.max(0) as u64),
+                    cost_used_micros: cost_used_micros.max(0) as u64,
                 },
             );
             continue;
         };
 
-        let effective_used = match rolled_over(window_start, window, now) {
+        // Both counters roll together: they measure the same window, and
+        // resetting one without the other would leave a principal with a fresh
+        // token allowance and last month's spend.
+        let (effective_used, effective_cost) = match rolled_over(window_start, window, now) {
             Some(new_start) => {
                 sqlx::query(
-                    "UPDATE budgets SET tokens_used = 0, window_start = $2, updated_at = now()
-                     WHERE principal_id = $1",
+                    "UPDATE budgets SET tokens_used = 0, cost_used_micros = 0, \
+                     window_start = $2, updated_at = now() WHERE principal_id = $1",
                 )
                 .bind(principal_id)
                 .bind(new_start)
                 .execute(pool)
                 .await?;
-                0i64
+                (0i64, 0i64)
             }
-            None => tokens_used,
+            None => (tokens_used, cost_used_micros),
         };
 
         budgets.insert(
             principal_id,
             Budget {
-                tokens_total: tokens_total.max(0) as u64,
+                tokens_total: tokens_total.map(|t| t.max(0) as u64),
                 tokens_used: effective_used.max(0) as u64,
+                cost_total_micros: cost_total_micros.map(|c| c.max(0) as u64),
+                cost_used_micros: effective_cost.max(0) as u64,
             },
         );
     }
@@ -1204,7 +1229,9 @@ mod tests {
         assert_eq!(
             budgeted.budget,
             Some(Budget {
-                tokens_total: 1000,
+                tokens_total: Some(1000),
+                cost_total_micros: None,
+                cost_used_micros: 0,
                 tokens_used: 250,
             })
         );
@@ -1288,8 +1315,10 @@ mod tests {
         assert_eq!(
             principal.budget,
             Some(Budget {
-                tokens_total: 100,
+                tokens_total: Some(100),
                 tokens_used: 0,
+                cost_total_micros: None,
+                cost_used_micros: 0,
             }),
             "a daily budget two days stale must have rolled over to zero usage"
         );

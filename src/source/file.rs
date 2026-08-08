@@ -83,8 +83,12 @@ impl SnapshotSource for FileSource {
                         tokens_per_min: l.tokens_per_min,
                     }),
                     budget: k.budget.map(|b| crate::snapshot::Budget {
-                        tokens_total: b.tokens_total,
+                        tokens_total: Some(b.tokens_total),
                         tokens_used: b.tokens_used,
+                        // File mode has no pricing to compute a cost from, so a
+                        // config-file budget stays a token budget.
+                        cost_total_micros: None,
+                        cost_used_micros: 0,
                     }),
                 },
             );
