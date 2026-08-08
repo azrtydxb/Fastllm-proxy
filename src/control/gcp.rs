@@ -270,6 +270,210 @@ fn base64url(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A throwaway key that authorises nothing — see `testdata/README.md`. Real
+    /// rather than synthetic because `ring` will not sign with a fake one, and
+    /// a test that skipped the signature would miss the part most likely to
+    /// break.
+    const TEST_KEY: &str = include_str!("testdata/rsa_test_key.pem");
+
+    /// Distinct `account` per test: the token cache is keyed by client email
+    /// and shared process-wide, so two tests using one account would see each
+    /// other's cached token.
+    fn key_file_for(account: &str, token_uri: &str) -> String {
+        serde_json::json!({
+            "type": "service_account",
+            "client_email": format!("{account}@example.iam.gserviceaccount.com"),
+            "private_key": TEST_KEY,
+            "token_uri": token_uri,
+        })
+        .to_string()
+    }
+
+    /// Decode a base64url segment back to bytes, so the assertion can be
+    /// inspected the way Google's token endpoint will.
+    fn base64url_decode(s: &str) -> Vec<u8> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut bits = 0u32;
+        let mut nbits = 0;
+        let mut out = Vec::new();
+        for c in s.bytes() {
+            let v = ALPHABET.iter().position(|&a| a == c).expect("base64url") as u32;
+            bits = (bits << 6) | v;
+            nbits += 6;
+            if nbits >= 8 {
+                nbits -= 8;
+                out.push((bits >> nbits) as u8);
+            }
+        }
+        out
+    }
+
+    /// A token endpoint that counts how many times it was asked.
+    ///
+    /// Counting is the point: the cache is what keeps a once-per-second
+    /// snapshot rebuild from making thousands of token requests an hour, and
+    /// nothing else observes whether it works.
+    async fn spawn_token_endpoint(body: &'static str, status: u16) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            let counter = Arc::clone(&counter);
+                            async move {
+                                let seen = req.into_body().collect().await.map(|b| b.to_bytes());
+                                counter.fetch_add(1, Ordering::Relaxed);
+                                // The form body is parked where the assertions
+                                // below can read it back.
+                                let _ = seen;
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::Response::builder()
+                                        .status(status)
+                                        .header("content-type", "application/json")
+                                        .body(Full::new(Bytes::from(body)))
+                                        .unwrap(),
+                                )
+                            }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/token"), hits)
+    }
+
+    fn init_minter() {
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        init(Arc::new(crate::upstream::Upstream::new(
+            crate::upstream::Config {
+                max_idle_per_host: 4,
+                idle_timeout: Duration::from_secs(30),
+                connect_timeout: Duration::from_secs(5),
+            },
+            tls,
+        )));
+    }
+
+    /// The whole path, against a token endpoint rather than Google: a real
+    /// signed assertion goes out, the access token comes back, and the second
+    /// call is served from the cache rather than minting again.
+    #[tokio::test]
+    async fn a_token_is_minted_once_and_then_reused() {
+        init_minter();
+        let (uri, hits) = spawn_token_endpoint(
+            r#"{"access_token":"ya29.minted","expires_in":3600,"token_type":"Bearer"}"#,
+            200,
+        )
+        .await;
+        let sa = key_file_for("reuse", &uri);
+
+        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+        // The call a snapshot rebuild makes a second later.
+        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "a cached token must not be re-minted on every snapshot rebuild"
+        );
+    }
+
+    /// A token already inside the refresh margin is not handed out: it could
+    /// expire while the snapshot carrying it is still reaching the proxies.
+    #[tokio::test]
+    async fn a_token_expiring_within_the_margin_is_replaced() {
+        init_minter();
+        // 60 seconds, comfortably inside the 5-minute margin.
+        let (uri, hits) =
+            spawn_token_endpoint(r#"{"access_token":"ya29.brief","expires_in":60}"#, 200).await;
+        let sa = key_file_for("brief", &uri);
+
+        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
+        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            2,
+            "a token this close to expiry must be re-minted, not served from cache"
+        );
+    }
+
+    /// Google's error body names the actual cause — clock skew, a revoked key,
+    /// an account without the role — and it is all an operator has to go on, so
+    /// it must survive into the message rather than being flattened to a code.
+    #[tokio::test]
+    async fn googles_rejection_reason_reaches_the_operator() {
+        init_minter();
+        let (uri, _) = spawn_token_endpoint(
+            r#"{"error":"invalid_grant","error_description":"Invalid JWT: token expired"}"#,
+            400,
+        )
+        .await;
+        let err = access_token(&key_file_for("rejected", &uri))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid_grant"), "{err}");
+        assert!(err.contains("Invalid JWT"), "{err}");
+    }
+
+    /// The assertion is what Google validates, so its claims are asserted
+    /// exactly: a wrong `aud` or a missing scope fails authentication with a
+    /// message that points nowhere near the cause.
+    #[test]
+    fn the_assertion_carries_the_claims_google_checks() {
+        let sa =
+            ServiceAccount::parse(&key_file_for("vertex", "https://example.test/token")).unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let jwt = signed_assertion(&sa, now).unwrap();
+
+        let parts: Vec<&str> = jwt.split('.').collect();
+        assert_eq!(parts.len(), 3, "header.claims.signature");
+
+        let header: serde_json::Value =
+            serde_json::from_slice(&base64url_decode(parts[0])).unwrap();
+        assert_eq!(header["alg"], "RS256");
+
+        let claims: serde_json::Value =
+            serde_json::from_slice(&base64url_decode(parts[1])).unwrap();
+        assert_eq!(claims["iss"], "vertex@example.iam.gserviceaccount.com");
+        assert_eq!(claims["aud"], "https://example.test/token");
+        assert_eq!(claims["scope"], SCOPE);
+        assert_eq!(claims["iat"], 1_700_000_000);
+        // One hour is the maximum Google accepts.
+        assert_eq!(claims["exp"], 1_700_000_000 + 3600);
+
+        // The signature must verify against this key's public half, which is
+        // the one thing a hand-rolled base64url could break silently.
+        let der = rustls_pemfile::private_key(&mut std::io::Cursor::new(TEST_KEY.as_bytes()))
+            .unwrap()
+            .unwrap();
+        let pair = ring::signature::RsaKeyPair::from_pkcs8(der.secret_der()).unwrap();
+        let public = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            pair.public().as_ref(),
+        );
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        public
+            .verify(signing_input.as_bytes(), &base64url_decode(parts[2]))
+            .expect("the assertion must verify against its own key");
+    }
 
     /// Against RFC 4648's own vectors, adjusted for JWT's no-padding rule.
     #[test]

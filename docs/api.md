@@ -25,8 +25,8 @@ kill -HUP $(pgrep -x fastllm-proxy)
 |---|---|
 | `POST /v1/chat/completions` | Proxied. Also `/completions`, `/embeddings`, `/rerank`, `/score`, `/audio/*` |
 | `GET /v1/models` | Aggregated across every pool |
-| `GET /health` | Per-backend health, in-flight, request and error counts. No auth required. Exposes backend addresses — keep it off the public interface |
-| `GET /metrics` | Prometheus text. No auth required |
+| `GET /health` | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface |
+| `GET /metrics` | Prometheus text, including `fastllm_snapshot_version`. No auth required |
 | `/admin/*` | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it |
 | `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires |
 | `/`, `/ui/*` (management UI) | `--role all`/`control` only. The embedded SPA — see "Management UI" below |
@@ -116,6 +116,16 @@ Verified base URLs for the OpenAI-compatible set:
 Bedrock API key as an ordinary bearer token, so it is a plain backend row like
 any other — create the key in the Bedrock console and put it in
 `upstream_api_key`.
+
+**Checking a proxy is current.** `snapshot_version` on `/health` — and
+`fastllm_snapshot_version` on `/metrics` — is the version of the configuration
+that process is actually serving, stamped by the control plane and so
+comparable across a fleet. A `max() - min()` across proxies that is not zero
+for more than a poll interval means a pod is stuck on an old configuration.
+This matters because a lagging proxy is otherwise invisible: it answers
+`/health` with `ok`, lists the right models and backends, and misbehaves only
+on whichever part of the snapshot changed — most often a key it has never seen,
+which looks to the caller like an invalid key rather than a stale proxy.
 
 **Vertex AI** is the one provider that cannot be reached with a static secret:
 it wants an OAuth2 access token, and those expire hourly. Give it the service

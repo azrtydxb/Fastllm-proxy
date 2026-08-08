@@ -66,6 +66,32 @@ pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Resul
     build_snapshot_with(pool, key, embedder()).await
 }
 
+/// The stamp that identifies a snapshot, in microseconds.
+///
+/// This value is also the `/snapshot` ETag, which is what makes its resolution
+/// load-bearing rather than cosmetic. Two builds that share a version are
+/// indistinguishable to a polling proxy: it sends `if-none-match` and is told
+/// 304. At the whole-second resolution this used to have, that happened
+/// routinely — the rebuilder ticks every second *and* every admin write
+/// triggers an immediate refresh — and the consequence was permanent, not a
+/// delay. A proxy that had already fetched second N skipped anything else
+/// built during second N, and kept skipping it until an unrelated change
+/// landed in a later second. It surfaced on the dev cluster as one proxy of
+/// two rejecting a newly created key for minutes while its sibling accepted
+/// it, both reporting healthy and listing identical models.
+///
+/// `clock_timestamp()` rather than `now()`: `now()` is transaction time and
+/// would return one value for every call inside a transaction. Nothing here
+/// runs in one today, which is exactly the sort of assumption worth not
+/// depending on.
+async fn snapshot_version(pool: &PgPool) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::BIGINT")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// The same build, with an embedder for prompt-class centroids.
 ///
 /// `embed` is passed in rather than constructed here so that this module does
@@ -321,10 +347,7 @@ pub async fn build_snapshot_with(
         );
     }
 
-    // The version is a clock the control plane owns; the proxy only compares it.
-    let version: i64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM now())::BIGINT")
-        .fetch_one(pool)
-        .await?;
+    let version = snapshot_version(pool).await?;
 
     let prompt_classes = build_prompt_classes(pool, embed).await?;
     let fallback_model: Option<String> =
@@ -1201,6 +1224,30 @@ mod tests {
     /// back from `build_snapshot` reset to zero — and the row itself is
     /// updated, not just the in-memory value, so the next usage report
     /// accumulates onto zero rather than the stale total.
+    /// The version doubles as the `/snapshot` ETag, so two snapshots that
+    /// share one are indistinguishable to a polling proxy — it is told 304 and
+    /// never sees the second. The consequence is permanent rather than a
+    /// delay, so the stamp has to change faster than snapshots can be built.
+    ///
+    /// Asserted on the stamp itself rather than on two `build_snapshot` calls:
+    /// a full build takes long enough to straddle a second boundary, so that
+    /// version of this test passed against the whole-second stamp it was
+    /// written to catch.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn the_snapshot_version_advances_faster_than_snapshots_are_built() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+
+        let first = snapshot_version(&pool).await.unwrap();
+        let second = snapshot_version(&pool).await.unwrap();
+        assert!(
+            second > first,
+            "two stamps taken back to back must differ and advance ({first} then {second}); \
+             equal stamps serve 304 for a snapshot the proxy has never seen"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn an_elapsed_budget_window_is_rolled_over_by_build_snapshot() {

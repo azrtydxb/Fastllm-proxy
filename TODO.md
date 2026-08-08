@@ -205,8 +205,50 @@ Three things decided the shape:
   whole rebuild and taking unrelated models offline.
 
 Not verified against Google's live endpoint: this deployment has no GCP
-service account. The JWT assembly, base64url encoding, credential validation
-and error paths are unit-tested; the token exchange itself is not.
+service account. Everything short of that is tested against a local token
+endpoint — a real RS256 assertion whose signature is verified against its own
+key, the exchange, the error body surviving into the message, and the cache
+both reusing a token and refusing to hand out one inside the refresh margin.
+
+## The snapshot ETag could hide a config change indefinitely — fixed (2026-08-08)
+
+A proxy could keep serving a stale configuration forever, with nothing in any
+log to say so.
+
+`Snapshot.version` was `EXTRACT(EPOCH FROM now())::BIGINT` — **whole seconds** —
+and the same value is the `/snapshot` ETag. Two builds inside one second
+therefore shared a version, and a proxy holding the first was answered `304 Not
+Modified` for the second. Not a delay: it kept being answered 304 until some
+later change happened to land in a different second.
+
+Two things made same-second builds routine rather than rare: the rebuilder
+ticks every second, and every admin write calls `refresh()` for an immediate
+one. So an admin write landing next to a tick was the common case, not a race.
+
+Found by investigating a symptom that looked like nothing at all — one proxy
+of two rejecting a newly created API key for several minutes while its sibling
+accepted it immediately, both reporting healthy and listing identical models
+and backends. The models matched because a later, unrelated `api_base` change
+bumped the version into a new second and unwedged it, which is also why it
+"self-resolved" and could not be reproduced afterwards.
+
+The stamp is now microseconds via `clock_timestamp()`, in a named
+`snapshot_version` function that carries the reasoning. `clock_timestamp()`
+rather than `now()` because `now()` is transaction time and would return one
+value for every call inside a transaction — nothing here runs in one today,
+which is the kind of assumption worth not depending on.
+
+The test asserts on the stamp, not on two `build_snapshot` calls. The first
+version of it did the latter and **passed against the whole-second stamp it was
+written to catch**, because a full build takes long enough to straddle a second
+boundary. Verified the current one fails against the old query and passes
+against the new.
+
+Diagnosis was much harder than it should have been because no proxy published
+which snapshot it was serving: a lagging pod answers `/health` with `ok`, lists
+the right models, and misbehaves only on the part that changed. `/health` now
+carries `snapshot_version` and a key count, and `/metrics` exposes
+`fastllm_snapshot_version`, so a fleet-wide `max() - min()` shows a stuck pod.
 
 ## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
 

@@ -414,9 +414,11 @@ pub struct WireVirtualModel {
 impl Snapshot {
     /// Whether two snapshots carry the same policy, ignoring `version`.
     ///
-    /// `version` is the database's clock (`EXTRACT(EPOCH FROM now())`), not a
-    /// content hash — it advances on every rebuild regardless of whether any
-    /// row actually changed. A periodic rebuilder that published on every
+    /// `version` is the database's clock in microseconds
+    /// (`control::build::snapshot_version`), not a content hash — it advances
+    /// on every rebuild regardless of whether any row actually changed. The
+    /// resolution is deliberate: the same value is the `/snapshot` ETag, so
+    /// two builds sharing one are indistinguishable to a polling proxy. A periodic rebuilder that published on every
     /// tick would therefore always look "changed" and defeat the point of
     /// comparing at all (every tick would rebuild the routing `Registry` and
     /// spam an info log). This is what lets the rebuilder tell "the database

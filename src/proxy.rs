@@ -1200,6 +1200,7 @@ fn health_response(state: &AppState) -> Response<ResBody> {
             })
         })
         .collect();
+    let snapshot = state.snapshot.load();
     let healthy = registry.healthy_count();
     let status = if healthy > 0 {
         StatusCode::OK
@@ -1212,6 +1213,13 @@ fn health_response(state: &AppState) -> Response<ResBody> {
             "status": if healthy > 0 { "ok" } else { "no_healthy_backends" },
             "policy": format!("{:?}", state.router.policy()),
             "uptime_seconds": state.started.elapsed().as_secs(),
+            // Which configuration this process is actually serving. Without it
+            // "is this pod current?" is unanswerable from outside, and a pod
+            // that is behind looks identical to one that is not — the models
+            // and backends it lists can be right while a key it has never seen
+            // is rejected.
+            "snapshot_version": snapshot.version,
+            "keys": snapshot.keys.len(),
             "models": registry.model_names(),
             "backends": backends,
         })
@@ -1242,6 +1250,17 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
     out.push_str(&format!(
         "fastllm_usage_reports_dropped_total {}\n",
         state.usage.dropped()
+    ));
+
+    // Scrapeable so a fleet-wide `max() - min()` shows a pod stuck on an old
+    // configuration, which is otherwise invisible: a lagging pod answers
+    // /health with `ok` and the right model list, and only misbehaves on the
+    // part of the snapshot that changed.
+    out.push_str("# HELP fastllm_snapshot_version Version of the snapshot this process is serving. The control plane's clock at build time, so it is comparable across processes.\n");
+    out.push_str("# TYPE fastllm_snapshot_version gauge\n");
+    out.push_str(&format!(
+        "fastllm_snapshot_version {}\n",
+        state.snapshot.load().version
     ));
 
     out.push_str("# HELP fastllm_backend_inflight Requests currently streaming from a backend.\n");
@@ -1301,6 +1320,19 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
+    /// These two responses are built from a complete body, so collecting it is
+    /// a formality rather than a stream read.
+    async fn body_string(resp: Response<ResBody>) -> String {
+        use http_body_util::BodyExt;
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("a fully-buffered body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("utf-8")
+    }
+
     fn snap(key: &str, models: &[&str]) -> Snapshot {
         Snapshot::for_test(
             vec![(key.to_string(), 1, None, false)],
@@ -1315,6 +1347,31 @@ mod tests {
             }],
             vec![],
         )
+    }
+
+    /// The gap this closes: a proxy lagging behind the control plane answers
+    /// `/health` with `ok`, lists the right models and backends, and still
+    /// rejects a key the control plane issued — because the part of the
+    /// snapshot that changed is not one `/health` showed. Publishing the
+    /// version makes "is this pod current?" answerable in one request, and
+    /// comparable across a fleet.
+    #[tokio::test]
+    async fn health_and_metrics_publish_which_snapshot_is_being_served() {
+        let state = crate::state::AppState::for_test();
+        let mut snapshot = snap("sk-ok", &["m"]);
+        snapshot.version = 1_786_140_563;
+        state.apply_snapshot(snapshot).unwrap();
+
+        let body = body_string(health_response(&state)).await;
+        let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(health["snapshot_version"], 1_786_140_563u64);
+        assert_eq!(health["keys"], 1, "a lagging pod is usually a key it lacks");
+
+        let metrics = body_string(metrics_response(&state)).await;
+        assert!(
+            metrics.contains("fastllm_snapshot_version 1786140563"),
+            "scrapeable, so a fleet-wide max minus min shows a stuck pod: {metrics}"
+        );
     }
 
     #[test]

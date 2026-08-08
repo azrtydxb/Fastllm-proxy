@@ -117,6 +117,55 @@ impl AppState {
         self.rebuild_registry_from_snapshot()
     }
 
+    /// An `AppState` wired up for tests, in this module and others.
+    ///
+    /// No network call is made through it; only `Upstream::new`'s bookkeeping
+    /// is exercised (same pattern as `source::http`'s tests).
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        use crate::router::Policy;
+        use crate::upstream::{Config as UpstreamConfig, Upstream};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let client = Arc::new(Upstream::new(
+            UpstreamConfig {
+                max_idle_per_host: 1,
+                idle_timeout: Duration::from_secs(1),
+                connect_timeout: Duration::from_secs(1),
+            },
+            tls,
+        ));
+        Self {
+            #[cfg(feature = "classifier")]
+            classifier: ArcSwap::from_pointee(crate::classifier::Classifier::default()),
+            #[cfg(feature = "classifier")]
+            tier1: None,
+            #[cfg(feature = "classifier-tier2")]
+            tier2_path: None,
+            #[cfg(feature = "classifier-tier2")]
+            tier2: std::sync::OnceLock::new(),
+            registry: ArcSwap::from_pointee(Registry::default()),
+            router: Router::new(Policy::CacheAffinity, 64, 64, 0, 0.0),
+            client,
+            interner: Interner::default(),
+            config_path: None,
+            legacy_master_key: None,
+            snapshot: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
+            max_body_bytes: 1024,
+            max_retries: 0,
+            upstream_headers_timeout: Duration::from_secs(1),
+            unhealthy_after: 1,
+            started: Instant::now(),
+            requests_ok: AtomicU64::new(0),
+            requests_failed: AtomicU64::new(0),
+            usage: crate::usage::UsageReporter::disabled(),
+            limiter: Arc::new(crate::limiter::Limiter::new()),
+        }
+    }
+
     /// Build the views derived from the snapshot this state was *constructed*
     /// with.
     ///
@@ -285,51 +334,10 @@ impl crate::control::api::SnapshotSink for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::router::Policy;
     use crate::snapshot::{BackendDef, ModelDef};
-    use crate::upstream::{Config as UpstreamConfig, Upstream};
 
-    /// No network call is made in these tests; only `Upstream::new`'s
-    /// bookkeeping is exercised (same pattern as `source::http`'s tests).
     fn test_state() -> AppState {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-        let client = Arc::new(Upstream::new(
-            UpstreamConfig {
-                max_idle_per_host: 1,
-                idle_timeout: Duration::from_secs(1),
-                connect_timeout: Duration::from_secs(1),
-            },
-            tls,
-        ));
-        AppState {
-            #[cfg(feature = "classifier")]
-            classifier: ArcSwap::from_pointee(crate::classifier::Classifier::default()),
-            #[cfg(feature = "classifier")]
-            tier1: None,
-            #[cfg(feature = "classifier-tier2")]
-            tier2_path: None,
-            #[cfg(feature = "classifier-tier2")]
-            tier2: std::sync::OnceLock::new(),
-            registry: ArcSwap::from_pointee(Registry::default()),
-            router: Router::new(Policy::CacheAffinity, 64, 64, 0, 0.0),
-            client,
-            interner: Interner::default(),
-            config_path: None,
-            legacy_master_key: None,
-            snapshot: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
-            max_body_bytes: 1024,
-            max_retries: 0,
-            upstream_headers_timeout: Duration::from_secs(1),
-            unhealthy_after: 1,
-            started: Instant::now(),
-            requests_ok: AtomicU64::new(0),
-            requests_failed: AtomicU64::new(0),
-            usage: crate::usage::UsageReporter::disabled(),
-            limiter: Arc::new(crate::limiter::Limiter::new()),
-        }
+        AppState::for_test()
     }
 
     fn snapshot_with_model(name: &str) -> Snapshot {
