@@ -307,6 +307,42 @@ impl AppState {
         loaded.as_ref()?.embed(text)
     }
 
+    /// Load the refined tier now, off the request path.
+    ///
+    /// Without this the first prompt to escalate pays the model load, and it is
+    /// not small: measured on the dev cluster at **~570 ms**, charged in full to
+    /// whichever user's request happened to be first. The histogram made it
+    /// visible — two fast classifications at 115-500 µs and one at 570 ms — and
+    /// a cliff that lands on one arbitrary request is worse than a slower start,
+    /// because it looks like an outage to exactly one caller and to nobody else.
+    ///
+    /// Called from `apply_snapshot` only when configuration has made escalation
+    /// reachable, so a deployment that never escalates still never loads it —
+    /// the gate the whole two-tier design rests on is unchanged.
+    #[cfg(feature = "classifier-tier2")]
+    pub fn warm_refined_tier(self: &Arc<Self>) {
+        if self.tier2.get().is_some() || self.tier2_path.is_none() {
+            return;
+        }
+        if !self.classifier.load().tier2_reachable() {
+            return;
+        }
+        let state = Arc::clone(self);
+        // `spawn_blocking`: loading an ONNX model is hundreds of milliseconds of
+        // CPU, and doing it on a runtime worker would stall every request that
+        // thread was serving.
+        tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            // Embedding a token is the cheapest way to force the same
+            // initialisation a request would; the result is discarded.
+            let _ = state.refined_embedding("warm");
+            tracing::info!(
+                took_ms = started.elapsed().as_millis() as u64,
+                "refined classifier tier loaded ahead of first use"
+            );
+        });
+    }
+
     #[cfg(all(feature = "classifier", not(feature = "classifier-tier2")))]
     fn refined_embedding(&self, _text: &str) -> Option<Vec<f32>> {
         None

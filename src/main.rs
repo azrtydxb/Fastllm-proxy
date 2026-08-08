@@ -1038,6 +1038,10 @@ fn build_app_state(
     // derives has to be primed once here. See `AppState::prime_derived_views`
     // for what went wrong when it was not.
     state.prime_derived_views();
+    // A proxy that starts with escalation already configured must not charge
+    // the model load to its first escalating request.
+    #[cfg(feature = "classifier-tier2")]
+    state.warm_refined_tier();
     Ok(state)
 }
 

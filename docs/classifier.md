@@ -161,6 +161,24 @@ stops firing.
 Per-request classification is logged at debug with the class, the margin and
 which tier decided, so drift is visible before somebody complains about answers.
 
+## The refined tier is loaded before it is needed
+
+The transformer is loaded lazily, on the first prompt that escalates — and the
+load is not small. Measured on the dev cluster at **~570 ms**, which was charged
+in full to whichever user's request happened to be first. The classify-duration
+histogram is what made it visible: two fast classifications at 115-500 µs and
+one at 570 ms in the same three requests.
+
+A cliff that lands on one arbitrary request is worse than a slower start,
+because it looks like an outage to exactly one caller and to nobody else. So
+`AppState::warm_refined_tier` loads it on a background `spawn_blocking` task as
+soon as a snapshot makes escalation reachable — at startup, or on the rebuild
+that first adds a refined class.
+
+The gate is unchanged: a deployment with no active refined class still never
+loads it, so tier-1-only remains indistinguishable at runtime from a build
+before tier 2 existed.
+
 ## Memory
 
 Both models ship in the image. Loaded, they cost real memory in whichever

@@ -746,6 +746,7 @@ async fn proxy_request(
                             break;
                         }
                     }
+                    state.telemetry.record_upstream_status(status.as_u16());
                     if status.is_client_error() || status.is_server_error() {
                         state.requests_failed.fetch_add(1, Ordering::Relaxed);
                         state

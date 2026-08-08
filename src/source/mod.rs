@@ -112,7 +112,15 @@ pub fn spawn_poller<S: SnapshotSource + 'static>(
             let have = Some(state.snapshot.load().version).filter(|v| *v != 0);
             match source.fetch(have).await {
                 Ok(Some(next)) => match state.apply_snapshot(next) {
-                    Ok(n) => tracing::info!(backends = n, "snapshot changed, registry rebuilt"),
+                    Ok(n) => {
+                        // A snapshot can be what first makes escalation
+                        // reachable, and the model load must not land on the
+                        // next user's request. No-op once loaded, or when no
+                        // active refined class needs it.
+                        #[cfg(feature = "classifier-tier2")]
+                        state.warm_refined_tier();
+                        tracing::info!(backends = n, "snapshot changed, registry rebuilt");
+                    }
                     Err(e) => tracing::error!(
                         error = %e,
                         "snapshot changed but registry rebuild failed; keeping previous routing table"
