@@ -57,7 +57,10 @@ fn anthropic_request_lifts_the_system_prompt_out_of_the_message_list() {
         json!({
             "model": "upstream-model",
             "max_tokens": 100,
-            "system": "Be terse.",
+            // A content block, not a bare string, so it can carry the cache
+            // breakpoint. Anthropic accepts both spellings.
+            "system": [{"type": "text", "text": "Be terse.",
+                        "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": "Hello"}],
         })
     );
@@ -226,11 +229,6 @@ fn unsupported_features_are_refused_by_name_rather_than_silently_dropped() {
     let base = json!({"messages": [{"role": "user", "content": "Hi"}]});
     let cases: &[(&str, Value, &str)] = &[
         ("functions", json!([{"name": "f"}]), "`functions`"),
-        (
-            "response_format",
-            json!({"type": "json_object"}),
-            "response_format",
-        ),
         ("logprobs", json!(true), "logprobs"),
         ("seed", json!(42), "seed"),
     ];
@@ -1117,5 +1115,129 @@ fn a_non_base64_data_url_does_not_masquerade_as_a_remote_one() {
     assert_eq!(
         body["messages"][0]["content"][0]["source"]["type"],
         json!("url")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Structured output and prompt caching
+// ---------------------------------------------------------------------------
+
+fn with_schema() -> Value {
+    json!({
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Extract the dates."}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "dates",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"start": {"type": "string"}},
+                    "required": ["start"],
+                },
+            },
+        },
+    })
+}
+
+/// Anthropic ignores OpenAI's `response_format` outright — sending it through
+/// unchanged would silently produce unstructured output, which is worse than
+/// the 501 this used to be. The native spelling is `output_config.format`.
+#[test]
+fn a_json_schema_becomes_anthropics_output_config() {
+    let (body, _) = translated(Protocol::Anthropic, with_schema(), None);
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"start": {"type": "string"}},
+            "required": ["start"],
+        }}})
+    );
+}
+
+#[test]
+fn a_json_schema_becomes_geminis_response_schema() {
+    let (body, _) = translated(Protocol::Gemini, with_schema(), None);
+    assert_eq!(
+        body["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
+    assert_eq!(
+        body["generationConfig"]["responseSchema"],
+        json!({"type": "object", "properties": {"start": {"type": "string"}},
+               "required": ["start"]}),
+        "pruned the same way tool schemas are: Gemini rejects additionalProperties"
+    );
+}
+
+/// `{"type":"json_object"}` asks for *some* JSON with no schema. Gemini has
+/// that exactly; Anthropic does not, and inventing an empty schema would
+/// constrain the model to `{}` — so it is dropped rather than approximated.
+#[test]
+fn schemaless_json_mode_maps_only_where_it_exists() {
+    let body = json!({
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_object"},
+    });
+
+    let (gemini, _) = translated(Protocol::Gemini, body.clone(), None);
+    assert_eq!(
+        gemini["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
+    assert!(gemini["generationConfig"].get("responseSchema").is_none());
+
+    let (anthropic, _) = translated(Protocol::Anthropic, body, None);
+    assert!(
+        anthropic.get("output_config").is_none(),
+        "an empty schema would constrain the model to {{}}: {anthropic}"
+    );
+}
+
+/// Anthropic caches nothing unless a block asks to be cached, and a hit costs
+/// 90% less. An OpenAI-format client cannot express that, so a translated
+/// backend was paying full price on every request for a prefix identical
+/// across all of them.
+#[test]
+fn the_system_prompt_carries_a_cache_breakpoint() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({
+            "max_tokens": 10,
+            "messages": [
+                {"role": "system", "content": "You are a careful assistant."},
+                {"role": "user", "content": "hi"},
+            ],
+        }),
+        None,
+    );
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": "You are a careful assistant.",
+            "cache_control": {"type": "ephemeral"},
+        }])
+    );
+}
+
+/// The breakpoint goes on the system prompt and nowhere else. A message is not
+/// stable across turns, so marking one would be guessing at which prefix
+/// repeats — and a misplaced breakpoint costs a cache write for nothing.
+#[test]
+fn no_cache_breakpoint_is_placed_on_a_message() {
+    let (body, _) = translated(
+        Protocol::Anthropic,
+        json!({"max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert!(body.get("system").is_none(), "no system prompt to mark");
+    assert!(
+        !body["messages"].to_string().contains("cache_control"),
+        "{body}"
     );
 }

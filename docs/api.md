@@ -205,11 +205,27 @@ Two things to know before choosing native over OpenRouter:
 - **Translated backends serve `/chat/completions` only.** Text and tool
   calling work, streaming included — `tools`, `tool_choice`, `tool_calls` and
   `role: "tool"` messages all translate, in both directions, as do image and
-  audio content parts. `n > 1`, `logprobs`, `seed`, `response_format`, the
+  audio content parts and `response_format`. `n > 1`, `logprobs`, `seed`, the
   deprecated `functions` parameter, and the embeddings/rerank/audio endpoints
   return `501` naming what was unsupported, rather than quietly doing less
   than was asked. Requests needing those should go to an OpenAI-compatible
   backend.
+
+  **Structured output translates, with one asymmetry.** A `json_schema`
+  becomes Anthropic's `output_config.format` and Gemini's
+  `generationConfig.responseSchema`. A bare `{"type":"json_object"}` — JSON
+  with no schema — maps to Gemini's `responseMimeType` but is dropped for
+  Anthropic, which has no equivalent: an empty schema there would constrain
+  the model to `{}`.
+
+  **Anthropic prompt caching is switched on for you.** Anthropic caches
+  nothing unless a block carries `cache_control`, and a cache hit costs 90%
+  less than the same input tokens — but an OpenAI-format client has no way to
+  ask for it, so a translated backend paid full price on every request for a
+  prefix identical across all of them. The system prompt now carries the
+  breakpoint. It goes there and nowhere else: the system prompt is the one
+  part of a chat request that is stable across turns by construction, where
+  marking a message would be guessing at which prefix repeats.
 
   **Media never causes a fetch.** A `data:` URL carries the bytes inline and
   translates exactly, base64 untouched. A remote `https://` URL is handed to

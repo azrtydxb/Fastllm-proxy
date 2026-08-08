@@ -205,6 +205,9 @@ pub struct OpenAiRequest {
     pub logprobs: Option<Value>,
     #[serde(default)]
     pub seed: Option<Value>,
+    /// `{"type":"json_schema","json_schema":{"name":...,"schema":{...}}}`, or
+    /// the older `{"type":"json_object"}`. Left as `Value` because each
+    /// protocol re-shapes it differently and there is nothing shared to model.
     #[serde(default)]
     pub response_format: Option<Value>,
 }
@@ -466,9 +469,7 @@ impl OpenAiRequest {
                 "the deprecated `functions` parameter — use `tools`",
             ));
         }
-        if self.response_format.is_some() {
-            return Err(TranslateError::Unsupported("response_format"));
-        }
+
         if self.n.is_some_and(|n| n > 1) {
             return Err(TranslateError::Unsupported("n greater than 1"));
         }
@@ -693,6 +694,27 @@ pub struct FunctionDelta {
     /// own until the last fragment arrives, and parsing mid-flight would either
     /// fail or force buffering the whole call before emitting anything.
     pub arguments: String,
+}
+
+/// The JSON Schema out of an OpenAI `response_format`, if it carries one.
+///
+/// Returns `None` for `{"type":"json_object"}` — that asks for *some* JSON with
+/// no schema, which neither native protocol has a direct equivalent for.
+/// Callers decide what to do about that rather than having a schema invented
+/// for them.
+pub fn response_format_schema(value: &Value) -> Option<&Value> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("json_schema") => value.get("json_schema")?.get("schema"),
+        _ => None,
+    }
+}
+
+/// Whether a `response_format` asks for JSON at all.
+pub fn wants_json(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("json_schema") | Some("json_object")
+    )
 }
 
 /// Wall-clock seconds for the `created` field.

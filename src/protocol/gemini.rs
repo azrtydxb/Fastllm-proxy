@@ -31,6 +31,7 @@ pub fn translate_request(
     let stop = req.stop.take().map(StopField::into_vec).unwrap_or_default();
     let tools = req.tools.take();
     let tool_choice = req.tool_choice.take();
+    let response_format = req.response_format.take();
     let (system, turns) = req.split_system()?;
 
     let contents: Vec<Value> = turns
@@ -60,6 +61,20 @@ pub fn translate_request(
     if !stop.is_empty() {
         config.insert("stopSequences".into(), json!(stop));
     }
+    // Structured output lives in `generationConfig`, unlike Anthropic's
+    // top-level `output_config`. `responseMimeType` alone is the equivalent of
+    // OpenAI's `{"type":"json_object"}` — JSON with no schema — which Gemini
+    // does support, so both forms map here where only one does for Anthropic.
+    if let Some(rf) = response_format.as_ref().filter(|v| super::wants_json(v)) {
+        config.insert("responseMimeType".into(), json!("application/json"));
+        if let Some(schema) = super::response_format_schema(rf) {
+            // Same pruning as tool schemas: Gemini rejects the JSON-Schema
+            // keywords every generator emits, and fails the whole request with
+            // a 400 that names neither.
+            config.insert("responseSchema".into(), prune_schema(schema.clone()));
+        }
+    }
+
     if !config.is_empty() {
         obj.insert("generationConfig".into(), config.into());
     }

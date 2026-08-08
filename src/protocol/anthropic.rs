@@ -37,6 +37,7 @@ pub fn translate_request(
     let stop = req.stop.take().map(StopField::into_vec).unwrap_or_default();
     let tools = req.tools.take();
     let tool_choice = req.tool_choice.take();
+    let response_format = req.response_format.take();
     let (system, turns) = req.split_system()?;
 
     let mut body = json!({
@@ -46,7 +47,29 @@ pub fn translate_request(
     });
     let obj = body.as_object_mut().expect("constructed as an object");
     if let Some(system) = system {
-        obj.insert("system".into(), json!(system));
+        // Marked cacheable, as a content block rather than a bare string.
+        //
+        // Anthropic's prompt caching is explicit — nothing is cached unless a
+        // block carries `cache_control` — and a cache hit costs 90% less than
+        // the same input tokens. An OpenAI-format client has no way to ask for
+        // this, so a translated backend was paying full price on every request
+        // for a prefix that is identical across all of them.
+        //
+        // The system prompt is the right and only safe place to put the
+        // breakpoint automatically: it is the one part of a chat request that
+        // is stable across turns by construction. Marking a *message* would be
+        // guessing at which prefix repeats.
+        //
+        // Below Anthropic's minimum cacheable length the marker is ignored
+        // rather than an error, so there is nothing to check for here.
+        obj.insert(
+            "system".into(),
+            json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]),
+        );
     }
     if let Some(t) = temperature {
         obj.insert("temperature".into(), json!(t));
@@ -59,6 +82,24 @@ pub fn translate_request(
     }
     if streaming {
         obj.insert("stream".into(), json!(true));
+    }
+    // Structured output. Anthropic ignores OpenAI's `response_format`
+    // outright, so a request carrying one used to be refused here; the native
+    // spelling is `output_config.format`.
+    //
+    // Only a `json_schema` maps. A bare `{"type":"json_object"}` asks for
+    // "some JSON" with no schema, which Anthropic has no equivalent for —
+    // inventing an empty schema would constrain the model to `{}`, so it is
+    // dropped and the model is merely asked in the prompt, which is what the
+    // caller had before this existed.
+    if let Some(schema) = response_format
+        .as_ref()
+        .and_then(super::response_format_schema)
+    {
+        obj.insert(
+            "output_config".into(),
+            json!({"format": {"type": "json_schema", "schema": schema}}),
+        );
     }
     // `tool_choice: "none"` is expressed by offering no tools at all. That is
     // exact rather than approximate — a model with no tools cannot call one —
