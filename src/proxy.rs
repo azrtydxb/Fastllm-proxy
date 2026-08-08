@@ -108,7 +108,14 @@ pub async fn handle(
     let snapshot = state.snapshot.load_full();
     let principal = match authorize(&req, &snapshot) {
         Ok(p) => p,
-        Err(rejection) => return Ok(rejection),
+        Err(rejection) => {
+            // Counted here rather than inside `authorize`, which has no access
+            // to state.
+            state
+                .telemetry
+                .record_rejection(crate::telemetry::Rejection::Unauthenticated);
+            return Ok(rejection);
+        }
     };
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
@@ -334,9 +341,22 @@ async fn proxy_request(
                 tier = c.tier.as_str(),
                 "classified"
             );
+            match c.tier {
+                crate::classifier::Tier::Fast => &state.telemetry.classified_fast,
+                crate::classifier::Tier::Refined => &state.telemetry.classified_refined,
+            }
+            .fetch_add(1, Ordering::Relaxed);
             (Some(c.class.as_str()), c.refines.as_slice())
         }
-        None => (None, &[][..]),
+        None => {
+            // Only where classification was actually attempted: a deployment
+            // with no classes must not look like one whose classifier never
+            // matches anything.
+            if state.has_prompt_classes() {
+                state.telemetry.unclassified.fetch_add(1, Ordering::Relaxed);
+            }
+            (None, &[][..])
+        }
     };
     #[cfg(not(feature = "classifier"))]
     let (class_name, class_refines) = {
@@ -380,9 +400,15 @@ async fn proxy_request(
     // what catches those. Skipped when it is already in the chain, so a rule
     // that names it does not get it twice.
     let mut candidates = candidates;
+    // Remembered so serving it can be counted. Only when the fallback was
+    // *added* here: a rule that names it explicitly chose it, and counting that
+    // as the last resort catching something would misreport a working route as
+    // a failure.
+    let mut fallback_appended = None;
     if let Some(fallback) = &snapshot.fallback_model {
         if !candidates.iter().any(|c| c == fallback) {
             candidates.push(fallback.clone());
+            fallback_appended = Some(fallback.clone());
         }
     }
 
@@ -690,6 +716,12 @@ async fn proxy_request(
                     if let Some(m) = state.telemetry.model(candidate_model) {
                         m.requests.fetch_add(1, Ordering::Relaxed);
                     }
+                    if fallback_appended.as_deref() == Some(candidate_model.as_str()) {
+                        state
+                            .telemetry
+                            .fallback_used
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     debug!(
                         backend = %backend.api_base,
                         requested_model = %requested_model,
@@ -724,6 +756,12 @@ async fn proxy_request(
                                 prefix,
                             ),
                             sink,
+                            Some(crate::telemetry::RequestTiming::new(
+                                &state.telemetry,
+                                candidate_model,
+                                streaming,
+                                received_at,
+                            )),
                         );
                     }
                     let tracking =
@@ -732,6 +770,7 @@ async fn proxy_request(
                             .flatten()
                             .map(|p| UsageTracking {
                                 tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
+                                metrics: state.telemetry.model(candidate_model),
                                 principal_id: p.id,
                                 model: candidate_model.clone(),
                                 reporter: state.usage.clone(),
@@ -740,8 +779,8 @@ async fn proxy_request(
                         resp,
                         guard,
                         tracking,
-                        Some(RequestTiming::new(
-                            &state,
+                        Some(crate::telemetry::RequestTiming::new(
+                            &state.telemetry,
                             candidate_model,
                             streaming,
                             received_at,
@@ -878,64 +917,6 @@ fn build_upstream_request(
     Ok(builder.body(Full::new(body))?)
 }
 
-/// Whole-request timing, recorded when the response body finishes.
-///
-/// Lives on the body rather than being timed around the handler because a
-/// streamed response is not over when the handler returns — it is over when the
-/// last frame goes out, which can be a minute later. Timing the handler would
-/// report the time to *start* answering as if it were the time to answer.
-///
-/// Two clock reads per request (`Instant::now` at 14ns each, measured in
-/// `bench/micro`) and one branch per frame until the first one arrives.
-pub struct RequestTiming {
-    start: Instant,
-    telemetry: Arc<AppState>,
-    model: Option<Arc<crate::telemetry::ModelMetrics>>,
-    /// Set once the first body byte is out. `None` afterwards, which is also
-    /// what makes the per-frame cost a single `is_some` check.
-    awaiting_first_byte: bool,
-    streaming: bool,
-}
-
-impl RequestTiming {
-    pub fn new(state: &Arc<AppState>, model: &str, streaming: bool, start: Instant) -> Self {
-        Self {
-            start,
-            model: state.telemetry.model(model),
-            telemetry: Arc::clone(state),
-            awaiting_first_byte: true,
-            streaming,
-        }
-    }
-
-    #[inline]
-    fn first_byte(&mut self) {
-        if !self.awaiting_first_byte {
-            return;
-        }
-        self.awaiting_first_byte = false;
-        // Only for a streamed response. For a buffered one this is the same
-        // instant as completion, and publishing it as a separate series would
-        // suggest the two are independent measurements when one is a copy.
-        if !self.streaming {
-            return;
-        }
-        let us = self.start.elapsed().as_micros() as u64;
-        self.telemetry.telemetry.ttft.record_us(us);
-        if let Some(m) = &self.model {
-            m.ttft.record_us(us);
-        }
-    }
-
-    fn finish(&self) {
-        let us = self.start.elapsed().as_micros() as u64;
-        self.telemetry.telemetry.duration.record_us(us);
-        if let Some(m) = &self.model {
-            m.duration.record_us(us);
-        }
-    }
-}
-
 /// Hand the upstream response to the client, keeping the in-flight guard alive
 /// for as long as the body is still streaming, and — for a principal with a
 /// budget or a token-rate limit — feeding forwarded bytes into a bounded tail
@@ -944,7 +925,7 @@ fn finish_response(
     resp: Response<UpstreamBody>,
     guard: InflightGuard,
     tracking: Option<UsageTracking>,
-    timing: Option<RequestTiming>,
+    timing: Option<crate::telemetry::RequestTiming>,
 ) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     // Hop-by-hop only: the response body is passed through byte for byte, so
@@ -972,6 +953,7 @@ fn translated_response(
     protocol: protocol::Protocol,
     ctx: protocol::ResponseContext,
     sink: Option<protocol::body::UsageSink>,
+    timing: Option<crate::telemetry::RequestTiming>,
 ) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     for name in HOP_BY_HOP {
@@ -991,7 +973,7 @@ fn translated_response(
     );
     Response::from_parts(
         parts,
-        protocol::body::TranslatedBody::new(body, guard, protocol, ctx, sink).boxed_body(),
+        protocol::body::TranslatedBody::new(body, guard, protocol, ctx, sink, timing).boxed_body(),
     )
 }
 
@@ -1001,6 +983,9 @@ fn translated_response(
 /// consumption is worth reading at all.
 struct UsageTracking {
     tail: TailBuffer,
+    /// Where to add the token counts, independent of whether they are also
+    /// reported to the control plane.
+    metrics: Option<Arc<crate::telemetry::ModelMetrics>>,
     principal_id: PrincipalId,
     /// The resolved concrete model name (`snapshot::ModelDef::name`), not
     /// the client-requested one — see `usage::UsageEvent::model`'s doc
@@ -1019,6 +1004,12 @@ impl UsageTracking {
     /// mechanism being "one small parse per request, not per frame".
     fn finish(mut self) {
         if let Some(tokens) = self.tail.extract_usage() {
+            if let Some(m) = &self.metrics {
+                m.prompt_tokens
+                    .fetch_add(u64::from(tokens.prompt_tokens), Ordering::Relaxed);
+                m.completion_tokens
+                    .fetch_add(u64::from(tokens.completion_tokens), Ordering::Relaxed);
+            }
             self.reporter.record(UsageEvent {
                 principal_id: self.principal_id,
                 model: self.model,
@@ -1051,7 +1042,7 @@ pin_project! {
         // Taken once, so a body finished by `poll_frame` is not recorded a
         // second time by `PinnedDrop` — the same rule the usage tracking above
         // follows, for the same reason.
-        timing: Option<RequestTiming>,
+        timing: Option<crate::telemetry::RequestTiming>,
     }
 
     impl PinnedDrop for TrackedBody {
@@ -1087,7 +1078,7 @@ impl TrackedBody {
         inner: UpstreamBody,
         guard: InflightGuard,
         usage_tracking: Option<UsageTracking>,
-        timing: Option<RequestTiming>,
+        timing: Option<crate::telemetry::RequestTiming>,
     ) -> Self {
         Self {
             inner,

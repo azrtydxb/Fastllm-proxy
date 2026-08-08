@@ -22,4 +22,4 @@ pub mod histogram;
 pub mod metrics;
 
 pub use histogram::Histogram;
-pub use metrics::{ModelMetrics, Outcome, Rejection, Telemetry};
+pub use metrics::{ModelMetrics, Outcome, Rejection, RequestTiming, Telemetry};

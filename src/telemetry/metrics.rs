@@ -326,6 +326,78 @@ impl Telemetry {
     }
 }
 
+/// Whole-request timing, recorded when the response body finishes.
+///
+/// Lives on the body rather than wrapping the handler because a streamed
+/// response is not over when the handler returns — it is over when the last
+/// frame goes out, which can be a minute later. Timing the handler would report
+/// the time to *start* answering as if it were the time to answer.
+///
+/// Two clock reads per request (`Instant::now`, 14ns each in `bench/micro`) and
+/// one predictable branch per frame until the first byte is out.
+pub struct RequestTiming {
+    start: std::time::Instant,
+    telemetry: Arc<Telemetry>,
+    model: Option<Arc<ModelMetrics>>,
+    awaiting_first_byte: bool,
+    streaming: bool,
+}
+
+impl RequestTiming {
+    pub fn new(
+        telemetry: &Arc<Telemetry>,
+        model: &str,
+        streaming: bool,
+        start: std::time::Instant,
+    ) -> Self {
+        Self {
+            start,
+            model: telemetry.model(model),
+            telemetry: Arc::clone(telemetry),
+            awaiting_first_byte: true,
+            streaming,
+        }
+    }
+
+    /// The first byte of the response body reached the client.
+    #[inline]
+    pub fn first_byte(&mut self) {
+        if !self.awaiting_first_byte {
+            return;
+        }
+        self.awaiting_first_byte = false;
+        // Streamed responses only. For a buffered one this is the same instant
+        // as completion, and publishing it as a separate series would suggest
+        // the two are independent measurements when one is a copy of the other.
+        if !self.streaming {
+            return;
+        }
+        let us = self.start.elapsed().as_micros() as u64;
+        self.telemetry.ttft.record_us(us);
+        if let Some(m) = &self.model {
+            m.ttft.record_us(us);
+        }
+    }
+
+    /// Tokens this response reported, for the per-model counters.
+    pub fn record_tokens(&self, prompt: u32, completion: u32) {
+        if let Some(m) = &self.model {
+            m.prompt_tokens
+                .fetch_add(u64::from(prompt), Ordering::Relaxed);
+            m.completion_tokens
+                .fetch_add(u64::from(completion), Ordering::Relaxed);
+        }
+    }
+
+    pub fn finish(&self) {
+        let us = self.start.elapsed().as_micros() as u64;
+        self.telemetry.duration.record_us(us);
+        if let Some(m) = &self.model {
+            m.duration.record_us(us);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

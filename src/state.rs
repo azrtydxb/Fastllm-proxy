@@ -76,7 +76,7 @@ pub struct AppState {
     /// are rebuilt on every snapshot apply — about once a second — and a
     /// counter that resets that often reads to Prometheus as a restart. See
     /// `telemetry::metrics`.
-    pub telemetry: crate::telemetry::Telemetry,
+    pub telemetry: std::sync::Arc<crate::telemetry::Telemetry>,
 
     /// Prompt classifier, rebuilt from the snapshot on every `apply_snapshot`
     /// so the centroids a request is scored against are always the ones the
@@ -172,7 +172,7 @@ impl AppState {
             requests_failed: AtomicU64::new(0),
             usage: crate::usage::UsageReporter::disabled(),
             limiter: Arc::new(crate::limiter::Limiter::new()),
-            telemetry: crate::telemetry::Telemetry::new(),
+            telemetry: std::sync::Arc::new(crate::telemetry::Telemetry::new()),
         }
     }
 
@@ -251,6 +251,23 @@ impl AppState {
     #[cfg(not(feature = "classifier"))]
     pub fn classify(&self, _body: &[u8]) -> Option<std::convert::Infallible> {
         None
+    }
+
+    /// Whether this deployment has any prompt classes at all.
+    ///
+    /// Distinguishes "the classifier declined" from "there is no classifier",
+    /// which matter differently: the first is a prompt below every floor and
+    /// worth counting, the second is a deployment that never asked and would
+    /// otherwise look like a classifier matching nothing.
+    pub fn has_prompt_classes(&self) -> bool {
+        #[cfg(feature = "classifier")]
+        {
+            !self.classifier.load().is_empty()
+        }
+        #[cfg(not(feature = "classifier"))]
+        {
+            false
+        }
     }
 
     /// Embed with the transformer, loading it on first use.

@@ -941,7 +941,7 @@ fn build_app_state(
         requests_failed: AtomicU64::new(0),
         usage,
         limiter: Arc::new(fastllm_proxy::limiter::Limiter::new()),
-        telemetry: fastllm_proxy::telemetry::Telemetry::new(),
+        telemetry: Arc::new(fastllm_proxy::telemetry::Telemetry::new()),
     });
 
     // The constructor above bypasses `apply_snapshot`, so anything that path

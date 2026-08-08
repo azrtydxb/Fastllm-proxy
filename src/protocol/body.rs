@@ -71,6 +71,9 @@ pin_project! {
         protocol: Protocol,
         ctx: ResponseContext,
         usage_sink: Option<UsageSink>,
+        // Taken once, so a body finished by `poll_frame` is not recorded again
+        // by `PinnedDrop` — the same rule `usage_sink` above follows.
+        timing: Option<crate::telemetry::RequestTiming>,
         // Set once the upstream body has ended and the trailing frame (final
         // chunk plus `[DONE]`, or the translated document) has been handed
         // out. Also what `is_end_stream` reports.
@@ -84,10 +87,23 @@ pin_project! {
         /// the translator has counted so far is the right way to be wrong.
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
+            let streamed_usage = match &this.mode {
+                Mode::Stream(t) => Some(t.usage()),
+                Mode::Buffer(_) => None,
+            };
             if let Some(sink) = this.usage_sink.take() {
-                if let Mode::Stream(t) = this.mode {
-                    sink.record(t.usage());
+                if let Some(usage) = streamed_usage {
+                    sink.record(usage);
                 }
+            }
+            if let Some(timing) = this.timing.take() {
+                // Tokens come from the translator's own count rather than the
+                // usage sink, so they are recorded whether or not this
+                // principal's consumption is reported to the control plane.
+                if let Some(usage) = streamed_usage {
+                    timing.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+                }
+                timing.finish();
             }
         }
     }
@@ -100,6 +116,7 @@ impl TranslatedBody {
         protocol: Protocol,
         ctx: ResponseContext,
         usage_sink: Option<UsageSink>,
+        timing: Option<crate::telemetry::RequestTiming>,
     ) -> Self {
         let mode = match ctx.streaming {
             true => match StreamTranslator::new(protocol, ctx.clone()) {
@@ -117,6 +134,7 @@ impl TranslatedBody {
             protocol,
             ctx,
             usage_sink,
+            timing,
             done: false,
         }
     }
@@ -157,6 +175,14 @@ impl Body for TranslatedBody {
                             if out.is_empty() {
                                 continue;
                             }
+                            // Measured at the first frame *we* emit, not the
+                            // first the upstream sent: several upstream frames
+                            // (`message_start`, `ping`, `content_block_start`)
+                            // translate to nothing, and timing those would
+                            // report a first token that the client never saw.
+                            if let Some(timing) = this.timing.as_mut() {
+                                timing.first_byte();
+                            }
                             return Poll::Ready(Some(Ok(Frame::data(Bytes::from(out)))));
                         }
                         Mode::Buffer(buf) => {
@@ -174,6 +200,13 @@ impl Body for TranslatedBody {
                             sink.record(t.usage());
                         }
                     }
+                    if let Some(timing) = this.timing.take() {
+                        if let Mode::Stream(t) = this.mode {
+                            let usage = t.usage();
+                            timing.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+                        }
+                        timing.finish();
+                    }
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
@@ -182,8 +215,13 @@ impl Body for TranslatedBody {
                     let out = match this.mode {
                         Mode::Stream(t) => {
                             let tail = t.finish();
+                            let usage = t.usage();
                             if let Some(sink) = this.usage_sink.take() {
-                                sink.record(t.usage());
+                                sink.record(usage);
+                            }
+                            if let Some(timing) = this.timing.take() {
+                                timing.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+                                timing.finish();
                             }
                             tail
                         }
@@ -192,6 +230,18 @@ impl Body for TranslatedBody {
                                 Ok((bytes, usage)) => {
                                     if let Some(sink) = this.usage_sink.take() {
                                         sink.record(usage);
+                                    }
+                                    if let Some(timing) = this.timing.take() {
+                                        timing.record_tokens(
+                                            usage.prompt_tokens,
+                                            usage.completion_tokens,
+                                        );
+                                        // A buffered response has no separate
+                                        // first-byte moment: the whole document
+                                        // goes out at once, which is what
+                                        // `first_byte` declines to record for a
+                                        // non-streaming request.
+                                        timing.finish();
                                     }
                                     bytes
                                 }
