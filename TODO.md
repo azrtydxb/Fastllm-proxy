@@ -250,36 +250,37 @@ the right models, and misbehaves only on the part that changed. `/health` now
 carries `snapshot_version` and a key count, and `/metrics` exposes
 `fastllm_snapshot_version`, so a fleet-wide `max() - min()` shows a stuck pod.
 
-## Escalation costs 50-100ms in the container, not 3.3ms — open (2026-08-08)
+## Escalation costs 21-29ms in the container, not 3.3ms — measured (2026-08-08)
 
-Measured, not suspected: `fastllm_classify_duration_seconds` on the dev cluster
-puts escalated classification in the 50-100 ms bucket, where `bench/minilm`
-measured bge-small at 3.27 ms. The bench figure is a 10-core arm64 macOS host;
-the deployed container is a 2-core limit on an 8-core arm64 k3s node.
+The docs claimed 3.27 ms from `bench/minilm` on a 10-core macOS host. The
+deployed arm64 container measures **21-29 ms**. `fastllm-proxy classify-bench`
+now ships in the image so this is reproducible against a pod's real CPU quota
+rather than a developer's machine; the table is in `docs/classifier.md`.
 
-The fast tier's ~115 µs holds — it is a memory lookup, not a matmul — so this is
-specifically the transformer.
+The hypothesis in the previous version of this entry was thread thrashing —
+`fastembed` leaving ONNX at `available_parallelism()`, which might read the
+node's 8 cores rather than the cgroup's 2. **It was wrong.** That call reads
+`/sys/fs/cgroup/cpu.max` correctly and returned 2. Worth having measured
+anyway: 1 thread is 1.7x worse than 2, and 8 is 1.8x worse than 4, so
+`Options::default` now pins `clamp(2, 4)` instead of deferring — which is a
+small win on a large pod and protection against a host where that call does
+read the node.
 
-Docs corrected to state both numbers rather than the flattering one. Not
-diagnosed further, and worth doing before a routing rule sends real volume
-through tier 2. Three things to measure, in order of expected payoff:
+Also ruled out: CPU (3.5x the quota bought 1.35x the speed — this model does
+not scale with cores) and the token window (128 vs 256 is noise, because the
+window is a cap and real prompts are shorter).
 
-1. **`intra_threads`.** `fastembed` leaves ONNX Runtime's intra-op thread count
-   at `available_parallelism()`. If that reads the node's 8 cores rather than
-   the cgroup's 2, eight threads contend for two cores and get throttled.
-   `InitOptionsUserDefined::intra_threads` is the knob; one line, but it needs a
-   measurement either side, not a guess.
-2. **The core.** Some of the gap is simply that an arm64 k3s core is not an
-   M-series one. Establishes the floor for the above.
-3. **The mutex, which matters more at volume than either.** `Tier2` holds
-   `Mutex<TextEmbedding>` because ONNX's session takes `&mut self`, so escalated
-   classifications serialise. At 58 ms each that caps escalated throughput near
-   17/s per pod however many cores it has.
+Untried, and the only remaining lever: **int8 quantisation**. `fastembed`
+exposes `QuantizationMode` and it typically buys 2-4x. It needs a quantised
+`model.onnx` in the image and a rerun of `bench/potion-arch` to confirm the
+accuracy the tier exists for survives — 93.3% architecture-vs-coding is the
+number it has to keep.
 
-Found only because the histogram existed. The mean read 191 ms, which looked
-like the documented claim being wrong by 60x; the distribution showed two fast
-classifications at 115-500 µs and one at 570 ms, which was the lazy model load —
-a separate bug, now fixed by warming. What remained after that fix is this.
+Concurrency buys nothing and that is not the mutex's fault. At four concurrent
+callers, per-prompt latency equals serial in every configuration, so escalated
+throughput caps near 35/s per pod. A session pool would lift the cap, but the
+same measurements show this model barely uses two cores, so extra sessions
+would contend rather than scale. The ceiling is the model.
 
 ## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
 

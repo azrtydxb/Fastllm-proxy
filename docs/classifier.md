@@ -155,33 +155,64 @@ measurably an easier one.
 
 On realistic traffic mixes escalation touches well under a tenth of requests.
 On the laptop figure that puts the average added cost near 0.2 ms; on the
-measured container figure it is nearer 5 ms, which is still small against a
-165 ms time to first token but is not the same claim.
+measured container figure it is nearer 2-3 ms, which is still modest against a
+165 ms time to first token — but a request that *does* escalate pays the full
+21-29 ms, and that is the number to weigh when a rule sends real traffic
+through tier 2.
 
 ## What escalation actually costs in production
 
-`fastllm_classify_duration_seconds` exists because the numbers above were
-measured on a laptop against a fixed corpus, and nothing had ever measured them
-on real traffic in the real container. The answer differs by more than an order
-of magnitude: escalated classification lands in the **50-100 ms** bucket on the
-dev cluster, against 3.27 ms on the laptop.
+`fastllm_classify_duration_seconds` exists because the numbers above were taken
+on a laptop against a fixed corpus, and nothing had measured them in the
+container. `fastllm-proxy classify-bench` ships inside the image so the answer
+comes from the pod's real CPU quota; reproduce with:
 
-Not yet diagnosed, and worth doing before relying on tier 2 at volume. Two
-candidates, both measurable:
+```bash
+kubectl -n fastllm run classbench --image=<the deployed image> --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"classbench","image":"<image>",
+    "command":["/usr/local/bin/fastllm-proxy","classify-bench",
+      "--classifier-tier2-model","/usr/local/share/fastllm/classifier-tier2"],
+    "resources":{"limits":{"cpu":"2","memory":"2Gi"}}}]}}'
+```
 
-- **Thread count.** `fastembed` leaves ONNX Runtime's `intra_threads` at its
-  default, which is `available_parallelism()`. The proxy container has a 2-core
-  limit on an 8-core node; if that default sees 8, ONNX spawns eight intra-op
-  threads against a two-core quota and they contend and get throttled.
-- **The core itself.** An arm64 k3s node core is not an M-series core, and some
-  of the gap is simply that.
+Measured, arm64 k3s node, per prompt:
 
-A third thing matters more at volume than either: `Tier2` holds
-`Mutex<TextEmbedding>`, because ONNX's session needs `&mut self`. Escalated
-classifications therefore serialise. At 58 ms each that caps escalated
-throughput near 17 per second per pod regardless of how many cores the pod has,
-which is a ceiling worth knowing about before a routing rule sends real traffic
-through it.
+| intra_threads | 2-core pod | 7-core pod |
+|---|---|---|
+| 1 | 49.9 ms | 49.6 ms |
+| **2** | **28.9 ms** | 32.1 ms |
+| **4** | 28.7 ms | **21.3 ms** |
+| 8 | 53.2 ms | 31.2 ms |
+
+Tier 1 measures 150-180 µs in the same pod, which matches its documented
+~115 µs closely enough. The refined tier is **21-29 ms**, not 3.3 ms.
+
+Three things that ruled themselves out, each of which looked plausible first:
+
+- **Thread thrashing was the hypothesis, and it was wrong.**
+  `available_parallelism()` reads `/sys/fs/cgroup/cpu.max` correctly and
+  returned 2 on a 2-core pod, so fastembed's default was never oversubscribed.
+  The curve is still worth pinning — one thread is 1.7x worse than two, eight is
+  1.8x worse than four — so `Options::default` now sets
+  `clamp(2, 4)` explicitly rather than deferring, which also protects a host
+  where that call reads the node's cores instead.
+- **CPU is not the lever.** 3.5x the quota bought 1.35x the speed. This model
+  does not scale with cores.
+- **The token window is not the lever either.** 128 against 256 is within noise,
+  because the window is a cap and these prompts are far shorter than either.
+
+What remains true is that the transformer costs tens of milliseconds on this
+hardware, and no configuration changes that. The untried lever is **int8
+quantisation** — `fastembed` exposes `QuantizationMode`, and it typically buys
+2-4x — which needs a quantised `model.onnx` baked into the image and a rerun of
+`bench/potion-arch` to confirm the accuracy the tier exists for survives it.
+
+**Concurrency buys nothing.** At four concurrent callers, per-prompt latency is
+unchanged from serial in every configuration above: `Tier2` holds one ONNX
+session behind a mutex because `embed` takes `&mut self`. Escalated throughput
+therefore caps near 35/s per pod. A pool of sessions would lift that, but the
+same table shows this model barely uses two cores, so extra sessions would
+contend rather than scale — the ceiling is the model, not the mutex.
 
 ## Classes compete globally
 
