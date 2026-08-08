@@ -70,6 +70,10 @@ rand = { version = "0.9", optional = true }
 # `src/control/secrets.rs` can call `ring::aead` for encryption at rest,
 # without adding a new crate to the dependency tree.
 ring = { version = "0.17", optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 # Embeds the management UI's built `web/dist/` into the binary (P4). Points
 # at a directory that may not exist yet in a plain `cargo build` — see
 # `src/control/ui.rs` for how a missing/empty `web/dist/` degrades to "UI not
@@ -90,6 +94,16 @@ default = ["control"]
 control = ["dep:sqlx", "dep:axum", "dep:argon2", "dep:rand", "dep:ring", "dep:rust-embed"]
 classifier = ["dep:model2vec-rs"]
 classifier-tier2 = ["classifier", "dep:fastembed"]
+# OTLP tracing. Behind a feature because it is the only telemetry here that
+# adds a dependency tree (opentelemetry + tonic/gRPC) and the only one that
+# needs something deployed to receive it; a build without it carries none of
+# that and pays nothing at runtime.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [dev-dependencies]
 tempfile = "3"

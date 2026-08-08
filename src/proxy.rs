@@ -33,6 +33,23 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 use tracing::{debug, warn};
 
+/// Record a field on the current request span, or nothing at all.
+///
+/// Without the `otel` feature this expands to a no-op, so the call sites read
+/// the same either way and a default build carries no span machinery.
+macro_rules! span_field {
+    ($name:literal, $value:expr) => {
+        #[cfg(feature = "otel")]
+        {
+            tracing::Span::current().record($name, $value);
+        }
+        #[cfg(not(feature = "otel"))]
+        {
+            let _ = &$value;
+        }
+    };
+}
+
 use crate::multipart;
 use crate::protocol;
 use crate::registry::{Backend, BackendUid, InflightGuard, Pool, Registry};
@@ -215,6 +232,33 @@ fn resolve_target_models(
     Ok(candidates)
 }
 
+/// One span per request, carrying the fields worth asking a trace about.
+///
+/// `skip_all` because the arguments are the request body, the whole snapshot
+/// and the caller's principal — recording those as span attributes would put
+/// prompts and credentials into a tracing backend. Fields are added below,
+/// explicitly, once they are known.
+///
+/// Level `debug` so the span costs nothing under the default `info` filter
+/// even with the feature built in; the OTLP layer sets its own filter when a
+/// collector is configured.
+#[cfg_attr(
+    feature = "otel",
+    tracing::instrument(
+        name = "chat_completion",
+        skip_all,
+        level = "debug",
+        fields(
+            model = tracing::field::Empty,
+            served_model = tracing::field::Empty,
+            backend = tracing::field::Empty,
+            stream = tracing::field::Empty,
+            class = tracing::field::Empty,
+            status = tracing::field::Empty,
+            attempts = tracing::field::Empty,
+        )
+    )
+)]
 async fn proxy_request(
     req: Request<Incoming>,
     state: Arc<AppState>,
@@ -327,6 +371,9 @@ async fn proxy_request(
     // so a deployment that routes on caller or shape alone never touches an
     // embedding model. Tier 2 is gated one level further in, on whether any
     // active class refines the one tier 1 chose (`crate::classifier`).
+    span_field!("model", requested_model.as_str());
+    span_field!("stream", streaming);
+
     let classification = state.classify(&collected);
     #[cfg(feature = "classifier")]
     let (class_name, class_refines) = match &classification {
@@ -346,6 +393,7 @@ async fn proxy_request(
                 crate::classifier::Tier::Refined => &state.telemetry.classified_refined,
             }
             .fetch_add(1, Ordering::Relaxed);
+            span_field!("class", c.class.as_str());
             (Some(c.class.as_str()), c.refines.as_slice())
         }
         None => {
@@ -722,6 +770,10 @@ async fn proxy_request(
                             .fallback_used
                             .fetch_add(1, Ordering::Relaxed);
                     }
+                    span_field!("served_model", candidate_model.as_str());
+                    span_field!("backend", backend.api_base.as_str());
+                    span_field!("status", status.as_u16());
+                    span_field!("attempts", attempt + 1);
                     debug!(
                         backend = %backend.api_base,
                         requested_model = %requested_model,

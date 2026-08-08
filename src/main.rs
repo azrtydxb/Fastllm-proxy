@@ -102,6 +102,26 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = LogFormat::Text, env = "FASTLLM_LOG_FORMAT")]
     log_format: LogFormat,
 
+    /// OTLP/gRPC collector for traces, e.g. `http://collector:4317`. Unset
+    /// disables tracing entirely, which is the default.
+    #[cfg(feature = "otel")]
+    #[arg(long, env = "FASTLLM_OTEL_ENDPOINT")]
+    otel_endpoint: Option<String>,
+
+    /// Trace one request in this many. 1 traces everything, which is only
+    /// sensible at low volume or while debugging.
+    #[cfg(feature = "otel")]
+    #[arg(long, default_value_t = 100, env = "FASTLLM_OTEL_SAMPLE_ONE_IN")]
+    otel_sample_one_in: u64,
+
+    #[cfg(feature = "otel")]
+    #[arg(
+        long,
+        default_value = "fastllm-proxy",
+        env = "FASTLLM_OTEL_SERVICE_NAME"
+    )]
+    otel_service_name: String,
+
     /// Directory or HuggingFace repo id for the fast-tier classifier model.
     ///
     /// A directory is what a container should use: the Dockerfile bakes the
@@ -300,34 +320,75 @@ pub enum LogFormat {
 }
 
 fn init_logging(cli: &Cli) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::Layer as _;
+
     let filter = tracing_subscriber::EnvFilter::try_new(&cli.log)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match cli.log_format {
-        LogFormat::Text => builder.with_target(false).init(),
+    let registry = tracing_subscriber::registry().with(filter);
+
+    // Boxed so both formats have one type and the OTLP layer below can be
+    // composed once rather than per branch.
+    let fmt = match cli.log_format {
+        LogFormat::Text => tracing_subscriber::fmt::layer().with_target(false).boxed(),
         // `flatten_event` puts the message and its fields at the top level
         // rather than nested under "fields", which is what every collector
         // expects to index without a transform step.
-        LogFormat::Json => builder
+        LogFormat::Json => tracing_subscriber::fmt::layer()
             .json()
             .flatten_event(true)
             .with_current_span(false)
             .with_span_list(false)
-            .init(),
+            .boxed(),
+    };
+
+    // One registry carrying the log layer and, when configured, the OTLP layer
+    // beside it. Two separate `init` calls would mean the second silently
+    // losing to the first, and the symptom — logs but no traces, or the
+    // reverse — points nowhere near the cause.
+    #[cfg(feature = "otel")]
+    {
+        let otel = cli.otel_endpoint.as_ref().and_then(|endpoint| {
+            let cfg = fastllm_proxy::telemetry::tracing_otel::Config {
+                endpoint: endpoint.clone(),
+                sample_one_in: cli.otel_sample_one_in,
+                service_name: cli.otel_service_name.clone(),
+            };
+            match fastllm_proxy::telemetry::tracing_otel::layer(&cfg) {
+                Ok(layer) => Some(layer),
+                Err(e) => {
+                    // Not fatal. A collector unreachable at startup must not
+                    // stop the proxy serving traffic — that would turn an
+                    // observability dependency into an availability one.
+                    eprintln!("tracing disabled: could not build the OTLP exporter: {e:#}");
+                    None
+                }
+            }
+        });
+        registry.with(fmt).with(otel).init();
     }
+    #[cfg(not(feature = "otel"))]
+    registry.with(fmt).init();
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    init_logging(&cli);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     if let Some(n) = cli.workers {
         builder.worker_threads(n.max(1));
     }
-    builder.build()?.block_on(run(cli))
+    let runtime = builder.build()?;
+    // Logging is initialised *inside* the runtime, not before it. The OTLP
+    // exporter is a gRPC client, and building one outside a runtime panics in
+    // hyper-util's executor — which is a startup crash, not a disabled
+    // exporter, so it has to be here rather than a line earlier.
+    runtime.block_on(async {
+        init_logging(&cli);
+        run(cli).await
+    })
 }
 
 async fn run(cli: Cli) -> Result<()> {

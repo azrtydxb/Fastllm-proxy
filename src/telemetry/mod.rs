@@ -21,5 +21,8 @@
 pub mod histogram;
 pub mod metrics;
 
+#[cfg(feature = "otel")]
+pub mod tracing_otel;
+
 pub use histogram::Histogram;
 pub use metrics::{ModelMetrics, Outcome, Rejection, RequestTiming, Telemetry};

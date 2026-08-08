@@ -152,3 +152,39 @@ without a transform step:
 `--log` (`FASTLLM_LOG`) takes an `EnvFilter` directive, so
 `--log 'info,fastllm_proxy::proxy=debug'` turns on per-request routing and
 classification detail without the rest.
+
+## Traces
+
+Built only with `--features otel`, because it is the one part of telemetry that
+adds a dependency tree (opentelemetry plus tonic/gRPC) and the only one needing
+something deployed to receive it. A build without the feature carries none of
+it and pays nothing at runtime — the instrumentation compiles away.
+
+```
+--otel-endpoint http://collector:4317   # unset disables tracing
+--otel-sample-one-in 100                # 1 traces everything
+--otel-service-name fastllm-proxy
+```
+
+One span per request, `chat_completion`, carrying the requested model, the
+model that actually served it, the backend, whether it streamed, the prompt
+class if one matched, the upstream status, and how many attempts it took. That
+last pair is the reason to reach for a trace rather than a metric: a histogram
+says the 99th percentile moved, a span says *this* request failed over twice
+and landed on the fallback.
+
+Deliberately not recorded as span attributes: the request body, the caller's
+principal, or any credential. A tracing backend is a log with a nicer UI, and
+prompts do not belong in one.
+
+Two behaviours worth knowing:
+
+- **Sampling is by counting, not randomly.** One request in `n` exactly, rather
+  than a ratio that is only right on average — at low volume a random sampler
+  means a quiet hour traces nothing. An upstream sampling decision is honoured
+  before this one, so the proxy never punches a hole in the middle of somebody
+  else's trace.
+- **An unreachable collector is not an outage.** If the exporter cannot be
+  built at startup the proxy logs it and serves traffic untraced; export itself
+  is a background batch task, so a collector that goes away costs dropped spans
+  rather than dropped requests.

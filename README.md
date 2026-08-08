@@ -153,7 +153,7 @@ cargo build --release
 | [Architecture](docs/architecture.md) | Component and request-flow diagrams, failure modes, consistency guarantees, behaviour notes |
 | [Performance](docs/performance.md) | Every measured number, its conditions, and what has not been measured |
 | [Semantic routing](docs/classifier.md) | Classifier tiers: measured accuracy, cost, and what is still to build |
-| [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration reference |
+| [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration, metrics, logs and traces |
 | [API and administration](docs/api.md) | Endpoints, admin API, providers, routing rules, auth, TLS, budgets, rate limits |
 | [Deployment on Kubernetes](deploy/README.md) | Manifests, adding a provider, operator runbook |
 | [TODO](TODO.md) | What is deliberately not built, and why |
