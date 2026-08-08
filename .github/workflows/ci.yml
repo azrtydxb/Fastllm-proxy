@@ -47,6 +47,14 @@ jobs:
       - name: Test (with database)
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          # Every process that talks to Postgres takes a whole *pool*, not a
+          # connection. `cargo test` runs each test binary's tests in parallel
+          # and several binaries at once, and each spawned proxy plus each
+          # library test's own pool counts — which at the default of 8 adds up
+          # past this Postgres's 100 and presents as an unrelated test failing
+          # to connect. The end-to-end tests already pin this per spawned
+          # process; this covers the library tests' own pools too.
+          FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
         run: cargo test --features control --locked -- --include-ignored
       # Semantic routing is behind a feature, so the run above never compiles
       # it — and a test that needs it is `#[cfg]`d out rather than failing for
@@ -57,6 +65,7 @@ jobs:
       - name: Test (classifier)
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
         run: cargo test --features "control classifier" --locked -- --include-ignored
 
   publish:
