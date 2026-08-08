@@ -1175,6 +1175,7 @@ impl UsageTracking {
                 ttft_ms: timing.and_then(|t| t.ttft_ms()),
                 status: Some(self.status),
                 requested_model: self.requested_model,
+                cost_micros: tokens.cost_micros,
             });
         }
     }

@@ -597,6 +597,12 @@ struct ModelView {
     id: i64,
     name: String,
     description: String,
+    /// Micro-units per million tokens. `None` is unpriced — usage is still
+    /// recorded, cost is left NULL rather than assumed zero.
+    input_price_per_mtok: Option<i64>,
+    output_price_per_mtok: Option<i64>,
+    /// `None` is caching off.
+    cache_ttl_seconds: Option<i32>,
     backends: Vec<BackendView>,
 }
 
@@ -604,11 +610,14 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
-    let models: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, name, description FROM models ORDER BY name")
-            .fetch_all(&ctx.pool)
-            .await
-            .map_err(|e| db_error("listing models", &e))?;
+    type ModelRow = (i64, String, String, Option<i64>, Option<i64>, Option<i32>);
+    let models: Vec<ModelRow> = sqlx::query_as(
+        "SELECT id, name, description, input_price_per_mtok, output_price_per_mtok, \
+             cache_ttl_seconds FROM models ORDER BY name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing models", &e))?;
     // `upstream_api_key IS NOT NULL` rather than the column: this query must
     // not be able to return a credential even by accident, so the ciphertext
     // never leaves Postgres on this path at all.
@@ -625,35 +634,47 @@ async fn list_models(
     Ok(Json(
         models
             .into_iter()
-            .map(|(id, name, description)| ModelView {
-                id,
-                name,
-                description,
-                backends: backends
-                    .iter()
-                    .filter(|(_, model_id, ..)| *model_id == id)
-                    .map(
-                        |(
-                            bid,
-                            _,
-                            api_base,
-                            upstream_model,
-                            has_key,
-                            protocol,
-                            auth_header,
-                            default_max_tokens,
-                        )| BackendView {
-                            id: *bid,
-                            api_base: api_base.clone(),
-                            upstream_model: upstream_model.clone(),
-                            has_upstream_api_key: *has_key,
-                            protocol: protocol.clone(),
-                            auth_header: auth_header.clone(),
-                            default_max_tokens: *default_max_tokens,
-                        },
-                    )
-                    .collect(),
-            })
+            .map(
+                |(
+                    id,
+                    name,
+                    description,
+                    input_price_per_mtok,
+                    output_price_per_mtok,
+                    cache_ttl_seconds,
+                )| ModelView {
+                    id,
+                    name,
+                    description,
+                    input_price_per_mtok,
+                    output_price_per_mtok,
+                    cache_ttl_seconds,
+                    backends: backends
+                        .iter()
+                        .filter(|(_, model_id, ..)| *model_id == id)
+                        .map(
+                            |(
+                                bid,
+                                _,
+                                api_base,
+                                upstream_model,
+                                has_key,
+                                protocol,
+                                auth_header,
+                                default_max_tokens,
+                            )| BackendView {
+                                id: *bid,
+                                api_base: api_base.clone(),
+                                upstream_model: upstream_model.clone(),
+                                has_upstream_api_key: *has_key,
+                                protocol: protocol.clone(),
+                                auth_header: auth_header.clone(),
+                                default_max_tokens: *default_max_tokens,
+                            },
+                        )
+                        .collect(),
+                },
+            )
             .collect(),
     ))
 }
@@ -755,6 +776,103 @@ async fn post_model(
         StatusCode::CREATED,
         Json(serde_json::json!({ "id": id, "name": body.name })),
     ))
+}
+
+/// Fields a model can be changed to. Every one optional, and absent means
+/// "leave it alone" rather than "clear it" — a `PATCH` that only sets a price
+/// must not silently turn caching off.
+///
+/// Clearing is spelled explicitly: `null` sets the column to NULL, which is how
+/// a model becomes unpriced or stops caching again.
+#[derive(Deserialize)]
+struct PatchModel {
+    #[serde(default, deserialize_with = "double_option")]
+    description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    input_price_per_mtok: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    output_price_per_mtok: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    cache_ttl_seconds: Option<Option<i32>>,
+}
+
+/// Tells "absent" apart from "present and null".
+///
+/// The distinction is the whole point of this handler: prices change, and
+/// correcting one must not require re-sending every other field — nor should
+/// omitting a field be indistinguishable from clearing it.
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// `PATCH /admin/models/{id}`: change a model's description, prices or cache
+/// TTL in place.
+///
+/// Exists because prices change. Without it the only way to correct one was to
+/// delete the model — cascading its backends and their encrypted credentials —
+/// and recreate the lot.
+async fn patch_model(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchModel>,
+) -> Result<StatusCode, ApiError> {
+    for (name, value) in [
+        ("input_price_per_mtok", body.input_price_per_mtok.flatten()),
+        (
+            "output_price_per_mtok",
+            body.output_price_per_mtok.flatten(),
+        ),
+    ] {
+        if value.is_some_and(|v| v < 0) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("{name} cannot be negative"),
+            ));
+        }
+    }
+    if body.cache_ttl_seconds.flatten().is_some_and(|v| v < 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "cache_ttl_seconds cannot be negative; 0 or null turns caching off",
+        ));
+    }
+
+    // `COALESCE($n, column)` would make "set to null" impossible, so each field
+    // carries its own "was it present" flag instead.
+    let done = sqlx::query(
+        "UPDATE models SET
+           description           = CASE WHEN $2 THEN $3  ELSE description           END,
+           input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
+           output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
+           cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.description.is_some())
+    .bind(body.description.clone().flatten().unwrap_or_default())
+    .bind(body.input_price_per_mtok.is_some())
+    .bind(body.input_price_per_mtok.flatten())
+    .bind(body.output_price_per_mtok.is_some())
+    .bind(body.output_price_per_mtok.flatten())
+    .bind(body.cache_ttl_seconds.is_some())
+    .bind(body.cache_ttl_seconds.flatten())
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("model update", &e))?;
+
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no model with id {id}; GET /admin/models lists the ids that exist"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_model(
@@ -2078,6 +2196,7 @@ async fn post_usage(
     let mut ttft_ms: Vec<Option<i32>> = Vec::with_capacity(submitted);
     let mut status: Vec<Option<i16>> = Vec::with_capacity(submitted);
     let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
+    let mut reported_cost: Vec<Option<i64>> = Vec::with_capacity(submitted);
     for e in &body.events {
         principal_ids.push(e.principal_id as i64);
         models.push(e.model.clone());
@@ -2088,6 +2207,7 @@ async fn post_usage(
         ttft_ms.push(e.ttft_ms.map(|v| v as i32));
         status.push(e.status.map(|v| v as i16));
         requested_model.push(e.requested_model.clone());
+        reported_cost.push(e.cost_micros.map(|c| c.min(i64::MAX as u64) as i64));
     }
 
     // `UNNEST` turns the parallel arrays back into rows, positionally —
@@ -2099,9 +2219,10 @@ async fn post_usage(
     let accepted_rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
-                $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[])
+                $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
+                $10::bigint[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
-                     duration_ms, ttft_ms, status, requested_model)
+                     duration_ms, ttft_ms, status, requested_model, reported_cost)
          )
          INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, cost_micros)
@@ -2114,11 +2235,26 @@ async fn post_usage(
                 --
                 -- NULL when the model is unpriced, so unpriced is visible
                 -- rather than looking free.
-                CASE WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
-                     THEN NULL
-                     ELSE (i.prompt_tokens     * COALESCE(m.input_price_per_mtok, 0)
-                         + i.completion_tokens * COALESCE(m.output_price_per_mtok, 0)) / 1000000
-                END
+                --
+                -- The provider's own figure wins where it gave one: it is the
+                -- amount actually billed, it already accounts for cache
+                -- discounts and for a routed alias serving a different model
+                -- per request, and it does not go stale when a price changes.
+                -- The configured price is the fallback, not the source.
+                --
+                -- Rounded, not truncated. Integer division truncates toward
+                -- zero, and a small request often costs single-digit
+                -- micro-units — truncating every one of them undercounts
+                -- systematically rather than symmetrically.
+                COALESCE(
+                    i.reported_cost,
+                    CASE WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
+                         THEN NULL
+                         ELSE ((i.prompt_tokens     * COALESCE(m.input_price_per_mtok, 0)
+                              + i.completion_tokens * COALESCE(m.output_price_per_mtok, 0))
+                              + 500000) / 1000000
+                    END
+                )
          FROM input i
          JOIN principals p ON p.id = i.principal_id
          JOIN models m ON m.name = i.model_name
@@ -2133,6 +2269,7 @@ async fn post_usage(
     .bind(&ttft_ms)
     .bind(&status)
     .bind(&requested_model)
+    .bind(&reported_cost)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -2755,7 +2892,10 @@ pub async fn serve(
         .route("/admin/principals/{id}/roles/{role}", delete(revoke_role))
         .route("/admin/principals/{id}/password", put(put_password))
         .route("/admin/models", get(list_models).post(post_model))
-        .route("/admin/models/{id}", delete(delete_model))
+        .route(
+            "/admin/models/{id}",
+            axum::routing::patch(patch_model).delete(delete_model),
+        )
         .route("/admin/models/{id}/backends", post(post_backend))
         .route("/admin/backends/{id}", delete(delete_backend))
         .route(
@@ -3653,6 +3793,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            cost_micros: None,
         }
     }
 
@@ -4308,6 +4449,188 @@ mod tests {
     /// write time if the credential is not one. Left to snapshot build, the
     /// mistake becomes a backend that looks configured in the API, is missing
     /// from routing, and says so only in the control plane's log.
+    /// The provider's figure wins over the configured price, and the fallback
+    /// rounds rather than truncating — a small request often costs single-digit
+    /// micro-units, and truncating every one undercounts systematically.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_reported_cost_wins_over_the_configured_price() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "cost-src-")
+            .track_prefix("models", "name", "cost-src-model-");
+        let principal_name = unique_name("cost-src");
+        let (_, created) = post_principal(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewPrincipal {
+                name: principal_name,
+                kind: None,
+                email: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let principal_id = created.0["id"].as_i64().unwrap();
+
+        let model_name = unique_name("cost-src-model");
+        let _ = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+                // $1 per Mtok in and out, so 3 tokens would price at 3 micros
+                // exactly and 1 token at 1.
+                input_price_per_mtok: Some(1_000_000),
+                output_price_per_mtok: Some(1_000_000),
+                cache_ttl_seconds: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut reported = usage_event(principal_id, &model_name);
+        reported.prompt_tokens = 1000;
+        reported.completion_tokens = 1000;
+        reported.cost_micros = Some(42);
+
+        // Same shape, no reported cost: priced from the model instead.
+        let mut priced = usage_event(principal_id, &model_name);
+        priced.prompt_tokens = 1000;
+        priced.completion_tokens = 1000;
+
+        // Half a micro-unit of work: truncation would record 0, rounding 1.
+        let mut tiny = usage_event(principal_id, &model_name);
+        tiny.prompt_tokens = 0;
+        tiny.completion_tokens = 1;
+
+        let _ = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![reported, priced, tiny],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let costs: Vec<Option<i64>> =
+            sqlx::query_scalar("SELECT cost_micros FROM usage_events WHERE principal_id = $1")
+                .bind(principal_id)
+                .fetch_all(&ctx.pool)
+                .await
+                .unwrap();
+        assert!(
+            costs.contains(&Some(42)),
+            "the provider's own figure must win: {costs:?}"
+        );
+        assert!(
+            costs.contains(&Some(2000)),
+            "and the configured price is the fallback: {costs:?}"
+        );
+        assert!(
+            costs.contains(&Some(1)),
+            "one token at 1/Mtok rounds to 1, not down to 0: {costs:?}"
+        );
+    }
+
+    /// Prices change. Before this, correcting one meant deleting the model —
+    /// cascading its backends and their encrypted credentials — and recreating
+    /// the lot.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_models_price_can_be_corrected_without_recreating_it() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "patch-model-");
+        let name = unique_name("patch-model");
+        let (_, created) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewModel {
+                name: name.clone(),
+                description: "before".into(),
+                input_price_per_mtok: Some(3_000_000),
+                output_price_per_mtok: Some(15_000_000),
+                cache_ttl_seconds: Some(60),
+            }),
+        )
+        .await
+        .unwrap();
+        let id = created.0["id"].as_i64().unwrap();
+
+        // The read path must show them, or a price can be set and never seen.
+        let listed = list_models(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
+        let view = listed.0.iter().find(|m| m.id == id).expect("listed");
+        assert_eq!(view.input_price_per_mtok, Some(3_000_000));
+        assert_eq!(view.cache_ttl_seconds, Some(60));
+
+        // Change one field. Everything omitted must be left alone — a PATCH
+        // that sets a price must not silently turn caching off.
+        patch_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(id),
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "input_price_per_mtok": 4_000_000
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let listed = list_models(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
+        let view = listed.0.iter().find(|m| m.id == id).expect("listed");
+        assert_eq!(view.input_price_per_mtok, Some(4_000_000));
+        assert_eq!(view.output_price_per_mtok, Some(15_000_000), "untouched");
+        assert_eq!(view.cache_ttl_seconds, Some(60), "untouched");
+        assert_eq!(view.description, "before", "untouched");
+
+        // Explicit null clears, which is how a model becomes unpriced again.
+        patch_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(id),
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "input_price_per_mtok": null,
+                    "cache_ttl_seconds": null
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let listed = list_models(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
+        let view = listed.0.iter().find(|m| m.id == id).expect("listed");
+        assert_eq!(view.input_price_per_mtok, None, "null clears");
+        assert_eq!(view.cache_ttl_seconds, None);
+        assert_eq!(
+            view.output_price_per_mtok,
+            Some(15_000_000),
+            "still untouched"
+        );
+
+        let missing = patch_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(-1),
+            Json(serde_json::from_value(serde_json::json!({"description": "x"})).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn a_service_account_credential_is_validated_when_the_backend_is_created() {

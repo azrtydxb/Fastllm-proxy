@@ -60,6 +60,15 @@ pub struct UsageEvent {
     /// one that actually answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    /// What the provider says it charged, in micro-units.
+    ///
+    /// Authoritative where present: it is the amount actually billed, it
+    /// already accounts for cache discounts and for a routed alias serving a
+    /// different model per request, and it does not go stale when a provider
+    /// changes its prices. The control plane falls back to the configured
+    /// price only when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -258,6 +267,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            cost_micros: None,
         }
     }
 

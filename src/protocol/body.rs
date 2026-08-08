@@ -58,6 +58,9 @@ impl UsageSink {
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
             status: Some(self.status),
             requested_model: self.requested_model,
+            // A translated backend's usage comes from the translator, which
+            // reports tokens and not money; the control plane prices it.
+            cost_micros: None,
         });
     }
 }

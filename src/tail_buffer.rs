@@ -36,6 +36,14 @@ pub struct TailBuffer {
 pub struct UsageTokens {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// What the provider says it charged, in micro-units, when it says.
+    ///
+    /// Authoritative where present, and strictly better than any price table:
+    /// it is the amount actually billed, it already accounts for cache
+    /// discounts and per-request routing, and it needs no maintenance when a
+    /// provider changes its prices. OpenRouter returns it unasked; most
+    /// providers return nothing, and those fall back to the configured price.
+    pub cost_micros: Option<u64>,
 }
 
 impl TailBuffer {
@@ -169,9 +177,20 @@ fn parse_usage_object(bytes: &[u8]) -> Option<UsageTokens> {
     }
     let prompt_tokens = usage.get("prompt_tokens")?.as_u64()?;
     let completion_tokens = usage.get("completion_tokens")?.as_u64()?;
+    // Dollars as a float on the wire — 4.8e-06 for a small request — so this
+    // is the one place a float is unavoidable. Converted to integer micro-units
+    // immediately and rounded rather than truncated: at these magnitudes a
+    // request often costs single-digit micros, and truncating every one of them
+    // would undercount systematically rather than symmetrically.
+    let cost_micros = usage
+        .get("cost")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| (c * 1_000_000.0).round() as u64);
     Some(UsageTokens {
         prompt_tokens: prompt_tokens.min(u32::MAX as u64) as u32,
         completion_tokens: completion_tokens.min(u32::MAX as u64) as u32,
+        cost_micros,
     })
 }
 
@@ -308,7 +327,8 @@ mod tests {
             tail.extract_usage(),
             Some(UsageTokens {
                 prompt_tokens: 7,
-                completion_tokens: 9
+                completion_tokens: 9,
+                cost_micros: None
             })
         );
     }
@@ -325,7 +345,8 @@ mod tests {
             tail.extract_usage(),
             Some(UsageTokens {
                 prompt_tokens: 50,
-                completion_tokens: 60
+                completion_tokens: 60,
+                cost_micros: None
             })
         );
     }
@@ -346,5 +367,54 @@ mod tests {
         let at = buf.windows(5).position(|w| w == b"usage").unwrap();
         assert_eq!(line_around(buf, at), b"data: {\"usage\":1}");
         assert_eq!(line_around(buf, 0), b"first");
+    }
+
+    /// The provider's own figure, where it gives one. OpenRouter returns it
+    /// unasked, in dollars as a float, and it is authoritative: it is what was
+    /// billed, cache discounts and routed aliases included.
+    #[test]
+    fn a_provider_reported_cost_is_read_from_the_usage_object() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(br#"data: {"usage":{"prompt_tokens":8,"completion_tokens":6,"cost":4.8e-06}}"#);
+        tail.push(b"\n\ndata: [DONE]\n\n");
+        let got = tail.extract_usage().unwrap();
+        assert_eq!(got.prompt_tokens, 8);
+        // 4.8e-06 dollars is 4.8 micro-units. Rounded, not truncated: a small
+        // request often costs single digits, and truncating every one of them
+        // undercounts systematically rather than symmetrically.
+        assert_eq!(got.cost_micros, Some(5));
+    }
+
+    #[test]
+    fn a_provider_that_reports_no_cost_leaves_it_absent() {
+        // Absent, not zero — the control plane prices it from the model's
+        // configured rate instead, and zero would look like a free request.
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(br#"data: {"usage":{"prompt_tokens":8,"completion_tokens":6}}"#);
+        tail.push(b"\n\ndata: [DONE]\n\n");
+        assert_eq!(tail.extract_usage().unwrap().cost_micros, None);
+    }
+
+    #[test]
+    fn a_nonsense_cost_is_ignored_rather_than_trusted() {
+        // Not `1e400`: a number outside f64's range fails serde_json at the
+        // parse, so the whole line yields nothing — the same all-or-nothing
+        // behaviour any malformed JSON always had here, and not something
+        // reading `cost` introduced.
+        for bad in ["null", "-1", "\"free\"", "true"] {
+            let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+            tail.push(
+                format!(
+                    r#"data: {{"usage":{{"prompt_tokens":1,"completion_tokens":1,"cost":{bad}}}}}"#
+                )
+                .as_bytes(),
+            );
+            tail.push(b"\n\ndata: [DONE]\n\n");
+            assert_eq!(
+                tail.extract_usage().unwrap().cost_micros,
+                None,
+                "cost {bad} must not be believed"
+            );
+        }
     }
 }

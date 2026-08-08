@@ -226,10 +226,29 @@ is $3.00 per million tokens.
 -d '{"name":"claude-sonnet","input_price_per_mtok":3000000,"output_price_per_mtok":15000000}'
 ```
 
-Every usage row then carries `cost_micros`, computed at ingest from the price
-**at the time the request ran** and stored rather than derived — a later price
-change must not silently rewrite what last month cost. A model with no price is
-left NULL rather than zero, so unpriced is visible instead of looking free.
+Prices are changed in place, and read back:
+
+```bash
+curl -X PATCH .../admin/models/42 -d '{"input_price_per_mtok":4000000}'
+```
+
+Absent means "leave alone" and an explicit `null` clears — so correcting a
+price does not silently turn caching off, and a model can become unpriced
+again. `GET /admin/models` returns both prices and the cache TTL.
+
+**The provider's own figure wins where it gives one.** OpenRouter returns
+`usage.cost` unasked, and that is authoritative: it is the amount actually
+billed, it already accounts for cache discounts and for a routed alias serving
+a different model per request, and it does not go stale when a provider changes
+its prices. The configured price is the fallback, not the source. Most
+providers report nothing, and those are priced from the table.
+
+Every usage row carries `cost_micros`, stored rather than derived — a later
+price change must not silently rewrite what last month cost. A model with no
+price and no reported cost is left NULL rather than zero, so unpriced is
+visible instead of looking free. The table fallback rounds rather than
+truncating: a small request often costs single-digit micro-units, and
+truncating each one undercounts systematically rather than symmetrically.
 
 Budgets cap tokens, money, or both:
 
