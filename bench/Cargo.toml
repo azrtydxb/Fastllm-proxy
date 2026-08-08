@@ -72,6 +72,10 @@ path = "src/classcheck.rs"
 name = "potion-wide"
 path = "src/potion_wide.rs"
 
+[[bin]]
+name = "wrapskew"
+path = "src/wrapskew.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
@@ -82,7 +86,7 @@ serde_json = "1"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 model2vec-rs = "0.2"
-fastllm-proxy = { path = "..", default-features = false }
+fastllm-proxy = { path = "..", default-features = false, features = ["classifier"] }
 # Real transformer embeddings (ONNX via `ort`), for the tier-2 half of the
 # cascade experiment only. A heavy native dependency, which is precisely why it
 # lives in `bench` and not in the proxy until the measurement justifies it.

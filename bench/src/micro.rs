@@ -238,6 +238,32 @@ fn telemetry() {
         });
     }
 
+    // Extracting the turn to classify. Only paid when prompt classes are
+    // configured, and against the ~150us the fast tier costs after it.
+    {
+        use fastllm_proxy::classifier::prompt::text_to_classify;
+        let turn = |n: usize| {
+            let mut msgs = vec![serde_json::json!({"role":"system","content":"x".repeat(400)})];
+            for i in 0..n {
+                msgs.push(serde_json::json!({"role":"user","content":format!("question {i} {}", "y".repeat(300))}));
+                msgs.push(serde_json::json!({"role":"assistant","content":"z".repeat(600)}));
+            }
+            msgs.push(serde_json::json!({"role":"user","content":"Why does this Rust code fail the borrow checker?"}));
+            serde_json::to_vec(&serde_json::json!({"model":"auto","messages":msgs})).unwrap()
+        };
+        for (label, n) in [("1 turn", 0usize), ("10 turns", 10), ("40 turns", 40)] {
+            let body = turn(n);
+            let size = body.len();
+            bench(
+                &format!("text_to_classify ({label}, {size} B)"),
+                200_000,
+                || {
+                    std::hint::black_box(text_to_classify(&body));
+                },
+            );
+        }
+    }
+
     // The number that actually matters at load: eight threads writing the same
     // counters, which is where false sharing would show up if these were laid
     // out badly.

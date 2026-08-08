@@ -243,7 +243,12 @@ impl AppState {
             return None;
         }
         let tier1 = self.tier1.as_ref()?;
-        let text = std::str::from_utf8(body).ok()?;
+        // The last user message, not the raw body. See `classifier::prompt`:
+        // classifying the body meant a system prompt cost two thirds of recall
+        // and a fourth-turn question was undetectable, because the window never
+        // reached the words being asked.
+        let text = crate::classifier::prompt::text_to_classify(body)?;
+        let text = text.as_str();
         // Timed here rather than around the call in `proxy_request`, because
         // this is the only scope that knows an escalation happened: the
         // returned `Classification` reports which tier *decided*, and a tier-2

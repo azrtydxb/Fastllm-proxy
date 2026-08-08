@@ -2,7 +2,9 @@
 --
 -- A class is a name plus a handful of example prompts. The control plane
 -- embeds the examples and averages them into a centroid that ships in the
--- snapshot; the request path embeds the prompt and takes the nearest centroid.
+-- snapshot; the request path embeds the request's last user message and takes
+-- the nearest centroid. Both sides embedding bare prompt text is what makes
+-- the comparison meaningful — see src/classifier/prompt.rs.
 -- There is no training step and no model to fine-tune, so adding a class is a
 -- snapshot rebuild exactly like adding a backend.
 CREATE TABLE prompt_classes (

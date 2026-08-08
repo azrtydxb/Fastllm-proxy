@@ -2,7 +2,14 @@
 //!
 //! A class is a name plus example prompts. The control plane embeds the
 //! examples and averages them into a centroid; the data plane embeds the
-//! request and takes the nearest centroid. There is no training step, no model
+//! request's **last user message** (`prompt::text_to_classify`) and takes the
+//! nearest centroid.
+//!
+//! That both sides embed bare prompt text is the whole basis of the
+//! comparison, and it used to be false — the request path embedded the raw
+//! JSON body, which cost two thirds of recall on a request with a system
+//! prompt and made the class undetectable by the fourth turn. See
+//! `classifier::prompt` for the measurements. There is no training step, no model
 //! to fine-tune, and adding a class is a snapshot rebuild like adding a
 //! backend.
 //!
@@ -36,6 +43,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub mod prompt;
 pub mod tier1;
 
 #[cfg(feature = "classifier-tier2")]

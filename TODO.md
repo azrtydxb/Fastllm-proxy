@@ -250,6 +250,42 @@ the right models, and misbehaves only on the part that changed. `/health` now
 carries `snapshot_version` and a key count, and `/metrics` exposes
 `fastllm_snapshot_version`, so a fleet-wide `max() - min()` shows a stuck pod.
 
+## The classifier was reading the wrong text — fixed (2026-08-08)
+
+Found by following a question about whether a classification cache would go
+stale on a long conversation. It would have, and the cache was not the problem:
+the classifier could not see the current turn at all.
+
+`AppState::classify` was handed the **raw request body** and embedded the first
+128 tokens of it, while class centroids are built from bare example prompts an
+operator typed. Two different text distributions compared by cosine similarity,
+with nothing able to notice. Measured with `bench/wrapskew`, 4,750 held-out
+prompts, centroids from bare text throughout:
+
+  query shape                 accuracy  coding prec  coding rec  mean margin
+  bare prompt                    98.6%        71.7%       91.3%        0.198
+  minimal JSON body              98.6%        72.3%       92.0%        0.173
+  body with a system prompt      97.8%        97.8%       30.0%        0.220
+  turn 4 of a conversation       96.8%         0.0%        0.0%        0.225
+  any shape, after the fix       98.6%        71.7%       91.3%        0.198
+
+The JSON wrapping was harmless — a minimal body matches bare text. The damage
+is what fills the window before the user's words: a system prompt cost two
+thirds of recall, and by turn four the class was undetectable.
+
+Two things made it invisible. Accuracy never dropped below 96.8%, because the
+class is a small share of traffic — the base-rate trap this repo's own
+classifier doc warns about. And the mean margin *rose* as accuracy collapsed,
+so `min_margin` was no defence: confidently wrong, and no threshold an operator
+could set would filter it.
+
+Fixed by classifying `prompt::text_to_classify(body)` — the last user message,
+alone. Costs 208 ns on a single-turn request and 7.6 µs on a 40-turn one,
+against the ~150 µs the fast tier costs after it, and only when classes exist.
+
+Every accuracy number in `docs/classifier.md` was measured on bare prompts, so
+they describe the fixed behaviour and not the shipped one. They are now true.
+
 ## Escalation cost: measured, then halved (2026-08-08)
 
 The docs claimed 3.27 ms from `bench/minilm` on a 10-core macOS host. The
@@ -408,9 +444,13 @@ the cloud.
 
 Still not done:
 
-- No classification cache. The prefix hash the router already computes would
-  key one, so a multi-turn conversation classifies once instead of per turn.
-  Worth doing only if 115us ever shows up in a profile, which it has not.
+- No classification cache. The router's prefix hash keys the *first* 2 KiB of
+  the body, which is what makes it right for cache affinity and wrong for this:
+  now that the classifier reads the last user message, two turns of one
+  conversation share a prefix hash and must not share a classification. A cache
+  would need its own key over the extracted text. Worth revisiting only if the
+  escalation rate — `fastllm_classify_escalations_total` over total requests —
+  turns out to be high enough for 13-15 ms to matter in the average.
 - Routing on *difficulty* remains out of scope: the 96% GSM8K-versus-lookup
   separation most likely measures genre rather than difficulty.
 

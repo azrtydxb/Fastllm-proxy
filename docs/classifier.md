@@ -99,6 +99,42 @@ Twelve viable classes on the 115 µs tier. Escalated to tier 2, writing-craft
 goes 78.8% → 93.5%, statistics 74.0% → 85.3%, legal 85.9% → 93.2% — tier 2
 upgrades good to excellent, but rarely changes whether a class is usable.
 
+## What the request path classifies
+
+The **last user message**, on its own — not the system prompt, not the earlier
+turns, and not the JSON around them.
+
+That sounds obvious and was not what the code did. The classifier was handed
+the raw request body and read the first 128 tokens of it, while the centroids
+it compares against are built from bare example prompts an operator typed. Two
+different text distributions, and nearest-centroid classification cannot notice.
+Measured with `bench/wrapskew` over 4,750 held-out prompts:
+
+| query shape | accuracy | coding precision | coding recall | mean margin |
+|---|---|---|---|---|
+| bare prompt | 98.6% | 71.7% | 91.3% | 0.198 |
+| minimal JSON body | 98.6% | 72.3% | 92.0% | 0.173 |
+| body with a system prompt | 97.8% | 97.8% | **30.0%** | 0.220 |
+| turn 4 of a conversation | 96.8% | **0.0%** | **0.0%** | 0.225 |
+| **any of the above, after the fix** | **98.6%** | **71.7%** | **91.3%** | **0.198** |
+
+Three things in that table are worth sitting with:
+
+- **The JSON wrapping was harmless.** A minimal body scores the same as bare
+  text. The damage comes from what fills the window *before* the user's words.
+- **A system prompt cost two thirds of recall**, and by the fourth turn the
+  class was undetectable — the question being asked sits at the end of the body,
+  where a 128-token window never reaches.
+- **Accuracy never moved below 96.8%**, because coding is a small share of
+  traffic. That is exactly the base-rate trap described further down this page,
+  hiding a total failure. And the mean margin *rose* as accuracy collapsed, so
+  a `min_margin` floor is no defence: the classifier was confidently wrong, and
+  no threshold an operator could set would have filtered it.
+
+Extracting the turn costs 208 ns on a single-turn request and 7.6 µs on a
+40-turn one (`bench/micro`), against the ~150 µs the fast tier costs after it,
+and it is only paid when prompt classes are configured.
+
 ## Three findings that shaped the design
 
 **Classify by subject, not by verb.** Subject-matter classes work. Task-shaped
