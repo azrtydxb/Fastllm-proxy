@@ -1564,6 +1564,350 @@ struct RoleView {
     permissions: Vec<PermissionView>,
 }
 
+/// Usage rolled up over a window.
+#[derive(Serialize, Debug)]
+struct UsageSummary {
+    /// Whatever the caller grouped by: a principal name, a model name, or a
+    /// day. `None` for a row whose key is null (usage attributed to a model
+    /// that has since been deleted).
+    key: Option<String>,
+    requests: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    /// Summed over the rows that *have* a cost.
+    cost_micros: i64,
+    /// How many of `requests` contributed nothing to `cost_micros` because the
+    /// model is unpriced and no provider reported a figure.
+    ///
+    /// Published rather than folded in, because `SUM` over a nullable column
+    /// treats those rows as zero and the total then reads as "this was cheap"
+    /// when it means "this is unknown". A caller showing a spend figure needs
+    /// to know how much of the traffic it does not cover.
+    unpriced_requests: i64,
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    #[serde(default = "default_group_by")]
+    group_by: String,
+    #[serde(default)]
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default = "default_usage_limit")]
+    limit: i64,
+}
+
+fn default_group_by() -> String {
+    "model".to_string()
+}
+
+fn default_usage_limit() -> i64 {
+    100
+}
+
+/// `GET /admin/usage`: aggregate usage and spend.
+///
+/// Grouped rather than paginated over raw rows: a screen wants "spend by team
+/// this month", and reading a million events to compute it client-side is the
+/// thing this endpoint exists to prevent.
+async fn usage_summary(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    axum::extract::Query(q): axum::extract::Query<UsageQuery>,
+) -> Result<Json<Vec<UsageSummary>>, ApiError> {
+    // An allow-list, not interpolation: this is the one place a caller's
+    // string would reach the query text.
+    let key_expr = match q.group_by.as_str() {
+        "model" => "m.name",
+        "principal" => "p.name",
+        "day" => "to_char(date_trunc('day', u.at), 'YYYY-MM-DD')",
+        other => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("group_by {other:?} is not one of: model, principal, day"),
+            ))
+        }
+    };
+    let limit = q.limit.clamp(1, 1000);
+
+    let sql = format!(
+        "SELECT {key_expr} AS key,
+                count(*)                                        AS requests,
+                -- `sum()` over a bigint returns *numeric* in Postgres, not
+                -- bigint, so each of these needs the cast back or the decode
+                -- fails at runtime with nothing wrong in the SQL itself.
+                COALESCE(sum(u.prompt_tokens), 0)::bigint       AS prompt_tokens,
+                COALESCE(sum(u.completion_tokens), 0)::bigint   AS completion_tokens,
+                COALESCE(sum(u.cost_micros), 0)::bigint         AS cost_micros,
+                count(*) FILTER (WHERE u.cost_micros IS NULL) AS unpriced_requests
+         FROM usage_events u
+         JOIN principals p ON p.id = u.principal_id
+         LEFT JOIN models m ON m.id = u.model_id
+         WHERE ($1::timestamptz IS NULL OR u.at >= $1)
+           AND ($2::timestamptz IS NULL OR u.at <  $2)
+         GROUP BY 1
+         ORDER BY cost_micros DESC, requests DESC
+         LIMIT $3"
+    );
+    let rows: Vec<(Option<String>, i64, i64, i64, i64, i64)> = sqlx::query_as(&sql)
+        .bind(q.since)
+        .bind(q.until)
+        .bind(limit)
+        .fetch_all(&ctx.pool)
+        .await
+        .map_err(|e| db_error("summarising usage", &e))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(key, requests, prompt_tokens, completion_tokens, cost_micros, unpriced)| {
+                    UsageSummary {
+                        key,
+                        requests,
+                        prompt_tokens,
+                        completion_tokens,
+                        cost_micros,
+                        unpriced_requests: unpriced,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
+/// The verbs a role may be granted, and the only ones this API will write.
+///
+/// A closed list because a permission is only meaningful if something checks
+/// it: inventing `model:delete` here would produce a row that grants nothing
+/// and reads, on a permission matrix, as though it did.
+const GRANTABLE_VERBS: &[&str] = &[
+    admin_permission::READ,
+    admin_permission::KEY_CREATE,
+    admin_permission::KEY_REVOKE,
+    admin_permission::CONFIG_WRITE,
+    "model:invoke",
+];
+
+#[derive(Deserialize)]
+struct GrantPermission {
+    verb: String,
+    /// `*` for the admin verbs, or `model/<name>` for `model:invoke`. Absent
+    /// means `*`, which is what every admin verb wants and what a caller
+    /// toggling a matrix cell would otherwise have to know.
+    #[serde(default)]
+    resource: Option<String>,
+}
+
+/// `POST /admin/roles/{name}/permissions`: grant a verb to a role.
+///
+/// Idempotent — granting twice is not an error, because a permission matrix
+/// toggled twice should end up in the state the operator sees, not a 409.
+async fn grant_permission(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(role): Path<String>,
+    Json(body): Json<GrantPermission>,
+) -> Result<StatusCode, ApiError> {
+    let resource = body.resource.unwrap_or_else(|| "*".into());
+    validate_grant(&body.verb, &resource)?;
+
+    let role_id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+        .bind(&role)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| db_error("looking up the role", &e))?;
+    let Some(role_id) = role_id else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no role named {role:?}; GET /admin/roles lists them"),
+        ));
+    };
+
+    // The permission row is created on demand: `model:invoke` on a specific
+    // model is one row per model, and an operator granting access to a new
+    // model should not have to create the permission first.
+    let permission_id: i64 = sqlx::query_scalar(
+        "INSERT INTO permissions (verb, resource) VALUES ($1, $2)
+         ON CONFLICT (verb, resource) DO UPDATE SET verb = EXCLUDED.verb
+         RETURNING id",
+    )
+    .bind(&body.verb)
+    .bind(&resource)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("creating the permission", &e))?;
+
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(role_id)
+    .bind(permission_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("granting the permission", &e))?;
+
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/roles/{name}/permissions`: revoke one.
+///
+/// The permission row itself is left alone — other roles may hold it, and a
+/// row with no holders is inert.
+async fn revoke_permission(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(role): Path<String>,
+    Json(body): Json<GrantPermission>,
+) -> Result<StatusCode, ApiError> {
+    let resource = body.resource.unwrap_or_else(|| "*".into());
+    let done = sqlx::query(
+        "DELETE FROM role_permissions rp
+         USING roles r, permissions p
+         WHERE rp.role_id = r.id AND rp.permission_id = p.id
+           AND r.name = $1 AND p.verb = $2 AND p.resource = $3",
+    )
+    .bind(&role)
+    .bind(&body.verb)
+    .bind(&resource)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("revoking the permission", &e))?;
+
+    // Revoking something already absent is the state the caller asked for.
+    if done.rows_affected() > 0 {
+        refresh(&ctx).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reject a grant that would read as meaningful and enforce nothing.
+fn validate_grant(verb: &str, resource: &str) -> Result<(), ApiError> {
+    if !GRANTABLE_VERBS.contains(&verb) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "verb {verb:?} is not one of: {}",
+                GRANTABLE_VERBS.join(", ")
+            ),
+        ));
+    }
+    if verb == "model:invoke" {
+        // `model/*` is every model; `model/<name>` is one. Anything else would
+        // silently match nothing, which on a matrix looks like access granted.
+        if !resource.starts_with("model/") {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "model:invoke needs a resource of model/* or model/<name>".to_string(),
+            ));
+        }
+    } else if resource != "*" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("verb {verb:?} is only meaningful with resource *"),
+        ));
+    }
+    Ok(())
+}
+
+/// One recorded configuration change.
+#[derive(Serialize, Debug)]
+struct AuditView {
+    id: i64,
+    /// The name as it was when the change was made. Kept even after the
+    /// principal is deleted — a trail that disappears with the account that
+    /// did the thing is not a trail.
+    actor_name: String,
+    actor_id: Option<i64>,
+    action: String,
+    target: String,
+    detail: serde_json::Value,
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    /// Newest first, so a UI's first page is the interesting one.
+    #[serde(default = "default_audit_limit")]
+    limit: i64,
+    /// Keyset rather than an offset: `before` is the id of the oldest row the
+    /// caller already has. An offset would skip or repeat rows as new ones
+    /// arrive at the head, which on an append-only log is guaranteed.
+    #[serde(default)]
+    before: Option<i64>,
+    #[serde(default)]
+    actor_id: Option<i64>,
+    /// Substring, so `/admin/keys` finds every route under it.
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn default_audit_limit() -> i64 {
+    100
+}
+
+/// `GET /admin/audit`: read the configuration-change log.
+///
+/// Written by a layer over every `/admin/*` mutation; this is how it is read
+/// back without reaching for `psql`.
+async fn list_audit(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Result<Json<Vec<AuditView>>, ApiError> {
+    // Clamped rather than rejected: a UI asking for more than this wants
+    // "lots", and an unbounded page is how one screen reads a year of history
+    // into memory.
+    let limit = q.limit.clamp(1, 1000);
+    type AuditRow = (
+        i64,
+        Option<i64>,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<AuditRow> = sqlx::query_as(
+        "SELECT id, actor_id, actor_name, action, target, detail, at
+         FROM audit_events
+         WHERE ($1::bigint IS NULL OR id < $1)
+           AND ($2::bigint IS NULL OR actor_id = $2)
+           AND ($3::text   IS NULL OR target ILIKE '%' || $3 || '%')
+           AND ($4::timestamptz IS NULL OR at >= $4)
+         ORDER BY id DESC
+         LIMIT $5",
+    )
+    .bind(q.before)
+    .bind(q.actor_id)
+    .bind(q.target.as_deref())
+    .bind(q.since)
+    .bind(limit)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing audit events", &e))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(id, actor_id, actor_name, action, target, detail, at)| AuditView {
+                    id,
+                    actor_id,
+                    actor_name,
+                    action,
+                    target,
+                    detail,
+                    at,
+                },
+            )
+            .collect(),
+    ))
+}
+
 async fn list_roles(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
@@ -2933,6 +3277,12 @@ pub async fn serve(
             delete(delete_default_target),
         )
         .route("/admin/roles", get(list_roles))
+        .route("/admin/audit", get(list_audit))
+        .route("/admin/usage", get(usage_summary))
+        .route(
+            "/admin/roles/{name}/permissions",
+            post(grant_permission).delete(revoke_permission),
+        )
         .route("/admin/limits", get(list_limits))
         .route(
             "/admin/principals/{id}/limits",
@@ -4532,6 +4882,254 @@ mod tests {
         assert!(
             costs.contains(&Some(1)),
             "one token at 1/Mtok rounds to 1, not down to 0: {costs:?}"
+        );
+    }
+
+    /// The GUI's Audit screen. Written by a layer, and this is how it is read
+    /// back without reaching for psql.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn the_audit_log_can_be_read_back_and_filtered() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "audit-read-");
+        let name = unique_name("audit-read");
+
+        sqlx::query(
+            "INSERT INTO audit_events (actor_id, actor_name, action, target, detail)
+             VALUES (NULL, $1, 'POST', '/admin/keys', '{\"status\":201}'::jsonb),
+                    (NULL, $1, 'DELETE', '/admin/models/1', '{}'::jsonb)",
+        )
+        .bind(&name)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let all = list_audit(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(serde_json::from_value(serde_json::json!({})).unwrap()),
+        )
+        .await
+        .unwrap();
+        // Newest first, so a UI's first page is the interesting one.
+        let mine: Vec<_> = all.0.iter().filter(|a| a.actor_name == name).collect();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].action, "DELETE", "newest first");
+
+        // Substring, so /admin/keys finds everything under it.
+        let filtered = list_audit(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(
+                serde_json::from_value(serde_json::json!({"target": "/admin/keys"})).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(filtered
+            .0
+            .iter()
+            .filter(|a| a.actor_name == name)
+            .all(|a| a.target.contains("/admin/keys")));
+
+        // An absurd limit is clamped rather than refused: a UI asking for
+        // "lots" should not read a year of history into memory.
+        let clamped = list_audit(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(
+                serde_json::from_value(serde_json::json!({"limit": 100000})).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(clamped.0.len() <= 1000);
+    }
+
+    /// The permission matrix has to be able to *change* something.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_role_can_be_granted_and_revoked_including_one_model() {
+        let (ctx, _cache) = test_ctx().await;
+        let role = unique_name("grant-role");
+        let model = unique_name("grant-model");
+        let _cleanup = TestCleanup::new()
+            .track_prefix("roles", "name", "grant-role-")
+            .track_prefix("models", "name", "grant-model-")
+            .track_prefix("permissions", "resource", "model/grant-model-");
+        sqlx::query("INSERT INTO roles (name) VALUES ($1)")
+            .bind(&role)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+
+        let grant = |verb: &str, resource: Option<&str>| {
+            let ctx = ctx.clone();
+            let role = role.clone();
+            let body = GrantPermission {
+                verb: verb.to_string(),
+                resource: resource.map(str::to_string),
+            };
+            async move {
+                grant_permission(
+                    State(ctx),
+                    RequireConfigWrite::default(),
+                    Path(role),
+                    Json(body),
+                )
+                .await
+            }
+        };
+
+        // An admin verb needs no resource — a matrix cell should not have to
+        // know that.
+        grant("usage:read", None).await.unwrap();
+        // Granting twice is the state the operator sees, not a 409.
+        grant("usage:read", None).await.unwrap();
+        grant("model:invoke", Some(&format!("model/{model}")))
+            .await
+            .unwrap();
+
+        let roles = list_roles(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
+        let view = roles.0.iter().find(|r| r.name == role).expect("role");
+        assert!(view.permissions.iter().any(|p| p.verb == "usage:read"));
+        assert!(view
+            .permissions
+            .iter()
+            .any(|p| p.verb == "model:invoke" && p.resource == format!("model/{model}")));
+
+        // A verb nothing enforces would read as access granted on a matrix.
+        assert_eq!(
+            grant("model:delete", None).await.unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        // As would model:invoke on a resource that matches no model.
+        assert_eq!(
+            grant("model:invoke", Some("everything"))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        revoke_permission(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(role.clone()),
+            Json(GrantPermission {
+                verb: "usage:read".into(),
+                resource: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let roles = list_roles(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap();
+        let view = roles.0.iter().find(|r| r.name == role).expect("role");
+        assert!(!view.permissions.iter().any(|p| p.verb == "usage:read"));
+    }
+
+    /// The number the GUI's spend figure depends on: unpriced traffic must be
+    /// counted, not silently summed as zero.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn usage_aggregates_report_unpriced_requests_separately() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "agg-")
+            .track_prefix("models", "name", "agg-model-");
+        let principal_name = unique_name("agg");
+        let (_, created) = post_principal(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewPrincipal {
+                name: principal_name,
+                kind: None,
+                email: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let principal_id = created.0["id"].as_i64().unwrap();
+
+        // One priced model and one unpriced.
+        let priced = unique_name("agg-model-priced");
+        let unpriced = unique_name("agg-model-unpriced");
+        for (name, price) in [(&priced, Some(1_000_000)), (&unpriced, None)] {
+            let _ = post_model(
+                State(ctx.clone()),
+                RequireConfigWrite::default(),
+                Json(NewModel {
+                    name: name.clone(),
+                    description: String::new(),
+                    input_price_per_mtok: price,
+                    output_price_per_mtok: price,
+                    cache_ttl_seconds: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut a = usage_event(principal_id, &priced);
+        a.prompt_tokens = 1000;
+        a.completion_tokens = 0;
+        let b = usage_event(principal_id, &unpriced);
+        let _ = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest { events: vec![a, b] }),
+        )
+        .await
+        .unwrap();
+
+        let rows = usage_summary(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(
+                serde_json::from_value(serde_json::json!({"group_by": "model"})).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let p = rows
+            .0
+            .iter()
+            .find(|r| r.key.as_deref() == Some(priced.as_str()))
+            .expect("priced model");
+        assert_eq!(p.cost_micros, 1000);
+        assert_eq!(p.unpriced_requests, 0);
+
+        let u = rows
+            .0
+            .iter()
+            .find(|r| r.key.as_deref() == Some(unpriced.as_str()))
+            .expect("unpriced model");
+        assert_eq!(u.requests, 1);
+        assert_eq!(
+            u.unpriced_requests, 1,
+            "summing a NULL cost as zero would read as 'this was cheap' when it \
+             means 'this is unknown'"
+        );
+
+        assert_eq!(
+            usage_summary(
+                State(ctx.clone()),
+                RequireRead::default(),
+                axum::extract::Query(
+                    serde_json::from_value(serde_json::json!({"group_by": "'; DROP TABLE"}))
+                        .unwrap()
+                ),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST,
+            "group_by is an allow-list, not interpolation"
         );
     }
 
