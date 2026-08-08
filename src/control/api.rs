@@ -131,6 +131,9 @@ struct Ctx {
     /// every `POST /limits/reconcile` call the same way `pool` is shared by
     /// every database query.
     reconcile: Arc<ReconcileState>,
+    /// Flags this process was started with, for `GET /admin/config`.
+    deployment: Arc<Deployment>,
+    started_at: std::time::Instant,
     /// Whether `serve` bound with TLS — the one bit `login`/`logout` need to
     /// decide whether to set `Secure` on the session cookie. `Secure`
     /// unconditionally would make the cookie silently never round-trip over
@@ -1608,6 +1611,14 @@ async fn sync_prices(
         "already_priced": report.skipped,
         "unmatched": report.unmatched,
         "dry_run": body.dry_run,
+        // The point of `dry_run`: a caller has to be able to see *what* would
+        // change before agreeing to it. A count alone would make the preview
+        // useless and the confirmation a formality.
+        "changes": report.changes.iter().map(|(name, price)| serde_json::json!({
+            "model": name,
+            "input_price_per_mtok": price.input_per_mtok,
+            "output_price_per_mtok": price.output_per_mtok,
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -1821,10 +1832,16 @@ async fn usage_summary(
         "model" => "m.name",
         "principal" => "p.name",
         "day" => "to_char(date_trunc('day', u.at), 'YYYY-MM-DD')",
+        // What the *caller asked for*, which for a virtual model is the
+        // virtual name and for anything else is the model itself. Grouping on
+        // this answers "how much traffic does each virtual model carry",
+        // which grouping on the served model cannot: by then the routing
+        // decision has already been made and the virtual name is gone.
+        "virtual_model" => "coalesce(u.requested_model, m.name)",
         other => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                format!("group_by {other:?} is not one of: model, principal, day"),
+                format!("group_by {other:?} is not one of: model, principal, day, virtual_model"),
             ))
         }
     };
@@ -3219,6 +3236,94 @@ type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
 ///
 /// The body is never captured. It carries passwords and upstream credentials,
 /// and an audit row is read by more people than the thing it describes.
+/// `GET /admin/config`: what this process was started with.
+///
+/// Read-only. Every value here is a CLI flag or a build feature, and changing
+/// one is a deploy — but a settings screen that *guesses* them is worse than
+/// none, because it shows a default that a `--config-poll 30` deployment does
+/// not have.
+async fn get_config(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let unpriced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM models WHERE input_price_per_mtok IS NULL")
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("counting unpriced models", &e))?;
+    let cached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM models WHERE cache_ttl_seconds IS NOT NULL AND cache_ttl_seconds > 0",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("counting cache-enabled models", &e))?;
+    let models: i64 = sqlx::query_scalar("SELECT count(*) FROM models")
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| db_error("counting models", &e))?;
+
+    let d = &*ctx.deployment;
+    Ok(Json(serde_json::json!({
+        "role": d.role,
+        "version": d.version,
+        "tls": ctx.tls_enabled,
+        "uptime_seconds": ctx.started_at.elapsed().as_secs(),
+        "config_poll_seconds": d.config_poll_seconds,
+        "health_report_interval_seconds": d.health_report_interval_seconds,
+        "cache_max_entries": d.cache_max_entries,
+        "cache_max_bytes": d.cache_max_bytes,
+        "otel_endpoint": d.otel_endpoint,
+        "otel_sample_one_in": d.otel_sample_one_in,
+        "classifier_tier1": d.classifier_tier1,
+        "classifier_tier2": d.classifier_tier2,
+        "session_ttl_hours": crate::control::auth::SESSION_TTL_HOURS,
+        "snapshot_rebuild_failures": ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
+        "snapshot_version": ctx.cache.current_snapshot().version,
+        "models": models,
+        "models_unpriced": unpriced,
+        "models_cached": cached,
+    })))
+}
+
+/// `POST /admin/snapshot/rebuild`: publish a freshly built snapshot now.
+///
+/// Every mutating route already does this; this is the manual one, for when
+/// something outside the admin API changed the database — a migration, a
+/// `sync-prices` run against Postgres directly, an operator with psql.
+async fn rebuild_snapshot(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    refresh(&ctx).await;
+    let snapshot = ctx.cache.current_snapshot();
+    // Reported rather than assumed: `refresh` deliberately does not fail the
+    // request that triggered it (see its doc comment), so "the route answered
+    // 200" is not the same as "a new snapshot was published".
+    Ok(Json(serde_json::json!({
+        "snapshot_version": snapshot.version,
+        "rebuild_failures": ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
+    })))
+}
+
+/// `POST /admin/sessions/revoke-all`: log everybody out, including the caller.
+///
+/// The blunt instrument for a suspected stolen cookie. It does not spare the
+/// caller: a route that kept its own session alive would be one an attacker
+/// who already has a session could use to lock everyone else out.
+async fn revoke_all_sessions(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deleted = sqlx::query("DELETE FROM sessions")
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("revoking sessions", &e))?
+        .rows_affected();
+    Ok(Json(
+        serde_json::json!({ "revoked": deleted, "includes_caller": true }),
+    ))
+}
+
 /// Routes that are `POST` because they take a body, not because they change
 /// anything.
 ///
@@ -3397,6 +3502,27 @@ async fn healthz(State(ctx): State<Ctx>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// Process facts an operator can only otherwise learn by reading the
+/// Deployment manifest.
+///
+/// Read-only, and deliberately so: these are flags a process was started with,
+/// and changing them is a deploy. What the UI needs is to stop *guessing* them
+/// — a settings screen that invents "5s" because that is the default lies the
+/// moment somebody passes `--config-poll 30`.
+#[derive(Clone, Serialize)]
+pub struct Deployment {
+    pub role: String,
+    pub version: String,
+    pub config_poll_seconds: u64,
+    pub health_report_interval_seconds: u64,
+    pub cache_max_entries: usize,
+    pub cache_max_bytes: usize,
+    pub otel_endpoint: Option<String>,
+    pub otel_sample_one_in: u64,
+    pub classifier_tier1: bool,
+    pub classifier_tier2: bool,
+}
+
 pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
@@ -3404,6 +3530,7 @@ pub async fn serve(
     cache: Arc<dyn SnapshotSink>,
     key: Arc<EncryptionKey>,
     tls: Option<rustls::ServerConfig>,
+    deployment: Deployment,
 ) -> anyhow::Result<()> {
     let tls_enabled = tls.is_some();
     let ctx = Ctx {
@@ -3414,6 +3541,8 @@ pub async fn serve(
         snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
         reconcile: Arc::new(ReconcileState::new()),
         tls_enabled,
+        deployment: Arc::new(deployment),
+        started_at: std::time::Instant::now(),
         // Two report intervals plus slack: a replica that misses one delivery
         // should not vanish from a UI, and one that has genuinely gone should
         // not linger.
@@ -3502,6 +3631,9 @@ pub async fn serve(
         .route("/admin/fleet", get(list_fleet))
         .route("/admin/routing/dry-run", post(routing_dry_run))
         .route("/admin/prices/sync", post(sync_prices))
+        .route("/admin/config", get(get_config))
+        .route("/admin/snapshot/rebuild", post(rebuild_snapshot))
+        .route("/admin/sessions/revoke-all", post(revoke_all_sessions))
         .route(
             "/admin/roles/{name}/permissions",
             post(grant_permission).delete(revoke_permission),
@@ -3703,6 +3835,19 @@ mod tests {
             fleet: Arc::new(crate::health_report::store::Fleet::new(
                 std::time::Duration::from_secs(30),
             )),
+            deployment: Arc::new(Deployment {
+                role: "all".into(),
+                version: "test".into(),
+                config_poll_seconds: 5,
+                health_report_interval_seconds: 10,
+                cache_max_entries: 4096,
+                cache_max_bytes: 64 * 1024 * 1024,
+                otel_endpoint: None,
+                otel_sample_one_in: 0,
+                classifier_tier1: false,
+                classifier_tier2: false,
+            }),
+            started_at: std::time::Instant::now(),
         };
         (ctx, cache)
     }
@@ -5765,6 +5910,125 @@ mod tests {
         }
     }
 
+    /// A settings screen that guesses defaults is worse than one showing
+    /// nothing: this must report the flags the process actually has.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn the_config_route_reports_this_processs_own_flags() {
+        let (ctx, _cache) = test_ctx().await;
+        let cfg = get_config(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(cfg["role"], "all");
+        assert_eq!(cfg["config_poll_seconds"], 5);
+        assert_eq!(cfg["cache_max_entries"], 4096);
+        assert_eq!(cfg["session_ttl_hours"], 12);
+        // A build without the feature must say so rather than omit the field
+        // and leave a UI to guess.
+        assert_eq!(cfg["otel_endpoint"], serde_json::Value::Null);
+        assert!(cfg["models"].is_i64());
+    }
+
+    /// The manual rebuild has to say which snapshot it published: `refresh`
+    /// deliberately does not fail the request that triggered it, so a bare
+    /// 200 would not distinguish "rebuilt" from "tried and failed".
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_manual_rebuild_reports_the_version_it_published() {
+        let (ctx, cache) = test_ctx().await;
+        let resp = rebuild_snapshot(State(ctx.clone()), RequireConfigWrite::default())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            resp["snapshot_version"].as_u64().unwrap(),
+            cache.current_snapshot().version,
+            "the version reported must be the one actually published"
+        );
+        assert_eq!(resp["rebuild_failures"], 0);
+    }
+
+    /// Grouping by the *served* model cannot answer "how much traffic does
+    /// each virtual model carry" — by then the routing decision is made and
+    /// the virtual name is gone. This is the only grouping that keeps it.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn usage_can_be_grouped_by_the_virtual_model_the_caller_asked_for() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "vgroup-p-")
+            .track_prefix("models", "name", "vgroup-m-");
+        let principal_id = make_principal(&ctx, &unique_name("vgroup-p")).await;
+        let model_name = unique_name("vgroup-m");
+        let (_, model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
+                cache_ttl_seconds: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = model;
+
+        // One request that asked for a virtual name, one that asked for the
+        // model directly — they must not collapse into one row.
+        let mut asked_for_virtual = usage_event(principal_id, &model_name);
+        asked_for_virtual.requested_model = Some("vgroup-router".into());
+        let resp = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![asked_for_virtual, usage_event(principal_id, &model_name)],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.accepted, 2);
+
+        let rows = usage_summary(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(UsageQuery {
+                group_by: "virtual_model".into(),
+                since: None,
+                until: None,
+                limit: 1000,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let router = rows
+            .iter()
+            .find(|r| r.key.as_deref() == Some("vgroup-router"))
+            .expect("the virtual name the caller asked for must be its own row");
+        assert_eq!(router.requests, 1);
+        assert!(
+            rows.iter().any(|r| r.key.as_deref() == Some(&model_name)),
+            "a request that named a concrete model still groups under it"
+        );
+        // Deliberately checked here rather than assumed: an unknown grouping
+        // must be refused, not interpolated into the query text.
+        assert!(usage_summary(
+            State(ctx.clone()),
+            RequireRead::default(),
+            axum::extract::Query(UsageQuery {
+                group_by: "; DROP TABLE models".into(),
+                since: None,
+                until: None,
+                limit: 10,
+            }),
+        )
+        .await
+        .is_err());
+    }
+
     /// The reverse channel end to end: a proxy's report survives the route and
     /// comes back out of `GET /admin/fleet`, on the proxy token and not on a
     /// human's session.
@@ -5776,6 +6040,12 @@ mod tests {
             replica: "proxy-test-0".into(),
             snapshot_version: 42,
             uptime_seconds: 7,
+            process: crate::health_report::ProcessCounters {
+                cache_hits: 9,
+                cache_misses: 1,
+                usage_dropped: 3,
+                ..Default::default()
+            },
             backends: vec![crate::health_report::BackendHealth {
                 api_base: "http://backend:8000".into(),
                 model: "m".into(),
@@ -5822,6 +6092,10 @@ mod tests {
              this is the whole reason the report exists"
         );
         assert_eq!(fleet[0].backends[0].inflight, 3);
+        // Per-process counters travel with the report: a fleet view can only
+        // show the spread in cache hit rate if it has each replica's own.
+        assert_eq!(fleet[0].process.cache_hits, 9);
+        assert_eq!(fleet[0].process.usage_dropped, 3);
     }
 }
 

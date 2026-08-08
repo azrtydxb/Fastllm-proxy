@@ -1,168 +1,182 @@
+/* The admin UI's design tokens and the handful of element defaults that are
+   easier to set once here than to repeat in every component.
+
+   Two rules this file exists to enforce:
+
+   1. **Colour is meaning, not decoration.** `--ok`/`--warn`/`--bad` carry
+      state; `--accent` carries interactivity. A component that needs "a nice
+      green" is really asking for `--ok`, and if it is not reporting health it
+      should not be green at all.
+
+   2. **Nothing here fakes data.** There is no style for a placeholder chart or
+      a skeleton number, because this UI never renders one — a figure the API
+      cannot answer is shown as "not available" with the reason, not as a
+      plausible-looking zero. */
+
 :root {
-  color-scheme: light dark;
-  --bg: #0f1115;
-  --panel: #161a21;
-  --border: #262b35;
-  --text: #e5e7eb;
-  --muted: #8b93a3;
-  --accent: #5b8cff;
-  --danger: #e5484d;
-  --ok: #33b06f;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bg: #0b0c0e;
+  --panel: #121417;
+  --panel-2: #0e1013;
+  --line: #23272e;
+  --line-soft: #16191d;
+  --line-mid: #1c2027;
+
+  --fg: #e9ecef;
+  --fg-2: #b6bcc6;
+  --fg-3: #868d9a;
+  --fg-4: #6f7683;
+  --fg-5: #5b626e;
+
+  --accent: #4d94ff;
+  --accent-soft: #8fb8ff;
+  --accent-bg: #1d2530;
+  --accent-line: #2b5490;
+
+  --ok: #2fb884;
+  --ok-fg: #4fd1a0;
+  --ok-bg: #0f2019;
+  --ok-line: #1f5340;
+
+  --warn: #d99a2b;
+  --warn-fg: #e8c27a;
+  --warn-bg: #2b2418;
+  --warn-line: #5a4a26;
+
+  --bad: #e5484d;
+  --bad-fg: #f08a8d;
+  --bad-bg: #2b1a1c;
+  --bad-line: #5a2a2d;
+
+  --violet: #8b7bd8;
+  --violet-fg: #b9a9f0;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius: 12px;
+  --radius-sm: 8px;
 }
 
-* { box-sizing: border-box; }
+/* The two faces are self-hosted-or-nothing: the binary embeds this UI and is
+   routinely run on a network that cannot reach fonts.googleapis.com, where a
+   <link> to it costs a render-blocking timeout on every page load and then
+   falls back anyway. The stack below is the fallback, chosen so the layout
+   does not move when the preferred face is absent. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+}
 
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--sans);
+  color: var(--fg);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
 }
 
-#root { min-height: 100vh; }
-
-a { color: var(--accent); }
-
-.app { display: flex; min-height: 100vh; }
-
-.sidebar {
-  width: 200px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--border);
-  padding: 16px 0;
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accent-soft);
 }
 
-.sidebar h1 {
-  font-size: 15px;
-  padding: 0 16px 16px;
-  margin: 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 12px;
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg);
 }
 
-.sidebar nav button {
-  display: block;
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+::selection {
+  background: #2b4c8f;
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Focus is visible everywhere. An admin UI is operated by keyboard more often
+   than its designers assume, and every destructive control here is a button. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--fg);
+  padding: 9px 11px;
+  outline: none;
+  min-width: 0;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent-line);
+}
+input::placeholder {
+  color: var(--fg-5);
+}
+
+table {
+  border-collapse: collapse;
   width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
-  color: var(--muted);
-  padding: 8px 16px;
-  cursor: pointer;
-  font-size: 14px;
 }
 
-.sidebar nav button.active {
-  color: var(--text);
-  background: var(--panel);
-  border-left: 2px solid var(--accent);
+code,
+.mono {
+  font-family: var(--mono);
 }
 
-.sidebar .who {
-  margin-top: 24px;
-  padding: 0 16px;
-  font-size: 12px;
-  color: var(--muted);
+@keyframes fastllm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
-.sidebar .who button {
-  margin-top: 8px;
-  width: auto;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-}
-
-.main { flex: 1; padding: 24px 32px; overflow: auto; }
-
-h2 { margin-top: 0; font-size: 18px; }
-
-table { border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 13px; }
-th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 500; }
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 20px;
-  max-width: 640px;
-}
-
-.panel h3 { margin-top: 0; font-size: 14px; }
-
-.row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-
-input, select {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 6px 8px;
-  border-radius: 4px;
-  font-size: 13px;
-}
-
-button.primary {
-  background: var(--accent);
-  color: white;
-  border: none;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-button.danger {
-  background: none;
-  color: var(--danger);
-  border: 1px solid var(--danger);
-  padding: 3px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-button.secondary {
-  background: none;
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.error { color: var(--danger); font-size: 13px; margin: 8px 0; }
-.ok { color: var(--ok); }
-.muted { color: var(--muted); font-size: 12px; }
-
-.login-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-}
-
-.login-panel { width: 320px; }
-
-.key-plaintext {
-  font-family: ui-monospace, monospace;
-  background: var(--bg);
-  border: 1px solid var(--ok);
-  padding: 8px;
-  border-radius: 4px;
-  word-break: break-all;
-  font-size: 12px;
-  margin-top: 8px;
-}
-
-.pill {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 11px;
-  border: 1px solid var(--border);
-  color: var(--muted);
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
 }

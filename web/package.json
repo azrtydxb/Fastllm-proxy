@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build && node -e \"require('fs').writeFileSync('dist/.gitkeep','')\"",
+    "preview": "vite preview",
+    "test": "node test/render.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -14,6 +15,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^29.1.1",
     "vite": "^5.4.11"
   }
 }

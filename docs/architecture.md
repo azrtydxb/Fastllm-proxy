@@ -27,6 +27,7 @@ flowchart LR
 
     subgraph cp["Control plane — --role control"]
         admin["admin API + UI<br/>session auth, per-route permissions"]
+        fleetstore[("fleet health<br/>in memory, 30s TTL")]
         build[build snapshot]
         pg[(Postgres)]
     end
@@ -48,6 +49,7 @@ flowchart LR
     cache -.restores on cold start.-> snap
     fwd -->|"POST /usage (batched)"| admin
     health["backend health<br/>probes + in-flight counts"] -->|"POST /health-report (every 10s)"| admin
+    admin --> fleetstore
     fwd -.observed by.-> health
 ```
 

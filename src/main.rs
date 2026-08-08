@@ -506,6 +506,36 @@ async fn run_command(command: &Command) -> Result<()> {
     }
 }
 
+/// The flags this process was started with, for `GET /admin/config`.
+///
+/// Assembled here because this is the only place that has the parsed CLI; the
+/// control plane would otherwise have to guess, and a settings screen showing
+/// a guessed default is worse than one showing nothing.
+#[cfg(feature = "control")]
+fn deployment_facts(cli: &Cli, role: &str) -> fastllm_proxy::control::api::Deployment {
+    fastllm_proxy::control::api::Deployment {
+        role: role.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        config_poll_seconds: cli.config_poll,
+        health_report_interval_seconds: cli.health_report_interval,
+        cache_max_entries: cli.cache_max_entries,
+        cache_max_bytes: cli.cache_max_bytes,
+        // The flags themselves only exist in an `otel` build; reporting
+        // "no endpoint" from a build that could not have one is the honest
+        // answer rather than an absent field the UI has to guess about.
+        #[cfg(feature = "otel")]
+        otel_endpoint: cli.otel_endpoint.clone(),
+        #[cfg(not(feature = "otel"))]
+        otel_endpoint: None,
+        #[cfg(feature = "otel")]
+        otel_sample_one_in: cli.otel_sample_one_in,
+        #[cfg(not(feature = "otel"))]
+        otel_sample_one_in: 0,
+        classifier_tier1: cfg!(feature = "classifier"),
+        classifier_tier2: cfg!(feature = "classifier-tier2"),
+    }
+}
+
 /// `fastllm-proxy sync-prices`: fill in model prices from a published
 /// catalogue.
 #[cfg(feature = "control")]
@@ -852,7 +882,8 @@ async fn run_control(cli: Cli) -> Result<()> {
                 format!("invalid admin bind address {}:{}", cli.host, cli.admin_port)
             })?;
         info!(%addr, tls = tls.is_some(), "control plane admin API listening");
-        fastllm_proxy::control::api::serve(pool, addr, proxy_token, cache, key, tls).await
+        let facts = deployment_facts(&cli, "control");
+        fastllm_proxy::control::api::serve(pool, addr, proxy_token, cache, key, tls, facts).await
     }
     #[cfg(not(feature = "control"))]
     {
@@ -979,6 +1010,7 @@ async fn run_all(cli: Cli) -> Result<()> {
             })?;
         let admin_pool = pool.clone();
         let admin_sink = Arc::clone(&state) as Arc<dyn fastllm_proxy::control::api::SnapshotSink>;
+        let admin_facts = deployment_facts(&cli, "all");
         let admin_token = proxy_token;
         fastllm_proxy::control::api::spawn_snapshot_rebuilder(
             pool.clone(),
@@ -995,6 +1027,7 @@ async fn run_all(cli: Cli) -> Result<()> {
                 admin_sink,
                 key,
                 admin_tls,
+                admin_facts,
             )
             .await
             {
@@ -1355,6 +1388,20 @@ fn spawn_health_reports(
                 replica: replica.clone(),
                 snapshot_version: state.snapshot.load().version,
                 uptime_seconds: state.started.elapsed().as_secs(),
+                process: fastllm_proxy::health_report::ProcessCounters {
+                    requests_ok: state.requests_ok.load(std::sync::atomic::Ordering::Relaxed),
+                    requests_failed: state
+                        .requests_failed
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    cache_hits: state.cache.hits.load(std::sync::atomic::Ordering::Relaxed),
+                    cache_misses: state
+                        .cache
+                        .misses
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    cache_entries: state.cache.len(),
+                    cache_bytes: state.cache.bytes(),
+                    usage_dropped: state.usage.dropped(),
+                },
                 backends: registry
                     .backends()
                     .iter()

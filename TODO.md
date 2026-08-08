@@ -79,6 +79,16 @@ drifted from what an operator actually needs to see. Closed in two commits:
 - `fastllm_cache_total{kind}`, `fastllm_cache_entries`, `fastllm_cache_bytes` —
   the response cache was invisible.
 
+Since then the management UI was rebuilt against these routes, and four more
+small ones were added because the screens needed them and each is honest on its
+own terms: `GET /admin/config` (a settings screen that guesses defaults is
+wrong the moment somebody passes `--config-poll 30`), `POST
+/admin/snapshot/rebuild`, `POST /admin/sessions/revoke-all`, and
+`group_by=virtual_model` on `GET /admin/usage`. The health report also grew
+per-process counters — cache hits/misses, usage events dropped — because those
+are per replica by construction and a fleet view can only show the spread if it
+has each replica's own.
+
 Not built: **teams / org scoping.** See "Deliberately not built" below.
 
 ### Deliberately not built: teams and org scoping

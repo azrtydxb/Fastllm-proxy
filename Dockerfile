@@ -17,6 +17,11 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ ./
+# The render check runs here rather than only in CI: this stage is the one
+# place the UI is guaranteed to be built before it is embedded, and a screen
+# that throws on mount would otherwise ship as a blank page nobody noticed
+# until an operator opened it.
+RUN npm test
 RUN npm run build
 
 # Trixie, not bookworm, and specifically because of ONNX Runtime. The prebuilt

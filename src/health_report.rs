@@ -46,6 +46,28 @@ pub struct HealthReport {
     pub snapshot_version: u64,
     pub uptime_seconds: u64,
     pub backends: Vec<BackendHealth>,
+    /// Counters that are per process by construction, carried so a fleet view
+    /// can show the *spread* rather than a sum that would mean nothing. The
+    /// response cache is not shared between replicas, and a worker restarted
+    /// five minutes ago has a cold one — averaging its hit rate into a fleet
+    /// figure reports a problem where there is none.
+    #[serde(default)]
+    pub process: ProcessCounters,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProcessCounters {
+    pub requests_ok: u64,
+    pub requests_failed: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_entries: usize,
+    pub cache_bytes: u64,
+    /// Usage events this replica dropped because the control plane was not
+    /// keeping up. Deliberately surfaced: the design's stated trade is to drop
+    /// usage rather than block inference, and a silent drop makes billing
+    /// quietly wrong instead of visibly incomplete.
+    pub usage_dropped: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +208,7 @@ mod tests {
             replica: replica.into(),
             snapshot_version: version,
             uptime_seconds: 1,
+            process: Default::default(),
             backends: vec![BackendHealth {
                 api_base: "http://a".into(),
                 model: "m".into(),

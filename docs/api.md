@@ -72,10 +72,13 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `POST /admin/roles/{name}/permissions` | `{"verb":"model:invoke", "resource":"model/gpt-4o"}`. The verb list is closed — a permission nothing checks would read on a matrix as though it granted something |
 | `DELETE /admin/roles/{name}/permissions` | Same body; revoke one |
 | `GET /admin/audit` | The change log, newest first. `?limit=&before=&actor_id=&target=&since=`. `before` is keyset pagination on the id of the oldest row you hold — an offset would skip or repeat rows as new ones arrive at the head |
-| `GET /admin/usage` | Aggregate requests, tokens, latency and spend. `?group_by=model\|principal\|day&since=&until=&limit=`. Reports `unpriced_requests` alongside every total: a request whose model has no price contributes nothing to `cost`, and summing those as zero would understate spend silently |
+| `GET /admin/usage` | Aggregate requests, tokens, latency and spend. `?group_by=model\|principal\|virtual_model\|day&since=&until=&limit=`. `virtual_model` groups on what the caller *asked for*, which is the only grouping that can answer "how much traffic does each virtual model carry" — by the time a model is chosen the virtual name is gone. Reports `unpriced_requests` alongside every total: a request whose model has no price contributes nothing to `cost`, and summing those as zero would understate spend silently |
 | `GET /admin/fleet` | What each proxy replica can see — its backends' health, in-flight counts, and the snapshot version it is serving |
 | `POST /admin/routing/dry-run` | `{"model":..., "streaming":..., "principal_id":..., "class":..., "headers":{...}}` → the candidate chain and **which rule index decided** |
 | `POST /admin/prices/sync` | `{"source":"open-router"\|"catalogue"\|"both", "overwrite":..., "dry_run":...}`. The same work `fastllm-proxy sync-prices` does, from a UI |
+| `GET /admin/config` | What this process was started with — role, TLS, poll and report intervals, cache bounds, session TTL, classifier tiers, OTLP. Read-only: changing one of these is a deploy |
+| `POST /admin/snapshot/rebuild` | Rebuild and republish now. Answers with the version it published, because `refresh` deliberately does not fail the request that triggered it |
+| `POST /admin/sessions/revoke-all` | Delete every session, including the caller's |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
 
@@ -524,7 +527,15 @@ Network isolation is still the right default even with a login in front of `/adm
 
 ### Management UI
 
-`--role all`/`control` serve a small React dashboard from `/` and `/ui/*` — models and backends, virtual models and their rule chains, keys (create/revoke), principals/roles/grants, limits and budgets with consumption, and a usage overview, all driven by the admin API above (`src/control/ui.rs`; frontend source in `web/`). `--role proxy` serves no UI at all; `control::api::serve`, where the UI's fallback route is mounted, is never called for that role.
+`--role all`/`control` serve a React dashboard from `/` and `/ui/*` (`src/control/ui.rs`; frontend source in `web/`). `--role proxy` serves no UI at all; `control::api::serve`, where the UI's fallback route is mounted, is never called for that role.
+
+Thirteen screens, all driven by the admin API above: **Overview** (fleet, backends, traffic, recent changes), **Metrics**, **Usage & spend**, **Providers**, **Models**, **Virtual models** with the routing dry-run, **Prompt classes** with the leave-one-out evaluation, **API keys**, **Principals & roles** with the permission matrix and per-model grants, **Limits & budgets**, **Audit log**, **Fleet**, and **Settings**.
+
+**Nothing on a screen is invented.** Where the control plane cannot answer a question, the UI says so and names what can: per-backend latency percentiles are per process and do not merge, so the Metrics screen prints the `histogram_quantile` query rather than an average of p99s; a model with no price shows `unpriced`, never `$0.00`; a backend no replica has probed shows a grey dot, not a green one. The rule is the same one the docs follow — a number nobody can reproduce is worse than an absent one.
+
+The one thing that *is* computed in the browser is a rate: the control plane stores no metric history, so every line on the Metrics screen is a delta between two polls of the counters the fleet reports, starting empty when the page loads. The header says so on the page.
+
+Screens are checked by `web/test/render.mjs` (`npm test` in `web/`, and a CI job): it mounts every one against stubbed responses shaped like the ones `control::api` serialises and fails on a render error or missing content. `npm run build` proves the modules parse; it says nothing about whether a screen renders, and a component used but not imported is a clean build and a blank page.
 
 Embedded into the binary with [`rust-embed`](https://docs.rs/rust-embed) reading `web/dist/` at compile time — one container image, no second artefact to deploy. Built by the `Dockerfile`'s dedicated `node` stage, not a `build.rs` that shells out to `npm`, so `cargo build`/`cargo test` never require Node — a `web/dist/` empty at compile time (the normal state outside the Docker build) degrades to a plain "UI not available" response rather than failing the build. See `web/dist/.gitkeep`'s neighbour, `src/control/ui.rs`'s module doc comment, for the full mechanics.
 

@@ -9,6 +9,13 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: "dist",
+    // Emptied so a renamed chunk from a previous build cannot linger and get
+    // embedded alongside the current one. That also deletes `dist/.gitkeep` —
+    // the one tracked file in here, and the thing that lets `cargo build`
+    // work without ever running Node — so `npm run build` recreates it
+    // afterwards. Without that, every UI build showed up as a deleted file in
+    // `git status` and was one careless `git add -A` away from breaking the
+    // Node-free build for everyone.
     emptyOutDir: true,
   },
   // The UI and the admin API it calls are served from the same origin (the

@@ -68,10 +68,33 @@ jobs:
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
         run: cargo test --features "control classifier" --locked -- --include-ignored
 
+  # A separate job with its own container, so the Rust job stays Node-free —
+  # the same reason the Dockerfile builds the UI in a dedicated stage rather
+  # than shelling out to npm from a build.rs.
+  ui:
+    runs-on: arc-azrtydxb
+    container:
+      image: node:22-bookworm-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        working-directory: web
+        run: npm install
+      # Mounts every screen against stubbed API responses shaped like the ones
+      # `control::api` serialises. `npm run build` proves the modules parse; it
+      # says nothing about whether a screen renders, and a component used but
+      # not imported is a clean build and a blank page.
+      - name: Render check
+        working-directory: web
+        run: npm test
+      - name: Build
+        working-directory: web
+        run: npm run build
+
   publish:
     # Only what lands on main or a tag becomes an image; a PR just gets tested.
     if: github.event_name != 'pull_request'
-    needs: test
+    needs: [test, ui]
     runs-on: arc-azrtydxb-publish
     steps:
       - uses: actions/checkout@v4

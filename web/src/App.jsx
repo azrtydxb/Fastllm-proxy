@@ -1,40 +1,128 @@
-import React, { useEffect, useState, useCallback } from "react";
+// The shell: sidebar, header, and which screen is mounted.
+//
+// Navigation is a `useState` and a hash, not a router. There are thirteen
+// screens, no nested routes, and no parameters beyond "which one" — a router
+// would be a dependency carrying its own upgrade treadmill for a `switch`.
+// The hash is there so a reload, and a link pasted to a colleague, both land
+// where they were.
+
+import React, { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "./api.js";
+import { Button, Dot, ErrorNote, Pill } from "./ui.jsx";
+
 import { Login } from "./views/Login.jsx";
+import { Overview } from "./views/Overview.jsx";
+import { Metrics } from "./views/Metrics.jsx";
+import { Usage } from "./views/Usage.jsx";
+import { Providers } from "./views/Providers.jsx";
 import { Models } from "./views/Models.jsx";
 import { VirtualModels } from "./views/VirtualModels.jsx";
+import { PromptClasses } from "./views/PromptClasses.jsx";
 import { Keys } from "./views/Keys.jsx";
 import { Principals } from "./views/Principals.jsx";
 import { LimitsAndBudgets } from "./views/LimitsAndBudgets.jsx";
-import { Usage } from "./views/Usage.jsx";
+import { Audit } from "./views/Audit.jsx";
+import { Fleet } from "./views/Fleet.jsx";
+import { Settings } from "./views/Settings.jsx";
 
-const TABS = [
-  { id: "models", label: "Models", component: Models },
-  { id: "virtual-models", label: "Virtual models", component: VirtualModels },
-  { id: "keys", label: "Keys", component: Keys },
-  { id: "principals", label: "Principals & roles", component: Principals },
-  { id: "limits", label: "Limits & budgets", component: LimitsAndBudgets },
-  { id: "usage", label: "Usage", component: Usage },
+const SCREENS = {
+  overview: { title: "Overview", subtitle: "control plane, fleet and backends", view: Overview },
+  metrics: {
+    title: "Metrics",
+    subtitle: "watched live, since this page loaded",
+    view: Metrics,
+  },
+  usage: { title: "Usage & spend", subtitle: "folded from usage_events", view: Usage },
+  providers: {
+    title: "Providers",
+    subtitle: "grouped by api_base — adding one is a row in a table",
+    view: Providers,
+  },
+  models: { title: "Models", subtitle: "concrete names and their backends", view: Models },
+  routing: {
+    title: "Virtual models",
+    subtitle: "rules, weights and failover chains",
+    view: VirtualModels,
+  },
+  classes: { title: "Prompt classes", subtitle: "semantic routing · two tiers", view: PromptClasses },
+  keys: { title: "API keys", subtitle: "SHA-256 hashed · prefix stored in the clear", view: Keys },
+  rbac: { title: "Principals & roles", subtitle: "RBAC and per-model grants", view: Principals },
+  limits: { title: "Limits & budgets", subtitle: "tokens, money, or both", view: LimitsAndBudgets },
+  audit: { title: "Audit log", subtitle: "append-only · every /admin/* mutation", view: Audit },
+  fleet: { title: "Fleet", subtitle: "what each proxy replica can see", view: Fleet },
+  settings: { title: "Settings", subtitle: "fallback, and what this process was started with", view: Settings },
+};
+
+const NAV = [
+  {
+    label: "OBSERVE",
+    items: [
+      { id: "overview", label: "Overview" },
+      { id: "metrics", label: "Metrics" },
+      { id: "usage", label: "Usage & spend" },
+    ],
+  },
+  {
+    label: "ROUTE",
+    items: [
+      { id: "providers", label: "Providers" },
+      { id: "models", label: "Models" },
+      { id: "routing", label: "Virtual models" },
+      { id: "classes", label: "Prompt classes" },
+    ],
+  },
+  {
+    label: "ACCESS",
+    items: [
+      { id: "keys", label: "API keys" },
+      { id: "rbac", label: "Principals & roles" },
+      { id: "limits", label: "Limits & budgets" },
+      { id: "audit", label: "Audit log" },
+    ],
+  },
+  {
+    label: "SYSTEM",
+    items: [
+      { id: "fleet", label: "Fleet" },
+      { id: "settings", label: "Settings" },
+    ],
+  },
 ];
 
-// `authed` starts `null` (unknown) rather than `false`, so the login form
-// does not flash on screen for a returning user with a still-valid session
-// cookie before the first probe request resolves.
+function screenFromHash() {
+  const id = window.location.hash.replace(/^#\/?/, "");
+  return SCREENS[id] ? id : "overview";
+}
+
+// `authed` starts `null` (unknown) rather than `false`, so the login form does
+// not flash on screen for a returning user whose session cookie is still valid
+// while the first probe request is in flight.
 export function App() {
   const [authed, setAuthed] = useState(null);
-  const [tab, setTab] = useState(TABS[0].id);
+  const [who, setWho] = useState(null);
+  const [screen, setScreen] = useState(screenFromHash);
+  const [error, setError] = useState(null);
+  const [config, setConfig] = useState(null);
 
-  // No `GET /whoami` route exists (nor should one — see the P4 design note
-  // about not adding routes the existing admin API can already answer
-  // from), so session validity is probed with the cheapest real admin read
-  // there is: `GET /admin/health`. A 401 there means "not logged in", which
-  // is exactly the question being asked.
+  // No `GET /whoami` route exists, so session validity is probed with the
+  // cheapest real admin read there is: `GET /admin/config`. A 401 there means
+  // "not logged in", which is exactly the question being asked — and its
+  // answer is the deployment banner in the header, so the probe is not wasted.
   const probe = useCallback(async () => {
     try {
-      await api.get("/admin/health");
+      const cfg = await api.get("/admin/config");
+      setConfig(cfg);
       setAuthed(true);
     } catch (e) {
-      setAuthed(e instanceof ApiError && e.status === 401 ? false : false);
+      if (e instanceof ApiError && e.status === 401) {
+        setAuthed(false);
+        return;
+      }
+      // Anything else — a control plane that is up but unhealthy — is not an
+      // authentication failure, and showing a login form for it would send an
+      // operator round a loop that cannot succeed.
+      setError(e.message);
+      setAuthed(false);
     }
   }, []);
 
@@ -42,11 +130,29 @@ export function App() {
     probe();
   }, [probe]);
 
-  if (authed === null) {
-    return null;
-  }
+  useEffect(() => {
+    const onHash = () => setScreen(screenFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const go = (id) => {
+    window.location.hash = `#/${id}`;
+    setScreen(id);
+  };
+
+  if (authed === null) return null;
   if (!authed) {
-    return <Login onLoggedIn={() => setAuthed(true)} />;
+    return (
+      <Login
+        error={error}
+        onLoggedIn={(name) => {
+          setWho(name);
+          setError(null);
+          probe();
+        }}
+      />
+    );
   }
 
   const logout = async () => {
@@ -54,34 +160,203 @@ export function App() {
       await api.post("/logout");
     } finally {
       setAuthed(false);
+      setConfig(null);
     }
   };
 
-  const Active = TABS.find((t) => t.id === tab).component;
+  const active = SCREENS[screen];
+  const View = active.view;
+  const onUnauthorised = () => setAuthed(false);
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <h1>fastllm-proxy</h1>
-        <nav>
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={t.id === tab ? "active" : ""}
-              onClick={() => setTab(t.id)}
-            >
-              {t.label}
-            </button>
+    <div style={{ display: "flex", height: "100%", background: "var(--bg)", color: "var(--fg)" }}>
+      <aside
+        style={{
+          width: 228,
+          flex: "none",
+          borderRight: "1px solid var(--line-mid)",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--panel-2)",
+        }}
+      >
+        <div
+          style={{
+            padding: "18px 18px 16px",
+            borderBottom: "1px solid var(--line-mid)",
+            display: "flex",
+            alignItems: "baseline",
+            gap: 8,
+          }}
+        >
+          <span style={{ font: "600 15px/1 var(--mono)", letterSpacing: "-.02em" }}>fastllm</span>
+          <span style={{ font: "400 15px/1 var(--mono)", color: "var(--fg-4)" }}>proxy</span>
+        </div>
+        <nav
+          style={{
+            flex: 1,
+            overflow: "auto",
+            padding: "14px 10px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 16,
+          }}
+        >
+          {NAV.map((group) => (
+            <div key={group.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div
+                style={{
+                  font: "500 10px/1 var(--sans)",
+                  color: "var(--fg-5)",
+                  letterSpacing: ".12em",
+                  padding: "0 8px 8px",
+                }}
+              >
+                {group.label}
+              </div>
+              {group.items.map((item) => {
+                const on = screen === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => go(item.id)}
+                    aria-current={on ? "page" : undefined}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 9,
+                      width: "100%",
+                      textAlign: "left",
+                      background: on ? "var(--line-soft)" : "none",
+                      border: "none",
+                      borderRadius: 8,
+                      color: on ? "var(--fg)" : "var(--fg-3)",
+                      padding: "8px 9px",
+                      font: `${on ? 500 : 400} 12.5px var(--sans)`,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 3,
+                        height: 14,
+                        borderRadius: 2,
+                        flex: "none",
+                        background: on ? "var(--accent)" : "transparent",
+                      }}
+                    />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
           ))}
         </nav>
-        <div className="who">
-          <div>Signed in</div>
-          <button onClick={logout}>Log out</button>
+        <div
+          style={{
+            padding: 12,
+            borderTop: "1px solid var(--line-mid)",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 7,
+              background: "var(--accent-bg)",
+              color: "var(--accent-soft)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              font: "600 11px var(--mono)",
+              flex: "none",
+            }}
+          >
+            {(who || "op").slice(0, 2).toUpperCase()}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                font: "500 12px/1.2 var(--sans)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {who || "signed in"}
+            </div>
+            <div style={{ font: "400 10px/1.3 var(--sans)", color: "var(--fg-4)" }}>
+              session cookie
+            </div>
+          </div>
+          <Button variant="small" onClick={logout} title="Log out">
+            exit
+          </Button>
         </div>
       </aside>
-      <main className="main">
-        <Active onUnauthorised={() => setAuthed(false)} />
-      </main>
+
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <header
+          style={{
+            height: 56,
+            flex: "none",
+            borderBottom: "1px solid var(--line-mid)",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            padding: "0 24px",
+            background: "var(--panel-2)",
+          }}
+        >
+          <div style={{ font: "600 14px/1 var(--sans)", letterSpacing: "-.01em" }}>
+            {active.title}
+          </div>
+          <div style={{ font: "400 12px/1 var(--sans)", color: "var(--fg-4)" }}>
+            {active.subtitle}
+          </div>
+          <div style={{ flex: 1 }} />
+          {config && (
+            <>
+              <Pill tone="quiet" mono>
+                v{config.version}
+              </Pill>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  background: "var(--panel)",
+                  border: "1px solid var(--line)",
+                  borderRadius: 8,
+                  padding: "7px 11px",
+                  font: "400 12px var(--mono)",
+                  color: "var(--fg-2)",
+                }}
+                title={
+                  config.tls
+                    ? "the admin API is served over TLS"
+                    : "the admin API is served over plain HTTP — /snapshot carries upstream credentials"
+                }
+              >
+                <Dot tone={config.tls ? "ok" : "warn"} size={6} />
+                {`--role ${config.role}`}
+                {!config.tls && " · no TLS"}
+              </div>
+            </>
+          )}
+        </header>
+
+        <main style={{ flex: 1, overflow: "auto", padding: "24px 28px 48px" }}>
+          {error && (
+            <div style={{ marginBottom: 16 }}>
+              <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>
+            </div>
+          )}
+          <View onUnauthorised={onUnauthorised} config={config} go={go} />
+        </main>
+      </div>
     </div>
   );
 }
