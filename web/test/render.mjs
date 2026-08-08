@@ -406,7 +406,11 @@ const { App } = await vite.ssrLoadModule("/src/App.jsx");
 const SCREENS = [
   // The fixture has proxy-2 on an older snapshot and disagreeing about a
   // backend; both banners must appear rather than being averaged away.
-  ["overview", ["serving an older snapshot", "Replicas disagree", "BACKENDS UP"]],
+  // "openai" only appears in the protocol column, which is populated by
+  // joining the health report onto the model configuration. That join is built
+  // from a shared key function; when the two sides built it separately, one
+  // disagreed about the separator and every cell silently read "—".
+  ["overview", ["serving an older snapshot", "Replicas disagree", "BACKENDS UP", "openai"]],
   ["metrics", ["Response cache", "Latency percentiles", "histogram_quantile"]],
   // The `mixed` row is partly unpriced and the `audit@kryton` row entirely so.
   ["usage", ["unpriced", "Spend by model", "COST / 1M TOKENS"]],

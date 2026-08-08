@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
-import { mergeBackends } from "../fleet.js";
+import { mergeBackends, backendKey } from "../fleet.js";
 import {
   Chip,
   Card,
@@ -83,7 +83,7 @@ export function Providers({ onUnauthorised, go }) {
       g.protocols.add(b.protocol);
       g.backends += 1;
       if (b.has_upstream_api_key) g.credentialled += 1;
-      const h = health.get(`${b.api_base} ${b.upstream_model || m.name}`);
+      const h = health.get(backendKey(b.api_base, b.upstream_model || m.name));
       if (h) {
         g.reported += 1;
         if (h.healthy) g.up += 1;

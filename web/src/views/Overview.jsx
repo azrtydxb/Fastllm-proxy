@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api, query } from "../api.js";
 import { useLoader } from "../load.js";
-import { fleetSummary, rateBetween } from "../fleet.js";
+import { fleetSummary, rateBetween, backendKey } from "../fleet.js";
 import {
   Bar,
   Banner,
@@ -86,7 +86,7 @@ export function Overview({ onUnauthorised, config, go }) {
   const protocolOf = new Map();
   for (const m of data.models || []) {
     for (const b of m.backends || []) {
-      protocolOf.set(`${b.api_base} ${b.upstream_model || m.name}`, b.protocol);
+      protocolOf.set(backendKey(b.api_base, b.upstream_model || m.name), b.protocol);
     }
   }
 

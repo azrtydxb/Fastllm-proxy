@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { api } from "../api.js";
 import { attempt, useLoader } from "../load.js";
-import { mergeBackends } from "../fleet.js";
+import { mergeBackends, backendKey } from "../fleet.js";
 import {
   Button,
   Card,
@@ -259,7 +259,7 @@ export function Models({ onUnauthorised }) {
             <div style={{ padding: "4px 16px 14px" }}>
               <Table cols={BACKEND_COLS}>
                 {m.backends.map((b) => {
-                  const h = health.get(`${b.api_base} ${b.upstream_model || m.name}`);
+                  const h = health.get(backendKey(b.api_base, b.upstream_model || m.name));
                   return (
                     <Tr
                       key={b.id}
