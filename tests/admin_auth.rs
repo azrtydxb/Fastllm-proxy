@@ -668,3 +668,89 @@ async fn the_bootstrap_admin_can_do_everything() {
     );
     assert_eq!(create_status, 201, "admin must be able to write config");
 }
+
+/// Every configuration change is recorded, and reads are not.
+///
+/// The value of a layer over hand-wired calls is exactly this: a route added
+/// tomorrow is audited without anybody remembering to wire it.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn configuration_changes_are_audited_and_reads_are_not() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port) = (14781, 14782);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+
+    let name = unique_name("audit-admin");
+    let model = unique_name("audit-model");
+    let _cleanup = TestCleanup::new()
+        .track_exact("principals", "name", name.clone())
+        .track_exact("models", "name", model.clone());
+    let principal_id = user_with_roles(&pool, &name, &["admin"]).await;
+    let _ = principal_id;
+
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &name);
+
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // A read: not a change, and auditing every list call would bury the
+    // changes in noise.
+    assert_eq!(
+        admin_get_with_cookie(admin_port, "/admin/models", Some(&cookie)),
+        200
+    );
+
+    // A change.
+    assert_eq!(
+        admin_write_with_cookie(
+            admin_port,
+            "POST",
+            "/admin/models",
+            Some(&cookie),
+            serde_json::json!({"name": model, "description": ""}),
+        ),
+        201
+    );
+
+    // A change that was refused: an attempt, not a change, and recording it as
+    // one would make the trail lie in the direction that matters most.
+    assert_eq!(
+        admin_write_with_cookie(
+            admin_port,
+            "POST",
+            "/admin/models",
+            None,
+            serde_json::json!({"name": "no-session", "description": ""}),
+        ),
+        401
+    );
+
+    let rows: Vec<(Option<i64>, String, String, String)> = sqlx::query_as(
+        "SELECT actor_id, actor_name, action, target FROM audit_events ORDER BY id DESC LIMIT 5",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        after - before,
+        1,
+        "the write only: not the read, not the rejected attempt: {rows:?}"
+    );
+    let (actor_id, actor_name, action, target) = &rows[0];
+    assert_eq!(actor_id, &Some(principal_id));
+    assert_eq!(actor_name, &name, "the trail's most important column");
+    assert_eq!(action, "POST");
+    assert_eq!(target, "/admin/models");
+}

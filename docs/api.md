@@ -117,6 +117,37 @@ Bedrock API key as an ordinary bearer token, so it is a plain backend row like
 any other — create the key in the Bedrock console and put it in
 `upstream_api_key`.
 
+### Audit log
+
+`usage_events` records inference. `audit_events` records the other kind of
+action — who created a key, granted a role, raised a budget, repointed a
+backend at a different provider. Those are the changes an incident review asks
+about.
+
+```sql
+SELECT at, actor_name, action, target FROM audit_events ORDER BY at DESC LIMIT 20;
+```
+
+Recorded by a layer over every `/admin/*` route rather than by a call in each
+handler, and that is the point: a hand-wired trail records the mutations
+somebody remembered to wire, which drifts the moment a route is added. A new
+endpoint is audited before it is written.
+
+What that costs is detail — the row says a principal's roles were changed and
+by whom, not which role. Complete and coarse beats detailed and full of holes,
+and the application log carries the rest.
+
+Three things are deliberately absent. **Reads** are not recorded: auditing
+every list call would bury the changes in noise. **Rejected attempts** are not
+recorded as changes: a 403 is an attempt, and logging it as a change would make
+the trail lie in the direction that matters most. And the **request body** is
+never captured — it carries passwords and upstream credentials, and an audit
+row is read by more people than the thing it describes.
+
+A failed audit write never fails the request. Losing a row is serious; losing
+the change as well would be worse, since an operator retrying a failed grant
+would have no way to tell whether the first attempt applied.
+
 ### Rate limit headers
 
 Every response from a principal with limits configured carries the de-facto

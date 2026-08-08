@@ -2485,6 +2485,87 @@ type RequireKeyCreate = RequirePermission<KeyCreatePermission>;
 type RequireKeyRevoke = RequirePermission<KeyRevokePermission>;
 type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
 
+/// Record every configuration change, in one place.
+///
+/// A layer rather than a call in each handler, and that is the point: a
+/// hand-wired audit trail records the mutations somebody remembered to wire,
+/// which drifts the moment a route is added. Everything that is not a `GET`
+/// under `/admin/*` passes through here, so a new endpoint is audited before it
+/// is written.
+///
+/// What that costs is detail — this records *that* a principal's roles were
+/// changed and by whom, not which role. The trade is deliberate: complete and
+/// coarse beats detailed and full of holes, and the request that follows in the
+/// application log carries the rest.
+///
+/// Reads are not recorded. `GET /admin/keys` returns prefixes, never secrets,
+/// and auditing every list call would bury the changes in noise.
+///
+/// The body is never captured. It carries passwords and upstream credentials,
+/// and an audit row is read by more people than the thing it describes.
+async fn audit_changes(
+    State(ctx): State<Ctx>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    // `require_session` runs first and always inserts this.
+    let actor = request
+        .extensions()
+        .get::<AdminPrincipal>()
+        .copied()
+        .map(|AdminPrincipal(id)| id);
+
+    let response = next.run(request).await;
+
+    if method == axum::http::Method::GET {
+        return response;
+    }
+    // Only changes that actually happened. A 403 or a 400 is an attempt, and
+    // recording it as a change would make the trail lie in the direction that
+    // matters most.
+    if !response.status().is_success() {
+        return response;
+    }
+
+    let actor_id = actor.unwrap_or(0);
+    let actor_name: String = sqlx::query_scalar("SELECT name FROM principals WHERE id = $1")
+        .bind(actor_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        // A principal deleted between acting and this lookup, or a route
+        // reached without a session. The id still identifies them.
+        .unwrap_or_else(|| format!("principal:{actor_id}"));
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO audit_events (actor_id, actor_name, action, target, detail)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(actor)
+    .bind(&actor_name)
+    .bind(method.as_str())
+    .bind(&path)
+    .bind(serde_json::json!({"status": response.status().as_u16()}))
+    .execute(&ctx.pool)
+    .await
+    {
+        // Never fails the request. Losing an audit row is serious; losing the
+        // change as well would be worse, since an operator retrying a failed
+        // grant would have no way to tell whether the first attempt applied.
+        tracing::error!(
+            error = %e,
+            method = %method,
+            %path,
+            actor = %actor_name,
+            "could not write an audit row; the change itself was applied"
+        );
+    }
+    response
+}
+
 #[derive(Deserialize)]
 struct SetPassword {
     password: String,
@@ -2688,6 +2769,14 @@ pub async fn serve(
             put(put_budget).delete(delete_budget),
         )
         .route("/admin/health", get(admin_health))
+        // Order matters: layers run outermost-last, so `require_session` is
+        // applied after this one and therefore runs *first*. That is what lets
+        // the audit layer read the `AdminPrincipal` the session put in the
+        // request's extensions.
+        .layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            audit_changes,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             ctx.clone(),
             require_session,
