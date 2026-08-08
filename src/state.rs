@@ -244,8 +244,22 @@ impl AppState {
         }
         let tier1 = self.tier1.as_ref()?;
         let text = std::str::from_utf8(body).ok()?;
+        // Timed here rather than around the call in `proxy_request`, because
+        // this is the only scope that knows an escalation happened: the
+        // returned `Classification` reports which tier *decided*, and a tier-2
+        // run that declined looks identical to one that never happened.
+        let started = std::time::Instant::now();
         let embedding = tier1.embed(text);
-        classifier.classify(&embedding, || self.refined_embedding(text))
+        let out = classifier.classify(&embedding, || {
+            self.telemetry
+                .classify_escalations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.refined_embedding(text)
+        });
+        self.telemetry
+            .classify_duration
+            .record_us(started.elapsed().as_micros() as u64);
+        out
     }
 
     #[cfg(not(feature = "classifier"))]

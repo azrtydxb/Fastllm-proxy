@@ -812,12 +812,15 @@ async fn proxy_request(
                                 prefix,
                             ),
                             sink,
-                            Some(crate::telemetry::RequestTiming::new(
-                                &state.telemetry,
-                                candidate_model,
-                                streaming,
-                                received_at,
-                            )),
+                            Some(
+                                crate::telemetry::RequestTiming::new(
+                                    &state.telemetry,
+                                    candidate_model,
+                                    streaming,
+                                    received_at,
+                                )
+                                .on_backend(Arc::clone(&backend)),
+                            ),
                         );
                     }
                     let tracking =
@@ -842,12 +845,15 @@ async fn proxy_request(
                         resp,
                         guard,
                         tracking,
-                        Some(crate::telemetry::RequestTiming::new(
-                            &state.telemetry,
-                            candidate_model,
-                            streaming,
-                            received_at,
-                        )),
+                        Some(
+                            crate::telemetry::RequestTiming::new(
+                                &state.telemetry,
+                                candidate_model,
+                                streaming,
+                                received_at,
+                            )
+                            .on_backend(Arc::clone(&backend)),
+                        ),
                     );
                 }
                 Err(e) => {
@@ -1419,6 +1425,24 @@ fn health_response(state: &AppState) -> Response<ResBody> {
     )
 }
 
+/// Seconds since a snapshot was stamped, or 0 if that is in the future.
+///
+/// The stamp is the control plane's clock in microseconds
+/// (`control::build::snapshot_version`), so this compares two machines' clocks
+/// and can go negative when they disagree. Clamping beats publishing a negative
+/// age, which reads as a broken exporter rather than as clock skew.
+fn snapshot_age_seconds(version: u64) -> u64 {
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    // A `File`-mode snapshot has no control-plane stamp at all.
+    if version == 0 {
+        return 0;
+    }
+    now_us.saturating_sub(version) / 1_000_000
+}
+
 fn metrics_response(state: &AppState) -> Response<ResBody> {
     let registry = state.registry.load();
     let mut out = String::with_capacity(1024);
@@ -1455,6 +1479,28 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         state.snapshot.load().version
     ));
 
+    // Version as a label on a constant 1, the conventional shape: it makes a
+    // deploy visible as a change of series in a graph, which is what turns
+    // "latency moved at 14:02" into "latency moved when we shipped this".
+    out.push_str("# HELP fastllm_build_info Build identity. Always 1; read the labels.\n");
+    out.push_str("# TYPE fastllm_build_info gauge\n");
+    out.push_str(&format!(
+        "fastllm_build_info{{version=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    // Age rather than only the version: "which snapshot" needs a fleet-wide
+    // comparison to interpret, where "how stale" is actionable on its own.
+    out.push_str(
+        "# HELP fastllm_snapshot_age_seconds Seconds since the snapshot this process serves was \
+         built by the control plane.\n",
+    );
+    out.push_str("# TYPE fastllm_snapshot_age_seconds gauge\n");
+    out.push_str(&format!(
+        "fastllm_snapshot_age_seconds {}\n",
+        snapshot_age_seconds(state.snapshot.load().version)
+    ));
+
     // Everything the telemetry module owns: outcomes, rejection reasons,
     // routing counters, classifier counters, and the duration/TTFT histograms
     // both globally and per model.
@@ -1489,6 +1535,19 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
             b.api_base,
             b.requests_total()
         ));
+    }
+
+    out.push_str(
+        "# HELP fastllm_backend_duration_seconds Whole-request wall time, per backend. A model's \
+         p99 rising says the model got slow; this says which replica did.\n",
+    );
+    out.push_str("# TYPE fastllm_backend_duration_seconds histogram\n");
+    for b in registry.backends() {
+        b.duration.render(
+            &mut out,
+            "fastllm_backend_duration_seconds",
+            &format!("api_base=\"{}\"", b.api_base),
+        );
     }
 
     out.push_str("# HELP fastllm_backend_errors_total Upstream failures observed for a backend.\n");

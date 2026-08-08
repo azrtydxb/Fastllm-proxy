@@ -108,6 +108,48 @@ impl Rejection {
     ];
 }
 
+/// An upstream's answer, bucketed.
+///
+/// Closed rather than labelled by the raw status: a provider inventing a code
+/// would otherwise add a time series, and the distinctions that matter for
+/// routing are these four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamClass {
+    Success,
+    /// The caller's fault, and not retryable — a malformed request.
+    ClientError,
+    /// Retryable, and the reason a healthy pool can still refuse a request.
+    RateLimited,
+    ServerError,
+}
+
+impl UpstreamClass {
+    pub fn of(status: u16) -> Self {
+        match status {
+            429 => Self::RateLimited,
+            s if (200..300).contains(&s) => Self::Success,
+            s if (400..500).contains(&s) => Self::ClientError,
+            _ => Self::ServerError,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::ClientError => "client_error",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+        }
+    }
+
+    pub const ALL: [UpstreamClass; 4] = [
+        Self::Success,
+        Self::ClientError,
+        Self::RateLimited,
+        Self::ServerError,
+    ];
+}
+
 /// Metrics for one model, carried across snapshot rebuilds by name.
 #[derive(Debug, Default)]
 pub struct ModelMetrics {
@@ -144,6 +186,23 @@ pub struct Telemetry {
     pub classified_fast: AtomicU64,
     pub classified_refined: AtomicU64,
     pub unclassified: AtomicU64,
+    /// Prompts the fast tier handed to the transformer.
+    ///
+    /// Not the same as `classified_refined`, and the difference is the whole
+    /// point: when the refined tier declines, the fast tier's answer stands and
+    /// is counted as `classified_fast`. Without this, an escalation that
+    /// declined is indistinguishable from one that never happened — and the
+    /// escalation *rate* is the number the two-tier design is justified on,
+    /// since it decides how often anything pays the transformer's 3.3ms.
+    pub classify_escalations: AtomicU64,
+    /// How long classification took, end to end. The design claims ~115µs for
+    /// the fast tier and ~3.3ms when it escalates; this is where that claim
+    /// meets production traffic.
+    pub classify_duration: Histogram,
+    /// Upstream answers by status class. `Outcome::UpstreamError` says an
+    /// upstream refused; this says how, and 429 in particular is what drives
+    /// retries and failover.
+    upstream_status: [AtomicU64; UpstreamClass::ALL.len()],
     models: ArcSwap<HashMap<String, Arc<ModelMetrics>>>,
 }
 
@@ -155,6 +214,11 @@ impl Telemetry {
     #[inline]
     pub fn record_outcome(&self, outcome: Outcome) {
         self.outcomes[outcome as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_upstream_status(&self, status: u16) {
+        self.upstream_status[UpstreamClass::of(status) as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -222,6 +286,16 @@ impl Telemetry {
             ));
         }
 
+        out.push_str("# HELP fastllm_upstream_status_total Upstream answers by status class.\n");
+        out.push_str("# TYPE fastllm_upstream_status_total counter\n");
+        for class in UpstreamClass::ALL {
+            out.push_str(&format!(
+                "fastllm_upstream_status_total{{class=\"{}\"}} {}\n",
+                class.as_str(),
+                self.upstream_status[class as usize].load(Ordering::Relaxed)
+            ));
+        }
+
         for (name, help, value) in [
             (
                 "fastllm_retries_total",
@@ -253,10 +327,25 @@ impl Telemetry {
                 "Prompts that cleared no class's confidence floor.",
                 &self.unclassified,
             ),
+            (
+                "fastllm_classify_escalations_total",
+                "Prompts the fast tier handed to the transformer. Larger than \
+                 fastllm_classified_refined_total by the number of escalations the \
+                 refined tier declined.",
+                &self.classify_escalations,
+            ),
         ] {
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
             out.push_str(&format!("{name} {}\n", value.load(Ordering::Relaxed)));
         }
+
+        out.push_str(
+            "# HELP fastllm_classify_duration_seconds Time spent classifying a prompt, \
+             including escalation to the refined tier where it happened.\n",
+        );
+        out.push_str("# TYPE fastllm_classify_duration_seconds histogram\n");
+        self.classify_duration
+            .render(out, "fastllm_classify_duration_seconds", "");
 
         out.push_str("# HELP fastllm_request_duration_seconds Whole-request wall time.\n");
         out.push_str("# TYPE fastllm_request_duration_seconds histogram\n");
@@ -344,6 +433,10 @@ pub struct RequestTiming {
     /// Kept so the per-request usage record can carry the same number the
     /// histogram got, rather than measuring it twice and disagreeing.
     ttft_us: Option<u64>,
+    /// The replica that served, so its own latency is recorded from the same
+    /// measurement. A per-model p99 says a model got slow; this says which of
+    /// its replicas did.
+    backend: Option<Arc<crate::registry::Backend>>,
 }
 
 impl RequestTiming {
@@ -360,7 +453,13 @@ impl RequestTiming {
             awaiting_first_byte: true,
             streaming,
             ttft_us: None,
+            backend: None,
         }
+    }
+
+    pub fn on_backend(mut self, backend: Arc<crate::registry::Backend>) -> Self {
+        self.backend = Some(backend);
+        self
     }
 
     pub fn duration_ms(&self) -> u32 {
@@ -408,6 +507,9 @@ impl RequestTiming {
         self.telemetry.duration.record_us(us);
         if let Some(m) = &self.model {
             m.duration.record_us(us);
+        }
+        if let Some(b) = &self.backend {
+            b.duration.record_us(us);
         }
     }
 }
@@ -481,6 +583,44 @@ mod tests {
             "a rebuild must carry the live counters forward"
         );
         assert!(t.model("c").is_some(), "and pick up the new model");
+    }
+
+    #[test]
+    fn upstream_statuses_bucket_the_way_routing_treats_them() {
+        // 429 is deliberately not a client error here: it is the retryable one,
+        // the reason a pool that passes every health check still refuses a
+        // request, and lumping it in with 4xx hides exactly the signal that
+        // explains a failover.
+        assert_eq!(UpstreamClass::of(200), UpstreamClass::Success);
+        assert_eq!(UpstreamClass::of(204), UpstreamClass::Success);
+        assert_eq!(UpstreamClass::of(400), UpstreamClass::ClientError);
+        assert_eq!(UpstreamClass::of(404), UpstreamClass::ClientError);
+        assert_eq!(UpstreamClass::of(429), UpstreamClass::RateLimited);
+        assert_eq!(UpstreamClass::of(500), UpstreamClass::ServerError);
+        assert_eq!(UpstreamClass::of(503), UpstreamClass::ServerError);
+        // Anything outside the ranges is a server problem, not a caller one.
+        assert_eq!(UpstreamClass::of(100), UpstreamClass::ServerError);
+        assert_eq!(UpstreamClass::of(599), UpstreamClass::ServerError);
+    }
+
+    /// Escalations and refined answers are different counts, and conflating
+    /// them is what made the escalation *rate* — the number the two-tier design
+    /// is justified on — impossible to see.
+    #[test]
+    fn escalations_are_counted_separately_from_refined_answers() {
+        let t = Telemetry::new();
+        t.classify_escalations.fetch_add(10, Ordering::Relaxed);
+        t.classified_refined.fetch_add(3, Ordering::Relaxed);
+        t.classified_fast.fetch_add(7, Ordering::Relaxed);
+
+        let mut out = String::new();
+        t.render(&mut out);
+        assert!(out.contains("fastllm_classify_escalations_total 10"));
+        assert!(out.contains("fastllm_classified_refined_total 3"));
+        assert!(
+            out.contains("fastllm_classified_fast_total 7"),
+            "the seven that escalated and were declined still count as fast: {out}"
+        );
     }
 
     #[test]

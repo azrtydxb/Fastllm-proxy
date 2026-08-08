@@ -153,6 +153,32 @@ without a transform step:
 `--log 'info,fastllm_proxy::proxy=debug'` turns on per-request routing and
 classification detail without the rest.
 
+## Metrics worth knowing about
+
+Most are self-describing from their `# HELP` text. Four are not obvious:
+
+- **`fastllm_classify_escalations_total` is not `fastllm_classified_refined_total`.**
+  The second counts prompts the transformer *decided*; the first counts prompts
+  it was *asked about*. When it declines, the fast tier's answer stands and is
+  counted as `classified_fast`. The gap between them is how often the expensive
+  tier ran and changed nothing, and the escalation rate itself is the number the
+  two-tier design is justified on.
+- **`fastllm_backend_duration_seconds` versus `fastllm_model_duration_seconds`.**
+  A model's p99 rising says the model got slow. The per-backend one says which
+  replica did, which is the difference between "the provider is degraded" and
+  "one of our two GPUs is".
+- **`fastllm_upstream_status_total` keeps 429 separate from other 4xx.** It is
+  the retryable one, and the reason a pool that passes every health check can
+  still refuse a request — lumping it with client errors hides the signal that
+  explains a failover.
+- **`fastllm_snapshot_age_seconds` compares two machines' clocks**, since the
+  stamp is the control plane's. It is clamped at zero rather than going
+  negative on skew, which would read as a broken exporter.
+
+`fastllm_build_info` is a constant 1 carrying the version as a label — the
+conventional shape, and what turns "latency moved at 14:02" into "latency moved
+when we shipped this".
+
 ## Per-request records
 
 `usage_events` carries latency and outcome alongside the token counts:

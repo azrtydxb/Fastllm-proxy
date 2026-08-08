@@ -121,6 +121,14 @@ pub struct Backend {
     inflight: AtomicUsize,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
+    /// Whole-request wall time for requests this backend served.
+    ///
+    /// Lives here rather than in the telemetry module's per-model map because
+    /// backends already survive a snapshot rebuild — the registry carries the
+    /// live object forward by uid — and because the question it answers is
+    /// per replica. A per-model p99 rising tells you a model got slow; this
+    /// tells you which of its replicas did.
+    pub duration: crate::telemetry::Histogram,
 }
 
 impl Backend {
@@ -170,6 +178,7 @@ impl Backend {
             inflight: AtomicUsize::new(0),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            duration: crate::telemetry::Histogram::new(),
         })
     }
 
