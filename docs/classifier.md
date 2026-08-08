@@ -53,6 +53,13 @@ rather than by us.
 | all-MiniLM-L6-v2 | 1.66 ms | modest gain over the static tier |
 | **bge-small-en-v1.5** | **3.27 ms** | same-subject / different-intent |
 
+Those are laptop numbers — a 10-core arm64 macOS host, the conditions stated at
+the top of [performance.md](performance.md). **In the deployed container the
+refined tier measures 50-100 ms, not 3.27 ms**, taken from
+`fastllm_classify_duration_seconds` on the dev cluster over escalated requests.
+See "What escalation actually costs in production" below; the fast tier's ~115 µs
+holds, since it is a memory lookup rather than a matmul.
+
 Tier 1 is a token-vector lookup and a mean — no transformer, no matmul. Cost
 also *plateaus* rather than growing with the prompt, because the encoder stops
 at its token cap: a 64 KB paste costs what a 4 KB one does.
@@ -146,8 +153,35 @@ When a request does escalate, tier 2 decides only between the classes that
 named that tier-1 class — a narrower question than the full taxonomy, and
 measurably an easier one.
 
-On realistic traffic mixes escalation touches well under a tenth of requests,
-putting the average added cost near 0.2 ms.
+On realistic traffic mixes escalation touches well under a tenth of requests.
+On the laptop figure that puts the average added cost near 0.2 ms; on the
+measured container figure it is nearer 5 ms, which is still small against a
+165 ms time to first token but is not the same claim.
+
+## What escalation actually costs in production
+
+`fastllm_classify_duration_seconds` exists because the numbers above were
+measured on a laptop against a fixed corpus, and nothing had ever measured them
+on real traffic in the real container. The answer differs by more than an order
+of magnitude: escalated classification lands in the **50-100 ms** bucket on the
+dev cluster, against 3.27 ms on the laptop.
+
+Not yet diagnosed, and worth doing before relying on tier 2 at volume. Two
+candidates, both measurable:
+
+- **Thread count.** `fastembed` leaves ONNX Runtime's `intra_threads` at its
+  default, which is `available_parallelism()`. The proxy container has a 2-core
+  limit on an 8-core node; if that default sees 8, ONNX spawns eight intra-op
+  threads against a two-core quota and they contend and get throttled.
+- **The core itself.** An arm64 k3s node core is not an M-series core, and some
+  of the gap is simply that.
+
+A third thing matters more at volume than either: `Tier2` holds
+`Mutex<TextEmbedding>`, because ONNX's session needs `&mut self`. Escalated
+classifications therefore serialise. At 58 ms each that caps escalated
+throughput near 17 per second per pod regardless of how many cores the pod has,
+which is a ceiling worth knowing about before a routing rule sends real traffic
+through it.
 
 ## Classes compete globally
 

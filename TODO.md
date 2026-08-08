@@ -250,6 +250,37 @@ the right models, and misbehaves only on the part that changed. `/health` now
 carries `snapshot_version` and a key count, and `/metrics` exposes
 `fastllm_snapshot_version`, so a fleet-wide `max() - min()` shows a stuck pod.
 
+## Escalation costs 50-100ms in the container, not 3.3ms — open (2026-08-08)
+
+Measured, not suspected: `fastllm_classify_duration_seconds` on the dev cluster
+puts escalated classification in the 50-100 ms bucket, where `bench/minilm`
+measured bge-small at 3.27 ms. The bench figure is a 10-core arm64 macOS host;
+the deployed container is a 2-core limit on an 8-core arm64 k3s node.
+
+The fast tier's ~115 µs holds — it is a memory lookup, not a matmul — so this is
+specifically the transformer.
+
+Docs corrected to state both numbers rather than the flattering one. Not
+diagnosed further, and worth doing before a routing rule sends real volume
+through tier 2. Three things to measure, in order of expected payoff:
+
+1. **`intra_threads`.** `fastembed` leaves ONNX Runtime's intra-op thread count
+   at `available_parallelism()`. If that reads the node's 8 cores rather than
+   the cgroup's 2, eight threads contend for two cores and get throttled.
+   `InitOptionsUserDefined::intra_threads` is the knob; one line, but it needs a
+   measurement either side, not a guess.
+2. **The core.** Some of the gap is simply that an arm64 k3s core is not an
+   M-series one. Establishes the floor for the above.
+3. **The mutex, which matters more at volume than either.** `Tier2` holds
+   `Mutex<TextEmbedding>` because ONNX's session takes `&mut self`, so escalated
+   classifications serialise. At 58 ms each that caps escalated throughput near
+   17/s per pod however many cores it has.
+
+Found only because the histogram existed. The mean read 191 ms, which looked
+like the documented claim being wrong by 60x; the distribution showed two fast
+classifications at 115-500 µs and one at 570 ms, which was the lazy model load —
+a separate bug, now fixed by warming. What remained after that fix is this.
+
 ## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
 
 A full `--include-ignored` run exhausted the dev cluster's connections twice,
