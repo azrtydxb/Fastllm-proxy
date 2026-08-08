@@ -17,7 +17,10 @@
 //! cargo run -p bench --release --bin minilm
 //! ```
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
+};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -126,18 +129,57 @@ fn score(sets: &[(&str, &Vec<Vec<f32>>)], floor: f32) -> (f64, f64, Vec<(String,
     )
 }
 
+/// Load a model from a directory of ONNX + tokeniser files.
+///
+/// Exists so a *quantised* model can be measured on the same data as the
+/// stock one: the accuracy this benchmark reports is the whole reason the
+/// refined tier is worth its cost, so swapping the weights for smaller ones
+/// has to be gated on it rather than on the latency alone.
+fn from_dir(dir: &str) -> anyhow::Result<TextEmbedding> {
+    let read = |name: &str| std::fs::read(std::path::Path::new(dir).join(name));
+    let files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+    let model = UserDefinedEmbeddingModel::new(read("model.onnx")?, files);
+    Ok(TextEmbedding::try_new_from_user_defined(
+        model,
+        InitOptionsUserDefined::new().with_max_length(256),
+    )?)
+}
+
 fn main() {
     let arch = load("se_architecture.json");
     let code = load("se_codereview.json");
 
-    for (label, which) in [
-        ("all-MiniLM-L6-v2", EmbeddingModel::AllMiniLML6V2),
-        ("bge-small-en-v1.5", EmbeddingModel::BGESmallENV15),
-    ] {
+    // Any directories given on the command line are measured too, labelled by
+    // path — that is how a candidate replacement model gets compared against
+    // the incumbent on identical data in one run.
+    let extra: Vec<String> = std::env::args().skip(1).collect();
+    let mut models: Vec<(String, Option<EmbeddingModel>)> = vec![
+        (
+            "all-MiniLM-L6-v2".into(),
+            Some(EmbeddingModel::AllMiniLML6V2),
+        ),
+        (
+            "bge-small-en-v1.5".into(),
+            Some(EmbeddingModel::BGESmallENV15),
+        ),
+    ];
+    models.extend(extra.into_iter().map(|d| (d, None)));
+
+    for (label, which) in models {
         println!("\n================ {label} ================");
-        let mut model = match TextEmbedding::try_new(
-            InitOptions::new(which).with_show_download_progress(false),
-        ) {
+        let loaded = match which {
+            Some(w) => {
+                TextEmbedding::try_new(InitOptions::new(w).with_show_download_progress(false))
+                    .map_err(anyhow::Error::from)
+            }
+            None => from_dir(&label),
+        };
+        let mut model = match loaded {
             Ok(m) => m,
             Err(e) => {
                 println!("could not load: {e}");

@@ -61,7 +61,16 @@ ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/t
 ADD --chmod=0644 https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json \
     /usr/local/share/fastllm/classifier/config.json
 
-ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx \
+# The int8 build, not the fp32 one. Measured with `classify-bench` in this
+# image on a 2-core arm64 pod: 13.4-15.3ms per prompt against fp32's 28.7ms,
+# roughly 2x, and 34MB of layer instead of 133MB.
+#
+# Gated on accuracy, not just latency, because accuracy is the only reason this
+# tier costs anything at all. `bench/minilm` over the same StackExchange data
+# puts architecture precision at 93.2% quantised against 93.3% fp32, and
+# centroid similarity at 0.944 against 0.943 — the geometry is unchanged, so
+# `min_margin` floors tuned against the fp32 model stay valid.
+ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx \
     /usr/local/share/fastllm/classifier-tier2/model.onnx
 ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer.json \
     /usr/local/share/fastllm/classifier-tier2/tokenizer.json

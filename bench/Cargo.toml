@@ -79,6 +79,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "server",
 http-body-util = "0.1"
 bytes = "1"
 serde_json = "1"
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 model2vec-rs = "0.2"
 fastllm-proxy = { path = "..", default-features = false }

@@ -201,11 +201,32 @@ Three things that ruled themselves out, each of which looked plausible first:
 - **The token window is not the lever either.** 128 against 256 is within noise,
   because the window is a cap and these prompts are far shorter than either.
 
-What remains true is that the transformer costs tens of milliseconds on this
-hardware, and no configuration changes that. The untried lever is **int8
-quantisation** — `fastembed` exposes `QuantizationMode`, and it typically buys
-2-4x — which needs a quantised `model.onnx` baked into the image and a rerun of
-`bench/potion-arch` to confirm the accuracy the tier exists for survives it.
+No configuration changes that, so the model did: the image now bakes the
+**int8** build of bge-small rather than the fp32 one.
+
+| | fp32 | int8 |
+|---|---|---|
+| per prompt, 2-core pod, 4 threads | 28.7 ms | **13.4-15.3 ms** |
+| model size | 133 MB | **34 MB** |
+| load | ~410 ms | ~265 ms |
+| architecture precision @ 0.05 | 93.3% | **93.2%** |
+| code-review precision @ 0.05 | 91.0% | 90.8% |
+| centroid similarity arch <-> code | 0.943 | 0.944 |
+
+Roughly 2x, for a tenth of a point of precision. It was gated on the accuracy
+rather than the latency because accuracy is the only reason this tier costs
+anything: `bench/minilm <dir>` measures a candidate model against the same
+StackExchange data as the incumbent, in one run, and that is the check to
+repeat before ever swapping these weights again.
+
+The centroid similarity barely moving matters as much as the precision: the
+embedding geometry is unchanged, so a `min_margin` tuned against the fp32 model
+stays valid and nobody has to re-tune a deployment to take this.
+
+Worth noting what did *not* transfer: on an M-series laptop int8 measured no
+faster than fp32 at all (3.63 ms against 3.58 ms). The win is specific to the
+arm64 container this actually runs in, which is the argument for
+`classify-bench` existing.
 
 **Concurrency buys nothing.** At four concurrent callers, per-prompt latency is
 unchanged from serial in every configuration above: `Tier2` holds one ONNX

@@ -250,7 +250,7 @@ the right models, and misbehaves only on the part that changed. `/health` now
 carries `snapshot_version` and a key count, and `/metrics` exposes
 `fastllm_snapshot_version`, so a fleet-wide `max() - min()` shows a stuck pod.
 
-## Escalation costs 21-29ms in the container, not 3.3ms — measured (2026-08-08)
+## Escalation cost: measured, then halved (2026-08-08)
 
 The docs claimed 3.27 ms from `bench/minilm` on a 10-core macOS host. The
 deployed arm64 container measures **21-29 ms**. `fastllm-proxy classify-bench`
@@ -270,11 +270,19 @@ Also ruled out: CPU (3.5x the quota bought 1.35x the speed — this model does
 not scale with cores) and the token window (128 vs 256 is noise, because the
 window is a cap and real prompts are shorter).
 
-Untried, and the only remaining lever: **int8 quantisation**. `fastembed`
-exposes `QuantizationMode` and it typically buys 2-4x. It needs a quantised
-`model.onnx` in the image and a rerun of `bench/potion-arch` to confirm the
-accuracy the tier exists for survives — 93.3% architecture-vs-coding is the
-number it has to keep.
+**Int8 quantisation — done.** The image bakes the quantised bge-small instead
+of the fp32 one: 13.4-15.3 ms per prompt against 28.7 ms, and 34 MB against
+133 MB. Gated on accuracy rather than latency, because accuracy is the only
+reason this tier costs anything — architecture precision 93.2% against 93.3%,
+and centroid similarity 0.944 against 0.943, so the geometry is unchanged and
+`min_margin` values tuned against fp32 stay valid.
+
+`bench/minilm <dir>` now takes model directories on the command line, which is
+what made that a one-run comparison on identical data rather than an argument.
+
+Did not transfer between machines: on an M-series laptop int8 measured no
+faster than fp32 (3.63 ms against 3.58 ms). The win is specific to the arm64
+container, which is the case for `classify-bench` existing.
 
 Concurrency buys nothing and that is not the mutex's fault. At four concurrent
 callers, per-prompt latency equals serial in every configuration, so escalated
