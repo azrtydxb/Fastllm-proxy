@@ -725,7 +725,12 @@ impl Snapshot {
                 .into_iter()
                 .map(|m| ModelDef {
                     name: m.name,
-                    cache_ttl: None,
+                    // 0 and NULL both mean off, so the request path only has to
+                    // check for `None`.
+                    cache_ttl: m
+                        .cache_ttl_seconds
+                        .filter(|s| *s > 0)
+                        .map(std::time::Duration::from_secs),
                     backends: m
                         .backends
                         .into_iter()
@@ -892,6 +897,31 @@ mod tests {
         assert_eq!(
             b(Some(10), 10, Some(500), 0).exceeded_kind(),
             Some("tokens")
+        );
+    }
+
+    /// Everything the request path needs must survive the wire, and only a
+    /// `--role proxy` deployment ever exercises that: `--role all` shares
+    /// `AppState` directly, so an end-to-end test in that mode passes with a
+    /// field that `from_wire` drops. `cache_ttl` was dropped exactly that way,
+    /// and only a live two-process deployment showed it.
+    #[test]
+    fn a_model_survives_the_round_trip_through_the_wire_format() {
+        let snap = Snapshot {
+            models: vec![ModelDef {
+                name: "m".into(),
+                cache_ttl: Some(std::time::Duration::from_secs(120)),
+                backends: vec![],
+            }],
+            ..Snapshot::default()
+        };
+        let back = Snapshot::from_wire(
+            serde_json::from_str(&serde_json::to_string(&snap.to_wire()).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            back.models[0].cache_ttl,
+            Some(std::time::Duration::from_secs(120)),
+            "the control plane serialised it and the proxy must read it back"
         );
     }
 
