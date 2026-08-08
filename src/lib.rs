@@ -5,6 +5,10 @@
 // one. See `src/classifier/mod.rs` for why it is two tiers.
 #[cfg(feature = "classifier")]
 pub mod classifier;
+
+/// Exact-match response caching. Unconditional: it carries no model and costs
+/// nothing until a model turns it on.
+pub mod cache;
 pub mod config;
 #[cfg(feature = "control")]
 pub mod control;

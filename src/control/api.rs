@@ -673,6 +673,12 @@ struct NewModel {
     input_price_per_mtok: Option<i64>,
     #[serde(default)]
     output_price_per_mtok: Option<i64>,
+    /// Seconds an identical request may be answered from cache. Unset or 0 is
+    /// off, which is the default: caching changes semantics, since two
+    /// identical requests at `temperature > 0` are supposed to be able to
+    /// differ.
+    #[serde(default)]
+    cache_ttl_seconds: Option<i32>,
 }
 
 /// A model and a virtual model sharing a name would make the `model` field
@@ -719,13 +725,15 @@ async fn post_model(
         ));
     }
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok, \
+             cache_ttl_seconds) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
     .bind(body.input_price_per_mtok)
     .bind(body.output_price_per_mtok)
+    .bind(body.cache_ttl_seconds)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -3017,6 +3025,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3285,6 +3294,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3299,6 +3309,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3423,6 +3434,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3463,6 +3475,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3655,6 +3668,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3755,6 +3769,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -3834,6 +3849,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -4192,6 +4208,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -4257,6 +4274,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await
@@ -4362,6 +4380,7 @@ mod tests {
                 description: String::new(),
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
+                cache_ttl_seconds: None,
             }),
         )
         .await

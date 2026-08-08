@@ -571,6 +571,36 @@ async fn proxy_request(
         }
     }
 
+    // Response cache. After authorisation, so a hit is already authorised, and
+    // after limits, so a cached answer still costs a request against the
+    // caller's allowance — a cache is a latency and cost optimisation, not a
+    // way around a quota.
+    //
+    // Keyed on the *resolved* model and the whole body, and only computed when
+    // that model has caching on: a deployment that never opts in never hashes
+    // anything.
+    let cache_ttl = snapshot
+        .models
+        .iter()
+        .find(|m| m.name == target_model)
+        .and_then(|m| m.cache_ttl);
+    let cache_key = cache_ttl.map(|_| crate::cache::ResponseCache::key(&target_model, &collected));
+    if let Some(key) = cache_key {
+        if let Some(entry) = state.cache.get(key, std::time::Instant::now()) {
+            state.requests_ok.fetch_add(1, Ordering::Relaxed);
+            state
+                .telemetry
+                .record_outcome(crate::telemetry::Outcome::Ok);
+            if let Some(m) = state.telemetry.model(&target_model) {
+                m.requests.fetch_add(1, Ordering::Relaxed);
+            }
+            let elapsed = received_at.elapsed().as_micros() as u64;
+            state.telemetry.duration.record_us(elapsed);
+            debug!(model = %target_model, "served from cache");
+            return cached_response(entry, &rate_limit_status);
+        }
+    }
+
     // Whether this response is worth reading for real token counts (P3) --
     // decided once, outside the retry loop, since it depends only on the
     // principal and the request shape, neither of which changes between
@@ -854,6 +884,42 @@ async fn proxy_request(
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             });
+                    // Store, if this model opted in and the response is one
+                    // that can be replayed. Streaming is excluded: caching a
+                    // stream means buffering the whole thing before any of it
+                    // reaches the client, which turns the one path this proxy
+                    // exists to keep incremental into a batch operation.
+                    // Non-2xx is excluded because an error is a statement about
+                    // *now* — serving a 429 from cache would keep a provider's
+                    // bad minute alive long after it ended.
+                    if let (Some(key), Some(ttl), false, true) =
+                        (cache_key, cache_ttl, streaming, status.is_success())
+                    {
+                        let cache = Arc::clone(&state.cache);
+                        let content_type = resp
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        return cache_and_finish(
+                            resp,
+                            guard,
+                            tracking,
+                            key,
+                            ttl,
+                            content_type,
+                            cache,
+                            rate_limit_status,
+                            crate::telemetry::RequestTiming::new(
+                                &state.telemetry,
+                                candidate_model,
+                                streaming,
+                                received_at,
+                            )
+                            .on_backend(Arc::clone(&backend)),
+                        )
+                        .await;
+                    }
                     let mut resp = finish_response(
                         resp,
                         guard,
@@ -1348,6 +1414,98 @@ fn rate_limited_response(retry_after: std::time::Duration) -> Response<ResBody> 
 ///
 /// No currency symbol: the unit is whatever the operator priced models in, and
 /// asserting dollars in a message would be wrong for anyone who did not.
+/// Buffer a non-streaming response, store it, and hand it to the client.
+///
+/// Buffering is exactly what makes this safe only for non-streaming: the whole
+/// body is collected before any of it goes out. For a completion that fits in
+/// one document that is the shape it already had; for a stream it would be a
+/// change of behaviour, which is why streams are never routed here.
+///
+/// A body that fails to collect is not cached and not served — the upstream
+/// broke mid-response, and inventing a truncated cache entry from it would make
+/// one bad response permanent.
+#[allow(clippy::too_many_arguments)]
+async fn cache_and_finish(
+    resp: Response<UpstreamBody>,
+    guard: InflightGuard,
+    tracking: Option<UsageTracking>,
+    key: u64,
+    ttl: std::time::Duration,
+    content_type: Option<String>,
+    cache: Arc<crate::cache::ResponseCache>,
+    rate_limit_status: Option<crate::limiter::RateLimitStatus>,
+    mut timing: crate::telemetry::RequestTiming,
+) -> Response<ResBody> {
+    let (mut parts, body) = resp.into_parts();
+    for name in HOP_BY_HOP {
+        parts.headers.remove(*name);
+    }
+    let collected = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            warn!(error = %e, "upstream body failed mid-response; not cached");
+            drop(guard);
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_unavailable",
+                "the upstream closed the response before it was complete",
+            );
+        }
+    };
+
+    // Usage still comes from the same tail parse; buffering does not change
+    // where the token counts are read from.
+    if let Some(mut tracking) = tracking {
+        tracking.tail.push(&collected);
+        tracking.finish(Some(&timing));
+    }
+    // A buffered response has no separate first-byte moment, and `first_byte`
+    // declines to record one for a non-streaming request anyway.
+    timing.first_byte();
+    timing.finish();
+    drop(guard);
+
+    cache.put(
+        key,
+        content_type,
+        collected.clone(),
+        ttl,
+        std::time::Instant::now(),
+    );
+
+    let mut resp = Response::from_parts(parts, full(collected));
+    resp.headers_mut()
+        .insert("x-fastllm-cache", HeaderValue::from_static("miss"));
+    if let Some(status) = &rate_limit_status {
+        stamp_rate_limit_headers(&mut resp, status);
+    }
+    resp
+}
+
+/// Serve a cached response.
+///
+/// `x-fastllm-cache: hit` because a caller measuring latency deserves to know
+/// why one request took a microsecond and the next took a second; without it a
+/// cache looks like wildly inconsistent performance.
+fn cached_response(
+    entry: crate::cache::Entry,
+    rate_limit_status: &Option<crate::limiter::RateLimitStatus>,
+) -> Response<ResBody> {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-fastllm-cache", "hit");
+    if let Some(ct) = &entry.content_type {
+        builder = builder.header(CONTENT_TYPE, ct.as_str());
+    }
+    let mut resp = builder
+        .body(full(entry.body))
+        .expect("a cached body is always a valid response");
+    if let Some(status) = rate_limit_status {
+        stamp_rate_limit_headers(&mut resp, status);
+    }
+    resp
+}
+
 /// Wait a little before retrying, and a little longer each time.
 ///
 /// Retries used to be immediate. Against a 5xx that merely wastes an attempt;

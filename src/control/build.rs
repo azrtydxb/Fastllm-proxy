@@ -104,11 +104,11 @@ pub async fn build_snapshot_with(
     key: &EncryptionKey,
     embed: Option<&dyn PromptClassEmbedder>,
 ) -> anyhow::Result<Snapshot> {
-    let model_rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, name FROM models ORDER BY name")
+    let model_rows: Vec<(i64, String, Option<i32>)> =
+        sqlx::query_as("SELECT id, name, cache_ttl_seconds FROM models ORDER BY name")
             .fetch_all(pool)
             .await?;
-    let all_names: Vec<String> = model_rows.iter().map(|(_, n)| n.clone()).collect();
+    let all_names: Vec<String> = model_rows.iter().map(|(_, n, _)| n.clone()).collect();
 
     type BackendRow = (
         i64,
@@ -129,7 +129,7 @@ pub async fn build_snapshot_with(
     .await?;
 
     let mut models = Vec::new();
-    for (id, name) in &model_rows {
+    for (id, name, cache_ttl_seconds) in &model_rows {
         let mut backends = Vec::new();
         for (
             _,
@@ -239,6 +239,11 @@ pub async fn build_snapshot_with(
         }
         models.push(ModelDef {
             name: name.clone(),
+            // 0 and NULL both mean off, so the request path only has to check
+            // for `None`.
+            cache_ttl: cache_ttl_seconds
+                .filter(|s| *s > 0)
+                .map(|s| std::time::Duration::from_secs(s as u64)),
             backends,
         });
     }

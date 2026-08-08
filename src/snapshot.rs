@@ -186,6 +186,9 @@ pub struct PromptClassDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDef {
     pub name: String,
+    /// How long a response to this model may be served from cache. `None` is
+    /// off, which is the default and costs nothing.
+    pub cache_ttl: Option<std::time::Duration>,
     pub backends: Vec<BackendDef>,
 }
 
@@ -360,6 +363,10 @@ fn default_auth_scheme() -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireModelDef {
     pub name: String,
+    /// Seconds. Defaults, per the rule above, so an older control plane's
+    /// snapshot simply means caching off.
+    #[serde(default)]
+    pub cache_ttl_seconds: Option<u64>,
     pub backends: Vec<WireBackendDef>,
 }
 
@@ -573,6 +580,7 @@ impl Snapshot {
                 .iter()
                 .map(|m| WireModelDef {
                     name: m.name.clone(),
+                    cache_ttl_seconds: m.cache_ttl.map(|d| d.as_secs()),
                     backends: m
                         .backends
                         .iter()
@@ -717,6 +725,7 @@ impl Snapshot {
                 .into_iter()
                 .map(|m| ModelDef {
                     name: m.name,
+                    cache_ttl: None,
                     backends: m
                         .backends
                         .into_iter()
@@ -1020,6 +1029,7 @@ mod tests {
         snap.principals.get_mut(&1).unwrap().allow_all = false;
         snap.models.push(ModelDef {
             name: "qwen3".into(),
+            cache_ttl: None,
             backends: vec![crate::snapshot::BackendDef {
                 api_base: "http://node-a:8000".into(),
                 upstream_model: "qwen3-upstream".into(),

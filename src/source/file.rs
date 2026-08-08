@@ -56,6 +56,9 @@ impl SnapshotSource for FileSource {
                 Some(m) => m.backends.push(backend),
                 None => models.push(ModelDef {
                     name,
+                    // File mode has no place to configure a TTL, so caching is
+                    // off — the same as any model that has not asked for it.
+                    cache_ttl: None,
                     backends: vec![backend],
                 }),
             }

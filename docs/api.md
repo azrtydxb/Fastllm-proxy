@@ -117,6 +117,44 @@ Bedrock API key as an ordinary bearer token, so it is a plain backend row like
 any other — create the key in the Bedrock console and put it in
 `upstream_api_key`.
 
+### Response cache
+
+Off unless a model asks for it:
+
+```bash
+-d '{"name":"embeddings","cache_ttl_seconds":300}'
+```
+
+An identical request to that model — same resolved model, same body — is
+answered from memory without touching the provider. Responses carry
+`x-fastllm-cache: hit` or `miss`, because a caller measuring latency deserves
+to know why one request took a microsecond and the next took a second.
+
+Opt-in per model rather than global, because caching changes semantics: two
+identical requests at `temperature > 0` are supposed to be able to differ. A
+deployment that sets nothing pays nothing, not even the hash — that is only
+computed once a model is known to have caching on.
+
+**Non-streaming 2xx responses only.** Caching a stream would mean buffering the
+whole response before any of it reached the client, turning the one path this
+proxy exists to keep incremental into a batch operation. Errors are never
+cached: a 429 is a statement about *now*, and serving it from cache would keep
+a provider's bad minute alive long after it ended. The natural fit is
+embeddings and short completions, which are the requests that repeat.
+
+The cache is **per process**, bounded by `--cache-max-entries` and
+`--cache-max-bytes` (both matter: a thousand embedding responses is nothing and
+a thousand completions is hundreds of megabytes). A shared cache would mean a
+network call, and the request path performs no I/O — a lower hit rate across
+replicas is the honest cost of that invariant.
+
+A cache hit still counts against the caller's rate limit and budget. A cache is
+a latency and cost optimisation, not a way around a quota. And the whole cache
+is dropped whenever a snapshot changes, since a reconfiguration can repoint a
+model at a different provider and there is no way to tell from a key which
+entries are affected — a cold cache is a latency cost where a stale one is a
+correctness bug.
+
 ### Audit log
 
 `usage_events` records inference. `audit_events` records the other kind of

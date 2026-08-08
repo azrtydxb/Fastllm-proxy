@@ -77,6 +77,9 @@ pub struct AppState {
     /// counter that resets that often reads to Prometheus as a restart. See
     /// `telemetry::metrics`.
     pub telemetry: std::sync::Arc<crate::telemetry::Telemetry>,
+    /// Exact-match response cache. Shared with nothing: a cross-replica cache
+    /// would mean a network call, and the request path performs no I/O.
+    pub cache: std::sync::Arc<crate::cache::ResponseCache>,
 
     /// Prompt classifier, rebuilt from the snapshot on every `apply_snapshot`
     /// so the centroids a request is scored against are always the ones the
@@ -122,6 +125,15 @@ impl AppState {
         self.rebuild_classifier(&snap);
         self.telemetry
             .rebuild_models(snap.models.iter().map(|m| m.name.as_str()));
+        // A snapshot can repoint a model at a different provider, change its
+        // price, or turn caching off. An answer cached under the old
+        // configuration must not be served under the new one, and there is no
+        // way to tell from a key which entries are affected — so the whole
+        // cache goes. Rebuilds are rare relative to requests, and a cold cache
+        // is a latency cost where a stale one is a correctness bug.
+        if !self.cache.is_empty() {
+            self.cache.clear();
+        }
         self.snapshot.store(Arc::new(snap));
         self.rebuild_registry_from_snapshot()
     }
@@ -173,6 +185,7 @@ impl AppState {
             usage: crate::usage::UsageReporter::disabled(),
             limiter: Arc::new(crate::limiter::Limiter::new()),
             telemetry: std::sync::Arc::new(crate::telemetry::Telemetry::new()),
+            cache: std::sync::Arc::new(crate::cache::ResponseCache::new(4096, 64 * 1024 * 1024)),
         }
     }
 
@@ -430,6 +443,7 @@ mod tests {
             version: 1,
             models: vec![ModelDef {
                 name: name.to_string(),
+                cache_ttl: None,
                 backends: vec![BackendDef {
                     api_base: "http://10.0.0.1:8000".into(),
                     upstream_model: name.to_string(),

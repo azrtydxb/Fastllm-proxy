@@ -198,6 +198,9 @@ struct Seen {
     path: String,
     headers: Vec<(String, String)>,
     body: String,
+    /// How many non-probe requests the mock has answered. The only way to
+    /// assert a cache hit that does not depend on timing.
+    hits: usize,
 }
 
 type Recorder = Arc<Mutex<Seen>>;
@@ -254,10 +257,13 @@ async fn spawn_mock(port: u16, recorder: Recorder, response: MockResponse) {
                             };
                             if !is_probe {
                                 hits.fetch_add(1, Ordering::Relaxed);
-                                *recorder.lock().unwrap() = Seen {
+                                let mut seen = recorder.lock().unwrap();
+                                let hits = seen.hits + 1;
+                                *seen = Seen {
                                     path,
                                     headers,
                                     body,
+                                    hits,
                                 };
                             }
                             Ok::<_, std::convert::Infallible>(
@@ -995,4 +1001,116 @@ async fn a_tool_call_round_trips_through_an_anthropic_backend() {
         ]),
         "the result must be nested into a message and paired back by id"
     );
+}
+
+fn hits_of(recorder: &Recorder) -> usize {
+    recorder.lock().unwrap().hits
+}
+
+/// A cached answer must never reach the provider a second time.
+///
+/// Asserted against the mock's own hit counter rather than against latency:
+/// "it was faster" is a measurement that passes for the wrong reasons on a
+/// loaded machine, where "the upstream was called once" cannot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn an_identical_request_is_answered_from_cache_without_touching_the_provider() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, upstream_port) = (14791, 14792, 14793);
+
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let recorder: Recorder = Arc::new(Mutex::new(Seen::default()));
+    spawn_mock(
+        upstream_port,
+        Arc::clone(&recorder),
+        MockResponse::json(r#"{"id":"a","object":"chat.completion","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}"#),
+    )
+    .await;
+
+    let admin_name = format!("np-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+
+    // An `openai` backend, so the response is the byte-exact passthrough path.
+    let model = format!("cache-model-{suffix}");
+    let created = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/models",
+        serde_json::json!({"name": model, "description": "", "cache_ttl_seconds": 60}),
+    );
+    let model_id = created["id"].as_i64().expect("model id");
+    // Localises a failure: a cache miss can mean the TTL never reached the
+    // database, never reached the snapshot, or never reached the lookup.
+    let stored: Option<i32> =
+        sqlx::query_scalar("SELECT cache_ttl_seconds FROM models WHERE id = $1")
+            .bind(model_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(60), "the admin API must persist the TTL");
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!("/admin/models/{model_id}/backends"),
+        serde_json::json!({
+            "api_base": format!("http://127.0.0.1:{upstream_port}/v1"),
+            "upstream_model": "m",
+            "upstream_api_key": UPSTREAM_KEY,
+        }),
+    );
+
+    let principal = format!("cache-sa-{suffix}");
+    let principal_id: i64 = sqlx::query_scalar(
+        "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
+    )
+    .bind(&principal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Suffixed, so `cleanup_for` reclaims it: an unsuffixed role leaks into
+    // the shared database and breaks the migration test's exact role list.
+    grant_one_model(&pool, principal_id, &model, &format!("cache-role-{suffix}")).await;
+    let key = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/keys",
+        serde_json::json!({"principal_id": principal_id, "name": "cache"}),
+    )["key"]
+        .as_str()
+        .expect("key")
+        .to_string();
+    wait_for_model(port, &key, &model);
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "the same question twice"}],
+    });
+
+    let before = hits_of(&recorder);
+    let (status, first) = chat(port, &key, body.clone());
+    assert_eq!(status, 200, "{first}");
+    let after_first = hits_of(&recorder);
+    assert_eq!(
+        after_first,
+        before + 1,
+        "the first request reaches upstream"
+    );
+
+    let (status, second) = chat(port, &key, body);
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(
+        hits_of(&recorder),
+        after_first,
+        "the second must be served from cache, not forwarded"
+    );
+    assert_eq!(first, second, "and byte-for-byte the same answer");
 }

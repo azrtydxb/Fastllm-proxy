@@ -98,6 +98,16 @@ struct Cli {
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 
+    /// Ceilings on the response cache. Both matter: a thousand embedding
+    /// responses is nothing and a thousand completions is hundreds of
+    /// megabytes, so either alone leaves the other unbounded. Only reached by
+    /// models that turn caching on.
+    #[arg(long, default_value_t = 4096, env = "FASTLLM_CACHE_MAX_ENTRIES")]
+    cache_max_entries: usize,
+
+    #[arg(long, default_value_t = 64 * 1024 * 1024, env = "FASTLLM_CACHE_MAX_BYTES")]
+    cache_max_bytes: usize,
+
     /// `text` for humans, `json` for a log collector.
     #[arg(long, value_enum, default_value_t = LogFormat::Text, env = "FASTLLM_LOG_FORMAT")]
     log_format: LogFormat,
@@ -1174,6 +1184,10 @@ fn build_app_state(
         usage,
         limiter: Arc::new(fastllm_proxy::limiter::Limiter::new()),
         telemetry: Arc::new(fastllm_proxy::telemetry::Telemetry::new()),
+        cache: Arc::new(fastllm_proxy::cache::ResponseCache::new(
+            cli.cache_max_entries,
+            cli.cache_max_bytes,
+        )),
     });
 
     // The constructor above bypasses `apply_snapshot`, so anything that path
