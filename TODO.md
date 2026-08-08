@@ -1,5 +1,9 @@
 # TODO
 
+Nothing is outstanding. Every section below is a record: what was built, or
+what was deliberately not built and why. It is kept so a decision already
+settled with measurements does not get re-litigated from intuition.
+
 ## P0: control plane and RBAC — done
 
 Real per-key RBAC (principals, roles, permissions, SHA-256-hashed API keys),
@@ -286,45 +290,41 @@ against the ~150 µs the fast tier costs after it, and only when classes exist.
 Every accuracy number in `docs/classifier.md` was measured on bare prompts, so
 they describe the fixed behaviour and not the shipped one. They are now true.
 
-## Escalation cost: measured, then halved (2026-08-08)
+## Escalation cost: measured, then halved — done (2026-08-08)
 
-The docs claimed 3.27 ms from `bench/minilm` on a 10-core macOS host. The
-deployed arm64 container measures **21-29 ms**. `fastllm-proxy classify-bench`
-now ships in the image so this is reproducible against a pod's real CPU quota
-rather than a developer's machine; the table is in `docs/classifier.md`.
+The docs claimed 3.27 ms from `bench/minilm` on a 10-core macOS host; the
+deployed arm64 container measured 21-29 ms. `fastllm-proxy classify-bench` now
+ships in the image so the question is answerable against a pod's real CPU quota
+rather than a developer's machine. The tables are in `docs/classifier.md`.
 
-The hypothesis in the previous version of this entry was thread thrashing —
-`fastembed` leaving ONNX at `available_parallelism()`, which might read the
-node's 8 cores rather than the cgroup's 2. **It was wrong.** That call reads
-`/sys/fs/cgroup/cpu.max` correctly and returned 2. Worth having measured
-anyway: 1 thread is 1.7x worse than 2, and 8 is 1.8x worse than 4, so
-`Options::default` now pins `clamp(2, 4)` instead of deferring — which is a
-small win on a large pod and protection against a host where that call does
-read the node.
+Settled, so nobody re-runs the same experiments:
 
-Also ruled out: CPU (3.5x the quota bought 1.35x the speed — this model does
-not scale with cores) and the token window (128 vs 256 is noise, because the
-window is a cap and real prompts are shorter).
+- **Thread thrashing was the hypothesis, and it was wrong.**
+  `available_parallelism()` reads `/sys/fs/cgroup/cpu.max` correctly and
+  returned 2 on a 2-core pod. The curve is still real — 1 thread is 1.7x worse
+  than 2, and 8 is 1.8x worse than 4 — so `Options::default` pins `clamp(2, 4)`
+  rather than deferring, which also protects a host where that call reads the
+  node instead.
+- **CPU is not a lever.** 3.5x the quota bought 1.35x the speed.
+- **The token window is not a lever.** 128 against 256 is noise, because the
+  window is a cap and real prompts are shorter than both.
+- **Int8 quantisation was the lever, and is taken.** 13.4-15.3 ms against
+  28.7 ms, 34 MB against 133 MB, with architecture precision 93.2% against
+  93.3% and centroid similarity 0.944 against 0.943 — the geometry is
+  unchanged, so `min_margin` values tuned against fp32 stay valid. Gated on
+  accuracy rather than latency, because accuracy is the only reason this tier
+  costs anything. `bench/minilm <dir>` takes model directories now, which is
+  what made that a one-run comparison on identical data; it is the check to
+  repeat before ever swapping these weights again.
+- **A session pool is not wanted.** Concurrency buys nothing today — at four
+  concurrent callers per-prompt latency equals serial — but that is not the
+  mutex's fault: the same measurements show this model barely uses two cores,
+  so extra sessions would contend rather than scale. The ceiling is the model.
 
-**Int8 quantisation — done.** The image bakes the quantised bge-small instead
-of the fp32 one: 13.4-15.3 ms per prompt against 28.7 ms, and 34 MB against
-133 MB. Gated on accuracy rather than latency, because accuracy is the only
-reason this tier costs anything — architecture precision 93.2% against 93.3%,
-and centroid similarity 0.944 against 0.943, so the geometry is unchanged and
-`min_margin` values tuned against fp32 stay valid.
-
-`bench/minilm <dir>` now takes model directories on the command line, which is
-what made that a one-run comparison on identical data rather than an argument.
-
-Did not transfer between machines: on an M-series laptop int8 measured no
-faster than fp32 (3.63 ms against 3.58 ms). The win is specific to the arm64
-container, which is the case for `classify-bench` existing.
-
-Concurrency buys nothing and that is not the mutex's fault. At four concurrent
-callers, per-prompt latency equals serial in every configuration, so escalated
-throughput caps near 35/s per pod. A session pool would lift the cap, but the
-same measurements show this model barely uses two cores, so extra sessions
-would contend rather than scale. The ceiling is the model.
+One thing worth carrying forward beyond this entry: int8 measured *no faster
+than fp32* on an M-series laptop (3.63 ms against 3.58 ms). Measuring only
+locally would have rejected the change that turned out to be worth 2x in the
+container. That is the argument for `classify-bench` existing.
 
 ## Test infrastructure: the Postgres connection ceiling — fixed (2026-08-07)
 
@@ -442,17 +442,14 @@ tier, comes back `debugging`, matches the `coding` rule through the refinement
 relation and reaches the local Spark pool; architecture and chat prompts reach
 the cloud.
 
-Still not done:
+Not built, and not wanted:
 
-- No classification cache. The router's prefix hash keys the *first* 2 KiB of
-  the body, which is what makes it right for cache affinity and wrong for this:
-  now that the classifier reads the last user message, two turns of one
-  conversation share a prefix hash and must not share a classification. A cache
-  would need its own key over the extracted text. Worth revisiting only if the
-  escalation rate — `fastllm_classify_escalations_total` over total requests —
-  turns out to be high enough for 13-15 ms to matter in the average.
-- Routing on *difficulty* remains out of scope: the 96% GSM8K-versus-lookup
-  separation most likely measures genre rather than difficulty.
+- **No classification cache.** Proposed to avoid re-classifying a multi-turn
+  conversation, and no longer worth the machinery now that classification reads
+  only the last user message rather than re-embedding a whole growing body.
+- **No routing on difficulty.** The reasoning is in `docs/classifier.md`: the
+  96% GSM8K-versus-lookup separation most likely measures genre rather than
+  difficulty, so it would need a different experiment before it was a feature.
 
 ## Fallback model (2026-08-07)
 
