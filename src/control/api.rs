@@ -1627,8 +1627,11 @@ const BUDGET_WINDOWS: [&str; 3] = ["daily", "weekly", "monthly"];
 struct BudgetView {
     principal_id: i64,
     principal: String,
-    tokens_total: i64,
+    /// `None` for a budget that caps only spend.
+    tokens_total: Option<i64>,
     tokens_used: i64,
+    cost_total_micros: Option<i64>,
+    cost_used_micros: i64,
     window: String,
     window_start: chrono::DateTime<chrono::Utc>,
 }
@@ -1637,9 +1640,22 @@ async fn list_budgets(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<BudgetView>>, ApiError> {
-    type BudgetRow = (i64, String, i64, i64, String, chrono::DateTime<chrono::Utc>);
+    // `tokens_total` is `Option` because the column is nullable: a budget may
+    // cap only spend. Decoding it as `i64` made this route fail outright the
+    // moment anyone created one — the whole listing, not just that row.
+    type BudgetRow = (
+        i64,
+        String,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        i64,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    );
     let rows: Vec<BudgetRow> = sqlx::query_as(
-        "SELECT b.principal_id, p.name, b.tokens_total, b.tokens_used, b.budget_window, b.window_start
+        "SELECT b.principal_id, p.name, b.tokens_total, b.tokens_used, \
+         b.cost_total_micros, b.cost_used_micros, b.budget_window, b.window_start
          FROM budgets b JOIN principals p ON p.id = b.principal_id
          ORDER BY b.principal_id",
     )
@@ -1649,12 +1665,23 @@ async fn list_budgets(
     Ok(Json(
         rows.into_iter()
             .map(
-                |(principal_id, principal, tokens_total, tokens_used, window, window_start)| {
+                |(
+                    principal_id,
+                    principal,
+                    tokens_total,
+                    tokens_used,
+                    cost_total_micros,
+                    cost_used_micros,
+                    window,
+                    window_start,
+                )| {
                     BudgetView {
                         principal_id,
                         principal,
                         tokens_total,
                         tokens_used,
+                        cost_total_micros,
+                        cost_used_micros,
                         window,
                         window_start,
                     }
@@ -4111,7 +4138,29 @@ mod tests {
         assert!(listed
             .0
             .iter()
-            .any(|b| b.principal_id == principal_id && b.tokens_total == 500));
+            .any(|b| b.principal_id == principal_id && b.tokens_total == Some(500)));
+
+        // A cost-only budget has a NULL token cap. Decoding that column as a
+        // non-null `i64` made this route fail outright — the whole listing,
+        // not just the offending row — the moment anyone created one.
+        put_budget(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+            Json(PutBudget {
+                tokens_total: None,
+                cost_total_micros: Some(5_000_000),
+                window: "monthly".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let listed = list_budgets(State(ctx.clone()), RequireRead::default())
+            .await
+            .expect("a cost-only budget must not break the listing");
+        assert!(listed.0.iter().any(|b| b.principal_id == principal_id
+            && b.tokens_total.is_none()
+            && b.cost_total_micros == Some(5_000_000)));
 
         delete_budget(
             State(ctx.clone()),
