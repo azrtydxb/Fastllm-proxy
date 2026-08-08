@@ -111,6 +111,25 @@ currently identified as worth doing.
   endpoint-index coupling between `proxy.rs` and `registry.rs`.
 - **Anything else on the request path.** There is under 1µs available in total.
 
+### Usage extraction was the most expensive thing on the response path
+
+Found while benchmarking telemetry, and unrelated to it. `TailBuffer::extract_usage`
+runs once per request for any principal with a budget or a token rate limit. It
+parsed **every** `data:` line in the 8 KiB tail into a full `serde_json::Value`
+— around sixty allocated trees — to find the usage chunk, which sits at the
+very end.
+
+| | before | after |
+|---|---|---|
+| usage present | 22.0 µs | 0.6 µs |
+| no usage in the tail | 32.4 µs | 2.8 µs |
+
+Against roughly 38 µs of core time per request, the old figures were most of a
+request again. Two changes: search backwards and stop at the first hit, since
+"the last matching line wins" is the same answer as "the first match from the
+end"; and scan for a single byte before comparing, which the compiler
+vectorises, rather than `windows(n)` comparing at every offset.
+
 ### What telemetry costs
 
 Measured on this machine with `bench/micro`, because "no performance impact" is

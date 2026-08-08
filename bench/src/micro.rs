@@ -207,6 +207,37 @@ fn telemetry() {
         h.record_us(45_000_000);
     });
 
+    // Whether usage tracking can be turned on for every request rather than
+    // only for principals with a budget — the difference between per-model
+    // token metrics that are complete and ones that silently undercount.
+    {
+        use fastllm_proxy::tail_buffer::{TailBuffer, DEFAULT_CAPACITY};
+        let frame = b"data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" token\"},\"finish_reason\":null}]}\n\n";
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        bench("TailBuffer::push (one ~130B SSE frame)", 5_000_000, || {
+            tail.push(frame);
+        });
+
+        // The other half of always-on tracking: one extraction per request,
+        // not per frame.
+        bench("TailBuffer::extract_usage (found)", 200_000, || {
+            let mut t = TailBuffer::new(DEFAULT_CAPACITY);
+            for _ in 0..40 {
+                t.push(frame);
+            }
+            t.push(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34}}\n\ndata: [DONE]\n\n");
+            std::hint::black_box(t.extract_usage());
+        });
+
+        bench("TailBuffer::extract_usage (absent)", 200_000, || {
+            let mut t = TailBuffer::new(DEFAULT_CAPACITY);
+            for _ in 0..60 {
+                t.push(frame);
+            }
+            std::hint::black_box(t.extract_usage());
+        });
+    }
+
     // The number that actually matters at load: eight threads writing the same
     // counters, which is where false sharing would show up if these were laid
     // out badly.

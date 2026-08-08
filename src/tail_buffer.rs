@@ -96,21 +96,69 @@ fn extract_usage(buf: &[u8]) -> Option<UsageTokens> {
     if let Some(u) = parse_usage_object(buf) {
         return Some(u);
     }
-    let mut last = None;
-    for line in buf.split(|&b| b == b'\n') {
-        let line = trim_ascii(line);
-        let Some(rest) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        let rest = trim_ascii(rest);
-        if rest == b"[DONE]" {
-            continue;
+    // One backwards search for the word, rather than a walk over every line.
+    //
+    // "The last matching line wins" is the same answer as "the first match
+    // scanning from the end", and where that match sits is not a coincidence:
+    // the usage chunk is the second-to-last line of the stream, immediately
+    // before `data: [DONE]`. So a backwards search finds it within a couple of
+    // hundred bytes, and a stream carrying no usage at all costs exactly one
+    // contiguous scan of the tail instead of sixty small ones.
+    //
+    // Forwards and line by line, this parsed every delta frame in the 8 KiB
+    // tail — around sixty full `serde_json::Value` trees, allocations and all
+    // — to find something sitting at the end. Measured at 22-32 µs against a
+    // request whose entire core cost is ~38 µs (`bench/micro`).
+    let mut end = buf.len();
+    while let Some(at) = rfind(&buf[..end], b"usage") {
+        let line = line_around(buf, at);
+        if let Some(rest) = line
+            .strip_prefix(b"data:".as_slice())
+            .map(trim_ascii)
+            .filter(|r| *r != b"[DONE]")
+        {
+            if let Some(u) = parse_usage_object(rest) {
+                return Some(u);
+            }
         }
-        if let Some(u) = parse_usage_object(rest) {
-            last = Some(u);
-        }
+        // The whole tail is tried as one document above, so a bare JSON body is
+        // already handled; anything reaching here that is not a `data:` line is
+        // a false positive — the word inside a message, say — and the search
+        // continues before it.
+        end = at;
     }
-    last
+    None
+}
+
+/// The `\n`-delimited line containing `at`, trimmed.
+fn line_around(buf: &[u8], at: usize) -> &[u8] {
+    let start = buf[..at]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let end = buf[at..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(buf.len(), |i| at + i);
+    trim_ascii(&buf[start..end])
+}
+
+/// Offset of the last occurrence of `needle`.
+///
+/// Scans for one byte and only then compares, which is the shape the compiler
+/// vectorises. The obvious `windows(n).rposition(..)` compares at every offset
+/// instead, and measured about twice as slow over an 8 KiB tail.
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let (&last, head) = needle.split_last()?;
+    let mut end = haystack.len();
+    while end > head.len() {
+        let at = haystack[head.len()..end].iter().rposition(|&b| b == last)? + head.len();
+        if haystack[at - head.len()..at] == *head {
+            return Some(at - head.len());
+        }
+        end = at;
+    }
+    None
 }
 
 fn parse_usage_object(bytes: &[u8]) -> Option<UsageTokens> {
@@ -242,5 +290,61 @@ mod tests {
         let usage = tail.extract_usage().unwrap();
         assert_eq!(usage.prompt_tokens, 99);
         assert_eq!(usage.completion_tokens, 99);
+    }
+
+    /// The word appearing in a model's own output must not be mistaken for a
+    /// usage object. The backwards search stops at the *first* thing it finds,
+    /// so a false positive nearer the end has to be stepped over rather than
+    /// ending the search.
+    #[test]
+    fn the_word_usage_in_content_does_not_shadow_the_real_one() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":9}}\n\n",
+        );
+        tail.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"your usage is high\"}}]}\n\n");
+        tail.push(b"data: [DONE]\n\n");
+        assert_eq!(
+            tail.extract_usage(),
+            Some(UsageTokens {
+                prompt_tokens: 7,
+                completion_tokens: 9
+            })
+        );
+    }
+
+    /// Two usage chunks in the window: the last one is the real total, and
+    /// billing the earlier one would undercount every request that had them.
+    #[test]
+    fn the_last_usage_chunk_wins() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(b"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n");
+        tail.push(b"data: {\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":60}}\n\n");
+        tail.push(b"data: [DONE]\n\n");
+        assert_eq!(
+            tail.extract_usage(),
+            Some(UsageTokens {
+                prompt_tokens: 50,
+                completion_tokens: 60
+            })
+        );
+    }
+
+    #[test]
+    fn rfind_finds_the_last_occurrence_and_nothing_that_is_not_there() {
+        assert_eq!(rfind(b"usage x usage y", b"usage"), Some(8));
+        assert_eq!(rfind(b"usage", b"usage"), Some(0));
+        assert_eq!(rfind(b"usag", b"usage"), None);
+        assert_eq!(rfind(b"", b"usage"), None);
+        // A partial match at the very end must not be read as a hit.
+        assert_eq!(rfind(b"xxusage_", b"usage"), Some(2));
+    }
+
+    #[test]
+    fn line_around_returns_the_whole_line_from_anywhere_inside_it() {
+        let buf = b"first\ndata: {\"usage\":1}\nlast";
+        let at = buf.windows(5).position(|w| w == b"usage").unwrap();
+        assert_eq!(line_around(buf, at), b"data: {\"usage\":1}");
+        assert_eq!(line_around(buf, 0), b"first");
     }
 }
