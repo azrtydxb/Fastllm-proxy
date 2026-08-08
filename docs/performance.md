@@ -111,6 +111,33 @@ currently identified as worth doing.
   endpoint-index coupling between `proxy.rs` and `registry.rs`.
 - **Anything else on the request path.** There is under 1µs available in total.
 
+### What telemetry costs
+
+Measured on this machine with `bench/micro`, because "no performance impact" is
+a claim and claims here need numbers.
+
+| instrument | cost |
+|---|---|
+| `Instant::now()` | 14 ns |
+| `Instant::elapsed()` to microseconds | 19 ns |
+| `AtomicU64` increment, uncontended | 2 ns |
+| `Histogram::record_us`, uncontended | 2 ns |
+| `Histogram::record_us`, 2 threads | 29 ns |
+| `Histogram::record_us`, 8 threads | 57 ns |
+
+A request pays one clock read on arrival, one per-model lookup, and on
+completion one elapsed plus two histogram records and a couple of counter
+increments — **roughly 80-150 ns depending on contention, against ~38 µs of
+core time per request.** Under half a percent, and the per-request fixed work
+in the table above is unchanged.
+
+Two design choices carry most of that. The histogram has no `count` field —
+the total is the sum of its buckets, added up at scrape time — because a
+third atomic on a single cache line cost more than it sounds: 91 ns per record
+at 8 threads with it, 57 ns without. And nothing formats a string while
+serving; labels are resolved when the snapshot is built, and the only
+allocation is on `/metrics`, at scrape time.
+
 ### Classifier tiers
 
 Semantic routing costs what it measures. Same machine, `--release`,

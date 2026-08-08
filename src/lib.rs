@@ -21,6 +21,7 @@ pub mod snapshot;
 pub mod source;
 pub mod state;
 pub mod tail_buffer;
+pub mod telemetry;
 pub mod upstream;
 pub mod usage;
 pub mod vector;

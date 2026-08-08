@@ -70,6 +70,13 @@ pub struct AppState {
     /// background task (spawned in `Http`-mode `--role proxy` only, see
     /// `main.rs`) can hold its own handle without holding all of `AppState`.
     pub limiter: Arc<crate::limiter::Limiter>,
+    /// Counters and histograms the request path writes.
+    ///
+    /// On `AppState` rather than on the registry because the registry's pools
+    /// are rebuilt on every snapshot apply — about once a second — and a
+    /// counter that resets that often reads to Prometheus as a restart. See
+    /// `telemetry::metrics`.
+    pub telemetry: crate::telemetry::Telemetry,
 
     /// Prompt classifier, rebuilt from the snapshot on every `apply_snapshot`
     /// so the centroids a request is scored against are always the ones the
@@ -113,6 +120,8 @@ impl AppState {
     pub fn apply_snapshot(&self, snap: Snapshot) -> anyhow::Result<usize> {
         #[cfg(feature = "classifier")]
         self.rebuild_classifier(&snap);
+        self.telemetry
+            .rebuild_models(snap.models.iter().map(|m| m.name.as_str()));
         self.snapshot.store(Arc::new(snap));
         self.rebuild_registry_from_snapshot()
     }
@@ -163,6 +172,7 @@ impl AppState {
             requests_failed: AtomicU64::new(0),
             usage: crate::usage::UsageReporter::disabled(),
             limiter: Arc::new(crate::limiter::Limiter::new()),
+            telemetry: crate::telemetry::Telemetry::new(),
         }
     }
 
@@ -180,8 +190,11 @@ impl AppState {
     ///
     /// Call once, immediately after construction.
     pub fn prime_derived_views(&self) {
+        let snap = self.snapshot.load();
         #[cfg(feature = "classifier")]
-        self.rebuild_classifier(&self.snapshot.load());
+        self.rebuild_classifier(&snap);
+        self.telemetry
+            .rebuild_models(snap.models.iter().map(|m| m.name.as_str()));
     }
 
     /// Rebuild the classifier from a snapshot's published centroids.

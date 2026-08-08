@@ -144,6 +144,8 @@ fn main() {
         let s = p.strip_prefix("/v1").unwrap_or(&p).to_string();
         std::hint::black_box((p, s));
     });
+
+    telemetry();
 }
 
 fn fxhash(bytes: &[u8]) -> u64 {
@@ -162,4 +164,74 @@ fn fxhash(bytes: &[u8]) -> u64 {
     hash ^= hash >> 32;
     hash = hash.wrapping_mul(SEED);
     hash ^ (hash >> 29)
+}
+
+/// What telemetry costs, measured rather than asserted.
+///
+/// The budget these have to fit inside: the proxy's own fixed per-request work
+/// is a few hundred nanoseconds against ~38µs of core time per request. An
+/// instrument costing a microsecond would be the single most expensive thing
+/// on the path.
+fn telemetry() {
+    use fastllm_proxy::telemetry::Histogram;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    println!("\ntelemetry instruments:");
+
+    // The clock is the expensive part, not the counters — it is a vDSO call,
+    // and there are two per request (start, and first byte or completion).
+    bench("Instant::now()", 2_000_000, || {
+        std::hint::black_box(Instant::now());
+    });
+
+    let start = Instant::now();
+    bench("Instant::elapsed() -> micros", 2_000_000, || {
+        std::hint::black_box(start.elapsed().as_micros() as u64);
+    });
+
+    let counter = AtomicU64::new(0);
+    bench("AtomicU64 fetch_add (uncontended)", 5_000_000, || {
+        counter.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let h = Histogram::new();
+    bench(
+        "Histogram::record_us, 1ms (early bucket)",
+        5_000_000,
+        || {
+            h.record_us(1_000);
+        },
+    );
+    bench("Histogram::record_us, 45s (late bucket)", 5_000_000, || {
+        h.record_us(45_000_000);
+    });
+
+    // The number that actually matters at load: eight threads writing the same
+    // counters, which is where false sharing would show up if these were laid
+    // out badly.
+    for threads in [2usize, 8] {
+        let h = Arc::new(Histogram::new());
+        const PER: u32 = 200_000;
+        let t = Instant::now();
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                std::thread::spawn(move || {
+                    for _ in 0..PER {
+                        h.record_us(1_000);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let total = PER as f64 * threads as f64;
+        let ns = t.elapsed().as_nanos() as f64 / total;
+        println!(
+            "  {:<46} {ns:>9.0} ns",
+            format!("Histogram::record_us, {threads} threads contending")
+        );
+    }
 }

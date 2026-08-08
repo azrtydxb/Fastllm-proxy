@@ -30,6 +30,7 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 use tracing::{debug, warn};
 
 use crate::multipart;
@@ -214,6 +215,11 @@ async fn proxy_request(
     principal: Option<&Principal>,
     snapshot: &Snapshot,
 ) -> Response<ResBody> {
+    // Taken before the body is even collected, so the measurement covers
+    // everything this proxy is responsible for — including waiting on a slow
+    // client's upload, which is otherwise invisible and looks like upstream
+    // latency.
+    let received_at = Instant::now();
     let (parts, body) = req.into_parts();
 
     let collected = match Limited::new(body, state.max_body_bytes).collect().await {
@@ -226,6 +232,9 @@ async fn proxy_request(
                 .downcast_ref::<http_body_util::LengthLimitError>()
                 .is_some()
             {
+                state
+                    .telemetry
+                    .record_rejection(crate::telemetry::Rejection::BodyTooLarge);
                 error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "payload_too_large",
@@ -385,6 +394,9 @@ async fn proxy_request(
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let known = registry.model_names().join(", ");
         let wanted = candidates.first().map(String::as_str).unwrap_or("");
+        state
+            .telemetry
+            .record_rejection(crate::telemetry::Rejection::ModelNotFound);
         return error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
@@ -415,6 +427,9 @@ async fn proxy_request(
     let Some((primary_model, _)) = routable.first().cloned() else {
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
         let denied = served.first().map(|(m, _)| m.as_str()).unwrap_or_default();
+        state
+            .telemetry
+            .record_rejection(crate::telemetry::Rejection::Unauthorised);
         return error_response(
             StatusCode::FORBIDDEN,
             "model_access_denied",
@@ -433,6 +448,9 @@ async fn proxy_request(
         if let Some(budget) = &principal.budget {
             if budget.exhausted() {
                 state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                state
+                    .telemetry
+                    .record_rejection(crate::telemetry::Rejection::OverBudget);
                 return budget_exceeded_response(budget);
             }
         }
@@ -464,6 +482,9 @@ async fn proxy_request(
                     .check(principal.id, limits, token_cost, std::time::Instant::now())
             {
                 state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                state
+                    .telemetry
+                    .record_rejection(crate::telemetry::Rejection::RateLimited);
                 return rate_limited_response(retry_after);
             }
         }
@@ -535,6 +556,9 @@ async fn proxy_request(
                 // clear local one.
                 if subpath != "/chat/completions" {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .record_rejection(crate::telemetry::Rejection::Unsupported);
                     return error_response(
                         StatusCode::NOT_IMPLEMENTED,
                         "unsupported_endpoint",
@@ -628,6 +652,7 @@ async fn proxy_request(
                         if attempt < state.max_retries && state.router.has_candidate(pool, &tried) {
                             last_error =
                                 Some(format!("upstream {} returned {}", backend.api_base, status));
+                            state.telemetry.retries.fetch_add(1, Ordering::Relaxed);
                             debug!(backend = %backend.api_base, %status, "retrying on another backend");
                             continue;
                         }
@@ -643,13 +668,27 @@ async fn proxy_request(
                                 %status,
                                 "failing over to the next model in the chain"
                             );
+                            state.telemetry.failovers.fetch_add(1, Ordering::Relaxed);
                             break;
                         }
                     }
                     if status.is_client_error() || status.is_server_error() {
                         state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        state
+                            .telemetry
+                            .record_outcome(crate::telemetry::Outcome::UpstreamError);
                     } else {
                         state.requests_ok.fetch_add(1, Ordering::Relaxed);
+                        state
+                            .telemetry
+                            .record_outcome(crate::telemetry::Outcome::Ok);
+                    }
+                    // Counted against the model that actually answered, not the
+                    // head of the chain — after a failover those differ, and
+                    // crediting the one that refused would make the per-model
+                    // rate a fiction.
+                    if let Some(m) = state.telemetry.model(candidate_model) {
+                        m.requests.fetch_add(1, Ordering::Relaxed);
                     }
                     debug!(
                         backend = %backend.api_base,
@@ -697,7 +736,17 @@ async fn proxy_request(
                                 model: candidate_model.clone(),
                                 reporter: state.usage.clone(),
                             });
-                    return finish_response(resp, guard, tracking);
+                    return finish_response(
+                        resp,
+                        guard,
+                        tracking,
+                        Some(RequestTiming::new(
+                            &state,
+                            candidate_model,
+                            streaming,
+                            received_at,
+                        )),
+                    );
                 }
                 Err(e) => {
                     backend.note_error();
@@ -715,6 +764,9 @@ async fn proxy_request(
     state.requests_failed.fetch_add(1, Ordering::Relaxed);
     let detail =
         last_error.unwrap_or_else(|| format!("no healthy backend for model {target_model:?}"));
+    state
+        .telemetry
+        .record_outcome(crate::telemetry::Outcome::Unavailable);
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
 }
 
@@ -826,6 +878,64 @@ fn build_upstream_request(
     Ok(builder.body(Full::new(body))?)
 }
 
+/// Whole-request timing, recorded when the response body finishes.
+///
+/// Lives on the body rather than being timed around the handler because a
+/// streamed response is not over when the handler returns — it is over when the
+/// last frame goes out, which can be a minute later. Timing the handler would
+/// report the time to *start* answering as if it were the time to answer.
+///
+/// Two clock reads per request (`Instant::now` at 14ns each, measured in
+/// `bench/micro`) and one branch per frame until the first one arrives.
+pub struct RequestTiming {
+    start: Instant,
+    telemetry: Arc<AppState>,
+    model: Option<Arc<crate::telemetry::ModelMetrics>>,
+    /// Set once the first body byte is out. `None` afterwards, which is also
+    /// what makes the per-frame cost a single `is_some` check.
+    awaiting_first_byte: bool,
+    streaming: bool,
+}
+
+impl RequestTiming {
+    pub fn new(state: &Arc<AppState>, model: &str, streaming: bool, start: Instant) -> Self {
+        Self {
+            start,
+            model: state.telemetry.model(model),
+            telemetry: Arc::clone(state),
+            awaiting_first_byte: true,
+            streaming,
+        }
+    }
+
+    #[inline]
+    fn first_byte(&mut self) {
+        if !self.awaiting_first_byte {
+            return;
+        }
+        self.awaiting_first_byte = false;
+        // Only for a streamed response. For a buffered one this is the same
+        // instant as completion, and publishing it as a separate series would
+        // suggest the two are independent measurements when one is a copy.
+        if !self.streaming {
+            return;
+        }
+        let us = self.start.elapsed().as_micros() as u64;
+        self.telemetry.telemetry.ttft.record_us(us);
+        if let Some(m) = &self.model {
+            m.ttft.record_us(us);
+        }
+    }
+
+    fn finish(&self) {
+        let us = self.start.elapsed().as_micros() as u64;
+        self.telemetry.telemetry.duration.record_us(us);
+        if let Some(m) = &self.model {
+            m.duration.record_us(us);
+        }
+    }
+}
+
 /// Hand the upstream response to the client, keeping the in-flight guard alive
 /// for as long as the body is still streaming, and — for a principal with a
 /// budget or a token-rate limit — feeding forwarded bytes into a bounded tail
@@ -834,6 +944,7 @@ fn finish_response(
     resp: Response<UpstreamBody>,
     guard: InflightGuard,
     tracking: Option<UsageTracking>,
+    timing: Option<RequestTiming>,
 ) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     // Hop-by-hop only: the response body is passed through byte for byte, so
@@ -841,7 +952,10 @@ fn finish_response(
     for name in HOP_BY_HOP {
         parts.headers.remove(*name);
     }
-    Response::from_parts(parts, TrackedBody::new(body, guard, tracking).boxed())
+    Response::from_parts(
+        parts,
+        TrackedBody::new(body, guard, tracking, timing).boxed(),
+    )
 }
 
 /// Hand a *translated* upstream response to the client.
@@ -934,6 +1048,10 @@ pin_project! {
         inner: UpstreamBody,
         guard: Option<InflightGuard>,
         usage_tracking: Option<UsageTracking>,
+        // Taken once, so a body finished by `poll_frame` is not recorded a
+        // second time by `PinnedDrop` — the same rule the usage tracking above
+        // follows, for the same reason.
+        timing: Option<RequestTiming>,
     }
 
     impl PinnedDrop for TrackedBody {
@@ -957,6 +1075,9 @@ pin_project! {
             if let Some(tracking) = this.usage_tracking.take() {
                 tracking.finish();
             }
+            if let Some(timing) = this.timing.take() {
+                timing.finish();
+            }
         }
     }
 }
@@ -966,11 +1087,13 @@ impl TrackedBody {
         inner: UpstreamBody,
         guard: InflightGuard,
         usage_tracking: Option<UsageTracking>,
+        timing: Option<RequestTiming>,
     ) -> Self {
         Self {
             inner,
             guard: Some(guard),
             usage_tracking,
+            timing,
         }
     }
 }
@@ -989,9 +1112,14 @@ impl Body for TrackedBody {
         // see `crate::tail_buffer`'s module doc comment for why this is the
         // one piece of per-frame work the design accepts.
         if let Poll::Ready(Some(Ok(frame))) = &polled {
-            if let Some(tracking) = this.usage_tracking.as_mut() {
-                if let Some(data) = frame.data_ref() {
+            if let Some(data) = frame.data_ref() {
+                if let Some(tracking) = this.usage_tracking.as_mut() {
                     tracking.tail.push(data);
+                }
+                // Time to first token, from the only place that knows when the
+                // first byte actually reaches the client.
+                if let Some(timing) = this.timing.as_mut() {
+                    timing.first_byte();
                 }
             }
         }
@@ -1006,6 +1134,9 @@ impl Body for TrackedBody {
         if let Poll::Ready(None) = &polled {
             if let Some(tracking) = this.usage_tracking.take() {
                 tracking.finish();
+            }
+            if let Some(timing) = this.timing.take() {
+                timing.finish();
             }
         }
         // Release on both clean end-of-stream and error; a client that hangs up
@@ -1262,6 +1393,11 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         "fastllm_snapshot_version {}\n",
         state.snapshot.load().version
     ));
+
+    // Everything the telemetry module owns: outcomes, rejection reasons,
+    // routing counters, classifier counters, and the duration/TTFT histograms
+    // both globally and per model.
+    state.telemetry.render(&mut out);
 
     out.push_str("# HELP fastllm_backend_inflight Requests currently streaming from a backend.\n");
     out.push_str("# TYPE fastllm_backend_inflight gauge\n");
