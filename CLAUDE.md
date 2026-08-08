@@ -25,6 +25,18 @@ If a change makes a security claim in the docs false, fixing the claim is the
 *minimum*; consider whether the code should be made to match the claim
 instead.
 
+## Never edit a migration that has been applied
+
+`sqlx` checksums every migration file and refuses to start when an applied one
+changes — including a comment. Correcting a stale comment in
+`migrations/0014_prompt_classes.sql` failed every database test with
+"migration 14 was previously applied but has been modified", and it failed in
+CI rather than locally because the checksum lives in the database, not the
+repo.
+
+If a migration's comment is wrong, fix it where the code lives and leave the
+migration alone, or add a new migration.
+
 ## Environment
 
 - **Never use Docker on this machine.** It is not the workflow. Do not run
