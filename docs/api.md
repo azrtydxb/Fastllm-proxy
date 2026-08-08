@@ -184,7 +184,10 @@ by whom, not which role. Complete and coarse beats detailed and full of holes,
 and the application log carries the rest.
 
 Three things are deliberately absent. **Reads** are not recorded: auditing
-every list call would bury the changes in noise. **Rejected attempts** are not
+every list call would bury the changes in noise — including the handful that
+are `POST` only because they take a body (`/admin/routing/dry-run`,
+`/admin/prompt-classes/evaluate`), which would otherwise dilute a log whose
+value is that every row is a change. **Rejected attempts** are not
 recorded as changes: a 403 is an attempt, and logging it as a change would make
 the trail lie in the direction that matters most. And the **request body** is
 never captured — it carries passwords and upstream credentials, and an audit

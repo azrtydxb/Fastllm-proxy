@@ -3214,10 +3214,25 @@ type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
 /// application log carries the rest.
 ///
 /// Reads are not recorded. `GET /admin/keys` returns prefixes, never secrets,
-/// and auditing every list call would bury the changes in noise.
+/// and auditing every list call would bury the changes in noise. A handful of
+/// routes are `POST` only because they take a body — see `is_read_only`.
 ///
 /// The body is never captured. It carries passwords and upstream credentials,
 /// and an audit row is read by more people than the thing it describes.
+/// Routes that are `POST` because they take a body, not because they change
+/// anything.
+///
+/// The audit trail's value comes from every row being a change; a dry run or an
+/// evaluation recorded as one dilutes it exactly the way auditing `GET` would.
+/// A closed list rather than a marker on the handler, so it sits next to the
+/// rule it is an exception to.
+fn is_read_only(path: &str) -> bool {
+    matches!(
+        path,
+        "/admin/routing/dry-run" | "/admin/prompt-classes/evaluate"
+    )
+}
+
 async fn audit_changes(
     State(ctx): State<Ctx>,
     request: axum::extract::Request,
@@ -3234,7 +3249,7 @@ async fn audit_changes(
 
     let response = next.run(request).await;
 
-    if method == axum::http::Method::GET {
+    if method == axum::http::Method::GET || is_read_only(&path) {
         return response;
     }
     // Only changes that actually happened. A 403 or a 400 is an attempt, and
@@ -5729,6 +5744,25 @@ mod tests {
         let concrete = dry_run(true, fast_name.clone()).await;
         assert!(!concrete.virtual_model);
         assert_eq!(concrete.candidates, vec![fast_name]);
+    }
+
+    /// The audit log's value is that every row is a change. A dry run is a
+    /// read that happens to need a body, and recording it dilutes the log the
+    /// same way auditing `GET` would.
+    #[test]
+    fn a_post_that_changes_nothing_is_not_recorded_as_a_change() {
+        assert!(is_read_only("/admin/routing/dry-run"));
+        assert!(is_read_only("/admin/prompt-classes/evaluate"));
+        // Everything that does change something must stay audited, including
+        // the routes added alongside the exceptions.
+        for path in [
+            "/admin/keys",
+            "/admin/prices/sync",
+            "/admin/roles/operator/permissions",
+            "/admin/models/1",
+        ] {
+            assert!(!is_read_only(path), "{path} must stay audited");
+        }
     }
 
     /// The reverse channel end to end: a proxy's report survives the route and

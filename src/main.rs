@@ -1375,10 +1375,15 @@ fn spawn_health_reports(
 /// Which replica this is. The pod name under Kubernetes, which is what an
 /// operator would `kubectl logs` next.
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    if let Some(h) = std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()) {
+        return h;
+    }
+    // Kubernetes always sets HOSTNAME to the pod name, which is the thing an
+    // operator would `kubectl logs` next, so this branch is for running the
+    // binary by hand. It carries the pid because the fleet is keyed on this
+    // string: a constant fallback would make every replica overwrite the same
+    // entry, and a fleet of six would silently read as one.
+    format!("unknown-{}", std::process::id())
 }
 
 fn usage_url(control_url: &str) -> String {
