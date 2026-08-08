@@ -226,6 +226,25 @@ is $3.00 per million tokens.
 -d '{"name":"claude-sonnet","input_price_per_mtok":3000000,"output_price_per_mtok":15000000}'
 ```
 
+Nobody needs to type them:
+
+```bash
+fastllm-proxy sync-prices --database-url "$URL" --dry-run
+```
+
+Reads OpenRouter's model list (395 models, unauthenticated) and the community
+catalogue (2,499), matches each model by what its backends call upstream —
+trying `openai/gpt-4o` and then `gpt-4o`, so you need not know which spelling a
+source uses — and fills in the prices. `--source` picks one; `--overwrite`
+replaces prices already set, which it will not do otherwise: a negotiated rate
+should not be replaced by a list price on the next run. A source that cannot be
+reached is reported and skipped, since filling in half the prices beats filling
+in none because GitHub was briefly unavailable.
+
+Where the two disagree, OpenRouter's own published price wins over a third
+party's copy of it. And the catalogue is a third party's file — correct in
+practice, occasionally stale, and a dependency on somebody else's maintenance.
+
 Prices are changed in place, and read back:
 
 ```bash

@@ -244,3 +244,16 @@ Two behaviours worth knowing:
   built at startup the proxy logs it and serves traffic untraced; export itself
   is a background batch task, so a collector that goes away costs dropped spans
   rather than dropped requests.
+
+## Keeping prices current
+
+`fastllm-proxy sync-prices --database-url "$URL"` fills in any model whose
+price is unset, from OpenRouter's published list and the community catalogue.
+`--dry-run` first; the next snapshot rebuild picks the change up, with no
+restart.
+
+Worth running on a schedule, and worth knowing what it is *not*: where a
+provider reports what it actually charged — OpenRouter returns `usage.cost`
+unasked — that figure is used instead and this table is never consulted. The
+sync matters for providers that publish a price but do not report one per
+request.

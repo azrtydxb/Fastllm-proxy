@@ -294,6 +294,32 @@ enum Command {
         database_url: String,
     },
 
+    /// Fill in model prices from a published catalogue, so nobody types them.
+    ///
+    /// Only touches models whose price is unset, unless `--overwrite`: an
+    /// operator who entered a negotiated rate should not have it replaced by a
+    /// list price on the next run.
+    ///
+    /// This is the *fallback* source. Where a provider reports what it charged
+    /// — OpenRouter returns `usage.cost` unasked — that figure is used instead
+    /// and nothing here competes with it.
+    #[cfg(feature = "control")]
+    SyncPrices {
+        #[arg(long, env = "FASTLLM_DATABASE_URL")]
+        database_url: String,
+
+        #[arg(long, value_enum, default_value_t = fastllm_proxy::control::pricing::Source::Both)]
+        source: fastllm_proxy::control::pricing::Source,
+
+        /// Replace prices that are already set, not only fill in the missing.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Measure the classifier where it actually runs.
     ///
     /// The tier-2 cost in `docs/classifier.md` was measured on a laptop, and
@@ -452,6 +478,13 @@ async fn run_command(command: &Command) -> Result<()> {
             password,
             database_url,
         } => run_set_password(name, password, database_url).await,
+        #[cfg(feature = "control")]
+        Command::SyncPrices {
+            database_url,
+            source,
+            overwrite,
+            dry_run,
+        } => run_sync_prices(database_url, *source, *overwrite, *dry_run).await,
         #[cfg(feature = "classifier-tier2")]
         Command::ClassifyBench {
             classifier_model,
@@ -465,6 +498,143 @@ async fn run_command(command: &Command) -> Result<()> {
             *concurrency,
         ),
     }
+}
+
+/// `fastllm-proxy sync-prices`: fill in model prices from a published
+/// catalogue.
+#[cfg(feature = "control")]
+async fn run_sync_prices(
+    database_url: &str,
+    source: fastllm_proxy::control::pricing::Source,
+    overwrite: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use fastllm_proxy::control::pricing::{self, Source};
+
+    let client = Arc::new(upstream::Upstream::new(
+        upstream::Config {
+            max_idle_per_host: 2,
+            idle_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(10),
+        },
+        tls_config(None)?,
+    ));
+
+    let fetch = |url: &'static str| {
+        let client = Arc::clone(&client);
+        async move {
+            let req = hyper::Request::builder()
+                .method("GET")
+                .uri(url)
+                .header(hyper::header::USER_AGENT, "fastllm-proxy")
+                .body(http_body_util::Full::new(bytes::Bytes::new()))?;
+            let resp = tokio::time::timeout(Duration::from_secs(30), client.request(req))
+                .await
+                .map_err(|_| anyhow::anyhow!("fetching {url} timed out"))??;
+            let status = resp.status();
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
+                .to_bytes();
+            if !status.is_success() {
+                anyhow::bail!("{url} answered {status}");
+            }
+            Ok::<_, anyhow::Error>(body)
+        }
+    };
+
+    // A source that cannot be reached is reported and skipped rather than
+    // fatal: filling in half the prices beats filling in none because GitHub
+    // was briefly unavailable.
+    let mut prices = std::collections::HashMap::new();
+    if matches!(source, Source::OpenRouter | Source::Both) {
+        match fetch(pricing::OPENROUTER_MODELS_URL).await {
+            Ok(body) => match pricing::parse_openrouter(&body) {
+                Ok(p) => {
+                    println!("openrouter: {} models", p.len());
+                    prices.extend(p);
+                }
+                Err(e) => eprintln!("openrouter: could not read the model list: {e:#}"),
+            },
+            Err(e) => eprintln!("openrouter: {e:#}"),
+        }
+    }
+    if matches!(source, Source::Catalogue | Source::Both) {
+        match fetch(pricing::CATALOGUE_URL).await {
+            Ok(body) => match pricing::parse_catalogue(&body) {
+                Ok(p) => {
+                    println!("catalogue: {} models", p.len());
+                    // Extended *after* OpenRouter so its own published prices
+                    // win over a third party's copy of them.
+                    for (k, v) in p {
+                        prices.entry(k).or_insert(v);
+                    }
+                }
+                Err(e) => eprintln!("catalogue: could not read it: {e:#}"),
+            },
+            Err(e) => eprintln!("catalogue: {e:#}"),
+        }
+    }
+    if prices.is_empty() {
+        anyhow::bail!("no prices could be fetched; nothing to do");
+    }
+
+    let pool = fastllm_proxy::control::db::connect(database_url).await?;
+    // One row per (model, upstream_model): a model's price comes from whatever
+    // its backends actually call upstream.
+    let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT m.id, m.name, b.upstream_model, m.input_price_per_mtok
+         FROM models m LEFT JOIN model_backends b ON b.model_id = m.id
+         ORDER BY m.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let (mut updated, mut skipped, mut unmatched) = (0usize, 0usize, 0usize);
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (id, name, upstream_model, existing) in rows {
+        if !seen.insert(id) {
+            continue;
+        }
+        if existing.is_some() && !overwrite {
+            skipped += 1;
+            continue;
+        }
+        let Some(upstream) = upstream_model else {
+            unmatched += 1;
+            continue;
+        };
+        let Some(price) = pricing::lookup(&prices, &upstream) else {
+            println!("  no price found for {name} ({upstream})");
+            unmatched += 1;
+            continue;
+        };
+        println!(
+            "  {name} ({upstream}): in {} out {} per Mtok",
+            price.input_per_mtok, price.output_per_mtok
+        );
+        if !dry_run {
+            sqlx::query(
+                "UPDATE models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(price.input_per_mtok)
+            .bind(price.output_per_mtok)
+            .execute(&pool)
+            .await?;
+        }
+        updated += 1;
+    }
+
+    println!(
+        "{} {updated} model(s); {skipped} already priced, {unmatched} with no match",
+        if dry_run { "would update" } else { "updated" }
+    );
+    if !dry_run && updated > 0 {
+        println!("the next snapshot rebuild picks these up; no restart needed");
+    }
+    Ok(())
 }
 
 /// Measure both classifier tiers under the CPU this process actually has.
