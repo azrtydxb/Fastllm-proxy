@@ -68,6 +68,14 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `GET /admin/budgets` | Every principal with a configured token budget, including current consumption |
 | `PUT /admin/principals/{id}/budget` | `{"tokens_total":..., "window":"daily"\|"weekly"\|"monthly"}`. Upserts the one row this principal may have; leaves `tokens_used` and the window's start alone on an update |
 | `DELETE /admin/principals/{id}/budget` | Remove the budget — the principal becomes unlimited, not limited to zero |
+| `PATCH /admin/models/{id}` | Correct a model in place: `{"description":..., "input_price_per_mtok":..., "output_price_per_mtok":..., "cache_ttl_seconds":...}`. Every field optional; an explicit `null` clears, an absent field is left alone |
+| `POST /admin/roles/{name}/permissions` | `{"verb":"model:invoke", "resource":"model/gpt-4o"}`. The verb list is closed — a permission nothing checks would read on a matrix as though it granted something |
+| `DELETE /admin/roles/{name}/permissions` | Same body; revoke one |
+| `GET /admin/audit` | The change log, newest first. `?limit=&before=&actor_id=&target=&since=`. `before` is keyset pagination on the id of the oldest row you hold — an offset would skip or repeat rows as new ones arrive at the head |
+| `GET /admin/usage` | Aggregate requests, tokens, latency and spend. `?group_by=model\|principal\|day&since=&until=&limit=`. Reports `unpriced_requests` alongside every total: a request whose model has no price contributes nothing to `cost`, and summing those as zero would understate spend silently |
+| `GET /admin/fleet` | What each proxy replica can see — its backends' health, in-flight counts, and the snapshot version it is serving |
+| `POST /admin/routing/dry-run` | `{"model":..., "streaming":..., "principal_id":..., "class":..., "headers":{...}}` → the candidate chain and **which rule index decided** |
+| `POST /admin/prices/sync` | `{"source":"open-router"\|"catalogue"\|"both", "overwrite":..., "dry_run":...}`. The same work `fastllm-proxy sync-prices` does, from a UI |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
 
@@ -185,6 +193,41 @@ row is read by more people than the thing it describes.
 A failed audit write never fails the request. Losing a row is serious; losing
 the change as well would be worse, since an operator retrying a failed grant
 would have no way to tell whether the first attempt applied.
+
+### Live backend health
+
+Backend health lives in the data plane: each proxy probes its own backends and
+keeps its own in-flight counts. The control plane has never seen any of it — it
+publishes a snapshot and hears back only about usage. So `GET /admin/fleet`
+exists, fed by proxies posting to `POST /health-report` on the same
+`--proxy-token` as `/snapshot` and `/usage`, every `--health-report-interval`
+(10s by default).
+
+Reports are kept **per replica and never merged**. The interesting failures are
+exactly the ones where replicas disagree: one proxy that cannot reach a backend
+the others can is a network partition, and averaging it into a fleet-wide
+"healthy" hides the only symptom there is. Each report also carries the
+snapshot version that replica is serving, so a fleet-wide `max - min` shows a
+pod stuck on an old configuration without scraping every one of them.
+
+Nothing is persisted. Health is a statement about *now*; a row saying a backend
+was up two hours ago is history, not health. A replica that stops reporting
+ages out after 30 seconds rather than lingering as "up, 40 minutes ago".
+
+### Routing dry-run
+
+`POST /admin/routing/dry-run` answers the question a rule author actually has —
+"does my `coding` rule fire for this caller?" — without sending a real request
+and reading the answer out of a log. It returns the candidate chain and the
+index of the rule that decided, because "my second rule matched instead of my
+first" and "my first rule matched and points somewhere I did not expect" are
+different bugs with the same symptom.
+
+Two honest limits. Backend **health is not consulted**: the registry is built
+fresh from the snapshot, so every backend looks up — `GET /admin/fleet` is
+where reachability lives. And the prompt **class is supplied, not computed**,
+so this tells you what a `coding` prompt would do, not whether some particular
+prompt is coding — `POST /admin/prompt-classes/evaluate` answers that one.
 
 ### Rate limit headers
 
@@ -501,6 +544,16 @@ On the client side, `--role proxy` in `Http` mode (`--control-url https://...`) 
 `--role proxy` holds a `usage::UsageReporter`: a bounded queue plus a background flush task that batches events and posts them to `/usage` on its own schedule, authenticated with the same `--proxy-token` as `/snapshot`. Recording an event (`UsageReporter::record`) is a non-blocking `try_send` — a full queue means the control plane is not keeping up, and the event is dropped rather than applying backpressure to inference (the design's stated tradeoff: "dropping usage rather than blocking a request is deliberate — billing accuracy is not worth failing inference"). Dropped events are counted and exposed on `/metrics` as `fastllm_usage_reports_dropped_total`, so the loss is visible instead of silent. `--role all` loops this same request back to its own admin API over `127.0.0.1` rather than inventing a second, in-process delivery path.
 
 On the control-plane side, `POST /usage` accepts a batch, persists it to `usage_events`, and folds each event's tokens into its principal's `budgets.tokens_used`, if that principal has a configured budget. A record naming a `principal_id` or model that no longer exists is dropped from the batch rather than failing the whole request — one stale id from one replica must not poison every other principal's usage in the same flush interval.
+
+### `POST /health-report`: the same channel, one more fact
+
+`--role proxy`/`all` also post a health report every `--health-report-interval`
+(`FASTLLM_HEALTH_REPORT_INTERVAL`, default 10s) on that same `--proxy-token`
+channel, read back by `GET /admin/fleet` (see "Live backend health" above).
+Same posture as usage: a bounded queue — depth one, since only the newest
+report says anything true — and a failed delivery is dropped rather than
+retried or allowed to block anything. `--role all` loops it back over
+`127.0.0.1` exactly as usage does.
 
 ### P3: usage accounting and budgets
 

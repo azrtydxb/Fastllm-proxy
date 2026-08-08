@@ -13,6 +13,10 @@ pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
 pub mod health;
+
+/// Proxies reporting backend health to the control plane, over the same
+/// reverse channel usage already uses.
+pub mod health_report;
 pub mod limiter;
 pub mod multipart;
 pub mod protocol;

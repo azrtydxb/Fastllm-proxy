@@ -572,7 +572,11 @@ impl RoutingRule {
     /// Conditions are AND'd, cheapest first: the two that read nothing but
     /// integers already in hand short-circuit before the ones that walk
     /// headers or pool counters.
-    fn matches(&self, facts: &RequestFacts<'_>, registry: &Registry) -> bool {
+    /// Whether this rule's conditions hold. `pub` so the control plane's
+    /// routing dry-run can report *which* rule decided, not only what it
+    /// resolved to — "why did this route there" is the question a rule author
+    /// has, and the answer is a rule index.
+    pub fn matches(&self, facts: &RequestFacts<'_>, registry: &Registry) -> bool {
         let c = &self.conditions;
         c.shape
             .matches(facts.prompt_tokens, facts.max_tokens, facts.streaming)

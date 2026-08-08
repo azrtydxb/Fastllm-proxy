@@ -43,6 +43,62 @@ the upstream's real token counts and the control plane folds them into
 
 ## Features
 
+### API surface the management UI needs — done (2026-08-09)
+
+The dashboard could show what the admin API happened to return, which had
+drifted from what an operator actually needs to see. Closed in two commits:
+
+- `GET /admin/audit` — the change log had a writer and no reader; psql was the
+  documented way to read it. Keyset on `before`, not an offset: on an
+  append-only log new rows arrive at the head, so an offset skips or repeats
+  rows between pages.
+- `POST`/`DELETE /admin/roles/{name}/permissions` — the permission matrix was
+  readable and not writable. The verb list is closed, which is the substance of
+  it: accepting `model:delete` would write a row that grants nothing and reads,
+  on a matrix, as though it did.
+- `GET /admin/usage` — aggregates by model, principal or day, reporting
+  `unpriced_requests` next to every total. A request whose model has no price
+  contributes nothing to `cost`; summing those as zero understates spend with
+  no symptom. (Found by the test: `sum()` over a bigint returns *numeric* in
+  Postgres, so every total failed to decode at runtime with nothing wrong in
+  the SQL.)
+- `PATCH /admin/models/{id}` — a price could be set at creation and never
+  corrected.
+- `POST /health-report` + `GET /admin/fleet` — backend health lives in the data
+  plane and the control plane had never seen it, so a UI's only option was to
+  scrape every proxy's `/metrics` and know where they all were. Per replica and
+  never merged: one proxy that cannot reach a backend the others can is a
+  partition, and averaging it away hides the only symptom. In memory, aged out
+  after 30s — "up, 40 minutes ago" is not health.
+- `POST /admin/routing/dry-run` — returns the candidate chain *and the rule
+  index that decided*, because "my second rule matched instead of my first" and
+  "my first rule matched and points somewhere unexpected" are different bugs
+  with one symptom.
+- `POST /admin/prices/sync` — the same work the CLI does, sharing one
+  implementation with it rather than a second copy of "which source wins".
+- `fastllm_cache_total{kind}`, `fastllm_cache_entries`, `fastllm_cache_bytes` —
+  the response cache was invisible.
+
+Not built: **teams / org scoping.** See "Deliberately not built" below.
+
+### Deliberately not built: teams and org scoping
+
+A tenancy layer between principal and deployment — a `teams` table, membership,
+budgets and grants that resolve through it. Not built, and the reason is that
+it is a data model change, not a feature: every authorisation and accounting
+question in the system currently resolves to a principal, and inserting a level
+above that changes what `authorize`, budgets, limits, usage aggregation and the
+snapshot's flattened `allowed_models` all mean. Doing it as a UI convenience
+would produce a `team_id` column nothing enforces.
+
+The honest interim: a principal *is* the unit of tenancy, and roles already
+group them. A team-shaped view over `GET /admin/usage?group_by=principal` plus
+a naming convention covers the reporting case without a schema that lies.
+
+Worth building when there are real tenants who must not see each other's usage
+— at which point it should start from the snapshot's shape, not from the UI's.
+
+
 ### Embedded management and monitoring UI — done (P4)
 
 Implemented: a small React dashboard (`web/`), embedded into the binary and

@@ -35,7 +35,10 @@ pub struct Price {
 }
 
 /// Where to read prices from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+// `Deserialize` so the same choice can arrive from the CLI or from a request
+// body, spelled the same way in both: `--source open-router`, `"open-router"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Source {
     /// `openrouter.ai/api/v1/models` — every model it fronts, unauthenticated.
     OpenRouter,
@@ -146,6 +149,142 @@ pub fn lookup<'a>(prices: &'a HashMap<String, Price>, upstream_model: &str) -> O
             .split_once('/')
             .and_then(|(_, bare)| prices.get(bare))
     })
+}
+
+/// What a sync did.
+pub struct SyncReport {
+    pub updated: usize,
+    pub skipped: usize,
+    pub unmatched: usize,
+    /// Model name and the price chosen, for a caller that wants to show it.
+    pub changes: Vec<(String, Price)>,
+}
+
+/// Fetch the catalogues and fill in prices.
+///
+/// Shared by `fastllm-proxy sync-prices` and `POST /admin/prices/sync` rather
+/// than implemented twice — two copies of "which price wins" would drift, and
+/// the answer is the interesting part.
+pub async fn sync(
+    pool: &sqlx::PgPool,
+    client: &crate::upstream::Upstream,
+    source: Source,
+    overwrite: bool,
+    dry_run: bool,
+) -> anyhow::Result<SyncReport> {
+    let prices = fetch(client, source).await?;
+
+    // One row per (model, upstream_model): a model's price comes from whatever
+    // its backends actually call upstream.
+    let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT m.id, m.name, b.upstream_model, m.input_price_per_mtok
+         FROM models m LEFT JOIN model_backends b ON b.model_id = m.id
+         ORDER BY m.name",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut report = SyncReport {
+        updated: 0,
+        skipped: 0,
+        unmatched: 0,
+        changes: Vec::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for (id, name, upstream_model, existing) in rows {
+        if !seen.insert(id) {
+            continue;
+        }
+        if existing.is_some() && !overwrite {
+            report.skipped += 1;
+            continue;
+        }
+        let Some(price) = upstream_model
+            .as_deref()
+            .and_then(|u| lookup(&prices, u).copied())
+        else {
+            report.unmatched += 1;
+            continue;
+        };
+        if !dry_run {
+            sqlx::query(
+                "UPDATE models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(price.input_per_mtok)
+            .bind(price.output_per_mtok)
+            .execute(pool)
+            .await?;
+        }
+        report.updated += 1;
+        report.changes.push((name, price));
+    }
+    Ok(report)
+}
+
+/// Read the configured sources, tolerating one being unreachable.
+///
+/// Filling in half the prices beats filling in none because GitHub was briefly
+/// unavailable; only every source failing is an error.
+async fn fetch(
+    client: &crate::upstream::Upstream,
+    source: Source,
+) -> anyhow::Result<HashMap<String, Price>> {
+    let mut prices = HashMap::new();
+    let mut errors = Vec::new();
+
+    if matches!(source, Source::OpenRouter | Source::Both) {
+        match get(client, OPENROUTER_MODELS_URL)
+            .await
+            .and_then(|b| parse_openrouter(&b))
+        {
+            Ok(p) => prices.extend(p),
+            Err(e) => errors.push(format!("openrouter: {e}")),
+        }
+    }
+    if matches!(source, Source::Catalogue | Source::Both) {
+        match get(client, CATALOGUE_URL)
+            .await
+            .and_then(|b| parse_catalogue(&b))
+        {
+            // Inserted without replacing: OpenRouter's own published price
+            // beats a third party's copy of it.
+            Ok(p) => {
+                for (k, v) in p {
+                    prices.entry(k).or_insert(v);
+                }
+            }
+            Err(e) => errors.push(format!("catalogue: {e}")),
+        }
+    }
+    if prices.is_empty() {
+        anyhow::bail!("no prices could be fetched ({})", errors.join("; "));
+    }
+    Ok(prices)
+}
+
+async fn get(client: &crate::upstream::Upstream, url: &str) -> anyhow::Result<bytes::Bytes> {
+    use http_body_util::BodyExt as _;
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(hyper::header::USER_AGENT, "fastllm-proxy")
+        .body(http_body_util::Full::new(bytes::Bytes::new()))?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(30), client.request(req))
+        .await
+        .map_err(|_| anyhow::anyhow!("fetching {url} timed out"))??;
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        anyhow::bail!("{url} answered {status}");
+    }
+    Ok(body)
 }
 
 #[cfg(test)]

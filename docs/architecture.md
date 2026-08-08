@@ -47,6 +47,8 @@ flowchart LR
     snap -.writes.-> cache
     cache -.restores on cold start.-> snap
     fwd -->|"POST /usage (batched)"| admin
+    health["backend health<br/>probes + in-flight counts"] -->|"POST /health-report (every 10s)"| admin
+    fwd -.observed by.-> health
 ```
 
 `--role all` runs both boxes in one process; the snapshot is handed over in
@@ -124,6 +126,7 @@ sequenceDiagram
     P->>P: at end of stream, parse once for usage
     P-)K: POST /usage (batched, fire-and-forget)
     K->>K: fold into budgets.tokens_used
+    P-)K: POST /health-report (every 10s, out of band)
 ```
 
 Two decisions in that flow are load-bearing:
@@ -170,6 +173,7 @@ Two things an operator should know rather than discover:
 | every model in the chain refuses | the last upstream's own status and body are forwarded, not a synthetic 502 |
 | Postgres down | control plane serves its last built snapshot; proxies unaffected |
 | usage report fails | dropped; never blocks a request |
+| health report fails | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s |
 | upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion |
 | snapshot names an unknown protocol | that backend is dropped with a logged reason, never silently treated as OpenAI |
 

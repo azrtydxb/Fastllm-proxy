@@ -138,6 +138,10 @@ struct Ctx {
     /// omitting it whenever TLS *is* on would ship a session cookie plain
     /// HTTP could read.
     tls_enabled: bool,
+    /// The latest health each proxy reported. In memory and not a table:
+    /// health is a statement about *now*, and a row saying a backend was up two
+    /// hours ago is history nobody asked for. See `crate::health_report`.
+    fleet: Arc<crate::health_report::store::Fleet>,
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
@@ -1562,6 +1566,201 @@ struct RoleView {
     name: String,
     description: String,
     permissions: Vec<PermissionView>,
+}
+
+/// `POST /admin/prices/sync`: fill in prices from the published catalogues.
+///
+/// The same work `fastllm-proxy sync-prices` does, reachable from a UI. The
+/// control plane already makes outbound calls (Vertex tokens), so this breaks
+/// no invariant — it is the *request path* that performs no I/O, not this
+/// process.
+async fn sync_prices(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<SyncPricesRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = crate::control::gcp::shared_client().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no HTTP client is available to reach the price catalogues",
+        )
+    })?;
+    let report = crate::control::pricing::sync(
+        &ctx.pool,
+        &client,
+        body.source.unwrap_or(crate::control::pricing::Source::Both),
+        body.overwrite,
+        body.dry_run,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %format!("{e:#}"), "price sync failed");
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            format!("could not sync prices: {e}"),
+        )
+    })?;
+    if !body.dry_run && report.updated > 0 {
+        refresh(&ctx).await;
+    }
+    Ok(Json(serde_json::json!({
+        "updated": report.updated,
+        "already_priced": report.skipped,
+        "unmatched": report.unmatched,
+        "dry_run": body.dry_run,
+    })))
+}
+
+#[derive(Deserialize)]
+struct SyncPricesRequest {
+    #[serde(default)]
+    source: Option<crate::control::pricing::Source>,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Deserialize)]
+struct DryRunRequest {
+    /// The name a client would put in `model`. A virtual model is the
+    /// interesting case; a concrete one resolves to itself.
+    model: String,
+    #[serde(default)]
+    principal_id: Option<i64>,
+    #[serde(default)]
+    streaming: bool,
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+    #[serde(default)]
+    headers: std::collections::HashMap<String, String>,
+    /// A prompt class, as the classifier would have decided it. Supplied
+    /// rather than computed: the control plane has the centroids but not
+    /// necessarily the model, and asking "what would a `coding` prompt do"
+    /// is the question a rule author actually has.
+    #[serde(default)]
+    class: Option<String>,
+    #[serde(default)]
+    class_refines: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DryRunResult {
+    /// The chain, best first. Empty means no rule matched and there were no
+    /// defaults — the request would 404.
+    candidates: Vec<String>,
+    /// Which rule decided, by position, or `None` for the defaults.
+    matched_rule: Option<usize>,
+    /// `false` when the name is a concrete model, which resolves to itself.
+    virtual_model: bool,
+}
+
+/// `POST /admin/routing/dry-run`: what would this request route to?
+///
+/// Answers the question a rule author actually has — "does my `coding` rule
+/// fire for this caller" — without sending a real request to a real model and
+/// reading the answer out of a log.
+///
+/// Two honest limits. Backend **health** is not consulted: this registry is
+/// built fresh from the snapshot, so every backend looks up. A dry-run tells
+/// you which rule matches, not which replica is currently reachable — that is
+/// what `GET /admin/fleet` is for. And the class is supplied rather than
+/// computed, so this says what a `coding` prompt would do, not whether a
+/// particular prompt is coding.
+async fn routing_dry_run(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    Json(body): Json<DryRunRequest>,
+) -> Result<Json<DryRunResult>, ApiError> {
+    let snapshot = ctx.cache.current_snapshot();
+    let registry = crate::registry::Registry::build_from_snapshot(
+        &snapshot,
+        &crate::registry::Interner::default(),
+        None,
+    )
+    .map_err(|e| {
+        tracing::error!(error = %e, "dry run could not build a registry");
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not evaluate routing; see server logs",
+        )
+    })?;
+
+    let Some(vm) = snapshot.virtual_models.get(&body.model) else {
+        // A concrete model routes to itself, which is worth answering rather
+        // than erroring: a UI should be able to ask about any name.
+        return Ok(Json(DryRunResult {
+            candidates: vec![body.model.clone()],
+            matched_rule: None,
+            virtual_model: false,
+        }));
+    };
+
+    let principal = body
+        .principal_id
+        .and_then(|id| snapshot.principals.values().find(|p| p.id as i64 == id));
+    let mut headers = HeaderMap::new();
+    for (name, value) in &body.headers {
+        if let (Ok(n), Ok(v)) = (
+            name.parse::<axum::http::HeaderName>(),
+            value.parse::<axum::http::HeaderValue>(),
+        ) {
+            headers.insert(n, v);
+        }
+    }
+    let facts = crate::routing::RequestFacts {
+        caller: principal,
+        prompt_tokens: body.prompt_tokens,
+        max_tokens: body.max_tokens,
+        streaming: body.streaming,
+        headers: &headers,
+        now: chrono::Utc::now(),
+        class: body.class.as_deref(),
+        class_refines: &body.class_refines,
+    };
+
+    // The same prefix hash a real request would produce is unavailable without
+    // its body, and weighted targets are chosen from it. Zero is deterministic
+    // and documented rather than random, so a dry run is reproducible.
+    let candidates = vm.resolve_candidates(&facts, 0, &registry);
+    let matched_rule = vm.rules.iter().position(|r| r.matches(&facts, &registry));
+
+    Ok(Json(DryRunResult {
+        candidates,
+        matched_rule,
+        virtual_model: true,
+    }))
+}
+
+/// `POST /health-report`: a proxy telling the control plane what it can see.
+///
+/// On the proxy token, alongside `/snapshot` and `/usage`, for the same reason
+/// those are: this is a proxy process authenticating to the control plane, not
+/// a human with a password.
+async fn post_health_report(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Json(report): Json<crate::health_report::HealthReport>,
+) -> impl IntoResponse {
+    if !proxy_token_authorised(&headers, &ctx.proxy_token) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    ctx.fleet.record(report, std::time::Instant::now());
+    StatusCode::NO_CONTENT
+}
+
+/// `GET /admin/fleet`: what every proxy currently reports.
+///
+/// Per replica and not merged, because the interesting failures are the ones
+/// where replicas disagree — a proxy that cannot reach a backend the others can
+/// is a partition, and a fleet-wide average hides the only symptom there is.
+async fn list_fleet(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Json<Vec<crate::health_report::HealthReport>> {
+    Json(ctx.fleet.current(std::time::Instant::now()))
 }
 
 /// Usage rolled up over a window.
@@ -3200,6 +3399,12 @@ pub async fn serve(
         snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
         reconcile: Arc::new(ReconcileState::new()),
         tls_enabled,
+        // Two report intervals plus slack: a replica that misses one delivery
+        // should not vanish from a UI, and one that has genuinely gone should
+        // not linger.
+        fleet: Arc::new(crate::health_report::store::Fleet::new(
+            std::time::Duration::from_secs(30),
+        )),
     };
     // Every mutating route below ends in `refresh(&ctx)` — the one write
     // path that publishes through `SnapshotSink::store_snapshot`. That is
@@ -3279,6 +3484,9 @@ pub async fn serve(
         .route("/admin/roles", get(list_roles))
         .route("/admin/audit", get(list_audit))
         .route("/admin/usage", get(usage_summary))
+        .route("/admin/fleet", get(list_fleet))
+        .route("/admin/routing/dry-run", post(routing_dry_run))
+        .route("/admin/prices/sync", post(sync_prices))
         .route(
             "/admin/roles/{name}/permissions",
             post(grant_permission).delete(revoke_permission),
@@ -3319,6 +3527,7 @@ pub async fn serve(
         .route("/logout", post(logout))
         .route("/snapshot", get(get_snapshot))
         .route("/usage", post(post_usage))
+        .route("/health-report", post(post_health_report))
         .route("/limits/reconcile", post(post_reconcile))
         .route("/healthz", get(healthz));
 
@@ -3476,6 +3685,9 @@ mod tests {
             snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
             reconcile: Arc::new(ReconcileState::new()),
             tls_enabled: false,
+            fleet: Arc::new(crate::health_report::store::Fleet::new(
+                std::time::Duration::from_secs(30),
+            )),
         };
         (ctx, cache)
     }
@@ -5377,6 +5589,205 @@ mod tests {
             row.is_none(),
             "no budget row must be created out of thin air"
         );
+    }
+
+    /// The question a rule author has: *which* rule fired, not merely where
+    /// the request ended up. A dry run that returned only a model name would
+    /// leave "my second rule matched instead of my first" indistinguishable
+    /// from "my first rule matched and points somewhere I did not expect".
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_dry_run_names_the_rule_that_decided_and_falls_back_to_the_defaults() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "dry-fast-")
+            .track_prefix("models", "name", "dry-slow-")
+            .track_prefix("virtual_models", "name", "dry-vm-");
+
+        let model = |name: String| {
+            let ctx = ctx.clone();
+            async move {
+                post_model(
+                    State(ctx),
+                    RequireConfigWrite::default(),
+                    Json(NewModel {
+                        name,
+                        description: String::new(),
+                        input_price_per_mtok: None,
+                        output_price_per_mtok: None,
+                        cache_ttl_seconds: None,
+                    }),
+                )
+                .await
+                .unwrap()
+                .1
+                 .0["id"]
+                    .as_i64()
+                    .unwrap()
+            }
+        };
+        let fast_name = unique_name("dry-fast");
+        let slow_name = unique_name("dry-slow");
+        let fast_id = model(fast_name.clone()).await;
+        let slow_id = model(slow_name.clone()).await;
+
+        let vm_name = unique_name("dry-vm");
+        let (_, vm) = post_virtual_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewVirtualModel {
+                name: vm_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let vm_id = vm.0["id"].as_i64().unwrap();
+
+        // One rule, on streaming, so the dry run can be flipped either side of
+        // it without touching the database again.
+        let (_, rule) = post_rule(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(vm_id),
+            Json(NewRule {
+                position: 0,
+                match_condition: MatchConditionJson {
+                    stream: Some(true),
+                    ..Default::default()
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        let rule_id = rule.0["id"].as_i64().unwrap();
+        let _ = post_rule_target(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(rule_id),
+            Json(NewTarget {
+                model_id: fast_id,
+                weight: 100,
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = post_default_target(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(vm_id),
+            Json(NewTarget {
+                model_id: slow_id,
+                weight: 100,
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let dry_run = |streaming: bool, model: String| {
+            let ctx = ctx.clone();
+            async move {
+                routing_dry_run(
+                    State(ctx),
+                    RequireRead::default(),
+                    Json(DryRunRequest {
+                        model,
+                        principal_id: None,
+                        streaming,
+                        prompt_tokens: 0,
+                        max_tokens: None,
+                        headers: Default::default(),
+                        class: None,
+                        class_refines: Vec::new(),
+                    }),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        };
+
+        let matched = dry_run(true, vm_name.clone()).await;
+        assert_eq!(matched.candidates.first().unwrap(), &fast_name);
+        assert_eq!(
+            matched.matched_rule,
+            Some(0),
+            "the rule index is the answer to \"why did it go there\""
+        );
+
+        let defaulted = dry_run(false, vm_name.clone()).await;
+        assert_eq!(defaulted.candidates.first().unwrap(), &slow_name);
+        assert_eq!(
+            defaulted.matched_rule, None,
+            "no rule matched; the defaults decided"
+        );
+
+        // Any name a UI can type must be answerable, including a concrete
+        // model, which resolves to itself rather than erroring.
+        let concrete = dry_run(true, fast_name.clone()).await;
+        assert!(!concrete.virtual_model);
+        assert_eq!(concrete.candidates, vec![fast_name]);
+    }
+
+    /// The reverse channel end to end: a proxy's report survives the route and
+    /// comes back out of `GET /admin/fleet`, on the proxy token and not on a
+    /// human's session.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_health_report_is_gated_by_the_proxy_token_and_read_back_from_the_fleet() {
+        let (ctx, _cache) = test_ctx().await;
+        let report = crate::health_report::HealthReport {
+            replica: "proxy-test-0".into(),
+            snapshot_version: 42,
+            uptime_seconds: 7,
+            backends: vec![crate::health_report::BackendHealth {
+                api_base: "http://backend:8000".into(),
+                model: "m".into(),
+                healthy: false,
+                inflight: 3,
+                requests_total: 100,
+                errors_total: 9,
+            }],
+        };
+
+        let rejected = post_health_report(
+            State(ctx.clone()),
+            auth_header("not-the-proxy-token"),
+            Json(report.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            list_fleet(State(ctx.clone()), RequireRead::default())
+                .await
+                .0
+                .is_empty(),
+            "a rejected report must not be recorded"
+        );
+
+        let accepted = post_health_report(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(report),
+        )
+        .await
+        .into_response();
+        assert!(accepted.status().is_success());
+
+        let fleet = list_fleet(State(ctx.clone()), RequireRead::default())
+            .await
+            .0;
+        assert_eq!(fleet.len(), 1);
+        assert_eq!(fleet[0].snapshot_version, 42);
+        assert!(
+            !fleet[0].backends[0].healthy,
+            "an unhealthy backend must stay unhealthy across the channel; \
+             this is the whole reason the report exists"
+        );
+        assert_eq!(fleet[0].backends[0].inflight, 3);
     }
 }
 

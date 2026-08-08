@@ -175,9 +175,32 @@ Most are self-describing from their `# HELP` text. Four are not obvious:
   stamp is the control plane's. It is clamped at zero rather than going
   negative on skew, which would read as a broken exporter.
 
+- **`fastllm_cache_total{kind="hit"|"miss"|"store"}` counts three things, not
+  two.** A miss that is never stored is a response the cache declined to keep —
+  streaming, an error, too large — so `store` well below `miss` is the cache
+  working as intended on uncacheable traffic, not a bug. `fastllm_cache_entries`
+  and `fastllm_cache_bytes` are the live occupancy against the configured
+  bounds.
+
 `fastllm_build_info` is a constant 1 carrying the version as a label — the
 conventional shape, and what turns "latency moved at 14:02" into "latency moved
 when we shipped this".
+
+## What each replica can see
+
+`GET /admin/fleet` on the control plane reports, per proxy replica, its
+backends' health and in-flight counts and the snapshot version it is serving.
+Proxies push this every `--health-report-interval` (default 10s) over the same
+`--proxy-token` channel as usage.
+
+Two questions it answers that `/metrics` cannot without scraping every pod:
+whether the fleet agrees a backend is up — a single replica that disagrees is a
+network partition, not a dead backend — and whether every replica is on the
+same snapshot version, which is how a pod stuck on an old configuration becomes
+visible.
+
+Nothing is stored: a replica that stops reporting ages out after 30 seconds.
+"Up, 40 minutes ago" is not health.
 
 ## Per-request records
 

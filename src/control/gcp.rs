@@ -120,6 +120,15 @@ pub fn init(upstream: Arc<Upstream>) {
     });
 }
 
+/// The shared HTTP client, for other control-plane code that needs to reach
+/// outside the process.
+///
+/// This module owns it only because it was the first to need one; the crate's
+/// rule is one pooled client per process, not one per caller.
+pub fn shared_client() -> Option<Arc<Upstream>> {
+    MINTER.get().map(|m| Arc::clone(&m.upstream))
+}
+
 /// A live access token for `service_account_json`, minted or reused.
 pub async fn access_token(service_account_json: &str) -> Result<String> {
     let minter = MINTER

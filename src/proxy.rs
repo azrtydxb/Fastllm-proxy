@@ -1750,6 +1750,28 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         snapshot_age_seconds(state.snapshot.load().version)
     ));
 
+    // The cache's own counters. A hit rate is the number that says whether
+    // caching is earning its memory, and it cannot be inferred from request
+    // totals — a hit and a miss both look like one served request.
+    out.push_str(
+        "# HELP fastllm_cache_total Response-cache lookups and stores. A hit served a request \
+         without contacting any provider.\n",
+    );
+    out.push_str("# TYPE fastllm_cache_total counter\n");
+    for (kind, value) in [
+        ("hit", state.cache.hits.load(Ordering::Relaxed)),
+        ("miss", state.cache.misses.load(Ordering::Relaxed)),
+        ("store", state.cache.stores.load(Ordering::Relaxed)),
+    ] {
+        out.push_str(&format!("fastllm_cache_total{{kind=\"{kind}\"}} {value}\n"));
+    }
+    out.push_str("# HELP fastllm_cache_entries Responses currently cached.\n");
+    out.push_str("# TYPE fastllm_cache_entries gauge\n");
+    out.push_str(&format!("fastllm_cache_entries {}\n", state.cache.len()));
+    out.push_str("# HELP fastllm_cache_bytes Memory held by cached responses.\n");
+    out.push_str("# TYPE fastllm_cache_bytes gauge\n");
+    out.push_str(&format!("fastllm_cache_bytes {}\n", state.cache.bytes()));
+
     // Everything the telemetry module owns: outcomes, rejection reasons,
     // routing counters, classifier counters, and the duration/TTFT histograms
     // both globally and per model.

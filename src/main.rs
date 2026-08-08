@@ -108,6 +108,12 @@ struct Cli {
     #[arg(long, default_value_t = 64 * 1024 * 1024, env = "FASTLLM_CACHE_MAX_BYTES")]
     cache_max_bytes: usize,
 
+    /// Seconds between health reports to the control plane. Backend health
+    /// only exists in the data plane, so this is the only way a management UI
+    /// can see it.
+    #[arg(long, default_value_t = 10, env = "FASTLLM_HEALTH_REPORT_INTERVAL")]
+    health_report_interval: u64,
+
     /// `text` for humans, `json` for a log collector.
     #[arg(long, value_enum, default_value_t = LogFormat::Text, env = "FASTLLM_LOG_FORMAT")]
     log_format: LogFormat,
@@ -509,8 +515,6 @@ async fn run_sync_prices(
     overwrite: bool,
     dry_run: bool,
 ) -> Result<()> {
-    use fastllm_proxy::control::pricing::{self, Source};
-
     let client = Arc::new(upstream::Upstream::new(
         upstream::Config {
             max_idle_per_host: 2,
@@ -519,119 +523,28 @@ async fn run_sync_prices(
         },
         tls_config(None)?,
     ));
-
-    let fetch = |url: &'static str| {
-        let client = Arc::clone(&client);
-        async move {
-            let req = hyper::Request::builder()
-                .method("GET")
-                .uri(url)
-                .header(hyper::header::USER_AGENT, "fastllm-proxy")
-                .body(http_body_util::Full::new(bytes::Bytes::new()))?;
-            let resp = tokio::time::timeout(Duration::from_secs(30), client.request(req))
-                .await
-                .map_err(|_| anyhow::anyhow!("fetching {url} timed out"))??;
-            let status = resp.status();
-            let body = http_body_util::BodyExt::collect(resp.into_body())
-                .await
-                .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
-                .to_bytes();
-            if !status.is_success() {
-                anyhow::bail!("{url} answered {status}");
-            }
-            Ok::<_, anyhow::Error>(body)
-        }
-    };
-
-    // A source that cannot be reached is reported and skipped rather than
-    // fatal: filling in half the prices beats filling in none because GitHub
-    // was briefly unavailable.
-    let mut prices = std::collections::HashMap::new();
-    if matches!(source, Source::OpenRouter | Source::Both) {
-        match fetch(pricing::OPENROUTER_MODELS_URL).await {
-            Ok(body) => match pricing::parse_openrouter(&body) {
-                Ok(p) => {
-                    println!("openrouter: {} models", p.len());
-                    prices.extend(p);
-                }
-                Err(e) => eprintln!("openrouter: could not read the model list: {e:#}"),
-            },
-            Err(e) => eprintln!("openrouter: {e:#}"),
-        }
-    }
-    if matches!(source, Source::Catalogue | Source::Both) {
-        match fetch(pricing::CATALOGUE_URL).await {
-            Ok(body) => match pricing::parse_catalogue(&body) {
-                Ok(p) => {
-                    println!("catalogue: {} models", p.len());
-                    // Extended *after* OpenRouter so its own published prices
-                    // win over a third party's copy of them.
-                    for (k, v) in p {
-                        prices.entry(k).or_insert(v);
-                    }
-                }
-                Err(e) => eprintln!("catalogue: could not read it: {e:#}"),
-            },
-            Err(e) => eprintln!("catalogue: {e:#}"),
-        }
-    }
-    if prices.is_empty() {
-        anyhow::bail!("no prices could be fetched; nothing to do");
-    }
-
     let pool = fastllm_proxy::control::db::connect(database_url).await?;
-    // One row per (model, upstream_model): a model's price comes from whatever
-    // its backends actually call upstream.
-    let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT m.id, m.name, b.upstream_model, m.input_price_per_mtok
-         FROM models m LEFT JOIN model_backends b ON b.model_id = m.id
-         ORDER BY m.name",
-    )
-    .fetch_all(&pool)
-    .await?;
 
-    let (mut updated, mut skipped, mut unmatched) = (0usize, 0usize, 0usize);
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (id, name, upstream_model, existing) in rows {
-        if !seen.insert(id) {
-            continue;
-        }
-        if existing.is_some() && !overwrite {
-            skipped += 1;
-            continue;
-        }
-        let Some(upstream) = upstream_model else {
-            unmatched += 1;
-            continue;
-        };
-        let Some(price) = pricing::lookup(&prices, &upstream) else {
-            println!("  no price found for {name} ({upstream})");
-            unmatched += 1;
-            continue;
-        };
+    // The work itself lives in the library, shared with `POST
+    // /admin/prices/sync`. Two copies of "which source wins" would drift, and
+    // that rule is the interesting part.
+    let report =
+        fastllm_proxy::control::pricing::sync(&pool, &client, source, overwrite, dry_run).await?;
+
+    for (name, price) in &report.changes {
         println!(
-            "  {name} ({upstream}): in {} out {} per Mtok",
+            "  {name}: in {} out {} per Mtok",
             price.input_per_mtok, price.output_per_mtok
         );
-        if !dry_run {
-            sqlx::query(
-                "UPDATE models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
-                 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(price.input_per_mtok)
-            .bind(price.output_per_mtok)
-            .execute(&pool)
-            .await?;
-        }
-        updated += 1;
     }
-
     println!(
-        "{} {updated} model(s); {skipped} already priced, {unmatched} with no match",
-        if dry_run { "would update" } else { "updated" }
+        "{} {} model(s); {} already priced, {} with no match",
+        if dry_run { "would update" } else { "updated" },
+        report.updated,
+        report.skipped,
+        report.unmatched
     );
-    if !dry_run && updated > 0 {
+    if !dry_run && report.updated > 0 {
         println!("the next snapshot rebuild picks these up; no restart needed");
     }
     Ok(())
@@ -1041,6 +954,23 @@ async fn run_all(cli: Cli) -> Result<()> {
         let state = build_app_state(
             &cli, client, interner, &tuning, None, master_key, snap, usage,
         )?;
+        // `all` reports to its own admin API over loopback, the same path
+        // usage takes, rather than inventing a second in-process route.
+        spawn_health_reports(
+            Arc::clone(&state),
+            fastllm_proxy::health_report::spawn(
+                fastllm_proxy::health_report::Config {
+                    url: format!(
+                        "{admin_scheme}://127.0.0.1:{}/health-report",
+                        cli.admin_port
+                    ),
+                    token: proxy_token.clone(),
+                    interval: Duration::from_secs(cli.health_report_interval),
+                },
+                Arc::clone(&state.client),
+            ),
+            Duration::from_secs(cli.health_report_interval),
+        );
 
         let admin_addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -1240,6 +1170,21 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
                     Duration::from_secs(cli.config_poll),
                 );
             }
+            // Backend health only exists in the data plane, and a management
+            // UI has no other way to ask for it. Same reverse channel and same
+            // token as usage.
+            spawn_health_reports(
+                Arc::clone(&state),
+                fastllm_proxy::health_report::spawn(
+                    fastllm_proxy::health_report::Config {
+                        url: health_report_url(&url),
+                        token: token.clone(),
+                        interval: Duration::from_secs(cli.health_report_interval),
+                    },
+                    Arc::clone(&state.client),
+                ),
+                Duration::from_secs(cli.health_report_interval),
+            );
             // P2 reconciliation: only `Http`-mode `--role proxy` has a
             // control plane to reconcile with at all. See
             // `crate::reconcile`'s doc comment for why `File` mode and
@@ -1375,6 +1320,67 @@ fn build_app_state(
 /// `/snapshot` (see `deploy/deployment.yaml`'s `FASTLLM_CONTROL_URL`): the
 /// two are sibling routes on the same control plane, so this avoids a second
 /// flag that could point somewhere else and drift out of sync with the first.
+/// `POST /health-report`'s URL, derived the same way `usage_url` derives
+/// `/usage`'s: a sibling route on the same control plane, from the one
+/// `--control-url` flag rather than a second that could drift.
+fn health_report_url(control_url: &str) -> String {
+    format!(
+        "{}/health-report",
+        control_url.strip_suffix("/snapshot").unwrap_or(control_url)
+    )
+}
+
+/// Report what this proxy can see, on a timer.
+///
+/// A timer rather than on-change: health is a level, not an event, and a UI
+/// polling the control plane wants the current value rather than a
+/// reconstruction from a stream of transitions it may have missed.
+///
+/// Entirely off the request path. Reading the registry is the same cheap load
+/// `/health` already does, and the send is a background task that drops rather
+/// than blocks.
+fn spawn_health_reports(
+    state: Arc<fastllm_proxy::state::AppState>,
+    reporter: fastllm_proxy::health_report::Reporter,
+    interval: Duration,
+) {
+    let replica = hostname();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let registry = state.registry.load();
+            reporter.send(fastllm_proxy::health_report::HealthReport {
+                replica: replica.clone(),
+                snapshot_version: state.snapshot.load().version,
+                uptime_seconds: state.started.elapsed().as_secs(),
+                backends: registry
+                    .backends()
+                    .iter()
+                    .map(|b| fastllm_proxy::health_report::BackendHealth {
+                        api_base: b.api_base.clone(),
+                        model: b.upstream_model.clone(),
+                        healthy: b.is_healthy(),
+                        inflight: b.inflight(),
+                        requests_total: b.requests_total(),
+                        errors_total: b.errors_total(),
+                    })
+                    .collect(),
+            });
+        }
+    });
+}
+
+/// Which replica this is. The pod name under Kubernetes, which is what an
+/// operator would `kubectl logs` next.
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn usage_url(control_url: &str) -> String {
     format!(
         "{}/usage",
