@@ -98,6 +98,10 @@ struct Cli {
     #[arg(long, default_value = "info", env = "FASTLLM_LOG")]
     log: String,
 
+    /// `text` for humans, `json` for a log collector.
+    #[arg(long, value_enum, default_value_t = LogFormat::Text, env = "FASTLLM_LOG_FORMAT")]
+    log_format: LogFormat,
+
     /// Directory or HuggingFace repo id for the fast-tier classifier model.
     ///
     /// A directory is what a container should use: the Dockerfile bakes the
@@ -282,16 +286,41 @@ enum Role {
     Proxy,
 }
 
+/// Human-readable lines, or one JSON object per line.
+///
+/// The default stays human-readable because that is what somebody running this
+/// locally or reading `kubectl logs` wants. `--log-format json` is for the
+/// deployment: a log line is only useful to a collector if its fields survive
+/// as fields, and a regex over "backend=http://... status=502" is the thing
+/// every log pipeline eventually regrets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+fn init_logging(cli: &Cli) {
+    let filter = tracing_subscriber::EnvFilter::try_new(&cli.log)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    match cli.log_format {
+        LogFormat::Text => builder.with_target(false).init(),
+        // `flatten_event` puts the message and its fields at the top level
+        // rather than nested under "fields", which is what every collector
+        // expects to index without a transform step.
+        LogFormat::Json => builder
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .init(),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new(&cli.log)
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
+    init_logging(&cli);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();

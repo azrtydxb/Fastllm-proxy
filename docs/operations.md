@@ -136,3 +136,19 @@ Absent `auth:` means open (no key required) — today's behaviour when no master
 ---
 
 Back to the [README](../README.md).
+
+## Logs
+
+`--log-format text` (the default) is human-readable; `--log-format json`
+(`FASTLLM_LOG_FORMAT=json`) emits one JSON object per line with the event's
+fields at the top level rather than nested, which is what a collector indexes
+without a transform step:
+
+```json
+{"timestamp":"2026-08-08T08:29:54.896902Z","level":"INFO","message":"starting",
+ "models":1,"backends":1,"policy":"CacheAffinity","role":"Proxy"}
+```
+
+`--log` (`FASTLLM_LOG`) takes an `EnvFilter` directive, so
+`--log 'info,fastllm_proxy::proxy=debug'` turns on per-request routing and
+classification detail without the rest.

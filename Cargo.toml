@@ -47,7 +47,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 arc-swap = "1"
 parking_lot = "0.12"
