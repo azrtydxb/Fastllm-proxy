@@ -19,6 +19,31 @@ use std::path::Path;
 /// history rather than only to their own.
 pub const MAX_TOKENS: usize = 256;
 
+/// Tuning that is worth measuring rather than guessing.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// ONNX Runtime intra-op threads. `None` leaves fastembed's default, which
+    /// is `available_parallelism()`.
+    ///
+    /// Worth setting explicitly in a container: if that default reads the
+    /// node's core count rather than the cgroup's quota, the runtime spawns
+    /// more threads than the pod may run and they contend and get throttled.
+    /// `classify-bench` measures both.
+    pub intra_threads: Option<usize>,
+    /// Token window. Cost is linear in it, and the window only has to be wide
+    /// enough for the distinction being drawn.
+    pub max_tokens: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            intra_threads: None,
+            max_tokens: MAX_TOKENS,
+        }
+    }
+}
+
 pub struct Tier2 {
     /// `TextEmbedding::embed` takes `&mut self` (the ONNX session is not
     /// `Sync`), so a mutex is unavoidable. It is uncontended in practice:
@@ -32,6 +57,10 @@ impl Tier2 {
     /// Deliberately not a HuggingFace repo id: this model is 130MB and a proxy
     /// must not reach the network to start serving.
     pub fn load(dir: &str) -> Result<Self> {
+        Self::load_with(dir, Options::default())
+    }
+
+    pub fn load_with(dir: &str, options: Options) -> Result<Self> {
         let dir = Path::new(dir);
         let read = |name: &str| -> Result<Vec<u8>> {
             std::fs::read(dir.join(name))
@@ -44,9 +73,12 @@ impl Tier2 {
             tokenizer_config_file: read("tokenizer_config.json")?,
         };
         let model = UserDefinedEmbeddingModel::new(read("model.onnx")?, files);
-        let embedding =
-            TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::default())
-                .context("initialising the tier-2 classifier session")?;
+        let mut init = InitOptionsUserDefined::new().with_max_length(options.max_tokens);
+        if let Some(threads) = options.intra_threads {
+            init = init.with_intra_threads(threads);
+        }
+        let embedding = TextEmbedding::try_new_from_user_defined(model, init)
+            .context("initialising the tier-2 classifier session")?;
         Ok(Self {
             inner: Mutex::new(embedding),
         })

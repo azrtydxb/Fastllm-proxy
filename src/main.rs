@@ -283,6 +283,33 @@ enum Command {
         #[arg(long, env = "FASTLLM_DATABASE_URL")]
         database_url: String,
     },
+
+    /// Measure the classifier where it actually runs.
+    ///
+    /// The tier-2 cost in `docs/classifier.md` was measured on a laptop, and
+    /// the deployed container turned out to be more than an order of magnitude
+    /// slower. Guessing at why — thread counts, core counts, token windows —
+    /// is what this exists to stop: it ships inside the image, so
+    /// `kubectl exec` measures the pod's real CPU quota rather than a
+    /// developer's machine.
+    #[cfg(feature = "classifier-tier2")]
+    ClassifyBench {
+        /// Fast-tier model directory. Defaults to the image's baked-in path.
+        #[arg(long, env = "FASTLLM_CLASSIFIER_MODEL")]
+        classifier_model: Option<String>,
+
+        /// Refined-tier model directory.
+        #[arg(long, env = "FASTLLM_CLASSIFIER_TIER2_MODEL")]
+        classifier_tier2_model: Option<String>,
+
+        #[arg(long, default_value_t = 20)]
+        iterations: u32,
+
+        /// Concurrency to measure, so the effect of `Tier2`'s session mutex is
+        /// visible rather than inferred.
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -415,7 +442,122 @@ async fn run_command(command: &Command) -> Result<()> {
             password,
             database_url,
         } => run_set_password(name, password, database_url).await,
+        #[cfg(feature = "classifier-tier2")]
+        Command::ClassifyBench {
+            classifier_model,
+            classifier_tier2_model,
+            iterations,
+            concurrency,
+        } => run_classify_bench(
+            classifier_model.as_deref(),
+            classifier_tier2_model.as_deref(),
+            *iterations,
+            *concurrency,
+        ),
     }
+}
+
+/// Measure both classifier tiers under the CPU this process actually has.
+#[cfg(feature = "classifier-tier2")]
+fn run_classify_bench(
+    tier1_dir: Option<&str>,
+    tier2_dir: Option<&str>,
+    iterations: u32,
+    concurrency: usize,
+) -> Result<()> {
+    use fastllm_proxy::classifier::{tier1::Tier1, tier2};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    // The first thing to establish, because every thread-count question below
+    // depends on it: what this process believes it may use. In a container that
+    // is the cgroup quota if the runtime reads it, and the node's core count if
+    // it does not — and the difference is the whole hypothesis.
+    println!(
+        "available_parallelism: {:?}",
+        std::thread::available_parallelism().map(|n| n.get())
+    );
+    for path in [
+        "/sys/fs/cgroup/cpu.max",
+        "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+    ] {
+        if let Ok(v) = std::fs::read_to_string(path) {
+            println!("{path}: {}", v.trim());
+        }
+    }
+
+    let prompt = "Why does this Rust code fail the borrow checker, and how do I                   restructure the function so the borrow ends before the move?";
+
+    if let Some(dir) = tier1_dir {
+        let t1 = Tier1::load(dir)?;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(t1.embed(prompt));
+        }
+        println!(
+            "tier1                       {:>8.0} us/prompt",
+            start.elapsed().as_micros() as f64 / f64::from(iterations)
+        );
+    }
+
+    let Some(dir) = tier2_dir else {
+        println!("no tier-2 model path given; skipping the refined tier");
+        return Ok(());
+    };
+
+    // One row per configuration, so the answer is a comparison rather than a
+    // single number needing interpretation.
+    for threads in [None, Some(1), Some(2), Some(4), Some(8)] {
+        for max_tokens in [128, 256] {
+            let options = tier2::Options {
+                intra_threads: threads,
+                max_tokens,
+            };
+            let loaded = Instant::now();
+            let t2 = match tier2::Tier2::load_with(dir, options) {
+                Ok(t) => t,
+                Err(e) => {
+                    println!("threads={threads:?} tokens={max_tokens}: load failed: {e:#}");
+                    continue;
+                }
+            };
+            let load_ms = loaded.elapsed().as_millis();
+
+            let start = Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(t2.embed(prompt));
+            }
+            let serial_us = start.elapsed().as_micros() as f64 / f64::from(iterations);
+
+            // The same work spread over threads. `Tier2` holds one session
+            // behind a mutex, so this is where serialisation shows up as
+            // throughput that does not improve.
+            let shared = Arc::new(t2);
+            let start = Instant::now();
+            let handles: Vec<_> = (0..concurrency)
+                .map(|_| {
+                    let t = Arc::clone(&shared);
+                    std::thread::spawn(move || {
+                        for _ in 0..iterations {
+                            std::hint::black_box(t.embed(prompt));
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().ok();
+            }
+            let total = iterations as f64 * concurrency as f64;
+            let concurrent_us = start.elapsed().as_micros() as f64 / total;
+
+            println!(
+                "tier2 threads={:<5} tokens={max_tokens:<4} load={load_ms:>5}ms  \
+                 serial={serial_us:>9.0} us  at x{concurrency}={concurrent_us:>9.0} us/prompt",
+                threads.map_or("auto".to_string(), |n| n.to_string()),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `fastllm-proxy import --config <path> --database-url <url>`: connects,
