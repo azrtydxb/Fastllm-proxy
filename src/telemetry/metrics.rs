@@ -341,6 +341,9 @@ pub struct RequestTiming {
     model: Option<Arc<ModelMetrics>>,
     awaiting_first_byte: bool,
     streaming: bool,
+    /// Kept so the per-request usage record can carry the same number the
+    /// histogram got, rather than measuring it twice and disagreeing.
+    ttft_us: Option<u64>,
 }
 
 impl RequestTiming {
@@ -356,7 +359,17 @@ impl RequestTiming {
             telemetry: Arc::clone(telemetry),
             awaiting_first_byte: true,
             streaming,
+            ttft_us: None,
         }
+    }
+
+    pub fn duration_ms(&self) -> u32 {
+        (self.start.elapsed().as_millis() as u64).min(u32::MAX as u64) as u32
+    }
+
+    pub fn ttft_ms(&self) -> Option<u32> {
+        self.ttft_us
+            .map(|us| ((us / 1_000).min(u32::MAX as u64)) as u32)
     }
 
     /// The first byte of the response body reached the client.
@@ -373,6 +386,7 @@ impl RequestTiming {
             return;
         }
         let us = self.start.elapsed().as_micros() as u64;
+        self.ttft_us = Some(us);
         self.telemetry.ttft.record_us(us);
         if let Some(m) = &self.model {
             m.ttft.record_us(us);

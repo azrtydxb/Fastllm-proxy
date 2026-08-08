@@ -2002,15 +2002,23 @@ async fn post_usage(
     let mut prompt_tokens = Vec::with_capacity(submitted);
     let mut completion_tokens = Vec::with_capacity(submitted);
     let mut at = Vec::with_capacity(submitted);
+    let mut duration_ms: Vec<Option<i32>> = Vec::with_capacity(submitted);
+    let mut ttft_ms: Vec<Option<i32>> = Vec::with_capacity(submitted);
+    let mut status: Vec<Option<i16>> = Vec::with_capacity(submitted);
+    let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
     for e in &body.events {
         principal_ids.push(e.principal_id as i64);
         models.push(e.model.clone());
         prompt_tokens.push(e.prompt_tokens as i64);
         completion_tokens.push(e.completion_tokens as i64);
         at.push(e.at);
+        duration_ms.push(e.duration_ms.map(|v| v as i32));
+        ttft_ms.push(e.ttft_ms.map(|v| v as i32));
+        status.push(e.status.map(|v| v as i16));
+        requested_model.push(e.requested_model.clone());
     }
 
-    // `UNNEST` turns the five parallel arrays back into rows, positionally —
+    // `UNNEST` turns the parallel arrays back into rows, positionally —
     // this is what lets one round trip insert a whole batch instead of one
     // query per event. The `JOIN`s against `principals`/`models` (rather than
     // a `NOT NULL` foreign key the `INSERT` could violate) are what makes an
@@ -2018,11 +2026,15 @@ async fn post_usage(
     // the statement outright.
     let accepted_rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
-            SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], $5::timestamptz[])
-                AS t(principal_id, model_name, prompt_tokens, completion_tokens, at)
+            SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
+                $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[])
+                AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
+                     duration_ms, ttft_ms, status, requested_model)
          )
-         INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at)
-         SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at
+         INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
+                                   duration_ms, ttft_ms, status, requested_model)
+         SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at,
+                i.duration_ms, i.ttft_ms, i.status, i.requested_model
          FROM input i
          JOIN principals p ON p.id = i.principal_id
          JOIN models m ON m.name = i.model_name
@@ -2033,6 +2045,10 @@ async fn post_usage(
     .bind(&prompt_tokens)
     .bind(&completion_tokens)
     .bind(&at)
+    .bind(&duration_ms)
+    .bind(&ttft_ms)
+    .bind(&status)
+    .bind(&requested_model)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -3438,6 +3454,10 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             at: chrono::Utc::now(),
+            duration_ms: None,
+            ttft_ms: None,
+            status: None,
+            requested_model: None,
         }
     }
 
@@ -3544,6 +3564,87 @@ mod tests {
     /// row for a principal that does not (or no longer) exist must not 500
     /// the control plane or fail the rows around it — the bad row is dropped
     /// and every other row in the same batch is still persisted.
+    /// The point of the latency columns: metrics answer "did p99 move", this
+    /// answers "for whom". Nullable throughout, so a row that genuinely has no
+    /// number carries none rather than a zero indistinguishable from an
+    /// instant response.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_usage_row_carries_the_latency_and_outcome_of_its_request() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("principals", "name", "usage-latency-")
+            .track_prefix("models", "name", "usage-latency-model-");
+        let principal_name = unique_name("usage-latency");
+        let (_, created) = post_principal(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewPrincipal {
+                name: principal_name.clone(),
+                kind: None,
+                email: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let principal_id = created.0["id"].as_i64().unwrap();
+
+        let model_name = unique_name("usage-latency-model");
+        let _ = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut timed = usage_event(principal_id, &model_name);
+        timed.duration_ms = Some(1234);
+        timed.ttft_ms = Some(56);
+        timed.status = Some(200);
+        timed.requested_model = Some("auto".into());
+        // A second row with nothing to say, so the nullability is exercised
+        // rather than assumed.
+        let bare = usage_event(principal_id, &model_name);
+
+        let _ = post_usage(
+            State(ctx.clone()),
+            auth_header(&ctx.proxy_token),
+            Json(UsageBatchRequest {
+                events: vec![timed, bare],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // `(duration_ms, ttft_ms, status, requested_model)`.
+        type Timing = (Option<i32>, Option<i32>, Option<i16>, Option<String>);
+        let rows: Vec<Timing> = sqlx::query_as(
+            "SELECT duration_ms, ttft_ms, status, requested_model FROM usage_events
+             WHERE principal_id = $1",
+        )
+        .bind(principal_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap();
+
+        // Not `ORDER BY id`: one `INSERT ... SELECT` does not promise to write
+        // rows in the order the arrays were unnested, and asserting on it makes
+        // a test that passes for a reason the code does not guarantee.
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.contains(&(Some(1234), Some(56), Some(200), Some("auto".to_string()))),
+            "the timed event must arrive intact: {rows:?}"
+        );
+        assert!(
+            rows.contains(&(None, None, None, None)),
+            "an event with no timing must store nulls, not zeroes: {rows:?}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn a_batch_with_an_unknown_principal_survives_and_only_that_row_is_dropped() {

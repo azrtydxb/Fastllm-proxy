@@ -43,6 +43,23 @@ pub struct UsageEvent {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub at: chrono::DateTime<chrono::Utc>,
+    /// Whole-request wall time. `None` only when the event was produced
+    /// somewhere that does not time (the reconciler, a test).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
+    /// Time to first token, for a streamed response. `None` for a buffered
+    /// one, where it would be a copy of `duration_ms` rather than a second
+    /// measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u32>,
+    /// The upstream's status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// What the client asked for, when it differs from `model` — a virtual
+    /// model, or the head of a chain that failed over. `model` is always the
+    /// one that actually answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -237,6 +254,10 @@ mod tests {
             prompt_tokens: 1,
             completion_tokens: 1,
             at: chrono::Utc::now(),
+            duration_ms: None,
+            ttft_ms: None,
+            status: None,
+            requested_model: None,
         }
     }
 

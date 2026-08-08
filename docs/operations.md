@@ -153,6 +153,36 @@ without a transform step:
 `--log 'info,fastllm_proxy::proxy=debug'` turns on per-request routing and
 classification detail without the rest.
 
+## Per-request records
+
+`usage_events` carries latency and outcome alongside the token counts:
+`duration_ms`, `ttft_ms`, `status`, and `requested_model` when the client asked
+for a name that differs from the one that served it — a virtual model, or the
+head of a chain that failed over.
+
+This is where per-caller detail lives, and deliberately not in Prometheus: the
+answer to "which callers got slow" is per principal and per key, and a label
+with that cardinality is how a metrics endpoint becomes an outage. Here it is a
+column in a database, already batched off the request path.
+
+```sql
+SELECT p.name, count(*), percentile_cont(0.95)
+         WITHIN GROUP (ORDER BY u.ttft_ms) AS p95_ttft_ms
+FROM usage_events u JOIN principals p ON p.id = u.principal_id
+WHERE u.at > now() - interval '1 hour' AND u.ttft_ms IS NOT NULL
+GROUP BY p.name ORDER BY p95_ttft_ms DESC;
+```
+
+Every new column is nullable, and that is load bearing. `ttft_ms` is NULL for a
+non-streaming response, where it would be a copy of `duration_ms` rather than a
+second measurement; all four are NULL on a row written by a proxy that predates
+them. A zero would be indistinguishable from a request that answered instantly.
+
+One limit worth knowing: a usage row exists only for principals whose
+consumption is tracked — those with a budget or a token rate limit — because
+nothing else parses the response body. Per-model *metrics* cover every request;
+per-caller *rows* cover those.
+
 ## Traces
 
 Built only with `--features otel`, because it is the one part of telemetry that

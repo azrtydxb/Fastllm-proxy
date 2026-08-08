@@ -34,11 +34,14 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub struct UsageSink {
     pub principal_id: PrincipalId,
     pub model: String,
+    /// What the client asked for, when it differs from `model`.
+    pub requested_model: Option<String>,
+    pub status: u16,
     pub reporter: UsageReporter,
 }
 
 impl UsageSink {
-    fn record(self, usage: Usage) {
+    fn record(self, usage: Usage, timing: Option<&crate::telemetry::RequestTiming>) {
         // A response that produced nothing is not an event: reporting zeroes
         // would dilute nothing but would still cost a queue slot, and the
         // passthrough path reports nothing in the same situation.
@@ -51,6 +54,10 @@ impl UsageSink {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             at: chrono::Utc::now(),
+            duration_ms: timing.map(|t| t.duration_ms()),
+            ttft_ms: timing.and_then(|t| t.ttft_ms()),
+            status: Some(self.status),
+            requested_model: self.requested_model,
         });
     }
 }
@@ -93,7 +100,7 @@ pin_project! {
             };
             if let Some(sink) = this.usage_sink.take() {
                 if let Some(usage) = streamed_usage {
-                    sink.record(usage);
+                    sink.record(usage, this.timing.as_ref());
                 }
             }
             if let Some(timing) = this.timing.take() {
@@ -197,7 +204,7 @@ impl Body for TranslatedBody {
                     // Whatever was counted before the break is still owed.
                     if let Some(sink) = this.usage_sink.take() {
                         if let Mode::Stream(t) = this.mode {
-                            sink.record(t.usage());
+                            sink.record(t.usage(), this.timing.as_ref());
                         }
                     }
                     if let Some(timing) = this.timing.take() {
@@ -217,7 +224,7 @@ impl Body for TranslatedBody {
                             let tail = t.finish();
                             let usage = t.usage();
                             if let Some(sink) = this.usage_sink.take() {
-                                sink.record(usage);
+                                sink.record(usage, this.timing.as_ref());
                             }
                             if let Some(timing) = this.timing.take() {
                                 timing.record_tokens(usage.prompt_tokens, usage.completion_tokens);
@@ -229,7 +236,7 @@ impl Body for TranslatedBody {
                             match translate_response(*this.protocol, buf, this.ctx) {
                                 Ok((bytes, usage)) => {
                                     if let Some(sink) = this.usage_sink.take() {
-                                        sink.record(usage);
+                                        sink.record(usage, this.timing.as_ref());
                                     }
                                     if let Some(timing) = this.timing.take() {
                                         timing.record_tokens(

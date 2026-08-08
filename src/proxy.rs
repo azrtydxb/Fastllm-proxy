@@ -795,6 +795,10 @@ async fn proxy_request(
                             protocol::body::UsageSink {
                                 principal_id: p.id,
                                 model: candidate_model.clone(),
+                                requested_model: (requested_model.as_str()
+                                    != candidate_model.as_str())
+                                .then(|| requested_model.to_string()),
+                                status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             }
                         });
@@ -825,6 +829,13 @@ async fn proxy_request(
                                 metrics: state.telemetry.model(candidate_model),
                                 principal_id: p.id,
                                 model: candidate_model.clone(),
+                                // Only when it differs: storing the same name
+                                // twice on every row would be noise in the one
+                                // place the detail is meant to be readable.
+                                requested_model: (requested_model.as_str()
+                                    != candidate_model.as_str())
+                                .then(|| requested_model.to_string()),
+                                status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             });
                     return finish_response(
@@ -1044,6 +1055,9 @@ struct UsageTracking {
     /// comment for why the data plane only ever reports the name the way the
     /// snapshot named it.
     model: String,
+    /// What the client asked for, when it differs from `model`.
+    requested_model: Option<String>,
+    status: u16,
     reporter: UsageReporter,
 }
 
@@ -1054,7 +1068,7 @@ impl UsageTracking {
     /// upstream that does not support it, a truncated stream — simply
     /// reports nothing; see the design doc's stated cost of this whole
     /// mechanism being "one small parse per request, not per frame".
-    fn finish(mut self) {
+    fn finish(mut self, timing: Option<&crate::telemetry::RequestTiming>) {
         if let Some(tokens) = self.tail.extract_usage() {
             if let Some(m) = &self.metrics {
                 m.prompt_tokens
@@ -1068,6 +1082,10 @@ impl UsageTracking {
                 prompt_tokens: tokens.prompt_tokens,
                 completion_tokens: tokens.completion_tokens,
                 at: chrono::Utc::now(),
+                duration_ms: timing.map(|t| t.duration_ms()),
+                ttft_ms: timing.and_then(|t| t.ttft_ms()),
+                status: Some(self.status),
+                requested_model: self.requested_model,
             });
         }
     }
@@ -1116,7 +1134,7 @@ pin_project! {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             if let Some(tracking) = this.usage_tracking.take() {
-                tracking.finish();
+                tracking.finish(this.timing.as_ref());
             }
             if let Some(timing) = this.timing.take() {
                 timing.finish();
@@ -1176,7 +1194,7 @@ impl Body for TrackedBody {
         // abort is the right call, not the wrong one.
         if let Poll::Ready(None) = &polled {
             if let Some(tracking) = this.usage_tracking.take() {
-                tracking.finish();
+                tracking.finish(this.timing.as_ref());
             }
             if let Some(timing) = this.timing.take() {
                 timing.finish();
