@@ -4,6 +4,7 @@ import { useLoader } from "../load.js";
 import { fleetSummary, rateBetween } from "../fleet.js";
 import {
   Bar,
+  Button,
   Card,
   Donut,
   Dot,
@@ -49,12 +50,20 @@ export function Metrics({ onUnauthorised, config }) {
   const [scope, setScope] = useState("fleet");
   const [series, setSeries] = useState({ rps: [], errors: [], cache: [] });
   const last = useRef(null);
+  // Counts polls rather than watching the totals: an idle fleet reports the
+  // same counters every time, and an effect keyed on those values is skipped
+  // — which froze every rate at its last non-zero reading instead of falling
+  // to zero, for as long as the page stayed open.
+  const [polls, setPolls] = useState(0);
 
   const { data, error, loading, reload, setError } = useLoader(
     () => api.get("/admin/fleet"),
     { onUnauthorised },
   );
-  usePoll(reload, POLL_MS);
+  usePoll(async () => {
+    await reload();
+    setPolls((n) => n + 1);
+  }, POLL_MS);
 
   const reports = data || [];
   const scoped = scope === "fleet" ? reports : reports.filter((r) => r.replica === scope);
@@ -83,24 +92,26 @@ export function Metrics({ onUnauthorised, config }) {
     last.current = { at: now, ...totals };
     if (!prev) return;
     const secs = (now - prev.at) / 1000;
-    const push = (name, from, to) => {
-      const r = rateBetween({ value: from }, { value: to }, secs);
-      return r === null ? null : r;
-    };
-    const rps = push("rps", prev.requests, totals.requests);
-    const eps = push("errors", prev.errors, totals.errors);
-    const cps = push("cache", prev.cache, totals.cache);
+    const push = (from, to) => rateBetween({ value: from }, { value: to }, secs);
+    const rps = push(prev.requests, totals.requests);
+    const eps = push(prev.errors, totals.errors);
+    const cps = push(prev.cache, totals.cache);
     setSeries((s) => ({
       rps: rps === null ? s.rps : [...s.rps, rps].slice(-WINDOW),
       errors: eps === null ? s.errors : [...s.errors, eps].slice(-WINDOW),
       cache: cps === null ? s.cache : [...s.cache, cps].slice(-WINDOW),
     }));
-    // Totals are compared by value, not identity: a poll that changed nothing
-    // must still advance the line, because a flat line is a fact.
+    // Keyed on the poll counter: a poll that changed nothing must still
+    // advance the line, because a flat line is a fact about the system.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totals?.requests, totals?.errors, totals?.cache]);
+  }, [polls]);
 
   if (loading && !data) return <Loading />;
+
+  // The scope survives in state after the replica it names stops reporting and
+  // drops out of the fleet. Rendering the empty selection would print zeros
+  // under that replica's name as though they had been measured.
+  const goneScope = scope !== "fleet" && reports.length > 0 && scoped.length === 0;
 
   const hitRate = cacheHits + cacheMisses > 0 ? (cacheHits / (cacheHits + cacheMisses)) * 100 : null;
   const now = (arr) => (arr.length ? arr[arr.length - 1] : null);
@@ -132,6 +143,18 @@ export function Metrics({ onUnauthorised, config }) {
           Rates are measured by this page, every {POLL_MS / 1000}s since it loaded.
         </Muted>
       </Row>
+
+      {goneScope && (
+        <Card tone="warn" title={`${scope} is no longer reporting`}>
+          <Muted>
+            It aged out of the fleet — a replica that stops reporting is dropped after 30 seconds
+            rather than shown stale. Nothing below is measured for it.{" "}
+            <Button variant="small" onClick={() => setScope("fleet")}>
+              back to the fleet
+            </Button>
+          </Muted>
+        </Card>
+      )}
 
       <Grid cols={3}>
         <RateCard

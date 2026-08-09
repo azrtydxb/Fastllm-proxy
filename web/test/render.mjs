@@ -149,15 +149,17 @@ const FIXTURES = {
         {
           id: 7,
           position: 0,
-          match_condition: {
-            principals: [],
-            roles: ["engineering"],
-            min_prompt_tokens: 256,
-            stream: true,
-            headers: { "x-fastllm-tier": "batch" },
-            days: [],
-            class: "coding",
-          },
+          // Flattened, exactly as `RuleView` serialises it — there is no
+          // `match_condition` key on the wire. The first version of this
+          // fixture nested them, which made the screen look correct in the
+          // test while every real rule rendered as a catch-all.
+          principals: [],
+          roles: ["engineering"],
+          min_prompt_tokens: 256,
+          stream: true,
+          headers: { "x-fastllm-tier": "batch" },
+          days: [],
+          class: "coding",
           targets: [{ id: 21, model_id: 5, model: "claude-sonnet", weight: 80, position: 0 }],
         },
       ],
@@ -416,13 +418,20 @@ const SCREENS = [
   ["usage", ["unpriced", "Spend by model", "COST / 1M TOKENS"]],
   ["providers", ["10.42.1.7", "api.anthropic.com"]],
   ["models", ["local-qwen", "claude-sonnet", "unpriced", "cache 300s"]],
-  ["routing", ["gpt-router", "class =", "coding", "Defaults"]],
+  // "engineering" and "batch" only appear inside condition chips, so this
+  // fails if the conditions are read from the wrong shape again.
+  ["routing", ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"]],
   ["classes", ["coding", "no centroid", "cannot route"]],
   ["keys", ["ci-runner", "revoked", "sk-abcd1234"]],
   ["rbac", ["ops@kryton", "batch-etl", "admin"]],
-  ["limits", ["batch-etl", "402", "429", "no spend cap"]],
+  // $155.00 of a $500.00 cap. Formatted money must keep its cents: dropping
+  // them above $100 — where the caps are — made a budget at 99.9% read as
+  // exactly at its cap.
+  ["limits", ["batch-etl", "402", "429", "no spend cap", "$500.00", "$155.00"]],
   ["audit", ["/admin/keys", "DELETE", "Reads are not recorded"]],
-  ["fleet", ["proxy-1", "proxy-2", "stuck on an older snapshot", "USAGE DROPPED"]],
+  // The banner must name the laggard's own version (v417), not the fleet
+  // minimum computed from the spread.
+  ["fleet", ["proxy-1", "proxy-2 (v417)", "stuck on an older snapshot", "USAGE DROPPED"]],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],
 ];
 
@@ -472,6 +481,7 @@ for (const [screen, expected] of SCREENS) {
     for (const m of missing) console.log(`      missing from the page: ${JSON.stringify(m)}`);
   } else {
     console.log(`  ${screen}: ok (${text.length} chars)`);
+    if (process.env.DUMP === screen) console.log("\n----\n" + text + "\n----\n");
   }
 }
 

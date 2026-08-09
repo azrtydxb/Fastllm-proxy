@@ -74,8 +74,14 @@ export function Fleet({ onUnauthorised, config }) {
 
       {summary.snapshotSpread > 0 && (
         <Banner tone="bad">
-          {summary.laggards.join(", ")} {summary.laggards.length === 1 ? "is" : "are"} serving
-          snapshot v{summary.snapshotVersion - summary.snapshotSpread} while the fleet is on v
+          {/* Each laggard's own version, not `max - spread`: that expression is
+              the minimum, so with three distinct versions it reported every
+              behind replica as being on the oldest one. */}
+          {reports
+            .filter((r) => summary.laggards.includes(r.replica))
+            .map((r) => `${r.replica} (v${r.snapshot_version})`)
+            .join(", ")}{" "}
+          {summary.laggards.length === 1 ? "is" : "are"} behind the fleet, which is on v
           {summary.snapshotVersion}
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}

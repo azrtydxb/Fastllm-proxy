@@ -46,10 +46,20 @@ const CONDITION_LABELS = {
   class: "class =",
 };
 
-function conditionChips(match) {
+/**
+ * The chips for one rule's conditions.
+ *
+ * Takes the whole rule, not a `match_condition` field, because there is no
+ * such field on the wire: `RuleView` and `NewRule` both put the conditions at
+ * the top level with `#[serde(flatten)]`. Reading a nested object here found
+ * `undefined` and drew "catch-all" on every rule that had conditions, and
+ * posting one buried them where serde discarded them — every rule the UI
+ * created matched every request that reached its position.
+ */
+function conditionChips(rule) {
   const out = [];
   for (const [key, label] of Object.entries(CONDITION_LABELS)) {
-    const v = match?.[key];
+    const v = rule?.[key];
     if (v === undefined || v === null) continue;
     if (Array.isArray(v)) {
       if (v.length === 0) continue;
@@ -58,7 +68,7 @@ function conditionChips(match) {
       out.push([label, String(v)]);
     }
   }
-  for (const [name, value] of Object.entries(match?.headers || {})) {
+  for (const [name, value] of Object.entries(rule?.headers || {})) {
     out.push(["header", `${name}: ${value}`]);
   }
   return out;
@@ -222,7 +232,7 @@ export function VirtualModels({ onUnauthorised }) {
             )}
 
             {vm.rules.map((r, i) => {
-              const chips = conditionChips(r.match_condition);
+              const chips = conditionChips(r);
               const total = r.targets.reduce((a, t) => a + t.weight, 0) || 1;
               return (
                 <Card key={r.id} style={{ borderLeft: "3px solid var(--accent)" }}>
@@ -546,9 +556,13 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
 
     const ok = await attempt(
       async () => {
+        // Spread, not nested: `NewRule` flattens `MatchConditionJson`, and
+        // because every field of it is `#[serde(default)]` with no
+        // `deny_unknown_fields`, a nested object deserialises to an empty
+        // condition and answers 201 — a catch-all rule with no error anywhere.
         const rule = await api.post(`/admin/virtual-models/${vm.id}/rules`, {
           position: vm.rules.length,
-          match_condition,
+          ...match_condition,
         });
         if (c.model_id) {
           await api.post(`/admin/rules/${rule.id}/targets`, {

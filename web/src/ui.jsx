@@ -15,11 +15,7 @@
 // exist, and here is why — which is the difference between a dashboard an
 // operator can trust and one they learn to second-guess.
 
-import React, { useEffect, useRef, useState } from "react";
-
-export function cx(...parts) {
-  return parts.filter(Boolean).join(" ");
-}
+import React, { useEffect, useRef } from "react";
 
 // --- layout -----------------------------------------------------------------
 
@@ -505,7 +501,7 @@ export function Banner({ tone = "warn", children, action }) {
  * A line over values this page collected itself.
  *
  * Deliberately not a general charting component: the only series this UI has
- * are the ones it has watched accumulate since it loaded (see `useSeries`), so
+ * are the ones each screen has watched accumulate since it loaded, so
  * there is no range selector, no axis of absolute time, and no way to ask for
  * yesterday. Pretending otherwise is the failure this avoids.
  */
@@ -619,45 +615,25 @@ export function Donut({ pct, label, sub, tone = "accent" }) {
 // --- hooks ------------------------------------------------------------------
 
 /**
- * Keep the last `n` samples of a value, for a chart of what this page watched.
+ * Poll `fn` every `ms`, pausing while the tab is hidden.
  *
- * The control plane stores no history — `/metrics` is a scrape and
- * `usage_events` is per request, neither of which a browser can turn into a
- * 24-hour line. Rather than invent one, every series in this UI starts empty
- * when the page loads and fills as it polls, and says so on the chart. That is
- * a real measurement with an honest, stated limit.
+ * The first call happens after one interval, not immediately: every caller
+ * pairs this with `useLoader`, which already fetches on mount, and firing at
+ * once doubled every screen's requests on load.
  */
-export function useSeries(value, n = 40) {
-  const [series, setSeries] = useState([]);
-  const last = useRef(undefined);
-  useEffect(() => {
-    if (value === null || value === undefined || Number.isNaN(value)) return;
-    if (last.current === value && series.length) {
-      // Repeated identical polls still advance the line — a flat line is a
-      // fact about the system, not a stalled chart.
-    }
-    last.current = value;
-    setSeries((s) => [...s, value].slice(-n));
-    // `series.length` is intentionally not a dependency: this effect appends
-    // on each new value, and depending on its own output would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, n]);
-  return series;
-}
-
-/** Poll `fn` every `ms`, pausing while the tab is hidden. */
 export function usePoll(fn, ms, deps = []) {
   const saved = useRef(fn);
   saved.current = fn;
   useEffect(() => {
     let alive = true;
-    let timer = null;
-    const tick = async () => {
+    let timer = setTimeout(function tick() {
       if (!alive) return;
-      if (!document.hidden) await saved.current();
-      if (alive) timer = setTimeout(tick, ms);
-    };
-    tick();
+      const done = () => {
+        if (alive) timer = setTimeout(tick, ms);
+      };
+      if (document.hidden) done();
+      else Promise.resolve(saved.current()).finally(done);
+    }, ms);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
@@ -692,11 +668,16 @@ export function fmtCompact(n) {
 export function fmtMoney(micros) {
   if (micros === null || micros === undefined) return "—";
   const dollars = Number(micros) / 1e6;
+  // Always two decimals, and truncated rather than rounded. Spend is read
+  // against a cap: $499.996 shown as "$500" reads as a budget breached that
+  // is not, and dropping the decimals above $100 — where the caps actually
+  // are — put the rounding exactly where it does the most damage.
+  const truncated = Math.trunc(dollars * 100) / 100;
   return (
     "$" +
-    dollars.toLocaleString(undefined, {
-      minimumFractionDigits: dollars >= 100 ? 0 : 2,
-      maximumFractionDigits: dollars >= 100 ? 0 : 2,
+    truncated.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     })
   );
 }

@@ -392,7 +392,24 @@ function PriceEditor({ model, onSave }) {
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [description, setDescription] = useState(model.description || "");
 
-  const micros = (v) => (v === "" ? undefined : Math.round(Number(v) * 1e6));
+  // Absent, cleared and mistyped are three different things and only the
+  // first two are intentional. `JSON.stringify` renders NaN as `null`, and to
+  // `PATCH` a null means *clear* — so "3,50" or a stray character would have
+  // turned a priced model into an unpriced one, which is exactly the failure
+  // this editor's doc comment claims to guard against.
+  const [bad, setBad] = useState(null);
+  const micros = (v) => {
+    if (v.trim() === "") return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) throw new RangeError(v);
+    return Math.round(n * 1e6);
+  };
+  const seconds = (v) => {
+    if (v === "" || v === null) return null;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0) throw new RangeError(v);
+    return n;
+  };
 
   return (
     <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--line-mid)" }}>
@@ -410,17 +427,33 @@ function PriceEditor({ model, onSave }) {
           <input value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
       </Grid>
+      {bad && (
+        <div style={{ marginTop: 12 }}>
+          <ErrorNote onDismiss={() => setBad(null)}>{bad}</ErrorNote>
+        </div>
+      )}
       <Row gap={8} style={{ marginTop: 12 }}>
         <Button
           variant="primary"
-          onClick={() =>
-            onSave({
-              input_price_per_mtok: micros(input),
-              output_price_per_mtok: micros(output),
-              cache_ttl_seconds: ttl === "" ? undefined : Number(ttl),
-              description,
-            })
-          }
+          onClick={() => {
+            try {
+              setBad(null);
+              onSave({
+                input_price_per_mtok: micros(input),
+                output_price_per_mtok: micros(output),
+                // Empty means "no TTL", which the hint promises and which only
+                // an explicit null delivers: `PATCH` treats an absent field as
+                // "leave alone", so omitting it here would silently keep the
+                // cache on for a model somebody just turned it off for.
+                cache_ttl_seconds: seconds(ttl),
+                description,
+              });
+            } catch (e) {
+              setBad(
+                `"${e.message}" is not a number. Nothing was saved — a value that cannot be read would have cleared the field, not left it alone.`,
+              );
+            }
+          }}
         >
           Save
         </Button>

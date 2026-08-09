@@ -5910,6 +5910,37 @@ mod tests {
         }
     }
 
+    /// The blanket `model:invoke` grant is stored as `model/*`, not `*` — the
+    /// resource is namespaced and `validate_grant` refuses a bare `*` for this
+    /// verb. Pinned because a reader that checked for `*` showed a role with
+    /// access to every model as having access to none, and nothing failed.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_blanket_model_grant_is_namespaced_and_a_bare_star_is_refused() {
+        let (ctx, _cache) = test_ctx().await;
+        let roles = list_roles(State(ctx.clone()), RequireRead::default())
+            .await
+            .unwrap()
+            .0;
+        let inference = roles
+            .iter()
+            .find(|r| r.name == "inference")
+            .expect("the seeded inference role");
+        assert!(
+            inference
+                .permissions
+                .iter()
+                .any(|p| p.verb == "model:invoke" && p.resource == "model/*"),
+            "the wildcard grant is `model/*`; anything reading it as `*` sees no grant at all"
+        );
+        assert!(validate_grant("model:invoke", "*").is_err());
+        assert!(validate_grant("model:invoke", "model/*").is_ok());
+        assert!(validate_grant("model:invoke", "model/gpt-4o").is_ok());
+        // The reverse: an admin verb is only meaningful unscoped.
+        assert!(validate_grant("config:write", "model/x").is_err());
+        assert!(validate_grant("config:write", "*").is_ok());
+    }
+
     /// A settings screen that guesses defaults is worse than one showing
     /// nothing: this must report the flags the process actually has.
     #[tokio::test]

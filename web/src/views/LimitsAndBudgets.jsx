@@ -61,6 +61,30 @@ export function LimitsAndBudgets({ onUnauthorised }) {
   if (loading && !data) return <Loading />;
   if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
+  // Both routes are `PUT`: they replace the row, so a field left out is set
+  // to NULL rather than left alone. That is coherent for a PUT and surprising
+  // in a form, so selecting a principal loads its current values in — an
+  // operator adding a request limit to a principal that already had a token
+  // limit was silently removing the token limit.
+  const loadLimit = (id) => {
+    const existing = (data?.limits || []).find((l) => String(l.principal_id) === String(id));
+    setLimitDraft({
+      principal_id: id,
+      requests_per_min: existing?.requests_per_min ?? "",
+      tokens_per_min: existing?.tokens_per_min ?? "",
+    });
+  };
+  const loadBudget = (id) => {
+    const existing = (data?.budgets || []).find((b) => String(b.principal_id) === String(id));
+    setBudgetDraft({
+      principal_id: id,
+      window: existing?.window || "daily",
+      tokens_total: existing?.tokens_total ?? "",
+      cost_total: existing?.cost_total_micros == null ? "" : existing.cost_total_micros / 1e6,
+    });
+  };
+
+
   const setLimit = async () => {
     if (!limitDraft.principal_id) return;
     const body = {};
@@ -129,7 +153,7 @@ export function LimitsAndBudgets({ onUnauthorised }) {
           <Field label="PRINCIPAL" style={{ flex: 1.2 }}>
             <select
               value={budgetDraft.principal_id || ""}
-              onChange={(e) => setBudgetDraft({ ...budgetDraft, principal_id: e.target.value })}
+              onChange={(e) => loadBudget(e.target.value)}
             >
               <option value="">principal…</option>
               {data.principals.map((p) => (
@@ -171,7 +195,11 @@ export function LimitsAndBudgets({ onUnauthorised }) {
           <Muted>
             A budget needs tokens, money, or both. A request is refused when either cap is reached,
             and the 402 names which one. Windows are fixed-length — 1 / 7 / 30 days, not calendar
-            months. Updating a budget leaves consumption and the window start alone.
+            months. Updating a budget leaves consumption and the window start alone, but{" "}
+            <strong style={{ fontWeight: 500, color: "var(--fg-3)" }}>
+              replaces both caps with what is in these boxes
+            </strong>{" "}
+            — selecting a principal loads its current values so an empty box means you meant it.
           </Muted>
         </div>
       </Card>
@@ -199,20 +227,24 @@ export function LimitsAndBudgets({ onUnauthorised }) {
                     <Mono key="t" style={{ color: "var(--fg-2)" }}>
                       {l.tokens_per_min === null ? "—" : fmtCompact(l.tokens_per_min)}
                     </Mono>,
-                    <Button
-                      key="x"
-                      variant="smallDanger"
-                      onClick={async () => {
-                        const ok = await attempt(
-                          () => api.del(`/admin/principals/${l.principal_id}/limits`),
-                          setError,
-                          onUnauthorised,
-                        );
-                        if (ok) reload();
-                      }}
-                    >
-                      remove
-                    </Button>,
+                    <Row key="x" gap={6} style={{ justifyContent: "flex-end" }}>
+                      <Button variant="small" onClick={() => loadLimit(String(l.principal_id))}>
+                        edit
+                      </Button>
+                      <Button
+                        variant="smallDanger"
+                        onClick={async () => {
+                          const ok = await attempt(
+                            () => api.del(`/admin/principals/${l.principal_id}/limits`),
+                            setError,
+                            onUnauthorised,
+                          );
+                          if (ok) reload();
+                        }}
+                      >
+                        remove
+                      </Button>
+                    </Row>,
                   ]}
                 />
               ))}
@@ -222,7 +254,7 @@ export function LimitsAndBudgets({ onUnauthorised }) {
             <select
               style={{ flex: 1.3 }}
               value={limitDraft.principal_id || ""}
-              onChange={(e) => setLimitDraft({ ...limitDraft, principal_id: e.target.value })}
+              onChange={(e) => loadLimit(e.target.value)}
             >
               <option value="">principal…</option>
               {data.principals.map((p) => (

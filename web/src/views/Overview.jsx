@@ -44,21 +44,35 @@ const BACKEND_COLS = [
 export function Overview({ onUnauthorised, config, go }) {
   const [series, setSeries] = useState([]);
   const sample = useRef(null);
+  // See Metrics: keyed on the poll, not on the counter, or an idle fleet
+  // holds its last measured rate on screen forever.
+  const [polls, setPolls] = useState(0);
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
       const [fleet, models, traffic, events] = await Promise.all([
         api.get("/admin/fleet"),
         api.get("/admin/models"),
-        api.get("/admin/usage" + query({ group_by: "virtual_model", limit: 6 })),
+        // Asked for wide and ranked here: the route orders by spend, so a
+        // free self-hosted model carrying most of the traffic sorts last and a
+        // limit of 6 would drop it out of a panel about *traffic*.
+        api.get("/admin/usage" + query({ group_by: "virtual_model", limit: 100 })),
         api.get("/admin/audit" + query({ limit: 6 })),
       ]);
-      return { fleet, models, traffic, events };
+      return {
+        fleet,
+        models,
+        events,
+        traffic: [...traffic].sort((a, b) => b.requests - a.requests).slice(0, 6),
+      };
     },
     { onUnauthorised },
   );
 
-  usePoll(reload, POLL_MS);
+  usePoll(async () => {
+    await reload();
+    setPolls((n) => n + 1);
+  }, POLL_MS);
 
   // A request rate this page measured itself, from two samples of a counter
   // the fleet reports. There is no stored history to ask for one; this is the
@@ -73,7 +87,8 @@ export function Overview({ onUnauthorised, config, go }) {
     sample.current = { at: now, value: requestsTotal };
     const rps = rateBetween(prev, sample.current, prev ? (now - prev.at) / 1000 : 0);
     if (rps !== null) setSeries((s) => [...s, rps].slice(-40));
-  }, [requestsTotal]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polls, requestsTotal === null]);
 
   if (loading && !data) return <Loading />;
   if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;

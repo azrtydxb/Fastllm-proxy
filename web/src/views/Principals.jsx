@@ -380,12 +380,18 @@ export function Principals({ onUnauthorised }) {
               rows={data.roles.map((r) => ({
                 key: r.name,
                 label: r.name,
-                sub: r.permissions.some((p) => p.verb === "model:invoke" && p.resource === "*")
+                // The wildcard is stored as `model/*`, not `*` — the resource
+                // is namespaced, and `validate_grant` rejects a bare `*` for
+                // this verb. Matching on `*` here showed a role with blanket
+                // access as having none at all.
+                sub: r.permissions.some(
+                  (p) => p.verb === "model:invoke" && p.resource === "model/*",
+                )
                   ? "all models"
                   : undefined,
                 cells: data.models.map((m) => {
                   const all = r.permissions.some(
-                    (p) => p.verb === "model:invoke" && p.resource === "*",
+                    (p) => p.verb === "model:invoke" && p.resource === "model/*",
                   );
                   const one = r.permissions.some(
                     (p) => p.verb === "model:invoke" && p.resource === `model/${m.name}`,
