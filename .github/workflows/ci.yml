@@ -80,11 +80,13 @@ jobs:
       - name: Install
         working-directory: web
         run: npm install
-      # Mounts every screen against stubbed API responses shaped like the ones
-      # `control::api` serialises. `npm run build` proves the modules parse; it
-      # says nothing about whether a screen renders, and a component used but
-      # not imported is a clean build and a blank page.
-      - name: Render check
+      # Two harnesses. `render` mounts every screen against stubbed responses
+      # shaped like the ones `control::api` serialises; `interact` clicks every
+      # control and asserts the method, path and body each one sends. The
+      # second exists because the worst bug this UI has had was a correct-
+      # looking screen posting a body serde silently discarded — nothing
+      # rendered wrong, and no test had ever looked at a request body.
+      - name: Screen and interaction checks
         working-directory: web
         run: npm test
       - name: Build

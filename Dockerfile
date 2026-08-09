@@ -17,10 +17,11 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ ./
-# The render check runs here rather than only in CI: this stage is the one
-# place the UI is guaranteed to be built before it is embedded, and a screen
-# that throws on mount would otherwise ship as a blank page nobody noticed
-# until an operator opened it.
+# The screen and interaction checks run here rather than only in CI: this stage
+# is the one place the UI is guaranteed to be built before it is embedded, and
+# a screen that throws on mount — or a button that posts a body the handler
+# discards — would otherwise ship as something nobody noticed until an
+# operator opened it.
 RUN npm test
 RUN npm run build
 

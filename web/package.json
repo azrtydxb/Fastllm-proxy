@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build && node -e \"require('fs').writeFileSync('dist/.gitkeep','')\"",
     "preview": "vite preview",
-    "test": "node test/render.mjs"
+    "test": "node test/render.mjs && node test/interact.mjs",
+    "test:fixtures": "node test/verify-fixtures.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
