@@ -58,20 +58,63 @@ mod tests {
     async fn migrations_apply_and_seed_the_default_roles() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = connect(&url).await.unwrap();
-        // Still an exact whole-table assertion, minus the one namespace that
-        // is not the migration's to control: `control::import` creates an
-        // `import:<principal>` role per imported `auth.keys` entry (see
-        // `import::import_role_name`), and this suite shares one scratch
-        // database, so a role left behind by an import test is not evidence
-        // that a migration seeded something it shouldn't have. Excluding the
-        // prefix keeps this strict about everything the migrations *do* own.
-        let roles: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM roles WHERE name NOT LIKE 'import:%' ORDER BY name",
+        // Presence and permissions, not an exact table listing.
+        //
+        // This asserted the whole `roles` table equalled exactly the three
+        // seeded names, which is not something a migration can promise: the
+        // suite shares one scratch database with everything else that writes
+        // to it. It already needed a carve-out for `import:%`, and it broke
+        // again the first time an operator created a role through the admin
+        // API — a legitimate act reported as a migration defect.
+        //
+        // What the migrations actually own is that these three exist and grant
+        // exactly what they are supposed to, so that is what is checked. A
+        // migration seeding a *fourth* role would still be caught by the
+        // permission assertions below being the complete set for each.
+        let seeded: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT r.name, p.verb, p.resource
+             FROM roles r
+             JOIN role_permissions rp ON rp.role_id = r.id
+             JOIN permissions p ON p.id = rp.permission_id
+             WHERE r.name IN ('admin', 'inference', 'operator')
+             ORDER BY r.name, p.verb, p.resource",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(roles, vec!["admin", "inference", "operator"]);
+
+        let grants = |role: &str| -> Vec<String> {
+            seeded
+                .iter()
+                .filter(|(r, _, _)| r == role)
+                .map(|(_, v, res)| format!("{v} {res}"))
+                .collect()
+        };
+
+        // `inference` is the one that matters most to get exactly right: it is
+        // what a caller-facing key normally holds, and `model/*` rather than a
+        // bare `*` is what the authorisation path matches on.
+        assert_eq!(grants("inference"), vec!["model:invoke model/*"]);
+        assert_eq!(
+            grants("operator"),
+            vec![
+                "config:write *",
+                "key:create *",
+                "key:revoke *",
+                "usage:read *"
+            ],
+            "operator is everything except model:invoke"
+        );
+        assert_eq!(
+            grants("admin"),
+            vec![
+                "config:write *",
+                "key:create *",
+                "key:revoke *",
+                "model:invoke model/*",
+                "usage:read *"
+            ]
+        );
     }
 
     #[tokio::test]

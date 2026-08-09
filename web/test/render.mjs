@@ -114,9 +114,9 @@ const SCREENS = [
   // exactly at its cap.
   ["limits", ["batch-etl", "402", "429", "no spend cap", "$500.00", "$155.00"]],
   ["audit", ["/admin/keys", "DELETE", "Reads are not recorded"]],
-  // The banner must name the laggard's own version (v417), not the fleet
-  // minimum computed from the spread.
-  ["fleet", ["proxy-1", "proxy-2 (v417)", "stuck on an older snapshot", "USAGE DROPPED"]],
+  // A snapshot version is epoch microseconds, so the banner reports how far
+  // behind the laggard is rather than printing sixteen digits at somebody.
+  ["fleet", ["proxy-1", "proxy-2 (4m behind)", "stuck on an older snapshot", "USAGE DROPPED"]],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],
 ];
 

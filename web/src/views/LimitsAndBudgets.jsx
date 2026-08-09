@@ -324,7 +324,10 @@ export function LimitsAndBudgets({ onUnauthorised }) {
 function Step({ at, title, desc, tone }) {
   return (
     <Row gap={12} style={{ alignItems: "flex-start", flexWrap: "nowrap", paddingBottom: 12, borderBottom: "1px solid var(--line-soft)" }}>
-      <Pill tone={tone} mono>
+      {/* Fixed width: "429" and "≥80%" are different sizes, and letting the
+          pill size itself left the three descriptions starting at three
+          different x positions. */}
+      <Pill tone={tone} mono style={{ width: 46, textAlign: "center", flex: "none" }}>
         {at}
       </Pill>
       <div style={{ flex: 1, minWidth: 0 }}>

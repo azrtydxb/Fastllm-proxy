@@ -33,8 +33,8 @@ const ADMIN_VERBS = ["usage:read", "key:create", "key:revoke", "config:write"];
 const P_COLS = [
   { label: "PRINCIPAL", width: "1.3fr" },
   { label: "KIND", width: ".8fr" },
-  { label: "ROLES", width: "1.8fr" },
-  { label: "", width: "150px", align: "right" },
+  { label: "ROLES", width: "1.6fr" },
+  { label: "", width: "210px", align: "right" },
 ];
 
 export function Principals({ onUnauthorised }) {
@@ -203,7 +203,16 @@ export function Principals({ onUnauthorised }) {
                             );
                             if (ok) reload();
                           }}
-                          style={{ padding: "2px 6px", fontSize: 11, borderRadius: 999 }}
+                          title="grant a role"
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: 11,
+                            borderRadius: 999,
+                            width: 42,
+                            background: "none",
+                            borderStyle: "dashed",
+                            color: "var(--fg-5)",
+                          }}
                         >
                           <option value="">+</option>
                           {data.roles
@@ -215,7 +224,7 @@ export function Principals({ onUnauthorised }) {
                             ))}
                         </select>
                       </Row>,
-                      <Row key="a" gap={6} style={{ justifyContent: "flex-end" }}>
+                      <Row key="a" gap={6} style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
                         {p.kind === "user" && (
                           <input
                             type="password"
@@ -312,8 +321,20 @@ export function Principals({ onUnauthorised }) {
                     </Muted>
                   </Row>
                 ))}
+                <NewRole
+                  onCreate={async (name) => {
+                    const ok = await attempt(
+                      () => api.post("/admin/roles", { name, description: "" }),
+                      setError,
+                      onUnauthorised,
+                    );
+                    if (ok) reload();
+                    return ok;
+                  }}
+                />
                 <Muted>
-                  Roles are seeded, not created here: each one exists because something checks it.
+                  Four roles are seeded because something checks them. A new one starts with no
+                  permissions — grant it some on the matrix, or it authorises nothing.
                 </Muted>
               </Stack>
             </Card>
@@ -412,6 +433,37 @@ export function Principals({ onUnauthorised }) {
         </Card>
       )}
     </Stack>
+  );
+}
+
+/**
+ * Create a role.
+ *
+ * Deliberately next to the list rather than on the matrix: a role with no
+ * permissions authorises nothing, so the useful order is create here, then
+ * grant there — and the copy says so rather than leaving an empty row looking
+ * broken.
+ */
+function NewRole({ onCreate }) {
+  const [name, setName] = useState("");
+  return (
+    <Row gap={6} style={{ flexWrap: "nowrap", marginBottom: 4 }}>
+      <input
+        placeholder="new role name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        style={{ flex: 1, fontSize: 12, padding: "6px 9px" }}
+      />
+      <Button
+        variant="small"
+        onClick={async () => {
+          if (!name.trim()) return;
+          if (await onCreate(name.trim())) setName("");
+        }}
+      >
+        create
+      </Button>
+    </Row>
   );
 }
 

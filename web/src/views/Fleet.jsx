@@ -21,6 +21,8 @@ import {
   fmtCompact,
   fmtDuration,
   fmtInt,
+  fmtSnapshot,
+  fmtSnapshotLag,
   hostOf,
   usePoll,
 } from "../ui.jsx";
@@ -79,10 +81,13 @@ export function Fleet({ onUnauthorised, config }) {
               behind replica as being on the oldest one. */}
           {reports
             .filter((r) => summary.laggards.includes(r.replica))
-            .map((r) => `${r.replica} (v${r.snapshot_version})`)
+            .map(
+              (r) =>
+                `${r.replica} (${fmtSnapshotLag(r.snapshot_version, summary.snapshotVersion)})`,
+            )
             .join(", ")}{" "}
-          {summary.laggards.length === 1 ? "is" : "are"} behind the fleet, which is on v
-          {summary.snapshotVersion}
+          {summary.laggards.length === 1 ? "is" : "are"} behind the fleet&rsquo;s snapshot of{" "}
+          {fmtSnapshot(summary.snapshotVersion)}
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
             — it answers /health with ok and lists the right models, and misbehaves only on
@@ -104,7 +109,10 @@ export function Fleet({ onUnauthorised, config }) {
         </Banner>
       )}
 
-      <Grid cols={reports.length >= 3 ? 3 : Math.max(1, reports.length)}>
+      {/* Sized by the card, not by the count: a one-replica fleet in a
+          three-column grid used to stretch a single card across the whole
+          window with its metrics metres apart. */}
+      <Grid cols="repeat(auto-fill, minmax(330px, 1fr))">
         {reports.map((r) => {
           const lagging = summary.laggards.includes(r.replica);
           const up = (r.backends || []).filter((b) => b.healthy).length;
@@ -126,7 +134,9 @@ export function Fleet({ onUnauthorised, config }) {
                   </Row>
                   <div style={{ flex: 1 }} />
                   <Pill tone={lagging ? "bad" : "ok"} mono>
-                    v{r.snapshot_version}
+                    <span title={`snapshot version ${r.snapshot_version}`}>
+                      {fmtSnapshot(r.snapshot_version)}
+                    </span>
                   </Pill>
                 </Row>
                 <Muted>
@@ -154,7 +164,8 @@ export function Fleet({ onUnauthorised, config }) {
                 </Grid>
                 {lagging && (
                   <Muted style={{ color: "var(--bad-fg)" }}>
-                    stuck on an older snapshot
+                    stuck on an older snapshot ·{" "}
+                    {fmtSnapshotLag(r.snapshot_version, summary.snapshotVersion)}
                   </Muted>
                 )}
               </Stack>

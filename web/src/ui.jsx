@@ -712,6 +712,36 @@ export function fmtBytes(bytes) {
   return `${v % 1 === 0 ? v : v.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * A snapshot version, made readable.
+ *
+ * `build_snapshot` stamps `EXTRACT(EPOCH …) * 1000000`, so a version is epoch
+ * microseconds: sixteen digits that tell an operator nothing and, worse, make
+ * the comparison this UI exists to support — is this replica behind? — an
+ * eyeball diff of two long numbers. Rendered as the clock time it actually is,
+ * with the raw value kept in a tooltip for anyone matching it against a log.
+ */
+export function fmtSnapshot(version) {
+  if (version === null || version === undefined) return "—";
+  const n = Number(version);
+  // Anything this large is a microsecond stamp; a small number is a version
+  // from some other scheme and is shown as-is rather than mangled into 1970.
+  if (n < 1e14) return `v${n}`;
+  const d = new Date(n / 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** How far behind one snapshot is from another, in plain words. */
+export function fmtSnapshotLag(behind, ahead) {
+  const micros = Number(ahead) - Number(behind);
+  if (!Number.isFinite(micros) || micros <= 0) return "";
+  // Only a microsecond stamp can be read as elapsed time. A version from some
+  // other scheme gets the difference stated plainly rather than a duration
+  // computed from units it does not have.
+  if (Number(ahead) < 1e14) return `${micros} behind`;
+  return fmtDuration(micros / 1e6) + " behind";
+}
+
 export function fmtWhen(iso) {
   if (!iso) return "never";
   const t = new Date(iso);

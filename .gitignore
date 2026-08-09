@@ -15,3 +15,6 @@
 # `git add -A` from the repo root will happily commit and which then fails the
 # push with an HTTP 408 rather than anything that names the cause.
 .fastembed_cache/
+
+# Screenshots from `npm run test:browser` — build output of a check, not source.
+/web/.screenshots/

@@ -23,7 +23,7 @@ const FIXTURES = {
     classifier_tier2: false,
     session_ttl_hours: 12,
     snapshot_rebuild_failures: 0,
-    snapshot_version: 418,
+    snapshot_version: 1786273263008852,
     models: 2,
     models_unpriced: 1,
     models_cached: 1,
@@ -34,7 +34,7 @@ const FIXTURES = {
   "/admin/fleet": [
     {
       replica: "proxy-1",
-      snapshot_version: 418,
+      snapshot_version: 1786273263008852,
       uptime_seconds: 90061,
       backends: [
         {
@@ -66,7 +66,7 @@ const FIXTURES = {
     },
     {
       replica: "proxy-2",
-      snapshot_version: 417,
+      snapshot_version: 1786273023008852,
       uptime_seconds: 300,
       backends: [
         {

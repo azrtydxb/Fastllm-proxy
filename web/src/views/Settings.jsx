@@ -16,6 +16,7 @@ import {
   fmtBytes,
   fmtDuration,
   fmtInt,
+  fmtSnapshot,
 } from "../ui.jsx";
 
 // Two kinds of setting, kept visibly apart.
@@ -151,8 +152,8 @@ export function Settings({ onUnauthorised, config }) {
         <Card title="Snapshots">
           <Setting
             label="Snapshot version"
-            hint="what this control plane last published"
-            value={c.snapshot_version ? `v${c.snapshot_version}` : "—"}
+            hint="what this control plane last published — the version is a microsecond stamp, shown as its clock time"
+            value={c.snapshot_version ? fmtSnapshot(c.snapshot_version) : "—"}
             tone="neutral"
           />
           <Setting

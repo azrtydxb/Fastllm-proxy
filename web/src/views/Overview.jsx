@@ -26,6 +26,7 @@ import {
   fmtCompact,
   fmtInt,
   fmtMoney,
+  fmtSnapshot,
   fmtWhen,
   hostOf,
   usePoll,
@@ -199,7 +200,7 @@ export function Overview({ onUnauthorised, config, go }) {
           unit="requests"
           foot={
             summary.snapshotVersion
-              ? `snapshot v${summary.snapshotVersion}${summary.snapshotSpread ? " · fleet split" : " · fleet in sync"}`
+              ? `snapshot ${fmtSnapshot(summary.snapshotVersion)}${summary.snapshotSpread ? " · fleet split" : " · fleet in sync"}`
               : "no replica reporting"
           }
           tone={summary.snapshotSpread ? "warn" : "accent"}
@@ -214,9 +215,11 @@ export function Overview({ onUnauthorised, config, go }) {
               <Muted>live from each proxy · merged by (api_base, model)</Muted>
               {summary.snapshotVersion !== null && (
                 <Pill tone={summary.snapshotSpread ? "bad" : "ok"} mono>
-                  {summary.snapshotSpread
-                    ? `v${summary.snapshotVersion} · ${summary.laggards.length} behind`
-                    : `v${summary.snapshotVersion} · in sync`}
+                  <span title={`snapshot version ${summary.snapshotVersion}`}>
+                    {summary.snapshotSpread
+                      ? `${fmtSnapshot(summary.snapshotVersion)} · ${summary.laggards.length} behind`
+                      : `${fmtSnapshot(summary.snapshotVersion)} · in sync`}
+                  </span>
                 </Pill>
               )}
             </Row>
