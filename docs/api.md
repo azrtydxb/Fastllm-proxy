@@ -69,6 +69,8 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `PUT /admin/principals/{id}/budget` | `{"tokens_total":..., "window":"daily"\|"weekly"\|"monthly"}`. Upserts the one row this principal may have; leaves `tokens_used` and the window's start alone on an update |
 | `DELETE /admin/principals/{id}/budget` | Remove the budget — the principal becomes unlimited, not limited to zero |
 | `PATCH /admin/models/{id}` | Correct a model in place: `{"description":..., "input_price_per_mtok":..., "output_price_per_mtok":..., "cache_ttl_seconds":...}`. Every field optional; an explicit `null` clears, an absent field is left alone |
+| `POST /admin/roles` | `{"name":..., "description":...}`. Permissions attach to roles, so a role is the only place to express "this caller may reach these models and nothing else" |
+| `DELETE /admin/roles/{name}` | Refused while any principal still holds it — a cascade would take every holder's access away at once, and the symptom arrives long after the click |
 | `POST /admin/roles/{name}/permissions` | `{"verb":"model:invoke", "resource":"model/gpt-4o"}`. The verb list is closed — a permission nothing checks would read on a matrix as though it granted something |
 | `DELETE /admin/roles/{name}/permissions` | Same body; revoke one |
 | `GET /admin/audit` | The change log, newest first. `?limit=&before=&actor_id=&target=&since=`. `before` is keyset pagination on the id of the oldest row you hold — an offset would skip or repeat rows as new ones arrive at the head |

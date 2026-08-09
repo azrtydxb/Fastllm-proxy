@@ -3236,6 +3236,102 @@ type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
 ///
 /// The body is never captured. It carries passwords and upstream credentials,
 /// and an audit row is read by more people than the thing it describes.
+/// `POST /admin/roles`: create a role to hang permissions on.
+///
+/// The gap this closes: permissions attach to roles, not to principals, so
+/// "this app may call these two models and nothing else" is unexpressible
+/// without a role to put it on. Without this the only scoping available was
+/// the seeded `inference` role, which grants `model/*` — every model,
+/// including the paid ones — and handing that to a third-party app is how a
+/// provider bill arrives unexpectedly.
+async fn post_role(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewRole>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "a role needs a name".to_string(),
+        ));
+    }
+    let id: i64 =
+        sqlx::query_scalar("INSERT INTO roles (name, description) VALUES ($1, $2) RETURNING id")
+            .bind(name)
+            .bind(body.description.unwrap_or_default())
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    api_error(
+                        StatusCode::CONFLICT,
+                        format!("a role named {name:?} already exists"),
+                    )
+                } else {
+                    db_error("creating the role", &e)
+                }
+            })?;
+
+    // No `refresh` here: a role with no permissions and no holders changes
+    // nothing a proxy can see. The grant that follows publishes.
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": name })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct NewRole {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// `DELETE /admin/roles/{name}`: remove a role nobody holds.
+///
+/// Refused while any principal still holds it, rather than cascading. A
+/// cascade here silently removes access from every holder at once, and the
+/// symptom — a fleet of callers all getting 403 — arrives long after the click
+/// that caused it. Revoking the role from its principals first makes that
+/// consequence something an operator chose rather than discovered.
+async fn delete_role(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let holders: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM principal_roles pr JOIN roles r ON r.id = pr.role_id
+         WHERE r.name = $1",
+    )
+    .bind(&name)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("counting role holders", &e))?;
+    if holders > 0 {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "{holders} principal(s) still hold {name:?}; revoke it from them first — \
+                 deleting it here would take their access away all at once"
+            ),
+        ));
+    }
+    let done = sqlx::query("DELETE FROM roles WHERE name = $1")
+        .bind(&name)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("deleting the role", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no role named {name:?}"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `GET /admin/config`: what this process was started with.
 ///
 /// Read-only. Every value here is a CLI flag or a build feature, and changing
@@ -3625,7 +3721,8 @@ pub async fn serve(
             "/admin/virtual-model-defaults/{id}",
             delete(delete_default_target),
         )
-        .route("/admin/roles", get(list_roles))
+        .route("/admin/roles", get(list_roles).post(post_role))
+        .route("/admin/roles/{name}", delete(delete_role))
         .route("/admin/audit", get(list_audit))
         .route("/admin/usage", get(usage_summary))
         .route("/admin/fleet", get(list_fleet))
@@ -5908,6 +6005,93 @@ mod tests {
         ] {
             assert!(!is_read_only(path), "{path} must stay audited");
         }
+    }
+
+    /// A role exists so permissions have somewhere to live; without one, "this
+    /// app may call these two models and nothing else" is unexpressible and
+    /// the only option is the seeded `inference` role, which grants every
+    /// model including the paid ones.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_scoped_role_can_be_created_and_is_not_deletable_while_held() {
+        let (ctx, _cache) = test_ctx().await;
+        let role_name = unique_name("scoped-role");
+        let _cleanup = TestCleanup::new()
+            .track_prefix("roles", "name", "scoped-role-")
+            .track_prefix("principals", "name", "scoped-holder-");
+
+        let (status, created) = post_role(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Json(NewRole {
+                name: role_name.clone(),
+                description: Some("only the local models".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.0["id"].is_i64());
+
+        // The same name twice is a conflict, not a second row.
+        assert_eq!(
+            post_role(
+                State(ctx.clone()),
+                RequireConfigWrite::default(),
+                Json(NewRole {
+                    name: role_name.clone(),
+                    description: None,
+                }),
+            )
+            .await
+            .expect_err("a duplicate role name must be refused")
+            .0,
+            StatusCode::CONFLICT
+        );
+
+        // Deleting it while a principal holds it would take that principal's
+        // access away all at once, with the symptom arriving much later.
+        let principal_id = make_principal(&ctx, &unique_name("scoped-holder")).await;
+        grant_role(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path(principal_id),
+            Json(RoleGrant {
+                role: role_name.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_role(
+                State(ctx.clone()),
+                RequireConfigWrite::default(),
+                Path(role_name.clone()),
+            )
+            .await
+            .expect_err("a held role must not be deletable")
+            .0,
+            StatusCode::CONFLICT
+        );
+
+        // Once nobody holds it, it goes.
+        revoke_role(
+            State(ctx.clone()),
+            RequireConfigWrite::default(),
+            Path((principal_id, role_name.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_role(
+                State(ctx.clone()),
+                RequireConfigWrite::default(),
+                Path(role_name.clone()),
+            )
+            .await
+            .unwrap(),
+            StatusCode::NO_CONTENT
+        );
     }
 
     /// The blanket `model:invoke` grant is stored as `model/*`, not `*` — the
