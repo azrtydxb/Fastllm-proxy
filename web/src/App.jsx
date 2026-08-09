@@ -274,7 +274,7 @@ export function App() {
               flex: "none",
             }}
           >
-            {(who || "op").slice(0, 2).toUpperCase()}
+            {(config?.you || who || "op").slice(0, 2).toUpperCase()}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
@@ -285,7 +285,12 @@ export function App() {
                 whiteSpace: "nowrap",
               }}
             >
-              {who || "signed in"}
+              {/* `config.you` rather than only the login response: the session
+                  cookie is HttpOnly, so after a reload the browser has no way
+                  to know whose session it is holding, and this read the
+                  operator's name until the first refresh and "signed in"
+                  forever after. */}
+              {config?.you || who || "signed in"}
             </div>
             <div style={{ font: "400 10px/1.3 var(--sans)", color: "var(--fg-4)" }}>
               session cookie

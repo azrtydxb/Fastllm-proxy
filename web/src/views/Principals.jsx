@@ -333,8 +333,11 @@ export function Principals({ onUnauthorised }) {
                   }}
                 />
                 <Muted>
-                  Four roles are seeded because something checks them. A new one starts with no
-                  permissions — grant it some on the matrix, or it authorises nothing.
+                  {/* Counted, not asserted: the copy said "four" while this
+                      deployment seeds three, and a number written into a
+                      sentence is one nobody re-checks. */}
+                  A role exists because something checks it. A new one starts with no permissions —
+                  grant it some on the matrix, or it authorises nothing.
                 </Muted>
               </Stack>
             </Card>

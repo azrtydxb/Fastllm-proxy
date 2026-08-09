@@ -79,6 +79,9 @@ export function Usage({ onUnauthorised }) {
     { requests: 0, prompt: 0, completion: 0, cost: 0, unpriced: 0 },
   );
   const tokens = totals.prompt + totals.completion;
+  // Not "some are unpriced" but "none are priced": the difference between a
+  // total that is missing a part and a total that does not exist.
+  const allUnpriced = totals.requests > 0 && totals.unpriced === totals.requests;
   const maxCost = Math.max(1, ...(data.byModel || []).map((r) => r.cost_micros));
 
   const cols = [
@@ -110,20 +113,27 @@ export function Usage({ onUnauthorised }) {
       <Grid cols={4}>
         <Kpi label="REQUESTS" value={fmtCompact(totals.requests)} />
         <Kpi label="TOKENS" value={fmtCompact(tokens)} sub={`${fmtCompact(totals.prompt)} prompt`} />
+        {/* When every request is unpriced there is no spend figure to give,
+            and "$0.00" would answer "we spent nothing" to a question whose
+            real answer is "we do not know". Only a mix has a total worth
+            printing. */}
         <Kpi
           label="SPEND"
-          value={fmtMoney(totals.cost)}
+          value={allUnpriced ? "—" : fmtMoney(totals.cost)}
           sub={
-            totals.unpriced > 0
-              ? `${fmtInt(totals.unpriced)} unpriced request${totals.unpriced === 1 ? "" : "s"} not counted`
-              : "every request priced"
+            allUnpriced
+              ? `no priced traffic — all ${fmtInt(totals.requests)} requests are unpriced`
+              : totals.unpriced > 0
+                ? `${fmtInt(totals.unpriced)} unpriced request${totals.unpriced === 1 ? "" : "s"} not counted`
+                : "every request priced"
           }
           tone={totals.unpriced > 0 ? "warn" : undefined}
         />
         <Kpi
           label="COST / 1M TOKENS"
-          value={tokens > 0 ? fmtMoney((totals.cost / tokens) * 1e6) : "—"}
-          sub="over priced traffic only"
+          value={allUnpriced || tokens === 0 ? "—" : fmtMoney((totals.cost / tokens) * 1e6)}
+          sub={allUnpriced ? "needs at least one priced model" : "over priced traffic only"}
+          tone={allUnpriced ? "warn" : undefined}
         />
       </Grid>
 

@@ -3060,6 +3060,28 @@ async fn require_session(
 #[derive(Debug, Clone, Copy)]
 struct AdminPrincipal(i64);
 
+/// Extractable directly, so a handler that only needs to know *who* is asking
+/// does not have to go through a permission marker to find out.
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AdminPrincipal {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AdminPrincipal>()
+            .copied()
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "no authenticated principal on this request".to_string(),
+                )
+            })
+    }
+}
+
 /// Every permission `/admin/*` routes check against, named for the
 /// `permissions.verb` column value each one maps to. Deliberately only
 /// these four (plus `model:invoke`, irrelevant here — that one gates the
@@ -3341,6 +3363,7 @@ async fn delete_role(
 async fn get_config(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
+    caller: AdminPrincipal,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let unpriced: i64 =
         sqlx::query_scalar("SELECT count(*) FROM models WHERE input_price_per_mtok IS NULL")
@@ -3358,8 +3381,19 @@ async fn get_config(
         .await
         .map_err(|e| db_error("counting models", &e))?;
 
+    // Who is asking. The session cookie is HttpOnly, so the browser cannot
+    // read its own identity back after a reload — the UI showed the operator's
+    // name until the first refresh and "signed in" forever after. This is the
+    // cheapest place to answer it: the caller is already authenticated here.
+    let you: Option<String> = sqlx::query_scalar("SELECT name FROM principals WHERE id = $1")
+        .bind(caller.0)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| db_error("reading the calling principal", &e))?;
+
     let d = &*ctx.deployment;
     Ok(Json(serde_json::json!({
+        "you": you,
         "role": d.role,
         "version": d.version,
         "tls": ctx.tls_enabled,
@@ -6131,10 +6165,14 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn the_config_route_reports_this_processs_own_flags() {
         let (ctx, _cache) = test_ctx().await;
-        let cfg = get_config(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap()
-            .0;
+        let cfg = get_config(
+            State(ctx.clone()),
+            RequireRead::default(),
+            AdminPrincipal(1),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(cfg["role"], "all");
         assert_eq!(cfg["config_poll_seconds"], 5);
         assert_eq!(cfg["cache_max_entries"], 4096);
