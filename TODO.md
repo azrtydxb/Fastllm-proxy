@@ -74,12 +74,11 @@ becoming an OpenAI backend pointed at Anthropic.
 agreeing with neither. `tests/doc_claims.rs` counts the table and fails if the
 prose disagrees.
 
-Rejected, with reasons: a Redis-backed shared cache (a lookup on the request
-path, which `tests/no_io_on_hot_path.rs` exists to prevent); `/batches`,
-`/files` and `/fine_tuning` (retrieval is a `GET` with no model and no body, so
-routing them means durable state on the request path — a design, not a suffix);
-SSO, guardrails and A2A (real, but each is a product decision rather than a
-defect).
+Not done: a shared response cache and SSO are parked with their reasoning under
+"Parked" below. `/batches`, `/files` and `/fine_tuning` stay out because
+retrieval is a `GET` with no model and no body, so routing them means durable
+state on the request path — a design, not a suffix. Guardrails and A2A are real
+gaps but product decisions rather than defects.
 
 
 ### Graceful shutdown and translator fuzzing — done (2026-08-12)
@@ -162,6 +161,62 @@ are per replica by construction and a fleet view can only show the spread if it
 has each replica's own.
 
 Not built: **teams / org scoping.** See "Deliberately not built" below.
+
+### Parked: shared response cache across replicas
+
+Revisit when there is evidence it is worth it. The reasoning is kept here so it
+does not have to be rebuilt from scratch.
+
+**The problem.** The response cache is per process. With N replicas a repeated
+request only hits if it lands on the replica that served it before — with two
+replicas and round-robin, roughly half the time.
+
+**Why Redis is the wrong question.** Embedded stores (redb, sled, RocksDB) do
+not share anything: they are per process, so they buy persistence across a
+restart, not a shared cache. Anything genuinely shared lives in another process,
+which puts a round trip on the *read* path — the one thing
+`tests/no_io_on_hot_path.rs` exists to prevent, and what the zero-overhead
+figure against vLLM rests on. A LAN Redis GET is 0.2-1 ms against a 26 ms
+(embeddings) to 40 ms (chat) time-to-first-token: 1-4% added to *every* request
+to make *some* of them much faster. Possibly a good trade, but a trade.
+
+**The design that avoids it.** Replicate asynchronously and keep reads local.
+On a store, publish the entry to the other replicas off the request path; a
+replica that has not received it yet simply misses, which is always safe. The
+plumbing exists — proxies already have a reverse channel to the control plane
+over `--proxy-token`, and the control plane already knows the fleet. It is a
+third message type on a channel that is there, not a new dependency. The cost is
+N× memory (bounded by the existing entry and byte caps anyway) and bandwidth per
+store.
+
+**The trap, if it is built.** The cache is dropped wholesale on a snapshot
+change, because a reconfiguration can repoint a model at a different provider —
+and replicas can be on *different* snapshot versions, which is why fleet drift
+detection exists. A replicated entry must therefore carry the snapshot version
+it was produced under, and a receiving replica must refuse one from a version it
+is not serving. Otherwise a replica on v418 serves a response generated under
+v417's routing: a stale answer from the wrong provider that looks entirely
+normal.
+
+**Do this first.** `cache_ttl_seconds` is currently NULL on every model, so the
+hit rate has never been observed and the ceiling of sharing is at most ~2× an
+unknown base. Turn it on for `bge-m3` — deterministic, and repeats are common in
+re-indexing and dedup — and read `fastllm_cache_total{kind}` after real traffic.
+If the base rate is 5%, none of the above is worth writing.
+
+### Parked: SSO (OIDC)
+
+Revisit when somebody needs it. Today a human logs in with a name and an
+Argon2id password against the `sessions` table, bootstrapped by
+`fastllm-proxy set-password`, and holds an HttpOnly cookie. That is sufficient
+for one operator and thin for an organisation.
+
+Parked rather than rejected because the work is real but the *shape* is a
+product decision that cannot be guessed: which provider, whether group claims
+map onto roles, and whether logout has to propagate. It also overlaps with teams
+and org scoping directly below — an OIDC integration that maps group claims to
+roles is most of a tenancy model, and building either without the other produces
+half a design twice.
 
 ### Deliberately not built: teams and org scoping
 
