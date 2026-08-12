@@ -36,7 +36,7 @@ one address while the annotation claimed two.
 
 Two Deployments, one Postgres, since Task 12:
 
-- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table), `/snapshot` and `/usage`. A `ClusterIP` Service on port 4001, **not** on the LoadBalancer VIP.
+- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table), `/snapshot` and `/usage`. A `LoadBalancer` Service on port 4001, pinned to `192.168.10.129` — its own VIP, deliberately not the gateway's. See "The admin API and UI are on their own VIP" below.
 - **`fastllm-proxy`** (`deployment.yaml`) — `--role=proxy`. Polls `fastllm-control`'s `/snapshot` over `FASTLLM_CONTROL_URL`, authenticating with `FASTLLM_PROXY_TOKEN`. Caches the last snapshot it received to an `emptyDir` at `/var/lib/fastllm`, so a pod restart while the control plane is down still comes up serving the last-known model/key set instead of crash-looping or refusing traffic.
 
 ### TLS on `/snapshot` and `/usage`
@@ -47,15 +47,32 @@ The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `n
 
 If `--tls-cert`/`--tls-key` are ever both removed (a dev cluster with no real backend credentials, say), `fastllm-control` falls back to plain HTTP rather than refusing to start — but it logs a startup warning every time, precisely because that fallback is silent otherwise and this is data that should not travel in the clear by accident.
 
-### ⚠️ Keep the admin API and UI off the VIP
+### ⚠️ The admin API and UI are on their own VIP
 
 `fastllm-control`'s `/admin/*` requires a session cookie (`POST /login`, checked against `principals.password_hash` with Argon2id — see README.md's "Admin authentication" section and `src/control/auth.rs`). `/snapshot` and `/usage` are unchanged: they check `--proxy-token`, a separate shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not a human login.
 
 **A password is no longer the same thing as being an admin.** A valid session only proves *who* is calling; each route additionally requires a permission (`usage:read`, `key:create`, `key:revoke`, or `config:write` — see README.md's table) that the principal must hold through a granted role. Giving a service account a password so it can view the UI (`PUT /admin/principals/{id}/password`) no longer silently hands it full administrative reach — it can log in, but every route still 403s until a role granting the permission it needs is granted with `POST /admin/principals/{id}/roles`. The `admin` role (granted automatically to the very first login by `set-password`, see below) is still the one that can do everything.
 
-**Network isolation is still the right default even with a real login in front of `/admin/*`.** A session cookie stops an anonymous request; it does not make brute-forcing a weak password, a leaked cookie, or a compromised pod on the same network segment a non-issue. Treat the login the same way you would treat any other internal admin tool's login: necessary, not sufficient, and no reason to put it on a public listener.
+**A session cookie is necessary, not sufficient.** It stops an anonymous request; it does not make brute-forcing a weak password, a leaked cookie, or a compromised pod on the same segment a non-issue. Treat the login the way you would any internal admin tool's login.
 
-**That means `fastllm-control`'s Service must stay `ClusterIP`, and must never be merged into `fastllm-proxy`'s `LoadBalancer` Service on `192.168.10.126`.** That VIP is reachable from the whole LAN, and `fastllm-control` now also serves the management UI (`/`, `/ui/*`) on the same listener — another reason it belongs off the VIP, not fewer. `control.yaml` has this ClusterIP-only, with a comment at the top saying why; don't "simplify" it into one Service later without re-reading that comment.
+**`fastllm-control` is a `LoadBalancer` on its own pinned VIP, `192.168.10.129`.** It was `ClusterIP` until 2026-08-12, and this section used to say it must stay that way. What changed is not the risk assessment but the honest alternative: the choice was never "no exposure", it was "every operator runs `kubectl port-forward` first", and the effect of that was an admin plane nobody opened on a LAN whose gateway VIPs (`.125`/`.126`, authenticated by the same key material) were always reachable.
+
+The exposure rests on three things, and if any stops being true this goes back to `ClusterIP`:
+
+1. the listener is TLS-only, so neither the session cookie nor the proxy token crosses the LAN in the clear;
+2. `/admin/*` and the UI require a session cookie, Argon2id-checked;
+3. `/snapshot` requires `--proxy-token` — which is now the credential whose leak costs the most, since it returns **decrypted upstream credentials**. Rotate `fastllm-proxy-token` if you suspect it, and restart both Deployments.
+
+**It still must never be merged into `fastllm-proxy`'s `LoadBalancer` Service.** Those are the *gateway's* addresses, held by callers with data-plane API keys and no business reaching the admin plane; one Service carrying both would put the admin port behind whatever gets opened up for the gateway next. Separate Services, separate addresses.
+
+The certificate carries `192.168.10.129` as an IP SAN, so clients given the cluster CA verify it fully by address:
+
+```bash
+kubectl -n fastllm get secret fastllm-control-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/kwca.crt
+curl --cacert /tmp/kwca.crt https://192.168.10.129:4001/healthz     # no -k needed
+```
+
+A browser still warns (`ERR_CERT_AUTHORITY_INVALID`): `cluster-ca` is a private CA in no OS trust store, and the IP SAN removes the name mismatch, not the unknown authority. Trust `cluster-ca` on your own machine if you want a warning-free UI.
 
 ### Bootstrapping the first admin login
 
@@ -104,7 +121,7 @@ kubectl -n fastllm rollout status deploy/fastllm-proxy --timeout=240s
 
 ## Creating and using an API key
 
-Keys are minted through the control plane's admin API, reachable only from inside the cluster (see the warning above) — `kubectl exec` into a pod that can reach the ClusterIP Service, or `kubectl -n fastllm exec` into `fastllm-control` itself. Log in first (see "Bootstrapping the first admin login" above for the very first one) to get a session cookie, then reuse it:
+Keys are minted through the control plane's admin API at `https://192.168.10.129:4001` (see the section above for what that address is and what guards it). Log in first (see "Bootstrapping the first admin login" above for the very first one) to get a session cookie, then reuse it:
 
 ```bash
 kubectl -n fastllm exec deploy/fastllm-control -- sh -c '
@@ -116,7 +133,7 @@ kubectl -n fastllm exec deploy/fastllm-control -- sh -c '
 # {"id":7,"key":"sk-..."}
 ```
 
-Or use the management UI at `https://fastllm-control.fastllm.svc:4001/` (port-forward it) instead of hand-writing `curl` — same admin API underneath, a form instead of JSON.
+Or open the management UI at **`https://192.168.10.129:4001/`** instead of hand-writing `curl` — same admin API underneath, a form instead of JSON. No port-forward: that address is a pinned VIP. Your browser will warn once about the private CA (see above).
 
 The response is the only time the plaintext key is ever shown — the database stores a SHA-256 hash, not the key, so read it now. Revoke the same way, cookie and all:
 
@@ -255,13 +272,18 @@ shortest path to Anthropic and Gemini models, because it speaks OpenAI format
 and needs no protocol setting:
 
 ```bash
-kubectl -n fastllm port-forward svc/fastllm-control 4001:4001 &
-curl -sk -c /tmp/ck -X POST https://127.0.0.1:4001/login \
+# The cluster CA, so the connection verifies rather than being waved through
+# with -k. Fetch once; it outlives any single certificate.
+kubectl -n fastllm get secret fastllm-control-tls -o jsonpath='{.data.ca\.crt}' \
+  | base64 -d > /tmp/kwca.crt
+C="curl -s --cacert /tmp/kwca.crt"
+
+$C -c /tmp/ck -X POST https://192.168.10.129:4001/login \
   -H 'content-type: application/json' \
   -d '{"name":"bootstrap","password":"..."}'
-curl -sk -b /tmp/ck -X POST https://127.0.0.1:4001/admin/models \
+$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/models \
   -H 'content-type: application/json' -d '{"name":"claude-sonnet","description":"via OpenRouter"}'
-curl -sk -b /tmp/ck -X POST https://127.0.0.1:4001/admin/models/$ID/backends \
+$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/models/$ID/backends \
   -H 'content-type: application/json' \
   -d '{"api_base":"https://openrouter.ai/api/v1",
        "upstream_model":"anthropic/claude-sonnet-4",

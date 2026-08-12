@@ -3,16 +3,22 @@
 # proxy to poll. No proxy listener lives here — that is deploy/deployment.yaml,
 # `--role=proxy`.
 #
-# SECURITY: `/admin/*` and the UI now require a session cookie (`POST
-# /login`, Argon2id-checked against principals.password_hash — see
-# src/control/auth.rs and README.md's "Admin authentication" section). That
-# is not a reason to put this Service on a public listener: a login screen on
-# the LAN-reachable VIP is still an unauthenticated-until-guessed target, not
-# an authenticated one. The Service below is therefore ClusterIP only, and
-# MUST NOT be merged into fastllm-proxy's LoadBalancer Service in
-# deploy/service.yaml, which is reachable from the whole LAN at
-# 192.168.10.126. See deploy/README.md, including "Bootstrapping the first
-# admin login" for how to get a working session in the first place.
+# SECURITY: this Service is LAN-reachable at 192.168.10.129, and everything
+# it serves is authenticated over TLS — `/admin/*` and the UI by a session
+# cookie (`POST /login`, Argon2id-checked against principals.password_hash;
+# see src/control/auth.rs and README.md's "Admin authentication"),
+# `/snapshot` by the proxy token. The reasoning for exposing it, and the
+# three properties that exposure depends on, are on the Service itself at the
+# bottom of this file — read them before changing any of the three.
+#
+# It still MUST NOT be merged into fastllm-proxy's LoadBalancer Service in
+# deploy/service.yaml. Those are the *gateway's* addresses, held by callers
+# with data-plane API keys and no business reaching the admin plane; one
+# Service carrying both would put the admin port behind whatever gets opened
+# up for the gateway next. Separate Services, separate addresses.
+#
+# See deploy/README.md, including "Bootstrapping the first admin login" for
+# how to get a working session in the first place.
 # CREDENTIALS ARE NOT IN THIS FILE, DELIBERATELY.
 #
 # fastllm-proxy-token and fastllm-encryption-key are created imperatively, the
@@ -82,7 +88,20 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-d3b569b
+          # Pinned to a commit, never `:main` — but the pin is only true if it
+          # is changed *here*. This said `sha-d3b569b` for weeks while the
+          # cluster ran `sha-befa593`, because a roll-forward was done with
+          # `kubectl set image` and the file was never updated. The next
+          # `kubectl apply -f deploy/` silently downgraded the control plane by
+          # one release, and it crash-looped on startup with
+          #
+          #     migration 14 was previously applied but is missing in the
+          #     resolved migrations
+          #
+          # — sqlx refusing, correctly, to run against a schema newer than the
+          # binary. It failed safe and the old pod kept serving, but the failure
+          # mode of a stale image pin is a downgrade, not a no-op.
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-befa593
           imagePullPolicy: Always
           args:
             - --role=control
@@ -158,16 +177,78 @@ spec:
         - name: tls
           secret: { secretName: fastllm-control-tls }
 ---
-# ClusterIP only — deliberately not a LoadBalancer and deliberately not on
-# fastllm-proxy's VIP. See the SECURITY note at the top of this file.
+# The serving certificate for the admin port.
+#
+# This lived only in the cluster for its first three months — created by hand,
+# described by deploy/README.md as being "in control.yaml", and absent from it.
+# A manifest that cannot rebuild the deployment it claims to describe is the
+# same failure as a stale comment, so it is here now.
+#
+# `ipAddresses` carries the VIP because the Service below is reached by address
+# from outside the cluster, where `fastllm-control.fastllm.svc` does not
+# resolve, and a certificate is only valid for the names it lists.
+#
+# This does NOT make a browser open the admin UI without a warning, and adding
+# the SAN in the hope that it would is the mistake to avoid here: `cluster-ca`
+# is a private CA in no OS trust store, so Chrome still reports
+# ERR_CERT_AUTHORITY_INVALID on https://192.168.10.129:4001/. What the SAN buys
+# is that the *only* remaining objection is the unknown authority — so
+# `curl --cacert <ca.crt>` and any client given the cluster CA verify the
+# connection fully, by IP, with no `-k` and no name override. Getting a
+# warning-free browser means trusting `cluster-ca` on that machine; that is an
+# operator's decision about their own laptop, not something a manifest does.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastllm-control-tls
+  namespace: fastllm
+spec:
+  secretName: fastllm-control-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef: { kind: ClusterIssuer, name: cluster-ca }
+  dnsNames:
+    - fastllm-control.fastllm.svc
+    - fastllm-control.fastllm.svc.cluster.local
+  ipAddresses:
+    - 192.168.10.129
+---
+# The admin API, the management UI and `/snapshot`, on a pinned VIP.
+#
+# This was ClusterIP for most of the project's life, and the note at the top of
+# this file argued for keeping it that way: a login form on a LAN-reachable
+# address is a target, and `/snapshot` hands out decrypted upstream credentials
+# to anything holding the proxy token.
+#
+# Both halves of that are still true. What changed is the weight given to the
+# alternative, which was not "no exposure" but "every operator runs `kubectl
+# port-forward` first" — and the practical effect of that was an admin plane
+# nobody opened, on a LAN whose other services (the gateway itself, at .125 and
+# .126, authenticated by the same key material) have always been reachable. The
+# boundary being defended here was already crossed elsewhere.
+#
+# What the exposure actually rests on, and what must not be weakened:
+#   - the listener is TLS-only (`--tls-cert`/`--tls-key` above), so neither a
+#     session cookie nor the proxy token crosses the LAN in the clear;
+#   - `/admin/*` and the UI need a session cookie, Argon2id-checked;
+#   - `/snapshot` needs the proxy token and nothing else — so that token is the
+#     one credential whose leak now costs more than it did, and rotating it
+#     (`fastllm-proxy-token`, see the top of this file) is the response.
+# If any of those three stops being true, this Service goes back to ClusterIP.
+#
+# Pinned by annotation rather than the deprecated `spec.loadBalancerIP`, and
+# pinned *here* rather than on the live object — see deploy/service.yaml for
+# what the two-sources-of-truth version of this cost.
 apiVersion: v1
 kind: Service
 metadata:
   name: fastllm-control
   namespace: fastllm
   labels: { app: fastllm-control }
+  annotations:
+    kube-vip.io/loadbalancerIPs: "192.168.10.129"
 spec:
-  type: ClusterIP
+  type: LoadBalancer
   selector: { app: fastllm-control }
   ports:
     - { name: admin, port: 4001, targetPort: admin }
