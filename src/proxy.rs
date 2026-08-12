@@ -65,11 +65,22 @@ pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 const PROXIED_SUFFIXES: &[&str] = &[
     "/chat/completions",
     "/completions",
+    // OpenAI's newer Responses API. Passthrough only, like the rest of this
+    // list: a native backend answers 501 below rather than being handed a body
+    // it cannot read.
+    "/responses",
     "/embeddings",
     "/rerank",
     "/score",
     "/audio/transcriptions",
     "/audio/translations",
+    // Binary or non-streaming responses, which the byte pump handles without
+    // caring: nothing on the response path parses a passthrough body, and the
+    // usage tail buffer already tolerates finding no usage in it.
+    "/audio/speech",
+    "/images/generations",
+    "/images/edits",
+    "/moderations",
 ];
 
 /// Per-connection headers, meaningless on the next hop in either direction.
@@ -170,7 +181,14 @@ struct BodyPeek {
     /// the same JSON object `model` is parsed out of, so this costs nothing
     /// beyond one more field in a struct `serde_json` already skips past
     /// everything else in.
-    #[serde(default)]
+    ///
+    /// Three spellings because OpenAI has used three. `max_tokens` is the
+    /// original, `max_completion_tokens` replaced it on chat completions, and
+    /// `max_output_tokens` is what the Responses API uses. A rule matching on
+    /// generation length must not silently stop firing because a client
+    /// upgraded its SDK — which is exactly what a single-name field would do,
+    /// with no error anywhere.
+    #[serde(default, alias = "max_completion_tokens", alias = "max_output_tokens")]
     max_tokens: Option<u64>,
 }
 
@@ -2158,6 +2176,36 @@ mod tests {
     fn audio_routes_are_proxied() {
         for route in ["/audio/transcriptions", "/audio/translations"] {
             assert!(PROXIED_SUFFIXES.contains(&route));
+        }
+    }
+
+    /// Every endpoint that is only a passthrough. Listed by name rather than
+    /// counted, so adding one is a deliberate edit here as well — and so the
+    /// docs test that reads this list has something to compare against.
+    #[test]
+    fn passthrough_endpoints_are_proxied() {
+        for route in [
+            "/responses",
+            "/audio/speech",
+            "/images/generations",
+            "/images/edits",
+            "/moderations",
+        ] {
+            assert!(PROXIED_SUFFIXES.contains(&route), "{route} is not proxied");
+        }
+    }
+
+    /// A routing rule matching on generation length must keep working when a
+    /// client moves to a newer OpenAI SDK. `max_tokens` became
+    /// `max_completion_tokens` on chat completions and `max_output_tokens` on
+    /// the Responses API; a rule that silently stopped matching would look
+    /// like a routing bug with nothing in the logs.
+    #[test]
+    fn every_spelling_of_max_tokens_is_read() {
+        for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+            let body = format!(r#"{{"model":"m","{field}":128}}"#);
+            let peek: BodyPeek = serde_json::from_str(&body).unwrap();
+            assert_eq!(peek.max_tokens, Some(128), "{field} was not read");
         }
     }
 

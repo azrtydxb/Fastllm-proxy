@@ -23,7 +23,7 @@ kill -HUP $(pgrep -x fastllm-proxy)
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/chat/completions` | Proxied. Also `/completions`, `/embeddings`, `/rerank`, `/score`, `/audio/*` |
+| `POST /v1/chat/completions` | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations` |
 | `GET /v1/models` | Aggregated across every pool |
 | `GET /health` | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface |
 | `GET /metrics` | Prometheus text, including `fastllm_snapshot_version`. No auth required |
@@ -83,6 +83,26 @@ Everything an operator needs to run the control plane, so that neither raw SQL n
 | `POST /admin/sessions/revoke-all` | Delete every session, including the caller's |
 
 **No route returns a credential.** Key plaintext is shown once, by `POST /admin/keys`, and never again; `api_keys.hash` is a verifier, not a display value, and is not in any response. `upstream_api_key` is the one secret that cannot be reduced to a hash — the proxy has to present it upstream — so it is encrypted at rest and `GET /admin/models` reports only whether one is set.
+
+### Endpoints, and what is not one
+
+Twelve `POST` endpoints are proxied. All of them take the same path: read
+`model` from the body, authorise it, route it, forward the bytes. Nothing on
+that list is parsed on the way back, so adding one costs a line — which is why
+`/responses`, `/audio/speech`, `/images/*` and `/moderations` are there.
+
+A **native** (`anthropic`/`gemini`) backend answers `501` for everything except
+`/chat/completions`, because only chat has a translation. That gate is what
+makes adding a passthrough endpoint safe: a native backend refuses it clearly
+instead of being handed a body it cannot read.
+
+**What is deliberately absent, and why it is not a line of config.** The
+stateful job APIs — `/batches`, `/files`, `/fine_tuning` — are not endpoints so
+much as small databases. Creating a job is a `POST` with a `model` in it, which
+would work; *retrieving* one is a `GET /v1/batches/{id}` with no model and no
+body, so there is nothing to route on. Serving them means remembering which
+backend owns which job id, which is durable state on the request path — the one
+thing this proxy is built not to have. They need a design, not a suffix.
 
 ### Providers
 

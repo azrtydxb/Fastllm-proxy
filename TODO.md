@@ -43,6 +43,45 @@ the upstream's real token counts and the control plane folds them into
 
 ## Features
 
+### Closing the endpoint and provider gap — done (2026-08-12)
+
+Prompted by a LiteLLM comparison. Most of its feature list was rejected (see
+below); what survived was cheap because the architecture already supported it.
+
+**Five more endpoints**, 7 → 12: `/responses`, `/audio/speech`,
+`/images/generations`, `/images/edits`, `/moderations`. A proxied endpoint is a
+`POST` carrying `model`, and nothing on the response path parses a passthrough
+body, so each is one line. Safe by construction: a native backend already
+answers 501 for anything but `/chat/completions`, so a new suffix cannot be
+handed to a translator that has no idea what it is.
+
+**`max_tokens` now reads three spellings.** OpenAI has used `max_tokens`,
+`max_completion_tokens` (chat) and `max_output_tokens` (Responses). A routing
+rule matching on generation length silently stopped firing when a client
+upgraded its SDK — no error, just a rule that never matched.
+
+**`protocol`, `auth_header`, `auth_scheme` and `default_max_tokens` are
+configurable from YAML**, not only through the control plane. `File` mode could
+not describe a native backend or an Azure-style key header at all, and the same
+deployment was configurable one way and not the other. Azure OpenAI now works
+with `auth_header: api-key` and an empty `auth_scheme` — both public analyses of
+this proxy called Azure unsupported and estimated weeks; it was four config
+fields. A misspelled protocol is now refused at startup rather than silently
+becoming an OpenAI backend pointed at Anthropic.
+
+**42 providers documented, and the count is now executable.** The README said
+"20" in one bullet and "Twenty-three" in the next paragraph, with the table
+agreeing with neither. `tests/doc_claims.rs` counts the table and fails if the
+prose disagrees.
+
+Rejected, with reasons: a Redis-backed shared cache (a lookup on the request
+path, which `tests/no_io_on_hot_path.rs` exists to prevent); `/batches`,
+`/files` and `/fine_tuning` (retrieval is a `GET` with no model and no body, so
+routing them means durable state on the request path — a design, not a suffix);
+SSO, guardrails and A2A (real, but each is a product decision rather than a
+defect).
+
+
 ### Graceful shutdown and translator fuzzing — done (2026-08-12)
 
 Two items from an external review that survived checking against the code.

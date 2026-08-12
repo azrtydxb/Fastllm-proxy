@@ -269,6 +269,18 @@ impl Registry {
         interner: &Interner,
         previous: Option<&Registry>,
     ) -> Result<Self> {
+        // Rejected here rather than defaulted: `protocol: anthropc` silently
+        // becoming an OpenAI backend pointed at Anthropic produces a stream of
+        // upstream 400s that look like the provider's fault.
+        for entry in &cfg.model_list {
+            if !entry.litellm_params.protocol_is_valid() {
+                anyhow::bail!(
+                    "model {:?}: protocol {:?} is not one of openai, anthropic, gemini",
+                    entry.model_name,
+                    entry.litellm_params.protocol.as_deref().unwrap_or_default()
+                );
+            }
+        }
         let entries = cfg.model_list.iter().map(|entry| {
             let api_base = entry
                 .litellm_params
@@ -281,6 +293,14 @@ impl Registry {
                 BackendDef {
                     upstream_model: entry.litellm_params.upstream_model(&entry.model_name),
                     api_key: entry.litellm_params.effective_api_key(),
+                    protocol: entry.litellm_params.protocol_or_default(),
+                    auth_header: entry
+                        .litellm_params
+                        .auth_header
+                        .clone()
+                        .unwrap_or_else(|| "authorization".to_string()),
+                    auth_scheme: entry.litellm_params.auth_scheme.clone(),
+                    default_max_tokens: entry.litellm_params.default_max_tokens,
                     ..Default::default()
                 },
             )
@@ -499,6 +519,90 @@ model_list:
         let b = Registry::build(&config(reversed), &interner, Some(&a)).unwrap();
         let uids_b: Vec<_> = b.backends().iter().map(|x| x.uid).collect();
         assert_eq!(uids_a, uids_b);
+    }
+
+    /// Azure OpenAI and anything else that wants the key in its own header
+    /// with no `Bearer` prefix. Both public comparisons of this proxy listed
+    /// Azure as unsupported and estimated weeks of work; it is two config
+    /// fields, and this pins that so the claim can be made honestly.
+    #[test]
+    fn a_custom_auth_header_carries_the_raw_key() {
+        let azure = r#"
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_base: https://example.openai.azure.com/openai/deployments/gpt-4o
+      api_key: secret-key
+      auth_header: api-key
+      auth_scheme: ""
+"#;
+        let reg = Registry::build(&config(azure), &Interner::default(), None).unwrap();
+        let headers = &reg.backends()[0].headers;
+        let sent: Vec<(String, String)> = headers
+            .iter()
+            .map(|(n, v)| (n.as_str().to_string(), v.to_str().unwrap().to_string()))
+            .collect();
+        assert!(
+            sent.iter()
+                .any(|(n, v)| n == "api-key" && v == "secret-key"),
+            "expected a bare api-key header, got {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|(n, _)| n == "authorization"),
+            "a custom auth header must replace Authorization, not add to it: {sent:?}"
+        );
+    }
+
+    /// A native backend from a YAML file. Before this, `protocol` was only
+    /// expressible through the control plane, so a `File`-mode deployment
+    /// could not talk to Anthropic or Gemini at all — and the config silently
+    /// produced an OpenAI backend pointed at an endpoint that speaks a
+    /// different language.
+    #[test]
+    fn a_native_backend_can_be_configured_from_yaml() {
+        let native = r#"
+model_list:
+  - model_name: claude
+    litellm_params:
+      model: claude-sonnet-4-5
+      api_base: https://api.anthropic.com/v1
+      api_key: sk-ant-x
+      protocol: anthropic
+      auth_header: x-api-key
+      auth_scheme: ""
+      default_max_tokens: 4096
+"#;
+        let reg = Registry::build(&config(native), &Interner::default(), None).unwrap();
+        let b = &reg.backends()[0];
+        assert_eq!(b.protocol, crate::protocol::Protocol::Anthropic);
+        assert_eq!(b.default_max_tokens, Some(4096));
+        let sent: Vec<String> = b
+            .headers
+            .iter()
+            .map(|(n, _)| n.as_str().to_string())
+            .collect();
+        assert!(sent.iter().any(|n| n == "x-api-key"), "{sent:?}");
+        // The translator needs this and an operator should not have to know
+        // it exists; the registry adds it for anthropic backends.
+        assert!(sent.iter().any(|n| n == "anthropic-version"), "{sent:?}");
+    }
+
+    #[test]
+    fn a_misspelled_protocol_is_refused_at_startup() {
+        let typo = r#"
+model_list:
+  - model_name: claude
+    litellm_params:
+      model: claude-sonnet-4-5
+      api_base: https://api.anthropic.com/v1
+      protocol: anthropc
+"#;
+        let err = match Registry::build(&config(typo), &Interner::default(), None) {
+            Err(e) => e,
+            Ok(_) => panic!("a protocol nobody implements must not default to openai"),
+        };
+        assert!(err.to_string().contains("anthropc"), "{err}");
     }
 
     #[test]

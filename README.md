@@ -21,7 +21,7 @@ fastllm-proxy addresses both: routing is prefix-aware, and response bodies are n
 - **Cache-affinity routing** with a load escape hatch. A shared prefix goes back to the node that already has its KV cache, unless that node is meaningfully hotter than the least-loaded one.
 - **Opaque response bodies.** Upstream frames reach the client exactly as they arrived — never deserialised, never re-encoded, never buffered.
 - **Cache-affinity routing, virtual models, rule-based and semantic routing** — see below.
-- **20 providers, and any OpenAI-compatible endpoint** — see below.
+- **42 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
 - **Control plane / data plane split** by a runtime flag, so one image is a single container in a lab and a scaled deployment in Kubernetes.
@@ -31,7 +31,7 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 
 ## Providers
 
-**Twenty-three providers work today, and adding one is a row in a table — not a code change, not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list.
+**42 providers work today — 40 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list. The count and this table are checked against each other by `tests/doc_claims.rs`, so the number cannot drift away from the rows.
 
 | reached as-is (OpenAI-compatible) | |
 |---|---|
@@ -44,6 +44,11 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 | **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
 | **Cohere** | `https://api.cohere.ai/compatibility/v1` |
 | **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [docs/api.md](docs/api.md#providers) for the service-account credential |
+| **Azure OpenAI** | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
+| Mistral · Perplexity · Cerebras · SambaNova | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1` |
+| DeepInfra · Novita · Hyperbolic · Lambda | four endpoints, four rows |
+| NVIDIA NIM · Databricks · HuggingFace TGI | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1` |
+| LM Studio · KoboldCpp · TabbyAPI · text-generation-webui | local servers, same row shape |
 
 | reached through their own wire format | |
 |---|---|

@@ -113,6 +113,28 @@ pub struct LitellmParams {
     /// upstream. Absent means "same as `model_name`".
     #[serde(default)]
     pub model: Option<String>,
+
+    // The four below exist on the control plane's `model_backends` table and
+    // were unreachable from a YAML file, so `File` mode could not describe a
+    // native backend, an Azure-style key header, or an Anthropic backend's
+    // required token cap. The same deployment was configurable one way and not
+    // the other, which is the kind of gap nobody notices until they hit it.
+    /// Wire format this upstream speaks: `openai` (default), `anthropic`,
+    /// `gemini`.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Header the key is sent in. Defaults to `authorization`; Azure OpenAI
+    /// wants `api-key`.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// Prefix before the key. Defaults to `Bearer`; an empty string sends the
+    /// key raw, which is what `api-key` and `x-api-key` expect.
+    #[serde(default)]
+    pub auth_scheme: Option<String>,
+    /// Sent when the client names no limit. Required in practice for an
+    /// Anthropic backend, which rejects a request without one.
+    #[serde(default)]
+    pub default_max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,6 +250,26 @@ impl LitellmParams {
     }
 
     /// Upstream bearer token, with LiteLLM's placeholders normalised away.
+    /// The wire format for this backend.
+    ///
+    /// An unrecognised name is rejected rather than silently treated as
+    /// OpenAI: `protocol: anthropc` is a typo an operator wants to hear about
+    /// at startup, not as a stream of confusing upstream 400s.
+    pub fn protocol_or_default(&self) -> crate::protocol::Protocol {
+        self.protocol
+            .as_deref()
+            .and_then(crate::protocol::Protocol::parse)
+            .unwrap_or_default()
+    }
+
+    /// Whether `protocol` names something this build understands, for the
+    /// startup check that turns a typo into an error.
+    pub fn protocol_is_valid(&self) -> bool {
+        self.protocol
+            .as_deref()
+            .is_none_or(|p| crate::protocol::Protocol::parse(p).is_some())
+    }
+
     pub fn effective_api_key(&self) -> Option<String> {
         self.api_key
             .as_deref()
@@ -246,6 +288,10 @@ mod tests {
 
     fn params(model: Option<&str>) -> LitellmParams {
         LitellmParams {
+            protocol: None,
+            auth_header: None,
+            auth_scheme: None,
+            default_max_tokens: None,
             api_base: "http://localhost:8000/v1".into(),
             api_key: None,
             model: model.map(str::to_string),
