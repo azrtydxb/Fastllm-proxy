@@ -227,14 +227,28 @@ Nothing is stored: a replica that stops reporting ages out after 30 seconds.
 for a name that differs from the one that served it — a virtual model, or the
 head of a chain that failed over.
 
-**One row per attributable request**, whether or not the response carried token
-counts. `usage_reported` says which: `false` means the counts are unknown, not
-zero, and such a row has `cost_micros` NULL rather than 0. Any query that sums
-tokens or spend should filter on it — `WHERE usage_reported` — while any query
-counting *requests* or *errors* must not, since the rows it would exclude are
-disproportionately the failures. An upstream 5xx never carries a usage block,
-so a count that filters them out is a count of successes wearing the name of a
-total.
+**One row per request that reached a backend**, whether or not the response
+carried token counts. `usage_reported` says which: `false` means the counts are
+unknown, not zero, and such a row has `cost_micros` NULL rather than 0. Any
+query that sums tokens or spend should filter on it — `WHERE usage_reported` —
+while any query counting *requests* must not, since the rows it would exclude
+are disproportionately the ones that failed.
+
+**What this table does not contain**, and what that means for an error rate
+computed from it: a request the proxy refused or could not dispatch never
+reaches a backend, so it is never recorded here. That covers 401/403
+(authentication and model authorisation), 429 (rate limit), 402 (budget), and
+the 502 the proxy synthesises when no backend in the chain could be reached —
+verified by pointing a model at an unreachable address and watching the 502
+leave no row. What *is* recorded is every response that came back from a
+backend, whatever its status.
+
+So `status >= 400` over this table is "errors the upstream returned", not
+"errors callers saw". The second number lives in `/metrics`
+(`fastllm_requests_total` against `fastllm_backend_errors_total`) and in the
+per-replica health reports. Do not present a `usage_events` error rate as the
+caller-visible one; they answer different questions, and the gap between them
+is exactly the requests the gateway rejected on its own.
 
 This is where per-caller detail lives, and deliberately not in Prometheus: the
 answer to "which callers got slow" is per principal and per key, and a label
