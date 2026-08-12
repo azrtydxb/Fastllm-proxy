@@ -1796,6 +1796,80 @@ struct UsageSummary {
     unpriced_requests: i64,
 }
 
+/// One bucket of a time series. Every field is present for every bucket,
+/// including empty ones — see [`timeseries`] for why gaps are not an option.
+#[derive(Serialize)]
+struct TimeseriesPoint {
+    /// Start of the bucket, RFC 3339.
+    at: chrono::DateTime<chrono::Utc>,
+    /// Everything attributable that happened in this bucket: forwarded
+    /// responses *and* refusals. The two breakdowns below partition it.
+    requests: i64,
+    /// Responses a backend returned with a 4xx or 5xx status.
+    upstream_errors: i64,
+    /// Requests the gateway turned away itself, by kind. Separate from
+    /// `upstream_errors` on purpose: the remedies have nothing in common.
+    refused_authorisation: i64,
+    refused_rate_limit: i64,
+    refused_budget: i64,
+    refused_no_backend: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cost_micros: i64,
+    /// Requests contributing nothing to `cost_micros`, so a spend line can
+    /// say how much of the traffic it does not cover rather than implying
+    /// the rest was free.
+    unpriced_requests: i64,
+    /// Whole-request latency percentiles, in milliseconds, over the
+    /// forwarded responses in this bucket that were timed. `None` for a
+    /// bucket with nothing to measure — which is not the same as zero, and
+    /// a chart must break the line rather than plot it at the axis.
+    p50_ms: Option<i64>,
+    p95_ms: Option<i64>,
+    /// Time to first token, streamed responses only.
+    ttft_p95_ms: Option<i64>,
+}
+
+/// The raw shape one bucket comes back as. A named struct rather than a
+/// fourteen-element tuple: the columns are positional in the SQL either way,
+/// but a mismatch between query and destructuring is a compile error here and
+/// a silently transposed column there.
+#[derive(sqlx::FromRow)]
+struct TimeseriesRow {
+    at: chrono::DateTime<chrono::Utc>,
+    requests: i64,
+    upstream_errors: i64,
+    r_auth: i64,
+    r_rate: i64,
+    r_budget: i64,
+    r_nobackend: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cost_micros: i64,
+    unpriced: i64,
+    p50: Option<f64>,
+    p95: Option<f64>,
+    ttft95: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct TimeseriesQuery {
+    #[serde(default)]
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Bucket width in seconds. Clamped, and snapped to a sane value by
+    /// `bucket_seconds` rather than trusted.
+    #[serde(default)]
+    bucket: Option<i64>,
+    /// Restrict to one model, by name.
+    #[serde(default)]
+    model: Option<String>,
+    /// Restrict to one principal, by id.
+    #[serde(default)]
+    principal_id: Option<i64>,
+}
+
 #[derive(Deserialize)]
 struct UsageQuery {
     #[serde(default = "default_group_by")]
@@ -1810,6 +1884,172 @@ struct UsageQuery {
 
 fn default_group_by() -> String {
     "model".to_string()
+}
+
+/// Snap a requested bucket width to one that will not produce an absurd
+/// number of points, and pick a sensible one when none was asked for.
+///
+/// The cap is on *points returned*, not on the width, because that is what
+/// actually hurts: a one-second bucket over thirty days is 2.6 million rows
+/// that no chart can draw and no browser should receive. Widening until the
+/// series fits answers the question the caller meant — "show me this range"
+/// — instead of refusing, and the response says which width was used so the
+/// axis can be labelled honestly rather than guessed at.
+fn bucket_seconds(requested: Option<i64>, span_seconds: i64) -> i64 {
+    /// Enough for a dense chart, few enough to stay a small response.
+    const MAX_POINTS: i64 = 720;
+    const LADDER: [i64; 10] = [
+        10,      // ten seconds
+        30,      //
+        60,      // a minute
+        300,     // five
+        900,     // fifteen
+        3_600,   // an hour
+        21_600,  // six
+        86_400,  // a day
+        604_800, // a week
+        2_592_000,
+    ];
+    let span = span_seconds.max(1);
+    let floor = (span + MAX_POINTS - 1) / MAX_POINTS;
+    let wanted = requested.unwrap_or(0).max(floor).max(1);
+    LADDER
+        .iter()
+        .copied()
+        .find(|&step| step >= wanted)
+        .unwrap_or(LADDER[LADDER.len() - 1])
+}
+
+/// `GET /admin/timeseries`: bucketed traffic, latency and spend over a
+/// window, for the charts.
+///
+/// # Why this exists rather than the UI polling `/admin/usage` repeatedly
+///
+/// The old screens computed rates in the browser by diffing two polls of a
+/// counter, which meant the numbers began at nothing on every page load and
+/// vanished on reload — there was no history because none was ever asked
+/// for. This reads the history that `usage_events` has been accumulating
+/// since usage recording was widened to every request, so a chart can show
+/// yesterday as readily as the last minute.
+///
+/// # Empty buckets are zeros, not gaps
+///
+/// The `generate_series` join is the whole point of the query's shape. An
+/// aggregate alone returns rows only where events exist, and a chart drawn
+/// from that connects 09:00 straight to 11:00 with a smooth line across an
+/// hour when the gateway served nothing — turning an outage into an
+/// interpolation. Emitting an explicit zero makes the hole visible as a
+/// hole.
+///
+/// Latency is the exception, and deliberately: `p50_ms` is `None` for a
+/// bucket with nothing to measure, because a zero there would read as
+/// "instantaneous" rather than "no data". The two want opposite treatments
+/// from a chart — a count of zero is a real point on the axis, an unknown
+/// latency is a break in the line.
+async fn timeseries(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    axum::extract::Query(q): axum::extract::Query<TimeseriesQuery>,
+) -> Result<Json<Vec<TimeseriesPoint>>, ApiError> {
+    let until = q.until.unwrap_or_else(chrono::Utc::now);
+    let since = q
+        .since
+        .unwrap_or_else(|| until - chrono::Duration::hours(24));
+    if since >= until {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "since must be before until",
+        ));
+    }
+    let bucket = bucket_seconds(q.bucket, (until - since).num_seconds());
+
+    // `to_timestamp(floor(extract(epoch ...) / n) * n)` rather than
+    // `date_trunc`: `date_trunc` only knows named units, and the ladder above
+    // includes widths like five and fifteen minutes that have no name. This
+    // form buckets to an arbitrary number of seconds, and both sides of the
+    // join use it so the generated grid and the aggregated rows land on
+    // identical instants -- an off-by-one there shows up as every bucket
+    // reading zero, which is a confusing way to find out.
+    let rows: Vec<TimeseriesRow> = sqlx::query_as(
+        "WITH grid AS (
+             SELECT generate_series(
+                 to_timestamp(floor(extract(epoch FROM $1::timestamptz) / $3) * $3),
+                 $2::timestamptz,
+                 make_interval(secs => $3)
+             ) AS at
+         ),
+         ev AS (
+             SELECT to_timestamp(floor(extract(epoch FROM u.at) / $3) * $3) AS at,
+                    count(*)                                      AS requests,
+                    count(*) FILTER (
+                        WHERE u.refusal IS NULL AND u.status >= 400)  AS upstream_errors,
+                    count(*) FILTER (WHERE u.refusal = 'authorisation') AS r_auth,
+                    count(*) FILTER (WHERE u.refusal = 'rate_limit')    AS r_rate,
+                    count(*) FILTER (WHERE u.refusal = 'budget')        AS r_budget,
+                    count(*) FILTER (WHERE u.refusal = 'no_backend')    AS r_nobackend,
+                    COALESCE(sum(u.prompt_tokens), 0)::bigint      AS prompt_tokens,
+                    COALESCE(sum(u.completion_tokens), 0)::bigint  AS completion_tokens,
+                    COALESCE(sum(u.cost_micros), 0)::bigint        AS cost_micros,
+                    count(*) FILTER (WHERE u.cost_micros IS NULL)  AS unpriced,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY u.duration_ms)  AS p50,
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS p95,
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY u.ttft_ms)     AS ttft95
+             FROM usage_events u
+             LEFT JOIN models m ON m.id = u.model_id
+             WHERE u.at >= $1 AND u.at < $2
+               AND ($4::text IS NULL OR m.name = $4)
+               AND ($5::bigint IS NULL OR u.principal_id = $5)
+             GROUP BY 1
+         )
+         SELECT grid.at                                AS at,
+                COALESCE(ev.requests, 0)               AS requests,
+                COALESCE(ev.upstream_errors, 0)        AS upstream_errors,
+                COALESCE(ev.r_auth, 0)                 AS r_auth,
+                COALESCE(ev.r_rate, 0)                 AS r_rate,
+                COALESCE(ev.r_budget, 0)               AS r_budget,
+                COALESCE(ev.r_nobackend, 0)            AS r_nobackend,
+                COALESCE(ev.prompt_tokens, 0)          AS prompt_tokens,
+                COALESCE(ev.completion_tokens, 0)      AS completion_tokens,
+                COALESCE(ev.cost_micros, 0)            AS cost_micros,
+                COALESCE(ev.unpriced, 0)               AS unpriced,
+                ev.p50                                 AS p50,
+                ev.p95                                 AS p95,
+                ev.ttft95                              AS ttft95
+         FROM grid LEFT JOIN ev ON ev.at = grid.at
+         ORDER BY grid.at",
+    )
+    .bind(since)
+    .bind(until)
+    .bind(bucket as f64)
+    .bind(&q.model)
+    .bind(q.principal_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("timeseries", &e))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| TimeseriesPoint {
+                at: r.at,
+                requests: r.requests,
+                upstream_errors: r.upstream_errors,
+                refused_authorisation: r.r_auth,
+                refused_rate_limit: r.r_rate,
+                refused_budget: r.r_budget,
+                refused_no_backend: r.r_nobackend,
+                prompt_tokens: r.prompt_tokens,
+                completion_tokens: r.completion_tokens,
+                cost_micros: r.cost_micros,
+                unpriced_requests: r.unpriced,
+                // Rounded here rather than in SQL: `percentile_cont`
+                // interpolates and returns a double, and a millisecond
+                // figure with fifteen decimal places is noise in a tooltip.
+                p50_ms: r.p50.map(|v| v.round() as i64),
+                p95_ms: r.p95.map(|v| v.round() as i64),
+                ttft_p95_ms: r.ttft95.map(|v| v.round() as i64),
+            })
+            .collect(),
+    ))
 }
 
 fn default_usage_limit() -> i64 {
@@ -3783,6 +4023,7 @@ pub async fn serve(
         .route("/admin/roles/{name}", delete(delete_role))
         .route("/admin/audit", get(list_audit))
         .route("/admin/usage", get(usage_summary))
+        .route("/admin/timeseries", get(timeseries))
         .route("/admin/fleet", get(list_fleet))
         .route("/admin/routing/dry-run", post(routing_dry_run))
         .route("/admin/prices/sync", post(sync_prices))
@@ -4657,6 +4898,49 @@ mod tests {
             &auth_header("real-token"),
             "real-token"
         ));
+    }
+
+    /// The bucket ladder, which decides how many points a chart gets.
+    ///
+    /// The property that matters is the cap: whatever a caller asks for,
+    /// the series must stay small enough to draw and to send. A one-second
+    /// bucket over a month is 2.6 million points, and the failure mode of
+    /// getting this wrong is not an error — it is a response large enough to
+    /// hang the browser that asked for it.
+    #[test]
+    fn a_bucket_width_never_yields_more_points_than_a_chart_can_draw() {
+        const MAX_POINTS: i64 = 720;
+        // Spans from a minute to a year, against both "no preference" and an
+        // absurdly fine request that must be widened rather than honoured.
+        for span in [60, 3_600, 86_400, 7 * 86_400, 30 * 86_400, 365 * 86_400] {
+            for requested in [None, Some(1), Some(10)] {
+                let bucket = bucket_seconds(requested, span);
+                assert!(bucket > 0, "span {span}: bucket must be positive");
+                let points = span / bucket;
+                assert!(
+                    points <= MAX_POINTS,
+                    "span {span}s with requested {requested:?} gave {points} points \
+                     at a {bucket}s bucket, over the {MAX_POINTS} cap"
+                );
+            }
+        }
+    }
+
+    /// A caller asking for a *coarser* bucket than the cap requires gets it.
+    /// The clamp is a floor, not an override — someone asking for hourly
+    /// buckets over a day wants 24 points, not 720.
+    #[test]
+    fn a_coarse_bucket_request_is_honoured() {
+        assert_eq!(bucket_seconds(Some(3_600), 86_400), 3_600);
+        assert_eq!(bucket_seconds(Some(86_400), 30 * 86_400), 86_400);
+    }
+
+    /// A span shorter than the smallest rung still produces one usable
+    /// bucket rather than a division by zero or an empty series.
+    #[test]
+    fn a_tiny_span_still_produces_a_bucket() {
+        assert!(bucket_seconds(None, 1) >= 1);
+        assert!(bucket_seconds(None, 0) >= 1);
     }
 
     fn usage_event(principal_id: i64, model: &str) -> UsageEvent {
