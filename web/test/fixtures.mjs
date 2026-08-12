@@ -319,12 +319,54 @@ const USAGE = [
   },
 ];
 
+
+// `GET /admin/timeseries`, in the shape the handler serialises: one entry per
+// bucket across the whole range, **including empty ones**. The zeros are the
+// point — an aggregate that omitted them would let a chart draw a straight
+// line across an outage — so the fixture carries a quiet stretch, a busy one,
+// a bucket with upstream errors, and one with each kind of refusal.
+//
+// Latency is null exactly where nothing was served, matching the handler:
+// zero would mean "instantaneous", and a chart must break the line instead.
+const TIMESERIES = (() => {
+  const start = Date.UTC(2026, 7, 12, 0, 0, 0);
+  const rows = [];
+  for (let i = 0; i < 24; i++) {
+    const at = new Date(start + i * 3600_000).toISOString();
+    const quiet = i < 6 || i > 20;
+    const requests = quiet ? 0 : 40 + ((i * 7) % 30);
+    const upstream_errors = i === 12 ? 5 : 0;
+    const refused_authorisation = i === 14 ? 3 : 0;
+    const refused_rate_limit = i === 15 ? 2 : 0;
+    const refused_budget = i === 16 ? 1 : 0;
+    const refused_no_backend = i === 18 ? 4 : 0;
+    rows.push({
+      at,
+      requests,
+      upstream_errors,
+      refused_authorisation,
+      refused_rate_limit,
+      refused_budget,
+      refused_no_backend,
+      prompt_tokens: requests * 120,
+      completion_tokens: requests * 260,
+      cost_micros: quiet ? 0 : requests * 35,
+      unpriced_requests: quiet ? 0 : Math.floor(requests / 4),
+      p50_ms: requests ? 180 + ((i * 13) % 90) : null,
+      p95_ms: requests ? 700 + ((i * 29) % 400) : null,
+      ttft_p95_ms: requests ? 90 + ((i * 11) % 60) : null,
+    });
+  }
+  return rows;
+})();
+
 function fixtureFor(path) {
   const [base] = path.split("?");
   if (base === "/admin/usage") return USAGE;
+  if (base === "/admin/timeseries") return TIMESERIES;
   if (base in FIXTURES) return FIXTURES[base];
   return null;
 }
 
 
-export { FIXTURES, USAGE, fixtureFor };
+export { FIXTURES, USAGE, TIMESERIES, fixtureFor };

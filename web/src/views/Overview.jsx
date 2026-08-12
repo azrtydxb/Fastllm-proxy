@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, query } from "../api.js";
 import { useLoader } from "../load.js";
 import { fleetSummary, rateBetween, backendKey } from "../fleet.js";
+import { Legend, RANGES, TimeChart, useTimeseries } from "../charts.jsx";
+import { TimeseriesModal } from "./TimeseriesModal.jsx";
 import {
   Bar,
   Banner,
@@ -207,6 +209,8 @@ export function Overview({ onUnauthorised, config, go }) {
         />
       </Grid>
 
+      <TrafficHistory />
+
       <Grid cols="1.35fr minmax(0,1fr)">
         <Card
           title="Backends"
@@ -409,5 +413,86 @@ function Kpi({ label, value, unit, series, foot, tone = "accent" }) {
         <div style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-5)" }}>{foot}</div>
       </div>
     </Card>
+  );
+}
+
+/**
+ * The last 24 hours, from the database rather than from counters diffed in
+ * this tab.
+ *
+ * The KPI tiles above are deliberately still live-since-load: they answer
+ * "what is happening right now", and a rate measured between two polls is
+ * the honest way to get that. This answers the different question the old
+ * UI could not — "what has been happening" — and it survives a reload,
+ * because the history is on the server.
+ *
+ * Fixed to 24h with no controls of its own. A dashboard tile that carries a
+ * range picker, filters and pagination has stopped being glanceable; all of
+ * that lives in the modal, one click away.
+ */
+function TrafficHistory() {
+  const [open, setOpen] = useState(false);
+  const range = RANGES.find((r) => r.id === "24h");
+  const { points, error } = useTimeseries({ range });
+
+  const series = [
+    { key: "requests_ok", label: "served", tone: "accent" },
+    { key: "upstream_errors", label: "upstream errors", tone: "bad" },
+    { key: "refused", label: "refused", tone: "warn" },
+  ];
+
+  // `requests` already includes the failures, so the served band has to be
+  // the remainder or the stack double-counts every error.
+  const shaped = points?.map((p) => {
+    const refused =
+      p.refused_authorisation + p.refused_rate_limit + p.refused_budget + p.refused_no_backend;
+    return {
+      ...p,
+      refused,
+      requests_ok: Math.max(0, p.requests - p.upstream_errors - refused),
+    };
+  });
+
+  const nothing = shaped && shaped.every((p) => p.requests === 0);
+
+  return (
+    <>
+      <Card
+        title="Last 24 hours"
+        right={
+          <Row gap={10}>
+            <Muted>from usage_events · click to explore</Muted>
+            <Button onClick={() => setOpen(true)}>expand</Button>
+          </Row>
+        }
+      >
+        <div
+          onClick={() => setOpen(true)}
+          style={{ cursor: "pointer" }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
+          aria-label="Open traffic history"
+        >
+          {error ? (
+            <NotAvailable why={error}>
+              This needs <Mono>GET /admin/timeseries</Mono>, which a control plane older than the
+              accounting change does not serve.
+            </NotAvailable>
+          ) : (
+            <>
+              <TimeChart points={shaped} series={series} height={120} spanSeconds={range.seconds} />
+              <div style={{ height: 8 }} />
+              <Row gap={12}>
+                <Legend series={series} />
+                <Spacer />
+                {nothing && <Muted>nothing served in this window</Muted>}
+              </Row>
+            </>
+          )}
+        </div>
+      </Card>
+      {open && <TimeseriesModal onClose={() => setOpen(false)} />}
+    </>
   );
 }

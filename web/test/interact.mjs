@@ -451,6 +451,52 @@ await goto("settings");
   check("revoke-all POSTs the right path", !!lastCall("POST", "/admin/sessions/revoke-all"));
 }
 
+// Overview's history chart, and the modal behind it. The chart itself is a
+// read, so what is worth asserting is the *request* it makes and the
+// controls that change it -- a chart that silently asks for the wrong window
+// looks perfectly plausible on screen.
+await goto("overview");
+{
+  const call = lastCall("GET", "/admin/timeseries");
+  check("the history chart asks for a bucketed window", !!call, "no /admin/timeseries request");
+  check(
+    "and bounds it with since and until rather than fetching everything",
+    /since=/.test(call?.path || "") && /until=/.test(call?.path || ""),
+    `path was ${call?.path}`,
+  );
+
+  await click(byText("expand"));
+  check(
+    "expand opens the drill-down",
+    !!byText("Traffic over time", "div") && !!byText("close"),
+    "modal did not open",
+  );
+
+  // A range chip must move the window, not just the label.
+  await click(byText("7d"));
+  const wide = lastCall("GET", "/admin/timeseries");
+  check(
+    "a range chip asks for a wider window",
+    /bucket=3600/.test(wide?.path || ""),
+    `path was ${wide?.path}`,
+  );
+
+  // Panning must keep the span and move the end -- the failure mode is a
+  // control that zooms out instead, which looks like it worked.
+  const before = new URL(`http://x${wide.path}`).searchParams;
+  await click(byText("← older"));
+  const older = lastCall("GET", "/admin/timeseries");
+  const after = new URL(`http://x${older.path}`).searchParams;
+  const spanOf = (p) => Date.parse(p.get("until")) - Date.parse(p.get("since"));
+  check(
+    "panning back keeps the span and moves the window",
+    spanOf(after) === spanOf(before) && Date.parse(after.get("until")) < Date.parse(before.get("until")),
+    `span ${spanOf(before)} -> ${spanOf(after)}`,
+  );
+
+  await click(byText("close"));
+}
+
 // Usage and Audit: the read filters that change the query, not the body.
 await goto("usage");
 {
