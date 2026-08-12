@@ -41,18 +41,32 @@ pub struct UsageSink {
 }
 
 impl UsageSink {
-    fn record(self, usage: Usage, timing: Option<&crate::telemetry::RequestTiming>) {
-        // A response that produced nothing is not an event: reporting zeroes
-        // would dilute nothing but would still cost a queue slot, and the
-        // passthrough path reports nothing in the same situation.
-        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
-            return;
-        }
+    /// Record this request, with or without token counts.
+    ///
+    /// `usage` is `None` when the translator never saw a usage block — a
+    /// buffered response that carried none, an upstream error, a stream that
+    /// ended early. The row is still written: it is what makes request rate
+    /// and error rate answerable from `usage_events`, and an error response
+    /// is precisely the case that never carries usage, so dropping these
+    /// would drop exactly the rows an error chart is made of.
+    ///
+    /// All-zero counts are treated as "not reported" rather than as a real
+    /// measurement of nothing. That is what they mean here: the translators
+    /// initialise their counters to zero and only move them when a usage
+    /// block says so, so zero is the absence of a report, not a report of
+    /// absence. The passthrough path in `proxy::UsageTracking` draws the
+    /// same distinction, and the two must agree or the same request would be
+    /// counted differently depending on which backend served it.
+    fn record(self, usage: Option<Usage>, timing: Option<&crate::telemetry::RequestTiming>) {
+        let reported = usage
+            .as_ref()
+            .is_some_and(|u| u.prompt_tokens != 0 || u.completion_tokens != 0);
         self.reporter.record(UsageEvent {
             principal_id: self.principal_id,
             model: self.model,
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
+            prompt_tokens: usage.as_ref().map_or(0, |u| u.prompt_tokens),
+            completion_tokens: usage.as_ref().map_or(0, |u| u.completion_tokens),
+            usage_reported: reported,
             at: chrono::Utc::now(),
             duration_ms: timing.map(|t| t.duration_ms()),
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
@@ -101,10 +115,12 @@ pin_project! {
                 Mode::Stream(t) => Some(t.usage()),
                 Mode::Buffer(_) => None,
             };
+            // Unconditionally, even in `Buffer` mode where `streamed_usage`
+            // is `None`: a sink still held at drop is a request that ended
+            // without any usage ever being seen, and that is a row worth
+            // having rather than a row to skip. See `UsageSink::record`.
             if let Some(sink) = this.usage_sink.take() {
-                if let Some(usage) = streamed_usage {
-                    sink.record(usage, this.timing.as_ref());
-                }
+                sink.record(streamed_usage, this.timing.as_ref());
             }
             if let Some(timing) = this.timing.take() {
                 // Tokens come from the translator's own count rather than the
@@ -204,11 +220,15 @@ impl Body for TranslatedBody {
                 Poll::Ready(Some(Err(e))) => {
                     *this.done = true;
                     this.guard.take();
-                    // Whatever was counted before the break is still owed.
+                    // Whatever was counted before the break is still owed —
+                    // and a buffered response that broke owes a row too, with
+                    // no counts on it, so the failure is visible.
                     if let Some(sink) = this.usage_sink.take() {
-                        if let Mode::Stream(t) = this.mode {
-                            sink.record(t.usage(), this.timing.as_ref());
-                        }
+                        let counted = match this.mode {
+                            Mode::Stream(t) => Some(t.usage()),
+                            Mode::Buffer(_) => None,
+                        };
+                        sink.record(counted, this.timing.as_ref());
                     }
                     if let Some(timing) = this.timing.take() {
                         if let Mode::Stream(t) = this.mode {
@@ -227,7 +247,7 @@ impl Body for TranslatedBody {
                             let tail = t.finish();
                             let usage = t.usage();
                             if let Some(sink) = this.usage_sink.take() {
-                                sink.record(usage, this.timing.as_ref());
+                                sink.record(Some(usage), this.timing.as_ref());
                             }
                             if let Some(timing) = this.timing.take() {
                                 timing.record_tokens(usage.prompt_tokens, usage.completion_tokens);
@@ -239,7 +259,7 @@ impl Body for TranslatedBody {
                             match translate_response(*this.protocol, buf, this.ctx) {
                                 Ok((bytes, usage)) => {
                                     if let Some(sink) = this.usage_sink.take() {
-                                        sink.record(usage, this.timing.as_ref());
+                                        sink.record(Some(usage), this.timing.as_ref());
                                     }
                                     if let Some(timing) = this.timing.take() {
                                         timing.record_tokens(

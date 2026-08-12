@@ -1040,19 +1040,37 @@ fn rewrite_model_if_needed(
     Ok(Bytes::from(serde_json::to_vec(&value)?))
 }
 
-/// Whether this principal's real token consumption is worth asking the
-/// upstream for. Scoped narrowly on purpose — see the design doc's stated
-/// consequence: injecting `stream_options.include_usage` adds a chunk the
-/// client did not request, so it must never happen for a principal with
-/// neither a budget nor a token-rate limit configured.
+/// Whether this request's consumption is worth reading. True for any
+/// attributable request — that is, any request with a principal.
+///
+/// This was once scoped to principals with a budget or a token-rate limit,
+/// on the reasoning that nothing else consumed the number and injecting
+/// `stream_options.include_usage` adds a chunk the client did not ask for.
+/// The reasoning was sound and the result was not: usage became a side
+/// effect of *enforcement*, so a deployment that enforced nothing recorded
+/// nothing. On the cluster this was found on, one principal of seven had a
+/// budget, `usage_events` held nineteen rows, and the newest was five days
+/// old — while the gateway had served hundreds of requests. Every "Usage &
+/// spend" figure was therefore true and useless, and no history existed to
+/// chart, because history was never written.
+///
+/// Accounting is not a side effect of enforcement. What a caller consumed is
+/// worth knowing whether or not a cap is attached to it, and it cannot be
+/// recovered later: the token counts live in a response body that is
+/// forwarded and gone.
+///
+/// The stated cost stands and is now paid on every attributable request:
+/// one small parse of a bounded response tail, and one extra SSE chunk on
+/// streamed responses. Neither is I/O — reporting is an in-memory queue
+/// drained by a background flush — so the "no I/O on the request path" rule
+/// is untouched. See `docs/performance.md` for the measurement.
+///
+/// Still false for an unauthenticated request: with no principal there is
+/// nothing to attribute consumption to, and a row that cannot name who
+/// spent is not accounting.
 #[inline]
 fn principal_needs_usage(principal: Option<&Principal>) -> bool {
-    principal.is_some_and(|p| {
-        p.budget.is_some()
-            || p.limits
-                .as_ref()
-                .is_some_and(|l| l.tokens_per_min.is_some())
-    })
+    principal.is_some()
 }
 
 fn build_upstream_request(
@@ -1170,32 +1188,44 @@ struct UsageTracking {
 
 impl UsageTracking {
     /// The one parse per request (`TailBuffer::extract_usage`), and the one
-    /// `record` call it feeds if it found anything. A response that never
-    /// carried usage — no `stream_options.include_usage` echoed back, an
-    /// upstream that does not support it, a truncated stream — simply
-    /// reports nothing; see the design doc's stated cost of this whole
-    /// mechanism being "one small parse per request, not per frame".
+    /// `record` call it always feeds.
+    ///
+    /// A row is written whether or not the parse found anything, because the
+    /// event answers two different questions and only one of them is about
+    /// tokens. "How many requests, how many failed, how slow were they" is
+    /// answerable for every request; "how many tokens did it burn" is not.
+    /// Recording only the responses that carried usage made the first
+    /// question unanswerable from the database — an upstream 502 carries no
+    /// usage block, so under the old rule the errors were precisely the rows
+    /// that never appeared, and an error-rate chart built on them would have
+    /// read a flat zero no matter how much was failing.
+    ///
+    /// `usage_reported` is what keeps that honest rather than merely
+    /// complete: absent counts are recorded as absent, never as zero. Zero
+    /// tokens and unknown tokens are different facts, and averaging the
+    /// second into the first is how a dashboard ends up quietly understating
+    /// consumption.
     fn finish(mut self, timing: Option<&crate::telemetry::RequestTiming>) {
-        if let Some(tokens) = self.tail.extract_usage() {
-            if let Some(m) = &self.metrics {
-                m.prompt_tokens
-                    .fetch_add(u64::from(tokens.prompt_tokens), Ordering::Relaxed);
-                m.completion_tokens
-                    .fetch_add(u64::from(tokens.completion_tokens), Ordering::Relaxed);
-            }
-            self.reporter.record(UsageEvent {
-                principal_id: self.principal_id,
-                model: self.model,
-                prompt_tokens: tokens.prompt_tokens,
-                completion_tokens: tokens.completion_tokens,
-                at: chrono::Utc::now(),
-                duration_ms: timing.map(|t| t.duration_ms()),
-                ttft_ms: timing.and_then(|t| t.ttft_ms()),
-                status: Some(self.status),
-                requested_model: self.requested_model,
-                cost_micros: tokens.cost_micros,
-            });
+        let tokens = self.tail.extract_usage();
+        if let (Some(m), Some(t)) = (&self.metrics, tokens.as_ref()) {
+            m.prompt_tokens
+                .fetch_add(u64::from(t.prompt_tokens), Ordering::Relaxed);
+            m.completion_tokens
+                .fetch_add(u64::from(t.completion_tokens), Ordering::Relaxed);
         }
+        self.reporter.record(UsageEvent {
+            principal_id: self.principal_id,
+            model: self.model,
+            prompt_tokens: tokens.as_ref().map_or(0, |t| t.prompt_tokens),
+            completion_tokens: tokens.as_ref().map_or(0, |t| t.completion_tokens),
+            usage_reported: tokens.is_some(),
+            at: chrono::Utc::now(),
+            duration_ms: timing.map(|t| t.duration_ms()),
+            ttft_ms: timing.and_then(|t| t.ttft_ms()),
+            status: Some(self.status),
+            requested_model: self.requested_model,
+            cost_micros: tokens.as_ref().and_then(|t| t.cost_micros),
+        });
     }
 }
 
@@ -2027,15 +2057,20 @@ mod tests {
         assert_eq!(parsed["stream_options"]["other"], true);
     }
 
-    /// `principal_needs_usage`, pinned directly: only a principal with a
-    /// configured budget or a tokens-per-minute limit is worth reading real
-    /// usage for — an unconfigured principal, a principal with only a
-    /// requests-per-minute limit, and no principal at all (an open
-    /// snapshot) all say no, exactly per the design doc's stated
-    /// consequence that injection must never happen where it was not
-    /// specifically asked for by configuration.
+    /// `principal_needs_usage`, pinned directly: **every** attributable
+    /// request is worth reading, and only an unattributable one is not.
+    ///
+    /// This test used to assert the opposite — that a principal with
+    /// neither a budget nor a tokens-per-minute limit said no. That rule
+    /// made accounting a side effect of enforcement, and the consequence
+    /// showed up in production rather than here: a deployment enforcing
+    /// nothing recorded nothing, so `usage_events` held nineteen rows
+    /// against hundreds of served requests and there was no history to
+    /// chart. The unconfigured cases below are the ones that changed
+    /// meaning, and they are asserted explicitly so a future change back to
+    /// the cheap rule has to delete a test that says why it exists.
     #[test]
-    fn only_a_principal_with_a_budget_or_a_token_limit_needs_usage() {
+    fn every_attributable_request_is_worth_recording() {
         fn principal(limits: Option<crate::limiter::Limits>, budget: Option<Budget>) -> Principal {
             Principal {
                 id: 1,
@@ -2048,15 +2083,26 @@ mod tests {
             }
         }
 
+        // The only no: nothing to attribute the consumption to.
         assert!(!principal_needs_usage(None), "no principal at all");
-        assert!(!principal_needs_usage(Some(&principal(None, None))));
-        assert!(!principal_needs_usage(Some(&principal(
-            Some(crate::limiter::Limits {
-                requests_per_min: Some(10),
-                tokens_per_min: None,
-            }),
-            None
-        ))));
+
+        // The two cases that used to be no, and are the whole point of the
+        // change: a principal nobody has configured still consumes tokens,
+        // and that consumption is still worth knowing.
+        assert!(
+            principal_needs_usage(Some(&principal(None, None))),
+            "a principal with no budget and no limits is still accounted for"
+        );
+        assert!(
+            principal_needs_usage(Some(&principal(
+                Some(crate::limiter::Limits {
+                    requests_per_min: Some(10),
+                    tokens_per_min: None,
+                }),
+                None
+            ))),
+            "a requests-per-minute limit does not read tokens, but usage is still recorded"
+        );
         assert!(principal_needs_usage(Some(&principal(
             Some(crate::limiter::Limits {
                 requests_per_min: None,

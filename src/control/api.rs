@@ -2757,6 +2757,7 @@ async fn post_usage(
     let mut status: Vec<Option<i16>> = Vec::with_capacity(submitted);
     let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
     let mut reported_cost: Vec<Option<i64>> = Vec::with_capacity(submitted);
+    let mut usage_reported: Vec<bool> = Vec::with_capacity(submitted);
     for e in &body.events {
         principal_ids.push(e.principal_id as i64);
         models.push(e.model.clone());
@@ -2768,6 +2769,7 @@ async fn post_usage(
         status.push(e.status.map(|v| v as i16));
         requested_model.push(e.requested_model.clone());
         reported_cost.push(e.cost_micros.map(|c| c.min(i64::MAX as u64) as i64));
+        usage_reported.push(e.usage_reported);
     }
 
     // `UNNEST` turns the parallel arrays back into rows, positionally —
@@ -2780,14 +2782,16 @@ async fn post_usage(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
-                $10::bigint[])
+                $10::bigint[], $11::boolean[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
-                     duration_ms, ttft_ms, status, requested_model, reported_cost)
+                     duration_ms, ttft_ms, status, requested_model, reported_cost,
+                     usage_reported)
          )
          INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
-                                   duration_ms, ttft_ms, status, requested_model, cost_micros)
+                                   duration_ms, ttft_ms, status, requested_model, usage_reported,
+                                   cost_micros)
          SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at,
-                i.duration_ms, i.ttft_ms, i.status, i.requested_model,
+                i.duration_ms, i.ttft_ms, i.status, i.requested_model, i.usage_reported,
                 -- Computed here, from the price at the time the request
                 -- happened, and stored. Deriving it on read would let a later
                 -- price change silently rewrite history; what a request cost is
@@ -2808,7 +2812,16 @@ async fn post_usage(
                 -- systematically rather than symmetrically.
                 COALESCE(
                     i.reported_cost,
-                    CASE WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
+                    -- An event with no token counts has no computable cost.
+                    -- Without this arm the arithmetic below runs on the
+                    -- zeroes that stand in for counts nobody reported, and
+                    -- yields a confident 0 -- which reads as a request that
+                    -- was priced and free rather than one whose cost is
+                    -- unknown. The UI already distinguishes unpriced from
+                    -- zero; this keeps that distinction true at the source.
+                    CASE WHEN NOT i.usage_reported
+                         THEN NULL
+                         WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
                          THEN NULL
                          ELSE ((i.prompt_tokens     * COALESCE(m.input_price_per_mtok, 0)
                               + i.completion_tokens * COALESCE(m.output_price_per_mtok, 0))
@@ -2830,6 +2843,7 @@ async fn post_usage(
     .bind(&status)
     .bind(&requested_model)
     .bind(&reported_cost)
+    .bind(&usage_reported)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -4641,6 +4655,7 @@ mod tests {
             model: model.to_string(),
             prompt_tokens: 10,
             completion_tokens: 5,
+            usage_reported: true,
             at: chrono::Utc::now(),
             duration_ms: None,
             ttft_ms: None,

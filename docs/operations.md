@@ -227,6 +227,15 @@ Nothing is stored: a replica that stops reporting ages out after 30 seconds.
 for a name that differs from the one that served it — a virtual model, or the
 head of a chain that failed over.
 
+**One row per attributable request**, whether or not the response carried token
+counts. `usage_reported` says which: `false` means the counts are unknown, not
+zero, and such a row has `cost_micros` NULL rather than 0. Any query that sums
+tokens or spend should filter on it — `WHERE usage_reported` — while any query
+counting *requests* or *errors* must not, since the rows it would exclude are
+disproportionately the failures. An upstream 5xx never carries a usage block,
+so a count that filters them out is a count of successes wearing the name of a
+total.
+
 This is where per-caller detail lives, and deliberately not in Prometheus: the
 answer to "which callers got slow" is per principal and per key, and a label
 with that cardinality is how a metrics endpoint becomes an outage. Here it is a

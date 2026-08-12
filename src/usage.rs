@@ -42,6 +42,22 @@ pub struct UsageEvent {
     pub model: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Whether the counts above were actually read off the response, as
+    /// opposed to being the zeroes that stand in when nothing was found.
+    ///
+    /// A row exists for every attributable request now, including the ones
+    /// whose response carried no usage block at all — an upstream error, an
+    /// endpoint that returns no token counts, a stream cut mid-flight. Those
+    /// rows are what make request-rate and error-rate answerable from the
+    /// database; this flag is what stops them being counted as traffic that
+    /// consumed nothing, which would understate every total drawn from them.
+    ///
+    /// `#[serde(default = ...)]` is `true` so an event from an older proxy,
+    /// which only ever reported when it had real counts, decodes with the
+    /// meaning it was written with rather than being silently reclassified
+    /// as unknown.
+    #[serde(default = "default_true")]
+    pub usage_reported: bool,
     pub at: chrono::DateTime<chrono::Utc>,
     /// Whole-request wall time. `None` only when the event was produced
     /// somewhere that does not time (the reconciler, a test).
@@ -69,6 +85,14 @@ pub struct UsageEvent {
     /// price only when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<u64>,
+}
+
+/// `serde`'s `default` needs a function, and the default for
+/// [`UsageEvent::usage_reported`] has to be `true` rather than `bool`'s own
+/// `false` — see that field's comment for why decoding an older proxy's
+/// event as "counts unknown" would be wrong.
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -262,6 +286,7 @@ mod tests {
             model: "m".into(),
             prompt_tokens: 1,
             completion_tokens: 1,
+            usage_reported: true,
             at: chrono::Utc::now(),
             duration_ms: None,
             ttft_ms: None,
