@@ -9,6 +9,29 @@ Plain manifests — this does not earn a Helm chart.
 | VIP | `192.168.10.126` via kube-vip — proxy traffic only, see below |
 | Backends | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
+## The gateway's two addresses
+
+`192.168.10.125` and `192.168.10.126` both answer, both select the same pods,
+and both are pinned in `deploy/service.yaml` — `fastllm-proxy` holds the first,
+`fastllm-proxy-alt` the second.
+
+Two, rather than one, because this VIP has moved between those addresses more
+than once and each move broke every client still holding the old one. A request
+to a departed VIP fails to connect, which a caller experiences as a hang rather
+than as an error naming the cause; it took a live debugging session to find that
+"the API is hanging" meant "the address moved".
+
+The moves were never kube-vip drifting. `deploy/service.yaml` pinned `.126`
+while a second, differing manifest pinned `.125`, so whichever was applied last
+won. **Pin addresses in this file and nowhere else** — that is the part that
+actually stops it recurring.
+
+Two Service objects rather than one with a comma-separated
+`kube-vip.io/loadbalancerIPs`: the kube-vip running on this cluster brings up
+only the first address of such a list. It was tried, and it silently assigned
+one address while the annotation claimed two.
+
+
 ## Split deployment
 
 Two Deployments, one Postgres, since Task 12:

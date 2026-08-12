@@ -10,8 +10,52 @@ metadata:
   namespace: fastllm
   labels: { app: fastllm-proxy }
   annotations:
-    # kube-vip, matching how the other VIPs on this cluster are requested.
-    # .120-.125 were taken; .126 was free.
+    # One of two pinned VIPs. The second is a separate Service below, because
+    # the kube-vip running here brings up only the first address of a
+    # comma-separated `loadbalancerIPs` list — tried, and it silently assigned
+    # one. Two Service objects need no version to cooperate.
+    #
+    # This service has moved between .125 and .126 more than once, and each
+    # move silently broke every client holding the old address — a request to
+    # the departed VIP fails to connect, which reads as a hang rather than as
+    # an error naming the cause. The moves were not kube-vip drifting: this
+    # manifest pinned .126 while a second, differing manifest was applied
+    # pinning .125, so whichever ran last won.
+    #
+    # Keeping both means an address handed to an application keeps working
+    # through the next such mistake. Pinning them here, and nowhere else, is
+    # what stops the two-sources-of-truth problem from recurring: change this
+    # file, not the live object.
+    #
+    # `spec.loadBalancerIP` is deliberately absent — it is deprecated, it holds
+    # only one address, and when it disagrees with this annotation the result
+    # depends on which kube-vip reads first.
+    kube-vip.io/loadbalancerIPs: "192.168.10.125"
+spec:
+  type: LoadBalancer
+  selector: { app: fastllm-proxy }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+    - { name: api, port: 4000, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-proxy-alt
+  namespace: fastllm
+  labels: { app: fastllm-proxy }
+  annotations:
+    # The second address, selecting the same pods.
+    #
+    # This exists because the gateway's VIP has moved between .125 and .126,
+    # and each move broke every client holding the old one — a request to a
+    # departed VIP fails to connect, which reads as a hang rather than an error
+    # naming the cause. Publishing two addresses that both work means the next
+    # such mistake costs nobody an outage.
+    #
+    # Both are pinned *here*, in this file, and nowhere else. The moves were
+    # never kube-vip drifting: this manifest pinned .126 while a second,
+    # differing manifest pinned .125, and whichever was applied last won.
     kube-vip.io/loadbalancerIPs: "192.168.10.126"
 spec:
   type: LoadBalancer
