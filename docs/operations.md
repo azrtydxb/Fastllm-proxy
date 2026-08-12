@@ -256,6 +256,31 @@ turned away". Blending them into one error rate tells an operator to do
 neither of the two available things — raise a budget, or go and look at a GPU
 node.
 
+### Retention
+
+`usage_events` takes one row per request now, so it has a policy rather than
+needing watching: **raw rows for 90 days, hourly rollups beyond that, kept
+indefinitely.** An hourly task folds everything past the cutoff into
+`usage_rollup_hourly` and deletes the rows it summarised — in one
+transaction, because doing the two separately would lose any request written
+between the summary and the delete.
+
+`/admin/timeseries` reads both tables and unions them, so a chart does not
+end at the retention boundary. What changes across it is granularity, and one
+thing more:
+
+**Rolled-up buckets report no latency at all.** Percentiles do not merge —
+averaging two hours' p95 produces a number that is the p95 of nothing — so
+the rollup stores `duration_ms_sum` and `duration_ms_count` and the API
+returns `null` for p50/p95 over rolled-up data. The chart breaks its line
+there, the same as for an empty bucket, rather than drawing a continuous
+line whose meaning silently changed 90 days back. A mean is recoverable from
+the two stored columns by anyone who wants one.
+
+To keep raw rows longer, change `RAW_RETENTION_DAYS` in `src/control/api.rs`;
+the roll-up is additive (`ON CONFLICT DO UPDATE`), so a longer window simply
+folds later.
+
 **Still absent: unauthenticated 401s.** There is no principal to attribute
 them to, and more to the point 401 is the only refusal a stranger can trigger
 at will — recording it would let anonymous traffic drive unbounded writes

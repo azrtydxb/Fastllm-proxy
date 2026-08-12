@@ -1978,26 +1978,73 @@ async fn timeseries(
                  make_interval(secs => $3)
              ) AS at
          ),
+         -- Raw rows and rolled-up buckets, unioned before aggregation.
+         --
+         -- Without this the charts would simply end at the retention
+         -- boundary: a 90-day window would show nothing beyond it, and the
+         -- roll-up would be a table nothing ever read. `refusal` and
+         -- `status` are reconstructed from the rollup's counters so one
+         -- aggregation expression works over both shapes.
+         --
+         -- `duration_ms` is NULL for every rolled-up row on purpose.
+         -- Percentiles do not merge, so a rolled-up bucket has no p50 or p95
+         -- to report and says so, rather than offering a mean wearing a
+         -- percentile's name. The chart breaks its line there, the same way
+         -- it does for a bucket with nothing in it.
+         src AS (
+             SELECT u.at, u.model_id, u.principal_id, u.status, u.refusal,
+                    u.prompt_tokens, u.completion_tokens, u.cost_micros,
+                    u.duration_ms, u.ttft_ms, 1::bigint AS weight
+             FROM usage_events u
+             WHERE u.at >= $1 AND u.at < $2
+             UNION ALL
+             -- One rollup row carries several outcomes as parallel counters,
+             -- so it expands back into one row per outcome, each weighted.
+             -- Collapsing it into a single row would keep the totals and
+             -- lose the breakdown -- errors and refusals would silently read
+             -- zero for every bucket older than the retention window, which
+             -- is precisely the shape of bug this whole feature exists to
+             -- stop the charts from having.
+             --
+             -- Tokens and cost ride on the served row alone so the sums stay
+             -- right; the failure rows carry counts only.
+             SELECT r.hour, r.model_id, r.principal_id, o.status, o.refusal,
+                    CASE WHEN o.kind = 'ok' THEN r.prompt_tokens ELSE 0 END,
+                    CASE WHEN o.kind = 'ok' THEN r.completion_tokens ELSE 0 END,
+                    CASE WHEN o.kind = 'ok' THEN NULLIF(r.cost_micros, 0) END,
+                    NULL::int, NULL::int, o.weight
+             FROM usage_rollup_hourly r
+             CROSS JOIN LATERAL (VALUES
+                 ('ok',   200::smallint, NULL::text,
+                  r.requests - r.upstream_errors - r.refused_authorisation
+                             - r.refused_rate_limit - r.refused_budget - r.refused_no_backend),
+                 ('err',  500::smallint, NULL,            r.upstream_errors),
+                 ('ref',  403::smallint, 'authorisation', r.refused_authorisation),
+                 ('ref',  429::smallint, 'rate_limit',    r.refused_rate_limit),
+                 ('ref',  402::smallint, 'budget',        r.refused_budget),
+                 ('ref',  502::smallint, 'no_backend',    r.refused_no_backend)
+             ) AS o(kind, status, refusal, weight)
+             WHERE r.hour >= $1 AND r.hour < $2 AND o.weight > 0
+         ),
          ev AS (
              SELECT to_timestamp(floor(extract(epoch FROM u.at) / $3) * $3) AS at,
-                    count(*)                                      AS requests,
-                    count(*) FILTER (
-                        WHERE u.refusal IS NULL AND u.status >= 400)  AS upstream_errors,
-                    count(*) FILTER (WHERE u.refusal = 'authorisation') AS r_auth,
-                    count(*) FILTER (WHERE u.refusal = 'rate_limit')    AS r_rate,
-                    count(*) FILTER (WHERE u.refusal = 'budget')        AS r_budget,
-                    count(*) FILTER (WHERE u.refusal = 'no_backend')    AS r_nobackend,
+                    COALESCE(sum(u.weight), 0)::bigint            AS requests,
+                    COALESCE(sum(u.weight) FILTER (
+                        WHERE u.refusal IS NULL AND u.status >= 400), 0)::bigint AS upstream_errors,
+                    COALESCE(sum(u.weight) FILTER (WHERE u.refusal = 'authorisation'), 0)::bigint AS r_auth,
+                    COALESCE(sum(u.weight) FILTER (WHERE u.refusal = 'rate_limit'), 0)::bigint AS r_rate,
+                    COALESCE(sum(u.weight) FILTER (WHERE u.refusal = 'budget'), 0)::bigint AS r_budget,
+                    COALESCE(sum(u.weight) FILTER (WHERE u.refusal = 'no_backend'), 0)::bigint AS r_nobackend,
                     COALESCE(sum(u.prompt_tokens), 0)::bigint      AS prompt_tokens,
                     COALESCE(sum(u.completion_tokens), 0)::bigint  AS completion_tokens,
                     COALESCE(sum(u.cost_micros), 0)::bigint        AS cost_micros,
-                    count(*) FILTER (WHERE u.cost_micros IS NULL)  AS unpriced,
+                    COALESCE(sum(u.weight) FILTER (WHERE u.cost_micros IS NULL), 0)::bigint AS unpriced,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY u.duration_ms)  AS p50,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS p95,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY u.ttft_ms)     AS ttft95
-             FROM usage_events u
+             FROM src u
              LEFT JOIN models m ON m.id = u.model_id
-             WHERE u.at >= $1 AND u.at < $2
-               AND ($4::text IS NULL OR m.name = $4)
+             WHERE ($4::text IS NULL OR m.name = $4)
                AND ($5::bigint IS NULL OR u.principal_id = $5)
              GROUP BY 1
          )
@@ -2871,6 +2918,123 @@ pub fn spawn_snapshot_rebuilder(
             ticker.tick().await;
             if let Err(e) = rebuild_once(&pool, cache.as_ref(), &key).await {
                 tracing::warn!(error = %e, "periodic snapshot rebuild failed; keeping previous snapshot");
+            }
+        }
+    });
+}
+
+/// How long per-request rows are kept before being folded into hourly
+/// buckets. See `migrations/0023_usage_retention.sql` for why the two
+/// granularities exist at all.
+const RAW_RETENTION_DAYS: i64 = 90;
+
+/// Fold everything older than the retention window into hourly buckets and
+/// delete the raw rows it came from.
+///
+/// One transaction, and the order inside it is the whole correctness
+/// argument: summarise, then delete exactly what was summarised, atomically.
+/// Deleting first would lose data outright, and doing the two in separate
+/// transactions would lose whatever arrived in between — a request written
+/// after the `INSERT ... SELECT` read the range but before the `DELETE`
+/// removed it would vanish having been counted nowhere.
+///
+/// `ON CONFLICT DO UPDATE` rather than plain insert because this is not
+/// assumed to run exactly once per hour. A control plane that was down for a
+/// day rolls up several windows on its next tick, and a retry after a
+/// partial failure must not double-count; adding to the existing bucket
+/// makes the operation converge on the same totals however many times it
+/// runs.
+async fn roll_up_and_prune_usage(pool: &PgPool) -> Result<(u64, u64), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(RAW_RETENTION_DAYS);
+
+    let rolled = sqlx::query(
+        "INSERT INTO usage_rollup_hourly (
+             hour, model_id, principal_id, requests, upstream_errors,
+             refused_authorisation, refused_rate_limit, refused_budget, refused_no_backend,
+             prompt_tokens, completion_tokens, cost_micros, unpriced_requests,
+             duration_ms_sum, duration_ms_count)
+         SELECT date_trunc('hour', at), model_id, principal_id,
+                count(*),
+                count(*) FILTER (WHERE refusal IS NULL AND status >= 400),
+                count(*) FILTER (WHERE refusal = 'authorisation'),
+                count(*) FILTER (WHERE refusal = 'rate_limit'),
+                count(*) FILTER (WHERE refusal = 'budget'),
+                count(*) FILTER (WHERE refusal = 'no_backend'),
+                COALESCE(sum(prompt_tokens), 0),
+                COALESCE(sum(completion_tokens), 0),
+                COALESCE(sum(cost_micros), 0),
+                count(*) FILTER (WHERE cost_micros IS NULL),
+                COALESCE(sum(duration_ms), 0),
+                count(*) FILTER (WHERE duration_ms IS NOT NULL)
+         FROM usage_events
+         WHERE at < $1
+         GROUP BY 1, 2, 3
+         ON CONFLICT (hour, model_id, principal_id) DO UPDATE SET
+             requests              = usage_rollup_hourly.requests + EXCLUDED.requests,
+             upstream_errors       = usage_rollup_hourly.upstream_errors + EXCLUDED.upstream_errors,
+             refused_authorisation = usage_rollup_hourly.refused_authorisation
+                                     + EXCLUDED.refused_authorisation,
+             refused_rate_limit    = usage_rollup_hourly.refused_rate_limit
+                                     + EXCLUDED.refused_rate_limit,
+             refused_budget        = usage_rollup_hourly.refused_budget + EXCLUDED.refused_budget,
+             refused_no_backend    = usage_rollup_hourly.refused_no_backend
+                                     + EXCLUDED.refused_no_backend,
+             prompt_tokens         = usage_rollup_hourly.prompt_tokens + EXCLUDED.prompt_tokens,
+             completion_tokens     = usage_rollup_hourly.completion_tokens
+                                     + EXCLUDED.completion_tokens,
+             cost_micros           = usage_rollup_hourly.cost_micros + EXCLUDED.cost_micros,
+             unpriced_requests     = usage_rollup_hourly.unpriced_requests
+                                     + EXCLUDED.unpriced_requests,
+             duration_ms_sum       = usage_rollup_hourly.duration_ms_sum + EXCLUDED.duration_ms_sum,
+             duration_ms_count     = usage_rollup_hourly.duration_ms_count
+                                     + EXCLUDED.duration_ms_count",
+    )
+    .bind(cutoff)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    let pruned = sqlx::query("DELETE FROM usage_events WHERE at < $1")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    tx.commit().await?;
+    Ok((rolled, pruned))
+}
+
+/// The roll-up, reachable from the integration test that pins it lossless
+/// and idempotent. Those are properties of the SQL, and the SQL is what a
+/// unit test cannot reach — this is a thin door onto it rather than a second
+/// implementation the test could pass while production failed.
+pub async fn roll_up_and_prune_usage_for_test(pool: &PgPool) -> Result<(u64, u64), sqlx::Error> {
+    roll_up_and_prune_usage(pool).await
+}
+
+/// Run the roll-up on a slow timer.
+///
+/// Hourly rather than on the snapshot-rebuild tick: this touches only rows
+/// months old, so running it more often is pure cost, and its failure is not
+/// urgent — the next tick catches up whatever the last one missed.
+pub fn spawn_usage_retention(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match roll_up_and_prune_usage(&pool).await {
+                Ok((0, 0)) => {}
+                Ok((rolled, pruned)) => tracing::info!(
+                    rolled_buckets = rolled,
+                    pruned_rows = pruned,
+                    retention_days = RAW_RETENTION_DAYS,
+                    "folded old usage rows into hourly buckets"
+                ),
+                // Warn, never fail: losing a roll-up costs disk, and taking
+                // the control plane down over it would cost service.
+                Err(e) => tracing::warn!(error = %e, "usage roll-up failed; will retry next tick"),
             }
         }
     });

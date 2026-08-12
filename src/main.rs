@@ -881,6 +881,10 @@ async fn run_control(cli: Cli) -> Result<()> {
             Duration::from_secs(cli.snapshot_rebuild_interval),
             Arc::clone(&key),
         );
+        // Both roles that own the database run this. `--role=control` is the
+        // one deployed on the cluster, so omitting it here would have meant
+        // the retention policy existed everywhere except in production.
+        fastllm_proxy::control::api::spawn_usage_retention(pool.clone());
         let tls = admin_tls_config(&cli)?;
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -1024,6 +1028,9 @@ async fn run_all(cli: Cli) -> Result<()> {
             Duration::from_secs(cli.snapshot_rebuild_interval),
             Arc::clone(&key),
         );
+        // Usage now takes a row per request rather than only for capped
+        // principals, so the table needs a policy rather than watching.
+        fastllm_proxy::control::api::spawn_usage_retention(pool.clone());
         let admin_tls_enabled = admin_tls.is_some();
         tokio::spawn(async move {
             if let Err(e) = fastllm_proxy::control::api::serve(
