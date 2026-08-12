@@ -43,6 +43,39 @@ the upstream's real token counts and the control plane folds them into
 
 ## Features
 
+### Graceful shutdown and translator fuzzing — done (2026-08-12)
+
+Two items from an external review that survived checking against the code.
+
+**SIGTERM drained nothing.** The handler existed — the review's claim that it
+did not is wrong — but it broke the accept loop and fell out of `main`, killing
+every connection task mid-stream. On a Kubernetes rollout that truncates
+whatever generations are running, and a truncated stream reaches the client as
+a response that stops mid-sentence with no error to retry on. Now: stop
+accepting, `graceful_shutdown` each connection so idle keep-alives close at
+once rather than holding the drain open, then wait for the rest up to
+`--shutdown-grace` (25s, under the 30s Kubernetes kills at). Measured on a
+6-second stream signalled 2 seconds in — every frame including `[DONE]` at the
+default, two frames and a cut at `--shutdown-grace 0`.
+
+**The protocol translators are the only thing here that parses a third
+party's JSON**, on the response path, after a request is already billed and
+while bytes may be moving to the client. `tests/protocol_fuzz.rs` mutates
+realistic Anthropic/Gemini/OpenAI payloads — truncation, type swaps, invalid
+UTF-8, deep nesting — and asserts the one property that is total: no input
+panics a translator. The streaming half re-chunks at arbitrary boundaries,
+because a bug that only shows when a multi-byte character straddles two chunks
+is invisible to a test that pushes a whole body. Structure-aware mutation with
+a fixed PRNG seed rather than cargo-fuzz: it runs in `cargo test` on every
+commit in ~0.15s instead of on a nightly toolchain nobody schedules. Verified
+it fails by injecting a panic — 8 inputs found it.
+
+Rejected from the same review, with reasons: a hand-rolled JSON scanner to
+replace `BodyPeek` (already measured at 67.1k → 67.2k req/s and recorded in
+`docs/performance.md` as not worth the misrouting risk), and `#[cold]` on
+`proxy_request`'s error branches (justified by a 2,000-line hot function that
+is actually 700).
+
 ### API surface the management UI needs — done (2026-08-09)
 
 The dashboard could show what the admin API happened to return, which had

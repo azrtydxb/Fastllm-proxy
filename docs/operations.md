@@ -186,6 +186,24 @@ Most are self-describing from their `# HELP` text. Four are not obvious:
 conventional shape, and what turns "latency moved at 14:02" into "latency moved
 when we shipped this".
 
+## Shutdown
+
+On SIGTERM (or Ctrl-C) the proxy stops accepting connections, tells every open
+one to stop keep-alive, and waits for in-flight requests to finish before
+exiting — `--shutdown-grace` (`FASTLLM_SHUTDOWN_GRACE`, 25s) bounds the wait,
+sitting under Kubernetes' 30s `terminationGracePeriodSeconds`.
+
+This matters for a streaming gateway specifically: a generation can run for
+minutes, and cutting it produces a response that stops mid-sentence with no
+error for the client to retry on. Measured against a 6-second stream with the
+signal sent 2 seconds in: at the default the client received every frame
+including `[DONE]`; at `--shutdown-grace 0` it received two frames and nothing
+else.
+
+If the grace expires with connections still open, they are closed and the
+count is logged at WARN — those are requests somebody is still waiting on, and
+silence would make the truncation look like a client bug.
+
 ## What each replica can see
 
 `GET /admin/fleet` on the control plane reports, per proxy replica, its

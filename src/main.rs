@@ -8,7 +8,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -107,6 +107,12 @@ struct Cli {
 
     #[arg(long, default_value_t = 64 * 1024 * 1024, env = "FASTLLM_CACHE_MAX_BYTES")]
     cache_max_bytes: usize,
+
+    /// How long to let in-flight requests finish after SIGTERM before the
+    /// process exits. Kubernetes SIGKILLs at `terminationGracePeriodSeconds`
+    /// (30 by default), so this sits under it; 0 exits immediately.
+    #[arg(long, default_value_t = 25, env = "FASTLLM_SHUTDOWN_GRACE")]
+    shutdown_grace: u64,
 
     /// Seconds between health reports to the control plane. Backend health
     /// only exists in the data plane, so this is the only way a management UI
@@ -1504,6 +1510,13 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
+    // Told once, on signal: stop keep-alive and finish what is in flight.
+    // Without it a drain would wait the full grace period every time, because
+    // an idle keep-alive connection is indistinguishable from a busy one by
+    // counting alone.
+    let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+    let live = Arc::new(AtomicUsize::new(0));
+
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -1518,6 +1531,9 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
                     warn!(error = %e, "could not set TCP_NODELAY on {peer}");
                 }
                 let state = Arc::clone(&state);
+                let live = Arc::clone(&live);
+                let mut close_rx = close_rx.clone();
+                live.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
                     let service = service_fn(move |req| proxy::handle(req, Arc::clone(&state)));
                     let conn = http1::Builder::new()
@@ -1526,10 +1542,29 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
                         // still streaming, and vice versa.
                         .half_close(true)
                         .serve_connection(TokioIo::new(stream), service);
-                    if let Err(e) = conn.await {
-                        // Disconnects mid-generation are routine, not errors.
-                        tracing::debug!(error = %e, "connection closed");
+                    let mut conn = std::pin::pin!(conn);
+                    loop {
+                        tokio::select! {
+                            res = conn.as_mut() => {
+                                if let Err(e) = res {
+                                    // Disconnects mid-generation are routine,
+                                    // not errors.
+                                    tracing::debug!(error = %e, "connection closed");
+                                }
+                                break;
+                            }
+                            // Fires once. `graceful_shutdown` stops this
+                            // connection accepting another request on the same
+                            // socket, but leaves a response already streaming
+                            // alone — which is the whole point: a generation
+                            // that has been running for a minute should not be
+                            // severed because a rollout started.
+                            _ = close_rx.changed() => {
+                                conn.as_mut().graceful_shutdown();
+                            }
+                        }
                     }
+                    live.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             _ = &mut shutdown => {
@@ -1539,7 +1574,50 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
         }
     }
 
+    drain(&close_tx, &live, Duration::from_secs(cli.shutdown_grace)).await;
     Ok(())
+}
+
+/// Let in-flight requests finish, up to `grace`.
+///
+/// Kubernetes sends SIGTERM and then SIGKILLs at `terminationGracePeriodSeconds`
+/// (30 by default). Before this, the signal broke the accept loop and the
+/// process fell out of `main`, killing every connection task mid-stream — so a
+/// rollout truncated whatever generations were running, and a client saw a
+/// response stop mid-sentence with no error to retry on.
+///
+/// Polled rather than notified: this runs once per process lifetime, and a
+/// 100ms poll has none of the wakeup races a condvar here would need to get
+/// right for no measurable gain.
+async fn drain(
+    close_tx: &tokio::sync::watch::Sender<bool>,
+    live: &Arc<AtomicUsize>,
+    grace: Duration,
+) {
+    let _ = close_tx.send(true);
+    if grace.is_zero() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        let remaining = live.load(Ordering::Relaxed);
+        if remaining == 0 {
+            info!("all connections closed; shutting down");
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // Said out loud: these are requests a client is still waiting on,
+            // and they are about to be cut. Silence here would make a truncated
+            // response look like a client-side bug.
+            warn!(
+                connections = remaining,
+                grace_seconds = grace.as_secs(),
+                "shutdown grace expired with connections still open; closing them"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Root certificates for `https://` api_bases, and for `https://` control

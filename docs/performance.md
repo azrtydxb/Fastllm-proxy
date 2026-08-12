@@ -110,6 +110,11 @@ currently identified as worth doing.
 - **Pre-parsed `Uri` per backend per endpoint.** ~0.2%, and it forces an
   endpoint-index coupling between `proxy.rs` and `registry.rs`.
 - **Anything else on the request path.** There is under 1µs available in total.
+- **`rewrite_model_if_needed` is not a JSON round trip in the common case.**
+  Raised again in review as "a full re-serialize on every rewrite"; it returns
+  the body unchanged when the names match, and splices the bytes in place when
+  the `model` field's range is known. The `serde_json::Value` path is the
+  fallback for a body neither applies to.
 
 ### Usage extraction was the most expensive thing on the response path
 

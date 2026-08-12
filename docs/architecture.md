@@ -174,6 +174,7 @@ Two things an operator should know rather than discover:
 | a model in a chain returns 429/5xx | the next model in the same rule serves it; nothing reached the client yet |
 | every model in the chain refuses | the last upstream's own status and body are forwarded, not a synthetic 502 |
 | Postgres down | control plane serves its last built snapshot; proxies unaffected |
+| SIGTERM (a rollout) | stops accepting, lets in-flight generations finish, exits — up to `--shutdown-grace` (25s, under Kubernetes' 30s default) |
 | usage report fails | dropped; never blocks a request |
 | health report fails | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s |
 | upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion |
