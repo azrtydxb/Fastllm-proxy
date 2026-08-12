@@ -90,7 +90,7 @@ impl TailBuffer {
     }
 }
 
-/// Two shapes to try, cheapest and most common first:
+/// Three shapes to try, cheapest and most common first:
 ///
 /// 1. The whole tail parses as one JSON object with a top-level `usage` —
 ///    true for a non-streaming completion whose entire body fit in the
@@ -100,6 +100,10 @@ impl TailBuffer {
 ///    `stream_options.include_usage` set. The *last* matching line wins,
 ///    matching upstream behaviour of sending the usage chunk once, at the
 ///    end, right before `data: [DONE]`.
+/// 3. Failing that, read the object following the last `usage` key directly
+///    — true for a non-streaming response *larger than the buffer*, where
+///    the tail is a fragment of a JSON document rather than a document, so
+///    (1) cannot parse it even though the counts are sitting in it.
 fn extract_usage(buf: &[u8]) -> Option<UsageTokens> {
     if let Some(u) = parse_usage_object(buf) {
         return Some(u);
@@ -129,10 +133,32 @@ fn extract_usage(buf: &[u8]) -> Option<UsageTokens> {
                 return Some(u);
             }
         }
-        // The whole tail is tried as one document above, so a bare JSON body is
-        // already handled; anything reaching here that is not a `data:` line is
-        // a false positive — the word inside a message, say — and the search
-        // continues before it.
+        // Not an SSE line. Before dismissing it, try reading the object that
+        // follows this `usage` key directly.
+        //
+        // This is the case a tail window exists for and the whole-document
+        // parse above cannot reach: a non-streaming response larger than the
+        // buffer. The tail then holds the *end* of a JSON document — a
+        // fragment with no opening brace — so parsing it as a document fails,
+        // and before this the counts were dropped.
+        //
+        // It was not hypothetical. A single bge-m3 embeddings response is
+        // around 22 KB against an 8 KiB window, so every embedding ever
+        // served recorded `usage_reported = false` while the numbers sat
+        // intact in the last hundred bytes of the very buffer being searched.
+        // Any non-streaming completion longer than the window had the same
+        // problem; the unit tests missed it because their fixtures fit.
+        if let Some(obj) = balanced_object_at(buf, at) {
+            if let Some(u) = serde_json::from_slice::<serde_json::Value>(obj)
+                .ok()
+                .as_ref()
+                .and_then(usage_from_value)
+            {
+                return Some(u);
+            }
+        }
+        // A genuine false positive — the word inside a message, say — so keep
+        // searching before it.
         end = at;
     }
     None
@@ -172,11 +198,66 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn parse_usage_object(bytes: &[u8]) -> Option<UsageTokens> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let usage = value.get("usage")?;
+    usage_from_value(usage)
+}
+
+/// The `{ ... }` starting at or after `from`, as a slice.
+///
+/// Depth is tracked outside string literals only, so a brace inside a string
+/// value cannot end the object early. Returns `None` if the object is not
+/// closed within the buffer, which for a tail window means the object began
+/// before the window did — there is nothing to parse and nothing to guess.
+fn balanced_object_at(buf: &[u8], from: usize) -> Option<&[u8]> {
+    let start = from + buf[from..].iter().position(|&b| b == b'{')?;
+    let (mut depth, mut in_str, mut escaped) = (0usize, false, false);
+    for (i, &b) in buf[start..].iter().enumerate() {
+        if in_str {
+            match () {
+                _ if escaped => escaped = false,
+                _ if b == b'\\' => escaped = true,
+                _ if b == b'"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&buf[start..start + i + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Read the token counts out of a `usage` object.
+///
+/// Both counts are optional, and at least one must be present. `usage: {}`
+/// is not a report of zero consumption, but an embeddings response carrying
+/// only `prompt_tokens` genuinely is a complete report — the OpenAI
+/// embeddings API omits `completion_tokens` entirely, and requiring it meant
+/// every embedding request was recorded as "counts unknown" no matter how
+/// well the response was formed.
+fn usage_from_value(usage: &serde_json::Value) -> Option<UsageTokens> {
     if usage.is_null() {
         return None;
     }
-    let prompt_tokens = usage.get("prompt_tokens")?.as_u64()?;
-    let completion_tokens = usage.get("completion_tokens")?.as_u64()?;
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64);
+    if prompt.is_none() && completion.is_none() {
+        return None;
+    }
+    let prompt_tokens = prompt.unwrap_or(0);
+    let completion_tokens = completion.unwrap_or(0);
     // Dollars as a float on the wire — 4.8e-06 for a small request — so this
     // is the one place a float is unavoidable. Converted to integer micro-units
     // immediately and rounded rather than truncated: at these magnitudes a
@@ -416,5 +497,75 @@ mod tests {
                 "cost {bad} must not be believed"
             );
         }
+    }
+
+    /// The bug this file's third strategy exists for: a non-streaming
+    /// response *larger than the tail window*.
+    ///
+    /// The tail then holds the end of a JSON document rather than a
+    /// document, so parsing it whole fails — while the counts sit intact in
+    /// its last hundred bytes. Sized after the real case that exposed it: a
+    /// bge-m3 embeddings response is roughly 22 KB against an 8 KiB window.
+    #[test]
+    fn a_non_streaming_body_larger_than_the_window_still_yields_its_usage() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        // A plausible embeddings body: a long float array, then usage last.
+        let vector: String = (0..4000).map(|i| format!("{}.{:04},", i % 10, i)).collect();
+        let body = format!(
+            r#"{{"object":"list","data":[{{"embedding":[{vector}0.0]}}],"model":"bge-m3",
+                 "usage":{{"prompt_tokens":4,"total_tokens":4,"completion_tokens":0}}}}"#
+        );
+        assert!(
+            body.len() > DEFAULT_CAPACITY * 2,
+            "fixture must exceed the window, or it proves nothing: {} bytes",
+            body.len()
+        );
+        tail.push(body.as_bytes());
+
+        let usage = tail
+            .extract_usage()
+            .expect("usage sits in the tail and must be found");
+        assert_eq!(usage.prompt_tokens, 4);
+        assert_eq!(usage.completion_tokens, 0);
+    }
+
+    /// An embeddings response that omits `completion_tokens` entirely, as
+    /// the OpenAI embeddings API does. Requiring the field recorded every
+    /// one of these as "counts unknown" despite a perfectly well-formed
+    /// report.
+    #[test]
+    fn usage_without_completion_tokens_is_a_complete_report_not_a_missing_one() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(br#"{"object":"list","usage":{"prompt_tokens":7,"total_tokens":7}}"#);
+        let usage = tail
+            .extract_usage()
+            .expect("prompt_tokens alone is a report");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 0);
+    }
+
+    /// But an empty usage object is not a report of zero.
+    #[test]
+    fn an_empty_usage_object_is_not_a_report() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(br#"{"object":"list","usage":{}}"#);
+        assert_eq!(tail.extract_usage(), None);
+    }
+
+    /// A brace inside a string value must not close the object early. The
+    /// scanner tracks depth outside string literals only, and getting that
+    /// wrong truncates the object into something that will not parse — which
+    /// would look exactly like "no usage found" rather than like a bug.
+    #[test]
+    fn a_brace_inside_a_string_does_not_end_the_usage_object() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        // Opens mid-document, so the tail cannot parse as one and strategy 3
+        // is the one under test rather than strategy 1.
+        tail.push(br#"ent":[0.1]}],"usage":{"note":"a } and a \" quote","prompt_tokens":3,"completion_tokens":9}}"#);
+        let usage = tail
+            .extract_usage()
+            .expect("must parse past the brace in the string");
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 9);
     }
 }
