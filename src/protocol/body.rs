@@ -67,6 +67,8 @@ impl UsageSink {
             prompt_tokens: usage.as_ref().map_or(0, |u| u.prompt_tokens),
             completion_tokens: usage.as_ref().map_or(0, |u| u.completion_tokens),
             usage_reported: reported,
+            // A backend answered; this row is not a refusal.
+            refusal: None,
             at: chrono::Utc::now(),
             duration_ms: timing.map(|t| t.duration_ms()),
             ttft_ms: timing.and_then(|t| t.ttft_ms()),

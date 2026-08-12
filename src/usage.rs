@@ -1,13 +1,15 @@
 //! The data-plane side of the Snapshot protocol's reverse channel: batched,
 //! fire-and-forget usage reporting to the control plane's `POST /usage`.
 //!
-//! Nothing calls [`UsageReporter::record`] yet — P2 wires real token counting
-//! into the request path once streaming responses are parsed for a trailing
-//! `usage` object (see the design doc's P3 section). This module exists now,
-//! in P0, specifically so that plumbing does not have to reshape the wire
-//! protocol later: the batch shape, the queue, and the drop-on-full policy
-//! are all fixed today. `UsageReporter::record` is the entire surface that
-//! future caller needs.
+//! [`UsageReporter::record`] is called from two places on the request path:
+//! `proxy::UsageTracking::finish` and `protocol::body::UsageSink::record`,
+//! once per response, plus `proxy::record_refusal` for requests the gateway
+//! turned away before any backend saw them. Between them every attributable
+//! request produces exactly one row.
+//!
+//! The batch shape, the queue and the drop-on-full policy were fixed before
+//! any of those callers existed, so that wiring them up never had to reshape
+//! the wire protocol — and it did not.
 //!
 //! Design constraint carried over from the request path itself: recording a
 //! usage event must never be able to block, retry-storm, or grow memory
@@ -58,6 +60,16 @@ pub struct UsageEvent {
     /// as unknown.
     #[serde(default = "default_true")]
     pub usage_reported: bool,
+    /// Set when the gateway refused this request itself; `None` when the
+    /// row describes a response that actually came back from a backend.
+    ///
+    /// This is what lets a chart separate *upstream errors* from *gateway
+    /// refusals* rather than presenting one blended figure. `status` alone
+    /// cannot: a 502 the proxy synthesised because nothing was reachable and
+    /// a 502 an upstream genuinely returned are the same number with
+    /// different meanings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Refusal>,
     pub at: chrono::DateTime<chrono::Utc>,
     /// Whole-request wall time. `None` only when the event was produced
     /// somewhere that does not time (the reconciler, a test).
@@ -93,6 +105,38 @@ pub struct UsageEvent {
 /// event as "counts unknown" would be wrong.
 fn default_true() -> bool {
     true
+}
+
+/// Why the gateway refused a request itself, rather than forwarding it and
+/// reporting what an upstream said.
+///
+/// A refusal and an upstream error are different diagnoses and must not
+/// average into one "error rate": one says a caller was stopped at the door
+/// by a policy someone configured, the other says a backend misbehaved. The
+/// remedies have nothing in common — raise a budget, versus go and look at a
+/// GPU node — so a chart that blends them tells an operator to do neither.
+///
+/// [`Unauthenticated`] is deliberately not here. A request with no valid key
+/// has no principal to attribute, and `usage_events` is keyed on one; more to
+/// the point, it is the only refusal a stranger can trigger, so recording it
+/// would let unauthenticated traffic drive unbounded database writes. That
+/// count belongs in `/metrics`, where it is a counter rather than a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// 403: authenticated, but not granted `model:invoke` on any candidate
+    /// left in the chain.
+    Authorisation,
+    /// 429: over a configured requests- or tokens-per-minute limit.
+    RateLimit,
+    /// 402: the principal's budget window is exhausted.
+    Budget,
+    /// 502: every backend in the chain was unreachable or refused the
+    /// connection. The one refusal that is not a policy decision, and the
+    /// reason this whole enum exists — without it a total backend outage
+    /// writes no rows at all, and an error chart reads a flat zero at
+    /// exactly the moment everything is broken.
+    NoBackend,
 }
 
 #[derive(Serialize)]
@@ -287,6 +331,7 @@ mod tests {
             prompt_tokens: 1,
             completion_tokens: 1,
             usage_reported: true,
+            refusal: None,
             at: chrono::Utc::now(),
             duration_ms: None,
             ttft_ms: None,

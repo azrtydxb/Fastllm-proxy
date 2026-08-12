@@ -1103,10 +1103,9 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             cli.snapshot_cache.clone(),
             Arc::clone(&client),
         );
-        // Nothing calls `usage.record(...)` yet (see `crate::usage`'s doc
-        // comment — P2 wires token counting in), but the reporter is spawned
-        // now so `/metrics`' drop counter is meaningful from the start and P2
-        // has nothing left to plumb beyond calling `record`.
+        // Spawned before the first request can arrive, so `/metrics`' drop
+        // counter is meaningful from the start rather than from whenever the
+        // first event happens to be recorded.
         usage = fastllm_proxy::usage::spawn(
             fastllm_proxy::usage::ReporterConfig {
                 url: usage_url(&url),

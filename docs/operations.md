@@ -234,21 +234,33 @@ query that sums tokens or spend should filter on it — `WHERE usage_reported` �
 while any query counting *requests* must not, since the rows it would exclude
 are disproportionately the ones that failed.
 
-**What this table does not contain**, and what that means for an error rate
-computed from it: a request the proxy refused or could not dispatch never
-reaches a backend, so it is never recorded here. That covers 401/403
-(authentication and model authorisation), 429 (rate limit), 402 (budget), and
-the 502 the proxy synthesises when no backend in the chain could be reached —
-verified by pointing a model at an unreachable address and watching the 502
-leave no row. What *is* recorded is every response that came back from a
-backend, whatever its status.
+**Refusals are recorded too**, and `refusal` says which kind. It is NULL for
+every row describing a response a backend actually returned, and set for the
+four cases the gateway decides itself:
 
-So `status >= 400` over this table is "errors the upstream returned", not
-"errors callers saw". The second number lives in `/metrics`
-(`fastllm_requests_total` against `fastllm_backend_errors_total`) and in the
-per-replica health reports. Do not present a `usage_events` error rate as the
-caller-visible one; they answer different questions, and the gap between them
-is exactly the requests the gateway rejected on its own.
+| `refusal` | status | meaning |
+|---|---|---|
+| `authorisation` | 403 | authenticated, but not granted the model |
+| `rate_limit` | 429 | over a configured per-minute limit |
+| `budget` | 402 | budget window exhausted |
+| `no_backend` | 502 | nothing in the chain could be reached |
+
+`no_backend` is why the column exists. A refused request has no forwarded
+response body, and the body is what writes the row — so before this, a total
+backend outage produced *no rows at all* and an error rate computed here read
+a flat zero at exactly the moment nothing worked.
+
+Keep the two apart when charting. `refusal IS NULL AND status >= 400` is
+"errors an upstream returned"; `refusal IS NOT NULL` is "requests the gateway
+turned away". Blending them into one error rate tells an operator to do
+neither of the two available things — raise a budget, or go and look at a GPU
+node.
+
+**Still absent: unauthenticated 401s.** There is no principal to attribute
+them to, and more to the point 401 is the only refusal a stranger can trigger
+at will — recording it would let anonymous traffic drive unbounded writes
+here. That count stays in `/metrics`, as a counter rather than a row, so a
+caller-visible total still needs both sources.
 
 This is where per-caller detail lives, and deliberately not in Prometheus: the
 answer to "which callers got slow" is per principal and per key, and a label

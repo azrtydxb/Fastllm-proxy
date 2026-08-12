@@ -522,6 +522,15 @@ async fn proxy_request(
         state
             .telemetry
             .record_rejection(crate::telemetry::Rejection::Unauthorised);
+        // Attributed to the model the caller was refused, which is the one
+        // question an operator has when they see this row.
+        record_refusal(
+            &state,
+            principal,
+            denied,
+            StatusCode::FORBIDDEN,
+            crate::usage::Refusal::Authorisation,
+        );
         return error_response(
             StatusCode::FORBIDDEN,
             "model_access_denied",
@@ -543,6 +552,13 @@ async fn proxy_request(
                 state
                     .telemetry
                     .record_rejection(crate::telemetry::Rejection::OverBudget);
+                record_refusal(
+                    &state,
+                    Some(principal),
+                    &target_model,
+                    StatusCode::PAYMENT_REQUIRED,
+                    crate::usage::Refusal::Budget,
+                );
                 return budget_exceeded_response(budget);
             }
         }
@@ -583,6 +599,13 @@ async fn proxy_request(
                     state
                         .telemetry
                         .record_rejection(crate::telemetry::Rejection::RateLimited);
+                    record_refusal(
+                        &state,
+                        Some(principal),
+                        &target_model,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        crate::usage::Refusal::RateLimit,
+                    );
                     return rate_limited_response(retry_after);
                 }
             }
@@ -976,6 +999,17 @@ async fn proxy_request(
     state
         .telemetry
         .record_outcome(crate::telemetry::Outcome::Unavailable);
+    // The reason refusals are recorded at all: with every backend
+    // unreachable no response comes back, so without this line a total
+    // outage writes no rows and every chart drawn from this table reads a
+    // flat zero while nothing works.
+    record_refusal(
+        &state,
+        principal,
+        &target_model,
+        StatusCode::BAD_GATEWAY,
+        crate::usage::Refusal::NoBackend,
+    );
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
 }
 
@@ -1038,6 +1072,49 @@ fn rewrite_model_if_needed(
         }
     }
     Ok(Bytes::from(serde_json::to_vec(&value)?))
+}
+
+/// Record a request the gateway refused or could not dispatch.
+///
+/// These never reach a backend, so nothing forwards a response body and the
+/// usual recording path — `UsageTracking::finish`, which hangs off that body
+/// — never runs. Without this they are absent from `usage_events` entirely,
+/// which is fine for token accounting (nothing was consumed) and wrong for
+/// everything else: the GUI reads Postgres, so a failure absent from
+/// Postgres is a failure the operator cannot see.
+///
+/// Zero tokens and `usage_reported: false` because nothing was consumed and
+/// nothing was measured — the same distinction the forwarded path draws, so
+/// a refusal can never be mistaken for a request that ran for free.
+///
+/// Silent when there is no principal: `usage_events` is keyed on one, and an
+/// unauthenticated caller has none. See [`usage::Refusal`] for why that
+/// exclusion is deliberate rather than a limitation to work around.
+fn record_refusal(
+    state: &AppState,
+    principal: Option<&Principal>,
+    model: &str,
+    status: StatusCode,
+    refusal: crate::usage::Refusal,
+) {
+    let Some(p) = principal else { return };
+    if model.is_empty() {
+        return;
+    }
+    state.usage.record(UsageEvent {
+        principal_id: p.id,
+        model: model.to_string(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        usage_reported: false,
+        refusal: Some(refusal),
+        at: chrono::Utc::now(),
+        duration_ms: None,
+        ttft_ms: None,
+        status: Some(status.as_u16()),
+        requested_model: None,
+        cost_micros: None,
+    });
 }
 
 /// Whether this request's consumption is worth reading. True for any
@@ -1219,6 +1296,8 @@ impl UsageTracking {
             prompt_tokens: tokens.as_ref().map_or(0, |t| t.prompt_tokens),
             completion_tokens: tokens.as_ref().map_or(0, |t| t.completion_tokens),
             usage_reported: tokens.is_some(),
+            // A backend answered; this row is not a refusal.
+            refusal: None,
             at: chrono::Utc::now(),
             duration_ms: timing.map(|t| t.duration_ms()),
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
@@ -2119,6 +2198,77 @@ mod tests {
                 cost_used_micros: 0,
             })
         ))));
+    }
+
+    /// `record_refusal` writes nothing without a principal, and nothing for
+    /// a model it cannot name.
+    ///
+    /// Both guards protect the same thing from opposite directions. An
+    /// unauthenticated caller has no principal, and `usage_events` is keyed
+    /// on one — but the reason this is a test rather than a `?` is that 401
+    /// is the only refusal a stranger can trigger at will, so recording it
+    /// would turn anonymous traffic into unbounded database writes. An empty
+    /// model name is the other end: it cannot resolve at ingest, so the row
+    /// would be dropped there anyway, and enqueuing it only burns a queue
+    /// slot that a real event could have used.
+    ///
+    /// Asserted through the drop counter because a `disabled()` reporter has
+    /// no receiver, so anything actually recorded lands there — which makes
+    /// "nothing was recorded" observable without a control plane.
+    #[test]
+    fn a_refusal_with_nobody_to_attribute_it_to_is_not_recorded() {
+        let state = crate::state::AppState::for_test();
+        assert_eq!(state.usage.dropped(), 0);
+
+        record_refusal(
+            &state,
+            None,
+            "some-model",
+            StatusCode::FORBIDDEN,
+            crate::usage::Refusal::Authorisation,
+        );
+        assert_eq!(
+            state.usage.dropped(),
+            0,
+            "an unauthenticated refusal must not be enqueued at all"
+        );
+
+        let principal = Principal {
+            id: 1,
+            name: "p".into(),
+            allowed_models: HashSet::new(),
+            allow_all: true,
+            roles: HashSet::new(),
+            limits: None,
+            budget: None,
+        };
+        record_refusal(
+            &state,
+            Some(&principal),
+            "",
+            StatusCode::BAD_GATEWAY,
+            crate::usage::Refusal::NoBackend,
+        );
+        assert_eq!(
+            state.usage.dropped(),
+            0,
+            "a refusal naming no model cannot resolve at ingest; do not enqueue it"
+        );
+
+        // The positive case, so the two assertions above are proving
+        // something rather than passing because nothing is ever recorded.
+        record_refusal(
+            &state,
+            Some(&principal),
+            "some-model",
+            StatusCode::BAD_GATEWAY,
+            crate::usage::Refusal::NoBackend,
+        );
+        assert_eq!(
+            state.usage.dropped(),
+            1,
+            "an attributable refusal naming a model is recorded"
+        );
     }
 
     #[test]

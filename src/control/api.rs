@@ -2758,6 +2758,7 @@ async fn post_usage(
     let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
     let mut reported_cost: Vec<Option<i64>> = Vec::with_capacity(submitted);
     let mut usage_reported: Vec<bool> = Vec::with_capacity(submitted);
+    let mut refusal: Vec<Option<String>> = Vec::with_capacity(submitted);
     for e in &body.events {
         principal_ids.push(e.principal_id as i64);
         models.push(e.model.clone());
@@ -2770,6 +2771,13 @@ async fn post_usage(
         requested_model.push(e.requested_model.clone());
         reported_cost.push(e.cost_micros.map(|c| c.min(i64::MAX as u64) as i64));
         usage_reported.push(e.usage_reported);
+        // Serialised through the enum rather than formatted ad hoc, so the
+        // column can only ever hold names `usage::Refusal` knows.
+        refusal.push(e.refusal.and_then(|r| {
+            serde_json::to_value(r)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+        }));
     }
 
     // `UNNEST` turns the parallel arrays back into rows, positionally —
@@ -2782,16 +2790,17 @@ async fn post_usage(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
-                $10::bigint[], $11::boolean[])
+                $10::bigint[], $11::boolean[], $12::text[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
                      duration_ms, ttft_ms, status, requested_model, reported_cost,
-                     usage_reported)
+                     usage_reported, refusal)
          )
          INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, usage_reported,
-                                   cost_micros)
+                                   refusal, cost_micros)
          SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at,
                 i.duration_ms, i.ttft_ms, i.status, i.requested_model, i.usage_reported,
+                i.refusal,
                 -- Computed here, from the price at the time the request
                 -- happened, and stored. Deriving it on read would let a later
                 -- price change silently rewrite history; what a request cost is
@@ -2844,6 +2853,7 @@ async fn post_usage(
     .bind(&requested_model)
     .bind(&reported_cost)
     .bind(&usage_reported)
+    .bind(&refusal)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -4656,6 +4666,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             usage_reported: true,
+            refusal: None,
             at: chrono::Utc::now(),
             duration_ms: None,
             ttft_ms: None,

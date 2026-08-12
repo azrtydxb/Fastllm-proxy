@@ -55,11 +55,11 @@ pub struct AppState {
     pub requests_failed: AtomicU64,
 
     /// The data-plane half of the Snapshot protocol's reverse channel
-    /// (`POST /usage`, see `crate::usage`). Nothing calls `usage.record(...)`
-    /// yet — see that module's doc comment — but the handle lives here
-    /// unconditionally so `proxy::metrics_response` can always report
-    /// `usage.dropped()`, in every mode including `File`, where it is a
-    /// `UsageReporter::disabled()` that would drop anything recorded on it.
+    /// (`POST /usage`, see `crate::usage`), recorded into on every
+    /// attributable request. The handle lives here unconditionally so
+    /// `proxy::metrics_response` can always report `usage.dropped()`, in
+    /// every mode including `File`, where it is a `UsageReporter::disabled()`
+    /// that would drop anything recorded on it.
     pub usage: crate::usage::UsageReporter,
 
     /// P2 rate limiting: per-principal token buckets, one instance for the
