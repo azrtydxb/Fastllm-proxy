@@ -173,10 +173,29 @@ has each replica's own.
 
 Not built: **teams / org scoping.** See "Deliberately not built" below.
 
-### Parked: shared response cache across replicas
+### Decided: no Redis. Shared response cache stays parked.
 
-Revisit when there is evidence it is worth it. The reasoning is kept here so it
-does not have to be rebuilt from scratch.
+**Ruled out on 2026-08-13**, not merely deferred: no external shared store is
+being added to this project. If a cross-replica cache is ever wanted, the
+asynchronous-replication design below is the sanctioned shape, because it is
+the only one that does not put a round trip on the read path.
+
+The reasoning is kept in full so it does not have to be rebuilt from scratch,
+and so the question can be answered without re-deriving it.
+
+**What is safe to share, and already is.** Anything where a slightly stale
+shared value is acceptable can be reconciled off the request path, and the
+codebase already does exactly that: `src/reconcile.rs` exchanges locally
+observed counts for a fresh allowance on a ticker, and the routing snapshot
+is swapped in wholesale via `ArcSwap`. Local decision, background
+reconciliation, zero I/O on the path. Rate limits, budgets and per-deployment
+headroom all fit that shape, and the control plane is already the authority
+for them — which is why an external store would add a second source of truth
+beside Postgres without adding a capability.
+
+**What is not.** A cache *read* has to return before the upstream call can be
+skipped, so a shared cache costs latency on every request including every
+miss. That is the one case where no amount of background machinery helps.
 
 **The problem.** The response cache is per process. With N replicas a repeated
 request only hits if it lands on the replica that served it before — with two
