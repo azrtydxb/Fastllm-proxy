@@ -36,6 +36,11 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
+# `src/control/api.rs` embeds this with `include_str!`, so it is a build
+# input rather than documentation that happens to live nearby. Omitting it
+# fails the compile — which is how it was found, in a release build, after
+# every local build had succeeded because the file was simply there.
+COPY openapi.json ./openapi.json
 # The root manifest declares a workspace, so cargo insists on loading every
 # member before it will build anything — omitting this fails the build outright
 # rather than merely skipping the benchmarks. `default-members` still keeps

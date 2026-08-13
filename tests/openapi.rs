@@ -173,3 +173,38 @@ fn the_spec_describes_no_route_that_does_not_exist() {
         stale.join("\n  ")
     );
 }
+
+/// Anything the binary embeds from outside `src/` must be copied into the
+/// Docker build context, or the image build fails while every local build
+/// succeeds.
+///
+/// That asymmetry is the whole point of this test. `cargo build` sees the
+/// whole checkout, so a missing `COPY` is invisible until a release build —
+/// which is exactly when it was found: `include_str!("../../openapi.json")`
+/// compiled here and failed in the container, after CI had already spent
+/// twenty minutes getting to it.
+#[test]
+fn everything_embedded_from_outside_src_is_copied_into_the_image() {
+    let dockerfile = source("Dockerfile");
+    let mut missing = Vec::new();
+
+    // One file embeds from outside `src/` today. Scanning that file rather
+    // than the whole tree keeps this cheap and, more importantly, honest: a
+    // new `include_str!` elsewhere is not covered, and pretending otherwise
+    // would make this test read as a guarantee it does not give.
+    let src = source("src/control/api.rs");
+    for m in src.match_indices("include_str!(\"../../") {
+        let rest = &src[m.0 + "include_str!(\"../../".len()..];
+        let Some(end) = rest.find('"') else { continue };
+        let file = &rest[..end];
+        if !dockerfile.contains(file) {
+            missing.push(file.to_string());
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "these files are embedded with include_str! but never COPYied in the \
+         Dockerfile, so `cargo build` succeeds and the image build fails: {missing:?}"
+    );
+}
