@@ -3293,6 +3293,45 @@ pub fn spawn_usage_retention(pool: PgPool) {
     });
 }
 
+/// `GET /openapi.json`: the machine-readable route list.
+///
+/// Unauthenticated, deliberately. It describes the shape of the API and
+/// contains no data — and a spec you need a session to read is a spec nobody
+/// generates a client from, which defeats the point of publishing one.
+///
+/// Served from a checked-in file rather than derived at runtime. The
+/// derivation would have to reproduce every handler's parameters and
+/// responses in a second form, which is the drift this is meant to prevent;
+/// `tests/openapi.rs` compares the file against the router instead, so a
+/// route added without an entry fails the build rather than shipping
+/// undocumented.
+async fn openapi_spec() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        include_str!("../../openapi.json"),
+    )
+}
+
+/// `GET /docs`: Swagger UI over the spec above.
+///
+/// The page is a few lines because the heavy lifting is a CDN script — and
+/// that is the one thing to know about it: an air-gapped deployment gets an
+/// empty page here, while `/openapi.json` still works. Vendoring the bundle
+/// would add half a megabyte to the binary for a convenience.
+async fn openapi_ui() -> impl IntoResponse {
+    axum::response::Html(
+        // `r##` rather than `r#`: the page contains `"#` in `dom_id:"#ui"`,
+        // which would close a single-hash raw string early.
+        r##"<!doctype html><html><head><meta charset="utf-8">
+<title>fastllm-proxy API</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head><body><div id="ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({url:"/openapi.json",dom_id:"#ui"})</script>
+</body></html>"##,
+    )
+}
+
 /// Shared by every route gated on the proxy's own bootstrap token —
 /// `/snapshot` and `/usage` alike. One implementation so a second, subtly
 /// different bearer-check (a `==` that forgot why `constant_time_eq` exists,
@@ -4507,7 +4546,9 @@ pub async fn serve(
         .route("/usage", post(post_usage))
         .route("/health-report", post(post_health_report))
         .route("/limits/reconcile", post(post_reconcile))
-        .route("/healthz", get(healthz));
+        .route("/healthz", get(healthz))
+        .route("/openapi.json", get(openapi_spec))
+        .route("/docs", get(openapi_ui));
 
     // The management UI (P4): served by this process only, which is to say
     // only by `--role control`/`all` — `serve` is never called for `--role

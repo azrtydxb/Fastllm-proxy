@@ -19,6 +19,12 @@ Reload after the model set changes — no restart, no dropped streams:
 kill -HUP $(pgrep -x fastllm-proxy)
 ```
 
+The machine-readable version of everything below is **[`openapi.json`](../openapi.json)**,
+served by the running control plane at `GET /openapi.json` with Swagger UI at
+`/docs`. It is checked against the router by `tests/openapi.rs` in both
+directions — a route without a spec entry fails the build, and so does a spec
+entry whose route no longer exists.
+
 ### Endpoints
 
 | Endpoint | Purpose |

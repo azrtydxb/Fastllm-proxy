@@ -1,0 +1,2207 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "fastllm-proxy",
+    "version": "0.1.0",
+    "description": "Two listeners, and they are not interchangeable.\n\nThe **data plane** (default :4000) is the OpenAI-compatible gateway: point clients here.\n\nThe **admin API** (default :4001) serves `/admin/*`, the management UI, and the control-plane protocol (`/snapshot`, `/usage`) that proxy replicas speak. `/snapshot` returns *decrypted* upstream credentials to anything holding the proxy token, which is why it must never share an address with the gateway.\n\nGenerated from the router and checked against it by `tests/openapi.rs`, so a route added without a spec entry fails the build.",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "data plane"
+    },
+    {
+      "url": "https://localhost:4001",
+      "description": "admin API"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A key minted through the admin API. Authorised per model."
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "fastllm_session",
+        "description": "Set by POST /login. Each route additionally requires a permission the principal holds through a role."
+      },
+      "proxyToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "--proxy-token. Machine-to-machine only; never a human credential."
+      }
+    }
+  },
+  "paths": {
+    "/admin/audit": {
+      "get": {
+        "summary": "The change log, newest first, keyset-paginated",
+        "operationId": "get_admin_audit",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/backends/{id}": {
+      "delete": {
+        "summary": "Delete backends id",
+        "operationId": "delete_admin_backends_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/budgets": {
+      "get": {
+        "summary": "Read budgets",
+        "operationId": "get_admin_budgets",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/config": {
+      "get": {
+        "summary": "What this process was started with, and who is asking",
+        "operationId": "get_admin_config",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/fallback-model": {
+      "get": {
+        "summary": "Read fallback-model",
+        "operationId": "get_admin_fallback_model",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "summary": "Set fallback-model",
+        "operationId": "put_admin_fallback_model",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/fleet": {
+      "get": {
+        "summary": "What each proxy replica reports, kept per replica and never merged",
+        "operationId": "get_admin_fleet",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/health": {
+      "get": {
+        "summary": "Read health",
+        "operationId": "get_admin_health",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/keys": {
+      "get": {
+        "summary": "Read keys",
+        "operationId": "get_admin_keys",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Mint a key. The plaintext is returned once and never again",
+        "operationId": "post_admin_keys",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/keys/{id}": {
+      "delete": {
+        "summary": "Revoke a key. The row stays for audit",
+        "operationId": "delete_admin_keys_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/limits": {
+      "get": {
+        "summary": "Read limits",
+        "operationId": "get_admin_limits",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/models": {
+      "get": {
+        "summary": "Read models",
+        "operationId": "get_admin_models",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create models",
+        "operationId": "post_admin_models",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/models/{id}": {
+      "delete": {
+        "summary": "Delete models id",
+        "operationId": "delete_admin_models_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "summary": "Correct a model in place. An explicit null clears a field; an absent field is left alone",
+        "operationId": "patch_admin_models_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/models/{id}/backends": {
+      "post": {
+        "summary": "Create models id backends",
+        "operationId": "post_admin_models_id_backends",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/prices/sync": {
+      "post": {
+        "summary": "Create prices sync",
+        "operationId": "post_admin_prices_sync",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/principals": {
+      "get": {
+        "summary": "Read principals",
+        "operationId": "get_admin_principals",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create principals",
+        "operationId": "post_admin_principals",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}": {
+      "delete": {
+        "summary": "Delete principals id",
+        "operationId": "delete_admin_principals_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}/budget": {
+      "delete": {
+        "summary": "Delete principals id budget",
+        "operationId": "delete_admin_principals_id_budget",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "put": {
+        "summary": "Set principals id budget",
+        "operationId": "put_admin_principals_id_budget",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}/limits": {
+      "delete": {
+        "summary": "Delete principals id limits",
+        "operationId": "delete_admin_principals_id_limits",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "put": {
+        "summary": "Set principals id limits",
+        "operationId": "put_admin_principals_id_limits",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}/password": {
+      "put": {
+        "summary": "Set principals id password",
+        "operationId": "put_admin_principals_id_password",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}/roles": {
+      "post": {
+        "summary": "Create principals id roles",
+        "operationId": "post_admin_principals_id_roles",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/principals/{id}/roles/{role}": {
+      "delete": {
+        "summary": "Delete principals id roles role",
+        "operationId": "delete_admin_principals_id_roles_role",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/prompt-classes": {
+      "get": {
+        "summary": "Read prompt-classes",
+        "operationId": "get_admin_prompt_classes",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create prompt-classes",
+        "operationId": "post_admin_prompt_classes",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/prompt-classes/evaluate": {
+      "post": {
+        "summary": "Leave-one-out precision and recall over your own class examples",
+        "operationId": "post_admin_prompt_classes_evaluate",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/prompt-classes/{id}": {
+      "delete": {
+        "summary": "Delete prompt-classes id",
+        "operationId": "delete_admin_prompt_classes_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/prompt-classes/{id}/examples": {
+      "post": {
+        "summary": "Create prompt-classes id examples",
+        "operationId": "post_admin_prompt_classes_id_examples",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/roles": {
+      "get": {
+        "summary": "Read roles",
+        "operationId": "get_admin_roles",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create roles",
+        "operationId": "post_admin_roles",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/roles/{name}": {
+      "delete": {
+        "summary": "Delete roles name",
+        "operationId": "delete_admin_roles_name",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/roles/{name}/permissions": {
+      "delete": {
+        "summary": "Delete roles name permissions",
+        "operationId": "delete_admin_roles_name_permissions",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create roles name permissions",
+        "operationId": "post_admin_roles_name_permissions",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/routing/dry-run": {
+      "post": {
+        "summary": "Which rule would decide, and what the chain resolves to, without dispatching",
+        "operationId": "post_admin_routing_dry_run",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/rule-targets/{id}": {
+      "delete": {
+        "summary": "Delete rule-targets id",
+        "operationId": "delete_admin_rule_targets_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/rules/{id}": {
+      "delete": {
+        "summary": "Delete rules id",
+        "operationId": "delete_admin_rules_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/rules/{id}/targets": {
+      "post": {
+        "summary": "Create rules id targets",
+        "operationId": "post_admin_rules_id_targets",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/sessions/revoke-all": {
+      "post": {
+        "summary": "Invalidate every session, including the caller's",
+        "operationId": "post_admin_sessions_revoke_all",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/snapshot/rebuild": {
+      "post": {
+        "summary": "Rebuild and republish the snapshot now",
+        "operationId": "post_admin_snapshot_rebuild",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/timeseries": {
+      "get": {
+        "summary": "Bucketed traffic, latency and spend. Empty buckets come back as explicit zeros; latency is null where there was nothing to measure",
+        "operationId": "get_admin_timeseries",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/usage": {
+      "get": {
+        "summary": "Aggregate usage and spend, grouped by model, principal, virtual model or day",
+        "operationId": "get_admin_usage",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/virtual-model-defaults/{id}": {
+      "delete": {
+        "summary": "Delete virtual-model-defaults id",
+        "operationId": "delete_admin_virtual_model_defaults_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/virtual-models": {
+      "get": {
+        "summary": "Read virtual-models",
+        "operationId": "get_admin_virtual_models",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create virtual-models",
+        "operationId": "post_admin_virtual_models",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/virtual-models/{id}": {
+      "delete": {
+        "summary": "Delete virtual-models id",
+        "operationId": "delete_admin_virtual_models_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/virtual-models/{id}/defaults": {
+      "post": {
+        "summary": "Create virtual-models id defaults",
+        "operationId": "post_admin_virtual_models_id_defaults",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/virtual-models/{id}/rules": {
+      "post": {
+        "summary": "Create virtual-models id rules",
+        "operationId": "post_admin_virtual_models_id_rules",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "Swagger UI over the spec. The page pulls its bundle from a CDN, so an air-gapped deployment gets an empty page while /openapi.json still works",
+        "operationId": "get_docs",
+        "tags": [
+          "session"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Per-backend health, in-flight and error counts. Unauthenticated - exposes backend addresses",
+        "operationId": "get_health",
+        "tags": [
+          "data plane"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/health-report": {
+      "post": {
+        "summary": "Per-replica backend health. Proxy token only",
+        "operationId": "post_health_report",
+        "tags": [
+          "control-plane protocol"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        },
+        "security": [
+          {
+            "proxyToken": []
+          }
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Liveness. Unauthenticated and does no database work, so probing it often costs nothing",
+        "operationId": "get_healthz",
+        "tags": [
+          "session"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        }
+      }
+    },
+    "/limits/reconcile": {
+      "post": {
+        "summary": "Exchange locally observed counts for a fresh rate-limit allowance. Proxy token only",
+        "operationId": "post_limits_reconcile",
+        "tags": [
+          "control-plane protocol"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        },
+        "security": [
+          {
+            "proxyToken": []
+          }
+        ]
+      }
+    },
+    "/login": {
+      "post": {
+        "summary": "Exchange a name and password for a session cookie",
+        "operationId": "post_login",
+        "tags": [
+          "session"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        }
+      }
+    },
+    "/logout": {
+      "post": {
+        "summary": "Clear the session cookie",
+        "operationId": "post_logout",
+        "tags": [
+          "session"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus text. Unauthenticated",
+        "operationId": "get_metrics",
+        "tags": [
+          "data plane"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "This document. Unauthenticated: a spec you need a session to read is one nobody generates a client from",
+        "operationId": "get_openapi_json",
+        "tags": [
+          "session"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        }
+      }
+    },
+    "/snapshot": {
+      "get": {
+        "summary": "The flattened routing table a proxy replica polls. Proxy token only - returns decrypted upstream credentials",
+        "operationId": "get_snapshot",
+        "tags": [
+          "control-plane protocol"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        },
+        "security": [
+          {
+            "proxyToken": []
+          }
+        ]
+      }
+    },
+    "/usage": {
+      "post": {
+        "summary": "Batched usage reporting from a proxy replica. Proxy token only",
+        "operationId": "post_usage",
+        "tags": [
+          "control-plane protocol"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          }
+        },
+        "security": [
+          {
+            "proxyToken": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/speech": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_audio_speech",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_audio_transcriptions",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/audio/translations": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_audio_translations",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_chat_completions",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_completions",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_embeddings",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/images/edits": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_images_edits",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/images/generations": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_images_generations",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "Models this key may invoke. Filtered by the caller's grants",
+        "operationId": "list_models",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/v1/moderations": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_moderations",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/rerank": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_rerank",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_responses",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/score": {
+      "post": {
+        "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
+        "operationId": "proxy_score",
+        "tags": [
+          "data plane"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The upstream's response, unmodified"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          },
+          "402": {
+            "description": "Budget window exhausted"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    }
+  }
+}
