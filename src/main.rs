@@ -61,6 +61,22 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Policy::CacheAffinity)]
     policy: Policy,
 
+    /// POST a JSON notification here when a backend goes down or recovers,
+    /// or when a snapshot rebuild fails after a write.
+    ///
+    /// `--role all`/`control` only: these are things the control plane
+    /// learns, from health reports and its own rebuilds.
+    #[arg(long, env = "FASTLLM_WEBHOOK_URL")]
+    webhook_url: Option<String>,
+
+    /// Sign each webhook body with HMAC-SHA256 in `x-fastllm-signature`.
+    ///
+    /// A webhook endpoint is reachable by anyone who learns its address, so
+    /// a receiver that acts on notifications wants to know they came from
+    /// here.
+    #[arg(long, env = "FASTLLM_WEBHOOK_SECRET")]
+    webhook_secret: Option<String>,
+
     /// Seconds between health sweeps.
     #[arg(long, default_value_t = 10)]
     health_interval: u64,
@@ -518,6 +534,26 @@ async fn run_command(command: &Command) -> Result<()> {
 /// control plane would otherwise have to guess, and a settings screen showing
 /// a guessed default is worse than one showing nothing.
 #[cfg(feature = "control")]
+/// The webhook sender for this process, or a disabled one when no URL was
+/// given — which is the default, and costs nothing.
+fn webhook_sender(
+    cli: &Cli,
+    client: &Arc<fastllm_proxy::upstream::Upstream>,
+) -> Arc<fastllm_proxy::webhook::WebhookSender> {
+    Arc::new(match &cli.webhook_url {
+        Some(url) => fastllm_proxy::webhook::spawn(
+            url.clone(),
+            cli.webhook_secret.clone(),
+            Arc::clone(client),
+            // Small on purpose: delivering a burst of stale alerts once a
+            // receiver returns is worse than dropping them. See the module
+            // doc comment.
+            64,
+        ),
+        None => fastllm_proxy::webhook::WebhookSender::disabled(),
+    })
+}
+
 fn deployment_facts(cli: &Cli, role: &str) -> fastllm_proxy::control::api::Deployment {
     fastllm_proxy::control::api::Deployment {
         role: role.to_string(),
@@ -893,7 +929,19 @@ async fn run_control(cli: Cli) -> Result<()> {
             })?;
         info!(%addr, tls = tls.is_some(), "control plane admin API listening");
         let facts = deployment_facts(&cli, "control");
-        fastllm_proxy::control::api::serve(pool, addr, proxy_token, cache, key, tls, facts).await
+        // `--role=control` proxies nothing, so it has no upstream client of
+        // its own; webhooks are its only outbound HTTP. One small pool.
+        let notify_client = Arc::new(upstream::Upstream::new(
+            upstream::Config {
+                max_idle_per_host: 2,
+                idle_timeout: Duration::from_secs(90),
+                connect_timeout: Duration::from_secs(5),
+            },
+            tls_config(cli.ca_bundle.as_deref())?,
+        ));
+        let webhook = webhook_sender(&cli, &notify_client);
+        fastllm_proxy::control::api::serve(pool, addr, proxy_token, cache, key, tls, facts, webhook)
+            .await
     }
     #[cfg(not(feature = "control"))]
     {
@@ -992,6 +1040,9 @@ async fn run_all(cli: Cli) -> Result<()> {
             Arc::clone(&client),
         );
 
+        // Before `client` is moved into the app state below, since the
+        // notifier shares the same connection pool.
+        let admin_webhook = webhook_sender(&cli, &client);
         let state = build_app_state(
             &cli, client, interner, &tuning, None, master_key, snap, usage,
         )?;
@@ -1041,6 +1092,7 @@ async fn run_all(cli: Cli) -> Result<()> {
                 key,
                 admin_tls,
                 admin_facts,
+                admin_webhook,
             )
             .await
             {

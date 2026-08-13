@@ -33,3 +33,4 @@ pub mod telemetry;
 pub mod upstream;
 pub mod usage;
 pub mod vector;
+pub mod webhook;

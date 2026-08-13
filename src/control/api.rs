@@ -133,6 +133,8 @@ struct Ctx {
     reconcile: Arc<ReconcileState>,
     /// Flags this process was started with, for `GET /admin/config`.
     deployment: Arc<Deployment>,
+    /// Outbound notifications, or a disabled sender when none is configured.
+    webhook: Arc<crate::webhook::WebhookSender>,
     started_at: std::time::Instant,
     /// Whether `serve` bound with TLS — the one bit `login`/`logout` need to
     /// decide whether to set `Secure` on the session cookie. `Secure`
@@ -1789,8 +1791,57 @@ async fn post_health_report(
         return StatusCode::UNAUTHORIZED;
     }
     let previous = ctx.fleet.record(report.clone(), std::time::Instant::now());
+    notify_health_transitions(&ctx, &report, previous.as_ref());
     persist_rejection_deltas(&ctx.pool, &report, previous.as_ref()).await;
     StatusCode::NO_CONTENT
+}
+
+/// Emit a notification for each backend that changed health since this
+/// replica's last report.
+///
+/// Transitions, not states: a backend that is down stays down, and a report
+/// every ten seconds would become ten alerts a minute for one incident. The
+/// previous report is already in hand from `Fleet::record`, so the comparison
+/// costs nothing extra and needs no state of its own.
+///
+/// Per replica rather than fleet-wide, deliberately. Every replica losing a
+/// backend is a dead backend; one replica losing it is a partition. Merging
+/// them here would delete the distinction before anyone saw it — the same
+/// reasoning `GET /admin/fleet` follows by never averaging replicas together.
+///
+/// A replica's *first* report emits nothing. There is no previous state to
+/// have changed from, and a control plane restart would otherwise announce
+/// every already-down backend in the fleet as though it had just failed.
+fn notify_health_transitions(
+    ctx: &Ctx,
+    report: &crate::health_report::HealthReport,
+    previous: Option<&crate::health_report::HealthReport>,
+) {
+    let Some(prev) = previous else { return };
+    for backend in &report.backends {
+        let was = prev
+            .backends
+            .iter()
+            .find(|b| b.api_base == backend.api_base && b.model == backend.model);
+        let Some(was) = was else { continue };
+        if was.healthy == backend.healthy {
+            continue;
+        }
+        let event = if backend.healthy {
+            crate::webhook::Event::BackendRecovered {
+                replica: report.replica.clone(),
+                api_base: backend.api_base.clone(),
+                model: backend.model.clone(),
+            }
+        } else {
+            crate::webhook::Event::BackendDown {
+                replica: report.replica.clone(),
+                api_base: backend.api_base.clone(),
+                model: backend.model.clone(),
+            }
+        };
+        ctx.webhook.send(event);
+    }
 }
 
 /// Store the increase in this replica's unattributable-refusal counters
@@ -2985,8 +3036,19 @@ async fn refresh(ctx: &Ctx) {
             ctx.cache.store_snapshot(snap);
         }
         Err(e) => {
-            ctx.snapshot_rebuild_failures
-                .fetch_add(1, Ordering::Relaxed);
+            let consecutive = ctx
+                .snapshot_rebuild_failures
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            // The push half of the counter below. This one is worth waking
+            // somebody for: the write committed, so the database and the
+            // snapshot every proxy is serving have diverged, and nothing
+            // reconciles them until a later rebuild happens to succeed.
+            ctx.webhook
+                .send(crate::webhook::Event::SnapshotRebuildFailed {
+                    error: e.to_string(),
+                    consecutive,
+                });
             tracing::error!(
                 error = %e,
                 "snapshot rebuild after an admin API write failed: the write itself already \
@@ -4217,6 +4279,11 @@ pub struct Deployment {
     pub classifier_tier2: bool,
 }
 
+/// Eight parameters, which clippy dislikes. Each is a distinct dependency
+/// this server needs and none is derivable from the others; bundling them
+/// into a config struct would move the same list one line up and add a type
+/// whose only purpose is to satisfy a lint.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     pool: PgPool,
     addr: SocketAddr,
@@ -4225,6 +4292,7 @@ pub async fn serve(
     key: Arc<EncryptionKey>,
     tls: Option<rustls::ServerConfig>,
     deployment: Deployment,
+    webhook: Arc<crate::webhook::WebhookSender>,
 ) -> anyhow::Result<()> {
     let tls_enabled = tls.is_some();
     let ctx = Ctx {
@@ -4236,6 +4304,7 @@ pub async fn serve(
         reconcile: Arc::new(ReconcileState::new()),
         tls_enabled,
         deployment: Arc::new(deployment),
+        webhook,
         started_at: std::time::Instant::now(),
         // Two report intervals plus slack: a replica that misses one delivery
         // should not vanish from a UI, and one that has genuinely gone should
@@ -4544,6 +4613,7 @@ mod tests {
                 classifier_tier2: false,
             }),
             started_at: std::time::Instant::now(),
+            webhook: Arc::new(crate::webhook::WebhookSender::disabled()),
         };
         (ctx, cache)
     }

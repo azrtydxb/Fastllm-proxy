@@ -631,6 +631,8 @@ A single replica enforcing the full configured limit locally would, with N repli
 | `--host` / `--port` | `127.0.0.1` / `4000` | Loopback by default; bind wider deliberately |
 | `--master-key` | from config | Bearer token required from clients |
 | `--policy` | `cache-affinity` | Or `least-loaded`, `round-robin`, `lowest-latency` |
+| `--webhook-url` | none | POST notifications on backend up/down and snapshot rebuild failure — see [operations.md](operations.md) |
+| `--webhook-secret` | none | HMAC-SHA256 signature in `x-fastllm-signature` |
 | `--max-retries` | `2` | Alternate backends tried before any bytes reach the client |
 | `--upstream-timeout` | `120` | Seconds to *first byte*. Does not bound generation |
 | `--health-interval` | `10` | Seconds between probes |

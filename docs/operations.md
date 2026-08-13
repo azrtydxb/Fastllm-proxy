@@ -228,6 +228,42 @@ visible.
 Nothing is stored: a replica that stops reporting ages out after 30 seconds.
 "Up, 40 minutes ago" is not health.
 
+## Notifications
+
+Everything this gateway knows is already published — `/metrics` to scrape,
+`/admin/fleet` to poll, `usage_events` to query. All of it requires somebody
+to be looking. `--webhook-url` is the other direction, for the conditions
+worth telling someone about at 3am:
+
+| event | when |
+|---|---|
+| `backend_down` | a replica newly reports a backend unhealthy |
+| `backend_recovered` | the same backend reporting healthy again |
+| `snapshot_rebuild_failed` | a rebuild failed *after* a write committed, so the database and the published snapshot have diverged |
+
+**Transitions, not states.** A backend that is down stays down, and a health
+report every ten seconds would otherwise become six alerts a minute for one
+incident. A replica's *first* report emits nothing at all — there is no
+previous state to have changed from, and a control-plane restart would
+otherwise announce every already-down backend as though it had just failed.
+
+**Per replica, not merged.** Every replica losing a backend is a dead
+backend; one replica losing it is a partition. Merging them here would delete
+the distinction before anyone saw it, which is the same reason
+`GET /admin/fleet` never averages replicas together.
+
+`--webhook-secret` signs each body with HMAC-SHA256 in `x-fastllm-signature`,
+in the `sha256=<hex>` form most receivers already know. A webhook endpoint is
+reachable by anyone who learns its address, so a receiver that *acts* on
+notifications wants to know where they came from.
+
+Delivery is one attempt with a five-second timeout and no retry, from a small
+bounded queue. A receiver that is down will still be down in five seconds,
+and a retry loop would turn one unreachable endpoint into a queue that never
+drains — while the condition being reported is still true and still visible
+on `/metrics` and `/admin/fleet`. Notifications dropped because the queue was
+full are counted rather than silently discarded.
+
 ## Per-request records
 
 `usage_events` carries latency and outcome alongside the token counts:
