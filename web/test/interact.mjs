@@ -534,6 +534,28 @@ await goto("overview");
   await click(byText("close"));
 }
 
+// Metrics carries the same history card and the same modal. Asserted
+// separately from Overview's because they are two mounts of it, and a
+// component that only works on one screen looks fine on the other until
+// somebody clicks.
+await goto("metrics");
+{
+  check(
+    "the metrics screen has a history chart",
+    !!byText("Last 24 hours", "div"),
+    "no Last 24 hours card on Metrics",
+  );
+  const before = lastCall("GET", "/admin/timeseries");
+  check("and it asks for a bucketed window", !!before, "no /admin/timeseries request");
+  await click(byText("expand"));
+  check(
+    "expand opens the drill-down from Metrics too",
+    !!byText("Traffic over time", "div") && !!byText("close"),
+    "modal did not open from Metrics",
+  );
+  await click(byText("close"));
+}
+
 // Usage and Audit: the read filters that change the query, not the body.
 await goto("usage");
 {

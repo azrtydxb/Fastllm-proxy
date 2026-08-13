@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
 import { fleetSummary, rateBetween } from "../fleet.js";
+import { Legend, RANGES, TimeChart, useTimeseries } from "../charts.jsx";
+import { TimeseriesModal } from "./TimeseriesModal.jsx";
 import {
   Bar,
   Button,
@@ -15,6 +17,7 @@ import {
   Label,
   Loading,
   Mono,
+  NotAvailable,
   Muted,
   Row,
   Spark,
@@ -155,6 +158,8 @@ export function Metrics({ onUnauthorised, config }) {
           </Muted>
         </Card>
       )}
+
+      <MetricsHistory />
 
       <Grid cols={3}>
         <RateCard
@@ -409,5 +414,95 @@ function Stat({ label, value, hint }) {
         {hint && <span style={{ color: "var(--fg-4)" }}> · {hint}</span>}
       </span>
     </div>
+  );
+}
+
+/**
+ * The same window the Overview carries, on the screen where someone has
+ * come specifically to look at rates.
+ *
+ * Everything else here is measured *by this page* since it loaded — that is
+ * what makes it a live view, and it is the right answer to "what is
+ * happening now". It is the wrong answer to "was it like this an hour ago",
+ * which is the question you have when you arrive at this screen because
+ * something looked wrong. That question needs the database.
+ *
+ * Deliberately not scoped by the replica picker above. `usage_events` records
+ * which principal and model a request belonged to, never which replica served
+ * it — the row is written by the control plane from a batch, and by then the
+ * replica is not part of the fact. Filtering this by replica would silently
+ * ignore the selection, so it says so instead of pretending.
+ */
+function MetricsHistory() {
+  const [open, setOpen] = useState(false);
+  const range = RANGES.find((r) => r.id === "24h");
+  const { points, error } = useTimeseries({ range });
+
+  const series = [
+    { key: "requests_ok", label: "served", tone: "accent" },
+    { key: "upstream_errors", label: "upstream errors", tone: "bad" },
+    { key: "refused", label: "refused", tone: "warn" },
+  ];
+  const lines = [
+    { key: "p50_ms", label: "p50", tone: "ok" },
+    { key: "p95_ms", label: "p95", tone: "violet" },
+  ];
+
+  const shaped = points?.map((p) => {
+    const refused =
+      p.refused_authorisation +
+      p.refused_rate_limit +
+      p.refused_budget +
+      p.refused_no_backend +
+      p.refused_unattributed;
+    return {
+      ...p,
+      refused,
+      requests_ok: Math.max(
+        0,
+        p.requests - p.upstream_errors - (refused - p.refused_unattributed),
+      ),
+    };
+  });
+
+  return (
+    <>
+      <Card
+        title="Last 24 hours"
+        right={
+          <Row gap={10}>
+            <Muted>from usage_events · fleet-wide · click to explore</Muted>
+            <Button onClick={() => setOpen(true)}>expand</Button>
+          </Row>
+        }
+      >
+        {error ? (
+          <NotAvailable why={error}>
+            History comes from <Mono>GET /admin/timeseries</Mono>. The live rates below are
+            unaffected — they are measured by this page and need no database.
+          </NotAvailable>
+        ) : (
+          <div
+            onClick={() => setOpen(true)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
+            style={{ cursor: "pointer" }}
+            aria-label="Open traffic history"
+          >
+            <TimeChart
+              points={shaped}
+              series={series}
+              lines={lines}
+              height={150}
+              spanSeconds={range.seconds}
+            />
+            <div style={{ height: 8 }} />
+            <Legend series={series} lines={lines} />
+          </div>
+        )}
+      </Card>
+      {open && <TimeseriesModal onClose={() => setOpen(false)} />}
+    </>
   );
 }
