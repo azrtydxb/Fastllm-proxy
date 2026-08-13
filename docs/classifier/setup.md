@@ -26,7 +26,7 @@ Two classes whose centroids sit above ~0.8 are one region with two names and no
 threshold separates them — the report says so rather than leaving you to infer
 it from four numbers.
 
-## Setting it up in the UI
+## Defining a class
 
 Everything above is a screen, and **Prompt classes** is where a class begins.
 A name, a tier, and example prompts one per line — no training step and no

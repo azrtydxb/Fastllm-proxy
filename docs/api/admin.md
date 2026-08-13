@@ -3,8 +3,6 @@
 Everything under `/admin/*` on the control plane: models, backends, keys,
 principals, prices, health and the audit log.
 
-## Admin API
-
 Everything an operator needs to run the control plane, so that neither raw SQL nor a second `import` run is the documented way to change policy. Every mutating route rebuilds and republishes the snapshot on the spot, so a change reaches `--role proxy` within one `--config-poll` interval rather than waiting on the control plane's own periodic rebuild.
 
 | Endpoint | Purpose |

@@ -3,8 +3,6 @@
 The rule grammar behind virtual models, and the dry-run that answers which
 rule would decide before anything is dispatched.
 
-## Routing rules
-
 A virtual model is a client-facing name with an ordered list of rules and a
 fallback. First rule whose conditions match wins; conditions within a rule are
 AND'd. Targets are weighted (relative shares, not percentages), and the target

@@ -3,8 +3,6 @@
 What the gateway serves on `:4000`, what it deliberately does not, and
 the headers and retry behaviour that come with each.
 
-## Endpoints
-
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/chat/completions` | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations` |
