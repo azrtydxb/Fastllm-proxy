@@ -62,17 +62,31 @@ fn cleanup_for(suffix: &str) -> TestCleanup {
         .track_suffix("permissions", "resource", suffix)
 }
 
-fn wait_healthy(port: u16) {
+/// Wait for both listeners `--role all` binds.
+///
+/// `/health` on the data plane says nothing about the admin API, which is
+/// bound separately and later — and this suite drives the admin port to move
+/// backends around. Waiting on only the proxy is a race that shows up as a
+/// connection refused on the admin port, which is how it surfaced in CI.
+fn wait_healthy(port: u16, admin_port: u16) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if !matches!(
+        let proxy_up = !matches!(
             ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
             Err(ureq::Error::Transport(_))
-        ) {
+        );
+        let admin_up = !matches!(
+            ureq::get(&format!("http://127.0.0.1:{admin_port}/healthz")).call(),
+            Err(ureq::Error::Transport(_))
+        );
+        if proxy_up && admin_up {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("fastllm-proxy on port {port} did not answer /health within 20s");
+            panic!(
+                "fastllm-proxy did not answer both /health on {port} and /healthz on \
+                 {admin_port} within 20s"
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -99,7 +113,7 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         .spawn()
         .expect("failed to spawn fastllm-proxy --role all");
     let proc = Proc(child);
-    wait_healthy(port);
+    wait_healthy(port, admin_port);
     proc
 }
 

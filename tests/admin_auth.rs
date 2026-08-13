@@ -88,10 +88,25 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         // database that happened to hold a model and hang for the full
         // timeout on an empty one — the server was listening and
         // answering the entire time.
-        if !matches!(
+        //
+        // **Both** listeners, not just the proxy one. `--role all` binds the
+        // data plane and the admin API separately, and the admin API is
+        // bound after the snapshot is built — so `/health` answering proves
+        // only that the *proxy* is up. Every test here then talks to the
+        // admin port, and one of them raced it in CI: connection refused on
+        // 14724 while `/health` on the data-plane port had answered happily.
+        //
+        // `/healthz` is the admin API's own unauthenticated liveness route,
+        // so this needs no session and widens no gate.
+        let proxy_up = !matches!(
             ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
             Err(ureq::Error::Transport(_))
-        ) {
+        );
+        let admin_up = !matches!(
+            ureq::get(&format!("http://127.0.0.1:{admin_port}/healthz")).call(),
+            Err(ureq::Error::Transport(_))
+        );
+        if proxy_up && admin_up {
             return proc;
         }
         if let Ok(Some(status)) = proc.0.try_wait() {
@@ -101,7 +116,8 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         if Instant::now() >= deadline {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             panic!(
-                "fastllm-proxy --role all on port {port} did not answer /health within 90s; \
+                "fastllm-proxy --role all did not answer both /health on {port} and \
+                 /healthz on {admin_port} within 90s; \
                  child output:\n{log}"
             );
         }

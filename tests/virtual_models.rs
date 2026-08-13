@@ -79,10 +79,21 @@ fn start(port: u16, admin_port: u16, database_url: &str) -> Proc {
         // database that happened to hold a model and hang for the full
         // timeout on an empty one — the server was listening and
         // answering the entire time.
-        if !matches!(
+        // Both listeners. `--role all` binds the data plane and the admin
+        // API separately, so `/health` answering proves only the proxy is
+        // up — a test that then talks to the admin port can race it, and
+        // one did: connection refused on the admin port in CI while
+        // `/health` had answered happily. `/healthz` is the admin API's own
+        // unauthenticated liveness route.
+        let proxy_up = !matches!(
             ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
             Err(ureq::Error::Transport(_))
-        ) {
+        );
+        let admin_up = !matches!(
+            ureq::get(&format!("http://127.0.0.1:{admin_port}/healthz")).call(),
+            Err(ureq::Error::Transport(_))
+        );
+        if proxy_up && admin_up {
             return proc;
         }
         if Instant::now() >= deadline {
