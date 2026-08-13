@@ -1,0 +1,17 @@
+# cert-manager issues the admin plane's certificate. Requires a ClusterIssuer
+# named `cluster-ca` — rename it here to whatever yours is called.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastllm-control-tls
+spec:
+  secretName: fastllm-control-tls
+  # In-cluster callers only. Add an IP or external name here if the admin
+  # plane is reachable from outside, and read docs/security.md first.
+  dnsNames:
+    - fastllm-control
+    - fastllm-control.fastllm.svc
+    - fastllm-control.fastllm.svc.cluster.local
+  issuerRef:
+    kind: ClusterIssuer
+    name: cluster-ca
