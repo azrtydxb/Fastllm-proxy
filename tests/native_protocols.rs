@@ -1007,6 +1007,23 @@ fn hits_of(recorder: &Recorder) -> usize {
     recorder.lock().unwrap().hits
 }
 
+/// The snapshot this proxy is serving, scraped from `/metrics`.
+///
+/// Needed because a rebuild clears the response cache — deliberately, see
+/// `AppState::apply_snapshot` — and this suite shares one database, so any
+/// other test's admin write can clear it underneath a cache assertion.
+fn snapshot_version(port: u16) -> u64 {
+    let body = ureq::get(&format!("http://127.0.0.1:{port}/metrics"))
+        .call()
+        .expect("metrics")
+        .into_string()
+        .expect("metrics body");
+    body.lines()
+        .find_map(|l| l.strip_prefix("fastllm_snapshot_version "))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("fastllm_snapshot_version in /metrics")
+}
+
 /// A cached answer must never reach the provider a second time.
 ///
 /// Asserted against the mock's own hit counter rather than against latency:
@@ -1095,22 +1112,48 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
         "messages": [{"role": "user", "content": "the same question twice"}],
     });
 
-    let before = hits_of(&recorder);
-    let (status, first) = chat(port, &key, body.clone());
-    assert_eq!(status, 200, "{first}");
-    let after_first = hits_of(&recorder);
-    assert_eq!(
-        after_first,
-        before + 1,
-        "the first request reaches upstream"
-    );
+    // A snapshot rebuild clears the response cache on purpose, and every test
+    // in this suite writes to one shared database — so a concurrent test's
+    // admin write can empty the cache between these two requests and the
+    // second legitimately reaches upstream. That is not what this test is
+    // about, and asserting through it made this the flakiest test in CI.
+    //
+    // So: retry the pair when the snapshot moved, and fail on a miss that had
+    // no rebuild to explain it. The assertion stays exactly as strict for the
+    // thing being tested.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let before = hits_of(&recorder);
+        let version_before = snapshot_version(port);
 
-    let (status, second) = chat(port, &key, body);
-    assert_eq!(status, 200, "{second}");
-    assert_eq!(
-        hits_of(&recorder),
-        after_first,
-        "the second must be served from cache, not forwarded"
-    );
-    assert_eq!(first, second, "and byte-for-byte the same answer");
+        let (status, first) = chat(port, &key, body.clone());
+        assert_eq!(status, 200, "{first}");
+        let after_first = hits_of(&recorder);
+        assert_eq!(
+            after_first,
+            before + 1,
+            "the first request reaches upstream"
+        );
+
+        let (status, second) = chat(port, &key, body.clone());
+        assert_eq!(status, 200, "{second}");
+        let after_second = hits_of(&recorder);
+        let version_after = snapshot_version(port);
+
+        if after_second == after_first {
+            assert_eq!(first, second, "and byte-for-byte the same answer");
+            break;
+        }
+
+        assert_eq!(
+            version_before, version_after,
+            "the second request was forwarded, and no snapshot rebuild happened \
+             to explain it — the response cache did not serve a repeat request"
+        );
+        assert!(
+            attempt < 5,
+            "a rebuild cleared the cache on every one of {attempt} attempts"
+        );
+    }
 }
