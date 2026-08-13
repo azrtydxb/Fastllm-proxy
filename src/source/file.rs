@@ -59,6 +59,9 @@ impl SnapshotSource for FileSource {
                     // File mode has no place to configure a TTL, so caching is
                     // off — the same as any model that has not asked for it.
                     cache_ttl: None,
+                    // File mode has nowhere to declare it, so it is unknown
+                    // rather than unlimited — see `ModelDef::context_length`.
+                    context_length: None,
                     backends: vec![backend],
                 }),
             }

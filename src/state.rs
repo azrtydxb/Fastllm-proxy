@@ -444,6 +444,7 @@ mod tests {
             models: vec![ModelDef {
                 name: name.to_string(),
                 cache_ttl: None,
+                context_length: None,
                 backends: vec![BackendDef {
                     api_base: "http://10.0.0.1:8000".into(),
                     upstream_model: name.to_string(),

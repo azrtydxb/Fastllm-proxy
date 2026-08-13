@@ -305,6 +305,9 @@ pub struct Registry {
     pools: HashMap<String, Pool>,
     /// Every distinct backend, for health sweeps and metrics.
     all: Vec<Arc<Backend>>,
+    /// Model name to declared context window. Absent means undeclared, which
+    /// is a third state routing must handle — see `ModelDef::context_length`.
+    context_length: HashMap<String, u64>,
 }
 
 impl Registry {
@@ -383,6 +386,22 @@ impl Registry {
         Self::build_from_entries(entries, interner, previous)
     }
 
+    /// Tokens a model can accept, or `None` when nobody has declared it.
+    ///
+    /// Lives here rather than only on the snapshot because routing asks the
+    /// registry, not the snapshot, and the alternative was threading a second
+    /// lookup through every call site that already has a `&Registry`.
+    pub fn context_length(&self, model: &str) -> Option<u64> {
+        self.context_length.get(model).copied()
+    }
+
+    /// Declare context windows on a registry built from YAML, which has no
+    /// syntax for them. Test-only: the real path is a control-plane snapshot.
+    #[cfg(test)]
+    pub fn set_context_lengths_for_test(&mut self, lengths: HashMap<String, u64>) {
+        self.context_length = lengths;
+    }
+
     fn build_from_entries(
         entries: impl Iterator<Item = (String, String, BackendDef)>,
         interner: &Interner,
@@ -428,6 +447,10 @@ impl Registry {
         Ok(Self {
             pools: pools.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
             all,
+            // Filled by `build_from_snapshot`; the YAML path has nowhere to
+            // declare a context window, so it stays empty and every model
+            // there reads as undeclared.
+            context_length: HashMap::new(),
         })
     }
 

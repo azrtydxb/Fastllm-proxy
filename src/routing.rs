@@ -568,6 +568,22 @@ pub struct RequestFacts<'a> {
     pub class_refines: &'a [String],
 }
 
+impl<'a> RequestFacts<'a> {
+    /// Tokens this request will occupy at its largest: the prompt estimate
+    /// plus whatever generation the caller asked for.
+    ///
+    /// Both halves matter. A 200k prompt fits a 262k window, and a 200k
+    /// prompt asking for 100k more does not, so comparing the prompt alone
+    /// against the window would route a request that cannot finish. `None`
+    /// for `max_tokens` contributes nothing rather than a guess — the caller
+    /// named no ceiling, and inventing one here would demote models on
+    /// arithmetic nobody asked for.
+    pub fn needed_tokens(&self) -> u64 {
+        self.prompt_tokens
+            .saturating_add(self.max_tokens.unwrap_or(0))
+    }
+}
+
 impl RoutingRule {
     /// Conditions are AND'd, cheapest first: the two that read nothing but
     /// integers already in hand short-circuit before the ones that walk
@@ -652,10 +668,20 @@ impl VirtualModelDef {
     ) -> Vec<String> {
         for rule in &self.rules {
             if rule.matches(facts, registry) {
-                return order_candidates(&rule.targets, prefix_hash, registry);
+                return order_candidates(
+                    &rule.targets,
+                    prefix_hash,
+                    registry,
+                    facts.needed_tokens(),
+                );
             }
         }
-        order_candidates(&self.default_targets, prefix_hash, registry)
+        order_candidates(
+            &self.default_targets,
+            prefix_hash,
+            registry,
+            facts.needed_tokens(),
+        )
     }
 }
 
@@ -705,6 +731,7 @@ fn order_candidates(
     targets: &[WeightedTarget],
     prefix_hash: u64,
     registry: &Registry,
+    needed_tokens: u64,
 ) -> Vec<String> {
     let Some(chosen) = choose_weighted(targets, prefix_hash) else {
         return Vec::new();
@@ -727,6 +754,29 @@ fn order_candidates(
     // own error reaches the client, which beats a synthetic 503 — the same
     // last-resort rule `Router::pick` follows inside a single pool.
     ordered.sort_by_key(|m| !registry.pool_has_healthy(m));
+
+    // Context-window fallback: a model whose declared window provably cannot
+    // hold this request goes to the back rather than being dropped.
+    //
+    // Demoted, not removed, for the same reason an unhealthy pool is kept —
+    // an empty candidate list is a synthetic error, while a real upstream
+    // 400 at least tells the caller what was wrong. This only reorders; if
+    // every candidate is too small the chain is unchanged and the request
+    // fails where it would have failed anyway.
+    //
+    // A model with no declared window is never demoted. Undeclared is not
+    // "small": treating it as too small would quietly stop routing to every
+    // model nobody has filled the figure in for, which is most of them.
+    //
+    // Stable, so it reorders only on this axis and leaves the health
+    // ordering above intact among candidates that agree on fit.
+    if needed_tokens > 0 {
+        ordered.sort_by_key(|m| {
+            registry
+                .context_length(m)
+                .is_some_and(|limit| limit < needed_tokens)
+        });
+    }
     ordered
 }
 
@@ -751,6 +801,23 @@ mod tests {
         let yaml = format!("model_list:\n{entries}");
         let cfg: FileConfig = serde_yaml::from_str(&yaml).unwrap();
         Registry::build(&cfg, &Interner::default(), None).unwrap()
+    }
+
+    /// A registry whose models carry declared context windows.
+    ///
+    /// Built through the ordinary path and then given the windows directly,
+    /// because the YAML config has nowhere to declare one — a context length
+    /// reaches a registry only from a control-plane snapshot.
+    fn registry_with_context(models: &[(&str, Option<u64>)]) -> Registry {
+        let names: Vec<&str> = models.iter().map(|(n, _)| *n).collect();
+        let mut registry = registry_with(&names);
+        registry.set_context_lengths_for_test(
+            models
+                .iter()
+                .filter_map(|(n, c)| c.map(|c| (n.to_string(), c)))
+                .collect(),
+        );
+        registry
     }
 
     /// The request side of a match, with everything a test does not care
@@ -1584,5 +1651,88 @@ mod tests {
         assert_eq!(estimate_prompt_tokens(0), 0);
         // 350 bytes / 3.5 bytes-per-token = 100, chosen to land exactly.
         assert_eq!(estimate_prompt_tokens(350), 100);
+    }
+
+    /// The context-window fallback: a model that provably cannot hold the
+    /// request goes to the back of the chain.
+    #[test]
+    fn a_model_too_small_for_the_prompt_is_demoted_not_dropped() {
+        let registry = registry_with_context(&[("small", Some(8_192)), ("big", Some(262_144))]);
+        let targets = vec![
+            WeightedTarget {
+                model: "small".into(),
+                weight: 100,
+            },
+            WeightedTarget {
+                model: "big".into(),
+                weight: 1,
+            },
+        ];
+
+        // Comfortably inside both: the declared weights decide, and `small`
+        // carries almost all of them.
+        let small_request = order_candidates(&targets, 0, &registry, 1_000);
+        assert_eq!(small_request[0], "small");
+
+        // Past what `small` can hold: `big` leads, and `small` is still
+        // present as a last resort rather than removed.
+        let big_request = order_candidates(&targets, 0, &registry, 100_000);
+        assert_eq!(big_request[0], "big", "the model that fits must lead");
+        assert!(
+            big_request.contains(&"small".to_string()),
+            "the small model stays in the chain: an empty chain is a synthetic \
+             error, a real upstream 400 at least says what was wrong"
+        );
+    }
+
+    /// Undeclared is not "small". A model nobody has given a window to must
+    /// never be demoted, or filling the field in for one model would quietly
+    /// deprioritise every model that still lacks it.
+    #[test]
+    fn a_model_with_no_declared_window_is_never_demoted() {
+        let registry = registry_with_context(&[("unknown", None), ("small", Some(8_192))]);
+        let targets = vec![
+            WeightedTarget {
+                model: "unknown".into(),
+                weight: 100,
+            },
+            WeightedTarget {
+                model: "small".into(),
+                weight: 1,
+            },
+        ];
+        let ordered = order_candidates(&targets, 0, &registry, 100_000);
+        assert_eq!(
+            ordered[0], "unknown",
+            "undeclared must not be treated as too small"
+        );
+    }
+
+    /// The generation counts too: a prompt that fits on its own may not fit
+    /// once the caller's requested completion is added.
+    #[test]
+    fn needed_tokens_counts_the_requested_generation() {
+        let headers = HeaderMap::new();
+        let facts = RequestFacts {
+            caller: None,
+            prompt_tokens: 250_000,
+            max_tokens: Some(20_000),
+            streaming: false,
+            headers: &headers,
+            now: Utc::now(),
+            class: None,
+            class_refines: &[],
+        };
+        assert_eq!(facts.needed_tokens(), 270_000);
+
+        let no_ceiling = RequestFacts {
+            max_tokens: None,
+            ..facts
+        };
+        assert_eq!(
+            no_ceiling.needed_tokens(),
+            250_000,
+            "an unstated ceiling contributes nothing rather than a guess"
+        );
     }
 }

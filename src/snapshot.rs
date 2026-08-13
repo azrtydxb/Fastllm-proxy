@@ -189,6 +189,14 @@ pub struct ModelDef {
     /// How long a response to this model may be served from cache. `None` is
     /// off, which is the default and costs nothing.
     pub cache_ttl: Option<std::time::Duration>,
+    /// Tokens this model can accept, or `None` when nobody has said.
+    ///
+    /// Three states, not two, and the third is the one that matters: unknown
+    /// is neither unlimited nor zero. Routing that treated unknown as
+    /// unlimited would send an oversized prompt and collect the upstream 400
+    /// this field exists to avoid; routing that treated it as zero would stop
+    /// using every model nobody has filled in. Callers must branch on it.
+    pub context_length: Option<u64>,
     pub backends: Vec<BackendDef>,
 }
 
@@ -367,6 +375,11 @@ pub struct WireModelDef {
     /// snapshot simply means caching off.
     #[serde(default)]
     pub cache_ttl_seconds: Option<u64>,
+    /// Defaults to absent, so a proxy talking to a control plane older than
+    /// this field reads "unknown" rather than failing to decode — and
+    /// unknown is a state the consumers already have to handle.
+    #[serde(default)]
+    pub context_length: Option<u64>,
     pub backends: Vec<WireBackendDef>,
 }
 
@@ -581,6 +594,7 @@ impl Snapshot {
                 .map(|m| WireModelDef {
                     name: m.name.clone(),
                     cache_ttl_seconds: m.cache_ttl.map(|d| d.as_secs()),
+                    context_length: m.context_length,
                     backends: m
                         .backends
                         .iter()
@@ -731,6 +745,7 @@ impl Snapshot {
                         .cache_ttl_seconds
                         .filter(|s| *s > 0)
                         .map(std::time::Duration::from_secs),
+                    context_length: m.context_length.filter(|c| *c > 0),
                     backends: m
                         .backends
                         .into_iter()
@@ -911,6 +926,7 @@ mod tests {
             models: vec![ModelDef {
                 name: "m".into(),
                 cache_ttl: Some(std::time::Duration::from_secs(120)),
+                context_length: None,
                 backends: vec![],
             }],
             ..Snapshot::default()
@@ -1060,6 +1076,7 @@ mod tests {
         snap.models.push(ModelDef {
             name: "qwen3".into(),
             cache_ttl: None,
+            context_length: None,
             backends: vec![crate::snapshot::BackendDef {
                 api_base: "http://node-a:8000".into(),
                 upstream_model: "qwen3-upstream".into(),

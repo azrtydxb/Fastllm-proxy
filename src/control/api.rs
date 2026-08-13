@@ -610,6 +610,10 @@ struct ModelView {
     output_price_per_mtok: Option<i64>,
     /// `None` is caching off.
     cache_ttl_seconds: Option<i32>,
+    /// Tokens this model accepts, or absent when nobody has declared it.
+    /// Absent is a third state, not zero — routing demotes a model only when
+    /// the figure is known and too small.
+    context_length: Option<i64>,
     backends: Vec<BackendView>,
 }
 
@@ -617,10 +621,18 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
-    type ModelRow = (i64, String, String, Option<i64>, Option<i64>, Option<i32>);
+    type ModelRow = (
+        i64,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<i32>,
+        Option<i64>,
+    );
     let models: Vec<ModelRow> = sqlx::query_as(
         "SELECT id, name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds FROM models ORDER BY name",
+             cache_ttl_seconds, context_length FROM models ORDER BY name",
     )
     .fetch_all(&ctx.pool)
     .await
@@ -649,6 +661,7 @@ async fn list_models(
                     input_price_per_mtok,
                     output_price_per_mtok,
                     cache_ttl_seconds,
+                    context_length,
                 )| ModelView {
                     id,
                     name,
@@ -656,6 +669,7 @@ async fn list_models(
                     input_price_per_mtok,
                     output_price_per_mtok,
                     cache_ttl_seconds,
+                    context_length,
                     backends: backends
                         .iter()
                         .filter(|(_, model_id, ..)| *model_id == id)
@@ -801,6 +815,10 @@ struct PatchModel {
     output_price_per_mtok: Option<Option<i64>>,
     #[serde(default, deserialize_with = "double_option")]
     cache_ttl_seconds: Option<Option<i32>>,
+    /// Tokens this model accepts. `null` clears it back to undeclared, which
+    /// is not the same as zero — see `ModelDef::context_length`.
+    #[serde(default, deserialize_with = "double_option")]
+    context_length: Option<Option<i64>>,
 }
 
 /// Tells "absent" apart from "present and null".
@@ -848,6 +866,15 @@ async fn patch_model(
             "cache_ttl_seconds cannot be negative; 0 or null turns caching off",
         ));
     }
+    // Refused rather than coerced to "undeclared": a model that accepts no
+    // tokens is not a thing, and silently reinterpreting the number would
+    // leave an operator believing they had set a limit that is not there.
+    if body.context_length.flatten().is_some_and(|v| v <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "context_length must be positive; send null to clear it",
+        ));
+    }
 
     // `COALESCE($n, column)` would make "set to null" impossible, so each field
     // carries its own "was it present" flag instead.
@@ -856,7 +883,8 @@ async fn patch_model(
            description           = CASE WHEN $2 THEN $3  ELSE description           END,
            input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
            output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
-           cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END
+           cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END,
+           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END
          WHERE id = $1",
     )
     .bind(id)
@@ -868,6 +896,8 @@ async fn patch_model(
     .bind(body.output_price_per_mtok.flatten())
     .bind(body.cache_ttl_seconds.is_some())
     .bind(body.cache_ttl_seconds.flatten())
+    .bind(body.context_length.is_some())
+    .bind(body.context_length.flatten())
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("model update", &e))?;

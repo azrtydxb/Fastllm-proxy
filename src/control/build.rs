@@ -104,11 +104,12 @@ pub async fn build_snapshot_with(
     key: &EncryptionKey,
     embed: Option<&dyn PromptClassEmbedder>,
 ) -> anyhow::Result<Snapshot> {
-    let model_rows: Vec<(i64, String, Option<i32>)> =
-        sqlx::query_as("SELECT id, name, cache_ttl_seconds FROM models ORDER BY name")
-            .fetch_all(pool)
-            .await?;
-    let all_names: Vec<String> = model_rows.iter().map(|(_, n, _)| n.clone()).collect();
+    let model_rows: Vec<(i64, String, Option<i32>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, name, cache_ttl_seconds, context_length FROM models ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let all_names: Vec<String> = model_rows.iter().map(|(_, n, _, _)| n.clone()).collect();
 
     type BackendRow = (
         i64,
@@ -129,7 +130,7 @@ pub async fn build_snapshot_with(
     .await?;
 
     let mut models = Vec::new();
-    for (id, name, cache_ttl_seconds) in &model_rows {
+    for (id, name, cache_ttl_seconds, context_length) in &model_rows {
         let mut backends = Vec::new();
         for (
             _,
@@ -244,6 +245,9 @@ pub async fn build_snapshot_with(
             cache_ttl: cache_ttl_seconds
                 .filter(|s| *s > 0)
                 .map(|s| std::time::Duration::from_secs(s as u64)),
+            // A non-positive limit is meaningless and is read as unknown
+            // rather than as a model that can accept nothing.
+            context_length: context_length.filter(|c| *c > 0).map(|c| c as u64),
             backends,
         });
     }

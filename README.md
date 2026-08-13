@@ -84,6 +84,7 @@ Route on any of these:
 | `min/max_max_tokens` | how much generation was asked for |
 | `stream` | whether a human is waiting |
 | `headers` | exact header values — the client labels its own workload |
+| *context window* | not a condition — a model whose declared `context_length` cannot hold the prompt plus the requested generation is automatically demoted down the chain |
 | `min/max_budget_used_percent` | how much of the caller's budget is spent |
 | `max_inflight_per_backend` | how busy this rule's own targets are |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window, wrapping midnight |
