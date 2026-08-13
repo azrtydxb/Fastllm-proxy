@@ -204,7 +204,7 @@ pub struct FastllmProxySpec {
 /// What the controller last observed. Every field here is measured, not
 /// echoed back from the spec — a status that repeats the spec tells an
 /// operator nothing they did not already type.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FastllmProxyStatus {
     /// `ready/desired`, so a partially rolled-out gateway is visible in
@@ -224,7 +224,7 @@ pub struct FastllmProxyStatus {
     pub conditions: Vec<Condition>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
     #[serde(rename = "type")]

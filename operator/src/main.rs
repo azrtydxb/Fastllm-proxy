@@ -6,8 +6,7 @@
 //! service mesh, a label added by a policy engine — untouched. A
 //! read-modify-write loop would fight those tools for ever.
 
-mod crd;
-mod resources;
+use fastllm_operator::{crd, resources};
 
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
@@ -110,39 +109,62 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
         .unwrap_or(0);
 
     let ready = control_ready && proxy_ready >= 1;
+    let condition_status = if ready { "True" } else { "False" };
+
+    // Carry the previous timestamp forward while the condition has not
+    // actually changed. Two reasons, and the second one is the bug this
+    // fixes:
+    //
+    //   - `lastTransitionTime` is supposed to be the time the condition last
+    //     *changed*. Stamping it every pass makes it the time of the last
+    //     reconcile, which is a different and much less useful fact.
+    //   - A status write is itself a change to the resource, so the watch
+    //     fires and the controller reconciles again. With a fresh timestamp
+    //     every pass the status is never equal to itself and the loop never
+    //     settles — measured at roughly ten reconciles a second against an
+    //     otherwise idle cluster.
+    let previous = obj.status.as_ref();
+    let last_transition_time = previous
+        .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready"))
+        .filter(|c| c.status == condition_status)
+        .map(|c| c.last_transition_time.clone())
+        .unwrap_or_else(now_rfc3339);
+
     let status = FastllmProxyStatus {
         proxy_replicas: format!("{}/{}", proxy_ready, obj.spec.proxy.replicas),
         control_ready,
         observed_generation: obj.meta().generation.unwrap_or(0),
         conditions: vec![Condition {
             type_: "Ready".into(),
-            status: if ready { "True" } else { "False" }.into(),
+            status: condition_status.into(),
             reason: if ready { "AllReplicasReady" } else { "Progressing" }.into(),
             message: if control_ready {
                 format!("{proxy_ready} of {} gateway replicas ready", obj.spec.proxy.replicas)
             } else {
                 "control plane has no ready replica".into()
             },
-            // Deliberately the observation time rather than a real transition
-            // time: tracking a genuine transition needs the previous status,
-            // and a wrong timestamp is worse than an honest one.
-            last_transition_time: now_rfc3339(),
+            last_transition_time,
         }],
     };
 
-    let api: Api<FastllmProxy> = Api::namespaced(client.clone(), &ns);
-    // A separate field manager for status: the spec and the status are
-    // written by different code paths and must not share ownership.
-    api.patch_status(
-        &name,
-        &PatchParams::apply("fastllm-operator-status").force(),
-        &Patch::Apply(serde_json::json!({
-            "apiVersion": FastllmProxy::api_version(&()),
-            "kind": FastllmProxy::kind(&()),
-            "status": status,
-        })),
-    )
-    .await?;
+    // Write only on a real change. Even with a stable timestamp, an
+    // unconditional patch bumps `metadata.resourceVersion` on every pass and
+    // keeps the watch — and therefore this controller — busy for nothing.
+    if previous != Some(&status) {
+        let api: Api<FastllmProxy> = Api::namespaced(client.clone(), &ns);
+        // A separate field manager for status: the spec and the status are
+        // written by different code paths and must not share ownership.
+        api.patch_status(
+            &name,
+            &PatchParams::apply("fastllm-operator-status").force(),
+            &Patch::Apply(serde_json::json!({
+                "apiVersion": FastllmProxy::api_version(&()),
+                "kind": FastllmProxy::kind(&()),
+                "status": status,
+            })),
+        )
+        .await?;
+    }
 
     // Re-reconcile on a timer as well as on events: readiness changes on the
     // Deployments this owns are watched, but a Secret being created later is
@@ -165,6 +187,15 @@ fn on_error(obj: Arc<FastllmProxy>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls refuses to pick for you when more than one provider feature is
+    // reachable in the dependency tree, and the failure is a panic at the
+    // first handshake — which here is the first API call, so the operator
+    // dies at startup with a message about crate features rather than
+    // anything to do with Kubernetes. `ring` to match the proxy.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("FASTLLM_OPERATOR_LOG")

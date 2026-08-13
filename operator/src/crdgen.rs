@@ -10,9 +10,7 @@
 //!
 //!   cargo run -p fastllm-operator --bin crdgen > operator/deploy/crd.yaml
 
-#[path = "crd.rs"]
-mod crd;
-
+use fastllm_operator::crd;
 use kube::CustomResourceExt;
 
 fn main() {

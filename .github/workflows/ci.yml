@@ -114,6 +114,9 @@ jobs:
             [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${IMAGE}:${GITHUB_REF_NAME#v}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+          # The operator image is tagged from the same commit, so it needs the
+          # short sha as its own output rather than parsed back out of `tags`.
+          echo "short=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
         env:
           IMAGE: ${{ env.IMAGE }}
 
@@ -172,6 +175,35 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64,mode=max,image-manifest=true
+
+      # The operator is a second image on the same release cycle. Small and
+      # fast to build — no UI stage, no classifier models — so it rides along
+      # rather than getting its own workflow.
+      - name: Build & push the operator (arm64 → zot)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: operator/Dockerfile
+          builder: fastllm
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator:${{ steps.meta.outputs.short }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true
+
+      - name: Build & push the operator (GHCR, tagged releases only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: operator/Dockerfile
+          builder: fastllm
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fastllm-operator:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fastllm-operator:latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
 
       - name: Build & push (arm64 → GHCR, tagged releases only)
         if: startsWith(github.ref, 'refs/tags/v')
