@@ -78,6 +78,29 @@ pub async fn serve_asset(uri: Uri) -> Response {
                 .into_response(),
         );
     }
+    // Only the root gets the SPA. Everything else that reached here is a path
+    // this server does not serve, and should say so.
+    //
+    // The UI routes on the *hash* (`/#/models`), so its deep links all have
+    // `/` as their path — it has never needed a catch-all, and having one
+    // meant every unknown path answered 200 with HTML. That is the same
+    // defect as an error message asserting a cause it has not checked: a
+    // client probing `/openapi.json` against a build too old to have it got a
+    // success and a page of markup, which is a worse answer than a 404
+    // because it looks like it worked.
+    if !(path.is_empty() || path == "index.html") {
+        return with_security_headers(
+            (
+                StatusCode::NOT_FOUND,
+                format!(
+                    "no route for /{path} on the admin port. The management UI is at /, the \
+                     admin API under /admin/*, the OpenAPI description at /openapi.json, and \
+                     the control-plane protocol at /snapshot and /usage."
+                ),
+            )
+                .into_response(),
+        );
+    }
     match Assets::get("index.html") {
         Some(file) => with_security_headers(served(file, false)),
         None => with_security_headers(
@@ -146,8 +169,8 @@ mod tests {
     /// it pass is direct evidence a bare `web/dist/.gitkeep` degrades
     /// gracefully rather than merely being argued to.
     #[tokio::test]
-    async fn a_missing_asset_falls_back_to_index_html_or_a_clear_unavailable_response() {
-        let uri: Uri = "/some/spa/route".parse().unwrap();
+    async fn the_root_serves_the_ui_or_says_why_it_cannot() {
+        let uri: Uri = "/".parse().unwrap();
         let resp = serve_asset(uri).await;
         // Either this repo's checkout has a built `web/dist/index.html`
         // (200, whatever the SPA's shell is) or it does not (503, the
@@ -156,6 +179,35 @@ mod tests {
         assert!(
             resp.status() == StatusCode::OK || resp.status() == StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// An unknown path must 404 rather than answering 200 with the UI shell.
+    ///
+    /// This used to be the opposite, and the consequence was worse than
+    /// untidy: a client probing `/openapi.json` against a build too old to
+    /// serve it got a 200 and a page of HTML. A success that means "not
+    /// found" is harder to diagnose than a 404, because the caller has no
+    /// reason to look further.
+    ///
+    /// Safe because the UI routes on the *hash* — `/#/models` has `/` as its
+    /// path — so no client-side route ever arrives here as a path to be
+    /// resolved.
+    #[tokio::test]
+    async fn an_unknown_path_404s_rather_than_serving_the_ui_shell() {
+        for path in [
+            "/openapi.json",
+            "/some/spa/route",
+            "/snapshot-typo",
+            "/v1/models",
+        ] {
+            let uri: Uri = path.parse().unwrap();
+            let resp = serve_asset(uri).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} reached the asset fallback and must 404, not answer 200 with HTML"
+            );
+        }
     }
 
     /// The fix for the SPA fallback swallowing an unmatched `/admin/*`
@@ -178,19 +230,27 @@ mod tests {
         }
     }
 
-    /// A genuine SPA client route (never prefixed with `/admin`) is
-    /// unaffected by the 404 rule above — this is the other half of the
-    /// same fix, pinning that the exception is scoped to `/admin/*` only
-    /// and did not accidentally swallow the fallback's actual purpose.
+    /// The premise this replaces was wrong, which is why it is written out
+    /// rather than deleted: it asserted that `/models` was "a genuine SPA
+    /// client route" that must not 404, and therefore justified a catch-all
+    /// answering 200 for every unknown path.
+    ///
+    /// The UI has never routed on the path. `web/src/App.jsx` reads
+    /// `window.location.hash` and writes `#/models`, so every one of its
+    /// routes arrives here as `/` and `/models` is not a UI route at all —
+    /// it is a request for something this server does not have.
+    ///
+    /// So the fallback needs exactly one path, and this pins that: a deep
+    /// link into the UI is served, because its path is the root.
     #[tokio::test]
-    async fn a_non_admin_unmatched_path_still_falls_back_to_the_ui() {
-        let uri: Uri = "/models".parse().unwrap();
+    async fn a_hash_route_is_served_because_its_path_is_the_root() {
+        // What the browser actually requests for `https://host/#/models`.
+        let uri: Uri = "/".parse().unwrap();
         let resp = serve_asset(uri).await;
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "a client-side SPA route must still fall back to index.html (200) or the \
-             not-built placeholder (503), never 404"
+            "the root must serve the UI (200) or the not-built placeholder (503), never 404"
         );
     }
 
