@@ -249,6 +249,27 @@ impl LitellmParams {
         raw.to_string()
     }
 
+    /// Prefix for the credential header, as three distinct states.
+    ///
+    /// The distinction matters and was being lost:
+    ///
+    /// - **absent** — the ordinary case, `Authorization: Bearer <key>`.
+    /// - **`""`** — send the key with no prefix at all, which is what
+    ///   `api-key` (Azure) and `x-api-key` (Anthropic) require.
+    /// - **anything else** — that prefix.
+    ///
+    /// Collapsing the first two turns every backend that did not mention
+    /// `auth_scheme` into one that sends its key raw. `Registry::build` did
+    /// exactly that, and nothing caught it because the backends exercised in
+    /// tests either carry no credential or set the field explicitly.
+    pub fn auth_scheme_or_default(&self) -> Option<String> {
+        match self.auth_scheme.as_deref() {
+            None => Some("Bearer".to_string()),
+            Some("") => None,
+            Some(scheme) => Some(scheme.to_string()),
+        }
+    }
+
     /// Upstream bearer token, with LiteLLM's placeholders normalised away.
     /// The wire format for this backend.
     ///
@@ -280,7 +301,72 @@ impl LitellmParams {
 }
 
 /// Provider prefixes LiteLLM may prepend that are not part of the model name.
-const PROVIDER_PREFIXES: &[&str] = &["openai/", "hosted_vllm/", "vllm/", "openai_like/"];
+/// Prefixes LiteLLM qualifies a model name with, which the upstream must not
+/// see.
+///
+/// The native ones are here for the same reason the OpenAI-compatible ones
+/// are: `anthropic/claude-sonnet-4` imported verbatim is sent to Anthropic as
+/// a model called `anthropic/claude-sonnet-4`, which does not exist. Only a
+/// known prefix is stripped, so a model whose own name contains a slash —
+/// `Qwen/Qwen3-8B` — survives intact.
+const PROVIDER_PREFIXES: &[&str] = &[
+    "openai/",
+    "hosted_vllm/",
+    "vllm/",
+    "openai_like/",
+    "anthropic/",
+    "gemini/",
+    "azure/",
+    "azure_ai/",
+    "vertex_ai/",
+    "bedrock/",
+];
+
+#[cfg(test)]
+mod auth_scheme_and_prefix_tests {
+    use super::*;
+
+    fn params(yaml: &str) -> LitellmParams {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    /// Absent is not the same as empty, and conflating them sends every
+    /// credential without its `Bearer`.
+    #[test]
+    fn an_unmentioned_auth_scheme_is_bearer_and_an_empty_one_is_raw() {
+        let absent = params("{ api_base: http://h/v1, api_key: sk-x }");
+        assert_eq!(absent.auth_scheme_or_default(), Some("Bearer".into()));
+
+        let empty = params("{ api_base: http://h/v1, api_key: sk-x, auth_scheme: \"\" }");
+        assert_eq!(
+            empty.auth_scheme_or_default(),
+            None,
+            "\"\" means send it raw"
+        );
+
+        let named = params("{ api_base: http://h/v1, api_key: sk-x, auth_scheme: Token }");
+        assert_eq!(named.auth_scheme_or_default(), Some("Token".into()));
+    }
+
+    /// A native backend's model name is sent to the provider, so a LiteLLM
+    /// prefix on it names a model that does not exist there.
+    #[test]
+    fn a_provider_prefix_is_stripped_and_a_model_name_with_a_slash_is_not() {
+        for (raw, want) in [
+            ("anthropic/claude-sonnet-4", "claude-sonnet-4"),
+            ("gemini/gemini-2.0-flash", "gemini-2.0-flash"),
+            ("azure/gpt-4o", "gpt-4o"),
+            ("vertex_ai/gemini-2.0-flash", "gemini-2.0-flash"),
+            ("bedrock/anthropic.claude-v2", "anthropic.claude-v2"),
+            ("openai/Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
+            // Not a provider prefix: the org is part of the name.
+            ("Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
+        ] {
+            let p = params(&format!("{{ api_base: http://h/v1, model: {raw} }}"));
+            assert_eq!(p.upstream_model("fallback"), want, "for {raw}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

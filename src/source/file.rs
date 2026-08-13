@@ -58,11 +58,7 @@ impl SnapshotSource for FileSource {
                     .auth_header
                     .clone()
                     .unwrap_or_else(|| "authorization".to_string()),
-                auth_scheme: entry
-                    .litellm_params
-                    .auth_scheme
-                    .clone()
-                    .filter(|s| !s.is_empty()),
+                auth_scheme: entry.litellm_params.auth_scheme_or_default(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
             };
             match models.iter_mut().find(|m| m.name == name) {

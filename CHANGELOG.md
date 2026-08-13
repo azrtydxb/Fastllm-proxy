@@ -20,6 +20,17 @@ source for *why* anything is the way it is; this file is the summary.
   converges an existing row instead of only avoiding a duplicate.
 - The `FileSource` path dropped the same four, so one YAML file described a
   different backend depending on which code path read it.
+- `auth_scheme` was two states where it needed three. Absent means
+  `Authorization: Bearer <key>`; `""` means send the key with no prefix, which
+  is what Azure's `api-key` and Anthropic's `x-api-key` require. Treating
+  absent and empty alike stripped `Bearer` from every File-mode backend that
+  did not mention the field — a request every OpenAI-compatible upstream
+  rejects. Found by running an import against a real database and reading the
+  row.
+- LiteLLM's native provider prefixes were not stripped from the upstream model
+  name, so `anthropic/claude-sonnet-4` was sent to Anthropic as a model called
+  `anthropic/claude-sonnet-4`. `anthropic/`, `gemini/`, `azure/`, `azure_ai/`,
+  `vertex_ai/` and `bedrock/` now strip like `openai/` always did.
 
 ## [0.1.0] — 2026-08-13
 

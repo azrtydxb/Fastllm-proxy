@@ -162,14 +162,11 @@ pub async fn import(
             .auth_header
             .clone()
             .unwrap_or_else(|| "authorization".to_string());
-        // `auth_scheme: ""` means "send the key raw", which the column spells
-        // as NULL. Left as an empty string it would be prepended to the key
-        // with a space and every upstream would reject it.
-        let auth_scheme = entry
-            .litellm_params
-            .auth_scheme
-            .clone()
-            .filter(|s| !s.is_empty());
+        // Three states, not two: absent means `Bearer`, `""` means send the key
+        // raw (NULL in the column), anything else is that prefix. Treating
+        // absent and empty alike would quietly drop `Bearer` from every
+        // backend that did not mention the field.
+        let auth_scheme = entry.litellm_params.auth_scheme_or_default();
         let default_max_tokens = entry.litellm_params.default_max_tokens.map(|t| t as i32);
 
         let existing_backend: Option<i64> = sqlx::query_scalar(

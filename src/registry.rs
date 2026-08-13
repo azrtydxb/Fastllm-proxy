@@ -350,7 +350,7 @@ impl Registry {
                         .auth_header
                         .clone()
                         .unwrap_or_else(|| "authorization".to_string()),
-                    auth_scheme: entry.litellm_params.auth_scheme.clone(),
+                    auth_scheme: entry.litellm_params.auth_scheme_or_default(),
                     default_max_tokens: entry.litellm_params.default_max_tokens,
                     ..Default::default()
                 },
