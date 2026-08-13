@@ -19,3 +19,5 @@
 # Screenshots from `npm run test:browser` — build output of a check, not source.
 /web/.screenshots/
 book/
+mermaid.min.js
+mermaid-init.js

@@ -6,6 +6,46 @@ Every number below was measured, on the hardware named, on the date named.
 Nothing here is projected or scaled from a smaller test. Where two runs of the
 same thing disagree, both are shown.
 
+## Against LiteLLM, in pictures
+
+Measured 2026-08-07 on an arm64 Kubernetes cluster. Both gateways: one
+replica, 4 CPU / 6 GiB, same idle node, reached over NodePort, same two vLLM
+backends, interleaved A/B runs. LiteLLM ran 4 uvicorn workers in `PRODUCTION`
+mode. Manifests: [`bench/compare/`](https://github.com/azrtydxb/Fastllm-proxy/tree/main/bench/compare).
+
+### With the GPU removed — what the gateway itself costs
+
+A mock upstream that answers instantly, so the gateway is the only thing being
+measured.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-mock-throughput-dark.svg"><img alt="Requests per second against a mock upstream. fastllm-proxy climbs to roughly 500-635 per second; LiteLLM plateaus near 36." src="images/bench-mock-throughput-light.svg" width="49%"></picture> <picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-mock-latency-dark.svg"><img alt="Median time to first token against a mock upstream, log scale. fastllm-proxy stays between 8 and 46 milliseconds; LiteLLM rises from 87 to 1313." src="images/bench-mock-latency-light.svg" width="49%"></picture>
+
+**~15x the throughput and 10-28x lower latency**, and the gap widens with
+concurrency rather than narrowing. This is the *ceiling* on what the choice can
+be worth, and you collect it only when the GPU is not your bottleneck — which
+is the next section, and the more honest one.
+
+### With real GPUs — throughput is a wash, consistency is not
+
+Two vLLM replicas, 16 concurrent slots each. A gateway that balances correctly
+should climb to 32 concurrent streams and then flatten. Both do, and land on the
+same ceiling.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-real-throughput-dark.svg"><img alt="Aggregate tokens per second against two real vLLM replicas. Both gateways climb together and flatten at about 305 to 332 tokens per second from 32 concurrent streams onward." src="images/bench-real-throughput-light.svg" width="49%"></picture> <picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-real-latency-dark.svg"><img alt="Time to first token against real vLLM, p50 solid and p99 dotted. Medians track closely; the 99th percentile diverges sharply at 32 streams." src="images/bench-real-latency-light.svg" width="49%"></picture>
+
+**Aggregate throughput is a wash** — both saturate the same GPUs, and at a
+single stream LiteLLM won several rounds outright. If your bottleneck is the
+GPU, the gateway barely moves your token rate.
+
+What differs is steadiness. At 32 streams, p99 time-to-first-token is
+**766 ms against 2921 ms**, and the gap between consecutive tokens is 15-25%
+less variable at *every* concurrency level:
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-real-jitter-dark.svg"><img alt="Standard deviation of the gap between tokens against real vLLM. fastllm-proxy is consistently 15 to 25 percent lower than LiteLLM at every concurrency level." src="images/bench-real-jitter-light.svg" width="49%"></picture>
+
+A p50 that moves by 20 ms and one that moves by 280 ms are different products
+even when their medians match.
+
 ### Against a real vLLM, the proxy is not measurable
 
 Two runs against the live spark2 replica (arm64, `qwen3-6-35b-a3b-nvfp4`),

@@ -8,6 +8,13 @@ authors = ["fastllm-proxy contributors"]
 language = "en"
 src = "docs"
 
+# mdBook does not render mermaid; without this the architecture page shows
+# three diagrams as raw ```mermaid code blocks, which is how they were
+# published at first. GitHub renders them natively, so the regression is
+# invisible until you look at the site rather than the repo.
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
 [output.html]
 default-theme = "ayu"
 preferred-dark-theme = "ayu"
@@ -18,6 +25,8 @@ site-url = "/Fastllm-proxy/"
 [output.html.search]
 enable = true
 limit-results = 20
+
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true
