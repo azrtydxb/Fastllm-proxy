@@ -19,6 +19,9 @@ const FIXTURES = {
     cache_max_bytes: 67108864,
     otel_endpoint: null,
     otel_sample_one_in: 0,
+    policy: "cache-affinity",
+    webhook_configured: true,
+    webhook_signed: true,
     classifier_tier1: true,
     classifier_tier2: false,
     session_ttl_hours: 12,
@@ -97,6 +100,7 @@ const FIXTURES = {
       input_price_per_mtok: 0,
       output_price_per_mtok: 0,
       cache_ttl_seconds: 300,
+      context_length: 262144,
       backends: [
         {
           id: 11,

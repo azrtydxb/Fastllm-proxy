@@ -336,6 +336,43 @@ await goto("models");
     "and says why",
     document.getElementById("root").textContent.includes("is not a number"),
   );
+
+  // Context length: empty must clear it to null rather than send 0. The
+  // handler refuses a non-positive length, so sending 0 would surface as a
+  // 400 an operator cannot act on -- and reading empty as "unlimited" would
+  // undo the routing rule this field exists for.
+  sent.length = 0;
+  await goto("models");
+  await click(containing("edit"));
+  const ctx = $("label")
+    .find((l) => l.textContent.includes("CONTEXT LENGTH"))
+    ?.querySelector("input");
+  check("the edit form offers a context length", !!ctx, "no CONTEXT LENGTH field");
+  if (ctx) {
+    await fill(ctx, "");
+    await click(byText("Save"));
+    const cleared = lastCall("PATCH", "/admin/models/");
+    check(
+      "clearing the context length sends null, not 0",
+      cleared?.body?.context_length === null,
+      `body was ${JSON.stringify(cleared?.body)}`,
+    );
+
+    sent.length = 0;
+    await goto("models");
+    await click(containing("edit"));
+    const ctx2 = $("label")
+      .find((l) => l.textContent.includes("CONTEXT LENGTH"))
+      ?.querySelector("input");
+    await fill(ctx2, "262144");
+    await click(byText("Save"));
+    const set = lastCall("PATCH", "/admin/models/");
+    check(
+      "a context length is sent as a number",
+      set?.body?.context_length === 262144,
+      `body was ${JSON.stringify(set?.body)}`,
+    );
+  }
 }
 
 // Backends: the add-backend row.

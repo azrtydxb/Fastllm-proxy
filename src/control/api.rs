@@ -4030,6 +4030,9 @@ async fn get_config(
         "cache_max_bytes": d.cache_max_bytes,
         "otel_endpoint": d.otel_endpoint,
         "otel_sample_one_in": d.otel_sample_one_in,
+        "policy": d.policy,
+        "webhook_configured": d.webhook_configured,
+        "webhook_signed": d.webhook_signed,
         "classifier_tier1": d.classifier_tier1,
         "classifier_tier2": d.classifier_tier2,
         "session_ttl_hours": crate::control::auth::SESSION_TTL_HOURS,
@@ -4277,6 +4280,14 @@ pub struct Deployment {
     pub otel_sample_one_in: u64,
     pub classifier_tier1: bool,
     pub classifier_tier2: bool,
+    /// Which backend within a pool a request goes to.
+    pub policy: String,
+    /// Whether outbound notifications are configured, and whether they are
+    /// signed. Never the URL or the secret: this endpoint is readable by any
+    /// principal with `usage:read`, and a webhook URL is a capability —
+    /// anyone who learns it can post to the receiver.
+    pub webhook_configured: bool,
+    pub webhook_signed: bool,
 }
 
 /// Eight parameters, which clippy dislikes. Each is a distinct dependency
@@ -4611,6 +4622,9 @@ mod tests {
                 otel_sample_one_in: 0,
                 classifier_tier1: false,
                 classifier_tier2: false,
+                policy: "cache-affinity".into(),
+                webhook_configured: false,
+                webhook_signed: false,
             }),
             started_at: std::time::Instant::now(),
             webhook: Arc::new(crate::webhook::WebhookSender::disabled()),

@@ -575,6 +575,19 @@ fn deployment_facts(cli: &Cli, role: &str) -> fastllm_proxy::control::api::Deplo
         otel_sample_one_in: 0,
         classifier_tier1: cfg!(feature = "classifier"),
         classifier_tier2: cfg!(feature = "classifier-tier2"),
+        policy: format!("{:?}", cli.policy)
+            .chars()
+            .flat_map(|c| {
+                if c.is_uppercase() {
+                    vec!['-', c.to_ascii_lowercase()]
+                } else {
+                    vec![c]
+                }
+            })
+            .skip(1)
+            .collect(),
+        webhook_configured: cli.webhook_url.is_some(),
+        webhook_signed: cli.webhook_secret.is_some(),
     }
 }
 

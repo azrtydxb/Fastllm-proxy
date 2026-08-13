@@ -21,6 +21,7 @@ import {
   Table,
   Tr,
   fmtInt,
+  fmtCompact,
   fmtPrice,
 } from "../ui.jsx";
 
@@ -233,6 +234,14 @@ export function Models({ onUnauthorised }) {
               <Pill tone={cached ? "accent" : "quiet"} mono>
                 {cached ? `cache ${m.cache_ttl_seconds}s` : "cache off"}
               </Pill>
+              {/* Shown even when undeclared, because "we do not know" is the
+                  state that changes routing: a model with no declared window
+                  is never demoted for being too small, and an operator
+                  looking at an oversized-prompt problem needs to see which
+                  models that applies to. */}
+              <Pill tone={m.context_length ? "quiet" : "warn"} mono>
+                {m.context_length ? `${fmtCompact(m.context_length)} ctx` : "ctx undeclared"}
+              </Pill>
               {m.description && <Muted>{m.description}</Muted>}
               <Spacer />
               <Button variant="small" onClick={() => setEditing(edit ? null : m.id)}>
@@ -390,6 +399,7 @@ function PriceEditor({ model, onSave }) {
     model.output_price_per_mtok === null ? "" : String(model.output_price_per_mtok / 1e6),
   );
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
+  const [context, setContext] = useState(model.context_length ?? "");
   const [description, setDescription] = useState(model.description || "");
 
   // Absent, cleared and mistyped are three different things and only the
@@ -398,6 +408,15 @@ function PriceEditor({ model, onSave }) {
   // turned a priced model into an unpriced one, which is exactly the failure
   // this editor's doc comment claims to guard against.
   const [bad, setBad] = useState(null);
+
+  // Same contract as `micros`/`seconds` above: throw on anything that is not
+  // a clean positive integer, so a typo surfaces as a refusal instead of
+  // silently clearing the field it was meant to set.
+  const positive = (raw, what) => {
+    const n = Number(String(raw).trim());
+    if (!Number.isInteger(n) || n <= 0) throw new Error(`${raw}" for ${what}`);
+    return n;
+  };
   const micros = (v) => {
     if (v.trim() === "") return undefined;
     const n = Number(v);
@@ -423,6 +442,16 @@ function PriceEditor({ model, onSave }) {
         <Field label="CACHE TTL (s)" hint="0 or empty turns the response cache off for this model">
           <input value={ttl} onChange={(e) => setTtl(e.target.value)} placeholder="300" />
         </Field>
+        <Field
+          label="CONTEXT LENGTH"
+          hint="tokens this model accepts · empty means undeclared, which routing treats as unknown rather than unlimited"
+        >
+          <input
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            placeholder="262144"
+          />
+        </Field>
         <Field label="DESCRIPTION">
           <input value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
@@ -446,6 +475,11 @@ function PriceEditor({ model, onSave }) {
                 // "leave alone", so omitting it here would silently keep the
                 // cache on for a model somebody just turned it off for.
                 cache_ttl_seconds: seconds(ttl),
+                // Empty clears it back to undeclared. Deliberately not sent
+                // as 0: the handler refuses a non-positive length, because a
+                // model that accepts no tokens is not a thing and coercing it
+                // would leave an operator believing they had set a limit.
+                context_length: context === "" ? null : positive(context, "context length"),
                 description,
               });
             } catch (e) {

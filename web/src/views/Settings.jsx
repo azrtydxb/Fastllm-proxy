@@ -174,6 +174,24 @@ export function Settings({ onUnauthorised, config }) {
             value={`${c.health_report_interval_seconds}s`}
             tone="neutral"
           />
+          <Setting
+            label="Routing policy"
+            hint="--policy — which backend within a pool a request goes to. cache-affinity keeps a shared prefix on the node holding its KV cache; lowest-latency is for a pool whose members are not equivalent"
+            value={c.policy || "—"}
+            tone="neutral"
+          />
+          <Setting
+            label="Outbound notifications"
+            hint="--webhook-url — POSTs on backend up/down and snapshot rebuild failure. The URL is deliberately not shown: it is a capability, and this screen is readable by anyone holding usage:read"
+            value={
+              c.webhook_configured
+                ? c.webhook_signed
+                  ? "on · signed"
+                  : "on · unsigned"
+                : "off"
+            }
+            tone={c.webhook_configured ? (c.webhook_signed ? "ok" : "warn") : "quiet"}
+          />
         </Card>
 
         <Card title="Response cache">
