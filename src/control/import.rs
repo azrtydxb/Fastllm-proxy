@@ -458,6 +458,52 @@ async fn import_key(
         }
     }
 
+    // `limits:` and `budget:` are part of the `auth:` block and were being
+    // dropped, the same way the backend's protocol and auth columns were: they
+    // parse, they validate, and nothing wrote them. A key imported out of a
+    // rate-limited `File`-mode deployment arrived in the database unlimited,
+    // which is the failure direction that matters.
+    if let Some(limits) = entry.limits {
+        sqlx::query(
+            "INSERT INTO limits (principal_id, requests_per_min, tokens_per_min)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (principal_id) DO UPDATE
+               SET requests_per_min = EXCLUDED.requests_per_min,
+                   tokens_per_min = EXCLUDED.tokens_per_min,
+                   updated_at = now()",
+        )
+        .bind(principal_id)
+        .bind(limits.requests_per_min.map(|v| v as i32))
+        .bind(limits.tokens_per_min.map(|v| v as i32))
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    if let Some(budget) = entry.budget {
+        // `monthly` because the file format has no window at all: `File` mode
+        // has no reconciliation loop, so its `tokens_used` is a static
+        // starting point rather than a rolling count. A window has to be
+        // chosen to reach a NOT NULL column, and the longest one is the choice
+        // least likely to refuse traffic the file never meant to refuse.
+        //
+        // `tokens_used` is written on insert and never on update. Once this
+        // budget is in the database it advances from real usage, and letting a
+        // static number in a config file rewind it on the next import would
+        // hand back spend that was already consumed.
+        sqlx::query(
+            "INSERT INTO budgets (principal_id, tokens_total, tokens_used, budget_window)
+             VALUES ($1, $2, $3, 'monthly')
+             ON CONFLICT (principal_id) DO UPDATE
+               SET tokens_total = EXCLUDED.tokens_total,
+                   updated_at = now()",
+        )
+        .bind(principal_id)
+        .bind(budget.tokens_total as i64)
+        .bind(budget.tokens_used as i64)
+        .execute(&mut **tx)
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -667,6 +713,88 @@ mod tests {
         // spells the same intent.
         assert_eq!(auth_scheme, None, "empty auth_scheme must store as NULL");
         assert_eq!(max_tokens, Some(4096), "default_max_tokens was dropped");
+    }
+
+    /// The `auth:` block's enforcement, not just its identity.
+    ///
+    /// A key imported out of a rate-limited `File`-mode deployment used to
+    /// arrive unlimited: `limits` and `budget` parse and validate, and nothing
+    /// wrote them. That is the failure direction that matters — the key works,
+    /// so nobody looks, and the cap silently is not there.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn import_carries_the_limits_and_budget_on_a_key() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "limits-import-test-")
+            .track_prefix("principals", "name", "limits-sa-");
+
+        let model = unique_name("limits-import-test");
+        let principal = unique_name("limits-sa");
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "model_list:\n\
+             \x20 - model_name: {model}\n\
+             \x20   litellm_params: {{ api_base: http://h:8000/v1 }}\n\
+             auth:\n\
+             \x20 keys:\n\
+             \x20   - key: sk-limits-import-test-aaaaaaaaaaaa\n\
+             \x20     name: {principal}\n\
+             \x20     models: [{model}]\n\
+             \x20     limits:\n\
+             \x20       requests_per_min: 60\n\
+             \x20       tokens_per_min: 100000\n\
+             \x20     budget:\n\
+             \x20       tokens_total: 1000000\n"
+        ))
+        .unwrap();
+
+        import(&pool, &cfg, &test_key()).await.unwrap();
+
+        let (rpm, tpm): (Option<i32>, Option<i32>) = sqlx::query_as(
+            "SELECT l.requests_per_min, l.tokens_per_min
+               FROM limits l JOIN principals p ON p.id = l.principal_id
+              WHERE p.name = $1",
+        )
+        .bind(&principal)
+        .fetch_one(&pool)
+        .await
+        .expect("a limits row for the imported principal");
+        assert_eq!(rpm, Some(60), "requests_per_min was dropped on import");
+        assert_eq!(tpm, Some(100_000), "tokens_per_min was dropped on import");
+
+        let (total, window): (Option<i64>, String) = sqlx::query_as(
+            "SELECT b.tokens_total, b.budget_window
+               FROM budgets b JOIN principals p ON p.id = b.principal_id
+              WHERE p.name = $1",
+        )
+        .bind(&principal)
+        .fetch_one(&pool)
+        .await
+        .expect("a budgets row for the imported principal");
+        assert_eq!(total, Some(1_000_000), "the budget was dropped on import");
+        assert_eq!(window, "monthly");
+
+        // Consumption is live state. A static number in a config file must not
+        // hand back spend that has already happened.
+        sqlx::query(
+            "UPDATE budgets SET tokens_used = 500000
+               WHERE principal_id = (SELECT id FROM principals WHERE name = $1)",
+        )
+        .bind(&principal)
+        .execute(&pool)
+        .await
+        .unwrap();
+        import(&pool, &cfg, &test_key()).await.unwrap();
+        let used: i64 = sqlx::query_scalar(
+            "SELECT b.tokens_used FROM budgets b JOIN principals p ON p.id = b.principal_id
+              WHERE p.name = $1",
+        )
+        .bind(&principal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(used, 500_000, "re-importing must not rewind consumption");
     }
 
     /// An edited file has to reach the database, not just avoid duplicating.

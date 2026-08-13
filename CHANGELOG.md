@@ -27,6 +27,10 @@ source for *why* anything is the way it is; this file is the summary.
   did not mention the field — a request every OpenAI-compatible upstream
   rejects. Found by running an import against a real database and reading the
   row.
+- `import` dropped the `limits:` and `budget:` blocks from `auth.keys`
+  entirely, so a key imported out of a rate-limited `File`-mode deployment
+  arrived in the database unlimited. The key worked, which is why nobody
+  would have looked.
 - LiteLLM's native provider prefixes were not stripped from the upstream model
   name, so `anthropic/claude-sonnet-4` was sent to Anthropic as a model called
   `anthropic/claude-sonnet-4`. `anthropic/`, `gemini/`, `azure/`, `azure_ai/`,

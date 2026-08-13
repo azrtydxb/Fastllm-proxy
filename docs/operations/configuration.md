@@ -40,6 +40,22 @@ Everything a backend row can hold is carried across, not just the address:
 Two entries sharing a `model_name` become one model with two backends — a
 load-balanced pool.
 
+The `auth:` block carries its enforcement, not only its identity:
+
+| from the file | into the database |
+|---|---|
+| `key` | `api_keys.hash` (SHA-256) plus a display prefix. Never stored in plaintext, never printed back |
+| `name` | a `service_account` principal, and a role `import:<name>` holding just that key's grants |
+| `models` | one `model:invoke` grant per model; `['*']` becomes allow-all |
+| `expires_at` | the key's expiry |
+| `limits` | the `limits` row — `requests_per_min`, `tokens_per_min` |
+| `budget` | the `budgets` row, as a `monthly` window, because the file format has no window to carry |
+
+`budget.tokens_used` is written when the row is created and never on a
+re-import. Once a budget is in the database it advances from real usage, and
+letting a static number in a config file rewind it would hand back spend that
+was already consumed.
+
 **Re-importing an edited file converges.** A backend is keyed on
 `(model, api_base, upstream_model)`: a row that already exists is updated
 rather than duplicated, so a `protocol:` corrected in the file reaches the
