@@ -12,7 +12,7 @@ RBAC, rate limits and budgets without a database call on the request path.
 docker run ghcr.io/azrtydxb/fastllm-proxy:v0.1.0 --help
 ```
 
-[**Get started →**](getting-started.md) · [What it does, and when to use it →](features.md) · [Connect a client →](integrations.md)
+[**Get started →**](getting-started.md) · [What it can do →](features.md) · [Connect a client →](integrations.md)
 
 ---
 
@@ -116,26 +116,37 @@ same models they already had.
 `File` mode reads LiteLLM YAML directly, if you would rather not adopt the
 database at all.
 
-## When to use something else
+## More than chat
 
-- **You need the widest provider and modality coverage** — image generation,
-  speech, bespoke rerank APIs. LiteLLM covers far more surface.
-- **You need guardrails, PII masking or content filtering.** Not built.
-- **You need SSO/SAML, teams or org hierarchies.** RBAC here is principals,
-  roles and per-model grants, and SSO is explicitly parked.
-- **You want a shared response cache across replicas.** The cache is per
-  process, and that is a decision: sharing it puts a round trip on the read
-  path, which is what the performance story rests on not doing.
-- **You are on amd64.** Released images are linux/arm64 only.
+Twelve endpoints, not one — and each is the same one-row configuration,
+authorised by the same per-model grants and counted in the same usage
+accounting:
 
-[The full version of this list, with the reasoning →](features.md#where-it-is-not-the-right-choice)
+| | |
+|---|---|
+| **Chat & completions** | `/chat/completions`, `/completions`, `/responses` |
+| **Images** | `/images/generations`, `/images/edits` |
+| **Speech** | `/audio/speech`, `/audio/transcriptions`, `/audio/translations` |
+| **Embeddings & ranking** | `/embeddings`, `/rerank`, `/score` |
+| **Safety** | `/moderations` |
+
+Multipart audio uploads are forwarded without their boundary being touched;
+binary responses go through the same byte pump as a token stream.
+
+## On the roadmap
+
+Guardrails and PII masking · SSO/SAML · teams and organisations ·
+native wire-format translators for providers that do not speak OpenAI's shape ·
+usage-based routing.
+
+[What each of those involves →](features.md#on-the-roadmap)
 
 ## Start here
 
 | | |
 |---|---|
 | [Getting started](getting-started.md) | Install, first request, and a tour of every screen |
-| [What it does, and when to use it](features.md) | Features, measured trade-offs, honest limits |
+| [What it can do](features.md) | Features, measured trade-offs, honest limits |
 | [Connecting a client](integrations.md) | OpenAI SDKs, five coding agents, four frameworks |
 | [Troubleshooting](troubleshooting.md) | The failures people actually hit |
 | [Operations](operations.md) | The three roles, deployment shapes, configuration |

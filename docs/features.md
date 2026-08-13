@@ -1,9 +1,12 @@
-# What it does, and when it is the right choice
+# What it can do
 
-There are several good LLM gateways. This one exists for a specific case, and
-it is worth saying plainly where it wins, where it draws, and where you should
-use something else — a features list that only claims advantages is a sales
-page, and you cannot plan a deployment from one.
+Chat, images, speech, embeddings and reranking through one endpoint, with
+routing that keeps your KV cache intact and accounting that costs nothing on
+the request path.
+
+What follows is what it does and what that is worth measured — including the
+places the measurements are less flattering, because you cannot plan a
+deployment from numbers that only ever point one way.
 
 ## The case it is built for
 
@@ -107,33 +110,56 @@ Anything OpenAI-shaped works whether or not it is on the list. Anthropic and
 Gemini are reached in their own wire format, translated in both directions
 including streaming and tool calls.
 
-## Where it is *not* the right choice
+## Beyond chat: what else it serves
 
-**You want the widest possible provider and modality coverage.** LiteLLM
-supports things this deliberately does not: image generation, speech, rerank
-providers with bespoke APIs, and a long tail of non-OpenAI-shaped endpoints.
-If your gateway needs to be the one integration point for everything, that is
-a real advantage and this is not it.
+Twelve `POST` endpoints, not one. Anything OpenAI-shaped that carries a
+`model` is forwarded byte-for-byte, authorised by the same per-model grants
+and counted in the same usage accounting:
 
-**You need guardrails, PII masking or content filtering in the gateway.** Not
-built. There are no hooks for it yet either.
+| | |
+|---|---|
+| **Chat & completions** | `/chat/completions`, `/completions`, `/responses` |
+| **Images** | `/images/generations`, `/images/edits` |
+| **Speech** | `/audio/speech` (TTS), `/audio/transcriptions`, `/audio/translations` |
+| **Embeddings & ranking** | `/embeddings`, `/rerank`, `/score` |
+| **Safety** | `/moderations` |
 
-**You need SSO/SAML or multi-tenant teams and org hierarchies.** RBAC here is
-principals, roles and per-model grants. There is no team or org layer, and SSO
-is [explicitly parked](https://github.com/azrtydxb/Fastllm-proxy/blob/main/TODO.md).
+So an image or speech provider is the same one-row configuration as a chat
+model — OpenAI, Azure OpenAI, or any self-hosted server exposing those paths.
+The multipart audio uploads are forwarded without the boundary being touched,
+and binary responses pass through the same byte pump as a token stream.
 
-**You want a shared response cache across replicas.** The cache is per process,
-and that is a decision rather than an omission: a shared cache means a network
-round trip on the read path, which is the one thing the performance story rests
-on not doing. The reasoning is written out in `TODO.md`.
+One thing this does *not* do is translate a provider's bespoke, non-OpenAI
+image API into OpenAI's shape. A provider that speaks its own wire format for
+images needs a translator, the same way Anthropic and Gemini needed one for
+chat.
 
-**You are on amd64.** Released images are linux/arm64 only, because every node
-this is built and tested on is arm64. It is a build-matrix change, not a code
-change, but it is not done.
+## On the roadmap
 
-**Your bottleneck is the GPU and you already have a gateway that works.** The
-honest reading of the benchmarks above is that you would gain steadier tails
-and lose your existing integration. That may not be worth it.
+Named because they are wanted, not because they are excuses. Each is a real
+piece of work rather than a flag away:
+
+| | |
+|---|---|
+| **Guardrails and PII masking** | Content filtering and redaction in the gateway. Needs a hook point on the request path that does not cost the latency the rest of the design protects — the interesting engineering is doing it without buffering the body |
+| **SSO / SAML** | Sessions are Argon2id passwords today. The RBAC underneath — principals, roles, per-model grants — is already the right shape to hang an identity provider off |
+| **Teams and organisations** | A layer above principals, so a grant can be made once for a group |
+| **Native image and speech providers** | The wire-format translators for providers that do not speak OpenAI's shape |
+| **Usage-based routing** | Route by a deployment's remaining TPM/RPM. Wanted, but honest cross-replica accounting needs shared state, which is the trade being weighed |
+
+## Where it is a poorer fit
+
+Two, and both are about *your* situation rather than a missing feature:
+
+**Your bottleneck is the GPU and your current gateway works.** The honest
+reading of the benchmarks above is that you would gain steadier tails and
+lose a working integration. Steadier p99 is worth real money to some
+deployments and nothing to others; only you can price it.
+
+**You want one integration point for every AI service you use.** This is a
+gateway for models you serve and models you buy through an OpenAI-shaped API.
+If you also need vector stores, agent frameworks and observability vendors
+behind the same endpoint, a broader tool fits better.
 
 ## Where next
 

@@ -136,6 +136,15 @@ jobs:
       # it continuously; publishing every commit publicly would make "latest"
       # mean "whatever landed most recently", which is the drift that already
       # cost this project a downgraded control plane.
+      # amd64 is emulated on these arm64 runners, so it is built for tagged
+      # releases only. Per-commit builds stay arm64-native and fast, because
+      # that is what this cluster deploys from continuously.
+      - name: Set up QEMU (for the amd64 release build)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64
+
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
@@ -170,7 +179,10 @@ jobs:
         with:
           context: .
           builder: fastllm
-          platforms: linux/arm64
+          # Both architectures on a release, so `docker run` works for
+          # someone who is not on arm64. Emulated, therefore slow, therefore
+          # not on every commit.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.public.outputs.tags }}
           # Same cache, so this is a manifest push rather than a second build.

@@ -5,7 +5,7 @@
 # Using it
 
 - [Getting started](getting-started.md)
-- [What it does, and when to use it](features.md)
+- [What it can do](features.md)
 - [Connecting a client](integrations.md)
 - [Troubleshooting](troubleshooting.md)
 

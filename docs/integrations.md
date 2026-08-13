@@ -177,6 +177,39 @@ curl http://gateway:4000/v1/rerank -H "authorization: Bearer sk-..." \
 `model`; they are not OpenAI endpoints, but every engine that implements them
 uses the same shape.
 
+## Images
+
+```python
+client.images.generate(model="dall-e-3", prompt="a red bicycle", size="1024x1024")
+```
+
+```bash
+curl http://gateway:4000/v1/images/generations -H "authorization: Bearer sk-..." \
+  -H 'content-type: application/json' \
+  -d '{"model":"dall-e-3","prompt":"a red bicycle","size":"1024x1024"}'
+```
+
+`/v1/images/edits` too. Binary and base64 responses go through the same byte
+pump as a token stream — nothing on the response path parses a passthrough
+body, whatever is in it.
+
+## Speech
+
+Text to speech, and both directions of transcription:
+
+```python
+client.audio.speech.create(model="tts-1", voice="alloy", input="hello")
+client.audio.transcriptions.create(model="whisper-1", file=open("clip.mp3", "rb"))
+client.audio.translations.create(model="whisper-1", file=open("clip.mp3", "rb"))
+```
+
+The transcription endpoints take a multipart upload, and the client's
+`content-type` is carried through untouched — the boundary parameter lives in
+that header, and rewriting it would make the body unparseable upstream.
+
+Each of these is the same one-row configuration as a chat model, authorised by
+the same per-model grant and counted in the same usage accounting.
+
 ## Observability
 
 ### Prometheus
@@ -215,15 +248,20 @@ is how a metrics endpoint becomes an outage. "Which caller got slow" is a SQL
 question against `usage_events`, or the **Usage & spend** screen in the UI.
 See [operations.md](operations.md#per-request-records).
 
-## What does not work, and why
+## Coming next
 
-**`/v1/batches`, `/v1/files`, `/v1/fine_tuning`.** Retrieval is a `GET` with no
-model in the body, so there is nothing to route on without remembering which
-backend owns which id — durable state on the request path. Not a gap that a
-config line closes; it needs a design.
+The stateful job APIs — `/v1/batches`, `/v1/files`, `/v1/fine_tuning` and the
+Assistants API — and provider-native passthrough paths such as
+`/vertex-ai/...`.
 
-**Provider-native passthrough paths** (`/vertex-ai/...` and friends). Same
-problem from the other end: no `model` in the body means nothing to check a
-per-model grant against, and every request here is authorised against one.
+Both need one new idea rather than one more route. Everything served today
+carries a `model` in its body, which is what the router routes on and what the
+per-model grant is checked against. A `GET /v1/files/{id}` carries neither, so
+supporting it means the gateway remembering which backend owns which id, and
+authorising on something other than a model. That is a design worth doing
+properly — an id-to-backend map that survives restarts, and grants that can be
+expressed per backend rather than per model — and it is on the list.
 
-**The Assistants API.** Stateful, and the same reasoning applies.
+Until then, call those endpoints against the provider directly; everything
+your application does per request goes through here.
+
