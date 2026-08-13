@@ -246,7 +246,7 @@ snapshot rebuild fails. `--webhook-secret` signs it with HMAC-SHA256 in
 Prometheus deliberately does not carry per-principal labels — that cardinality
 is how a metrics endpoint becomes an outage. "Which caller got slow" is a SQL
 question against `usage_events`, or the **Usage & spend** screen in the UI.
-See [operations.md](operations.md#per-request-records).
+See [operations.md](operations/usage-records.md#per-request-records).
 
 ## Coming next
 

@@ -74,7 +74,7 @@ Route on any of these:
 
 **One model catches everything.** `PUT /admin/fallback-model` names a deployment-wide last resort, appended to every chain — virtual or concrete — for the case a rule author did not anticipate. It is authorised like any other candidate, so it cannot widen anyone's access.
 
-**Failover is part of routing, not a separate retry layer.** A rule's targets are tried in order on `5xx`, on `429`, and on an unreachable upstream — before any byte reaches the client. `429` counts because a hosted provider refusing a request is not the same as being unhealthy. Failover never widens reach: a candidate the caller lacks a grant on is dropped from the chain. Details in [docs/api.md](docs/api.md#routing-rules).
+**Failover is part of routing, not a separate retry layer.** A rule's targets are tried in order on `5xx`, on `429`, and on an unreachable upstream — before any byte reaches the client. `429` counts because a hosted provider refusing a request is not the same as being unhealthy. Failover never widens reach: a candidate the caller lacks a grant on is dropped from the chain. Details in [docs/api.md](docs/api/routing-rules.md).
 
 ### Semantic routing
 

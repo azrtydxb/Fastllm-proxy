@@ -6,15 +6,31 @@
  * and unreadable in the other four.
  *
  * Nothing here changes content. If a rule below is doing semantic work —
- * hiding something, reordering something — it is in the wrong file. */
+ * hiding something, reordering something — it is in the wrong file.
+ *
+ * Lengths are in px, not rem, and that is deliberate. mdBook sets
+ * `html { font-size: 62.5% }`, so 1rem is 10px here rather than 16px. Every
+ * spacing value in the first version of this file was written in the ordinary
+ * assumption and came out at about 60% of its intended size — cramped tables,
+ * a 7.8px sidebar label, and a content column narrower than the default it
+ * was widening. */
 
 /* ---------------------------------------------------------------- content */
 
 /* The stock 750px measure predates every table on this site. These pages
  * carry wide reference tables and 1440px screenshots, both of which spend the
- * whole budget on the first two columns and wrap the rest into noise. */
-.content main {
-  max-width: 62rem;
+ * whole budget on the first two columns and wrap the rest into noise.
+ *
+ * Set the variable rather than `.content main`, so everything mdBook derives
+ * from it stays consistent.
+ *
+ * Not `rem`: mdBook sets `html { font-size: 62.5% }`, the old trick that makes
+ * 1rem = 10px. A `62rem` written here in the ordinary 16px assumption came out
+ * as 620px — *narrower* than the 750px default it was meant to widen, which is
+ * why the first attempt at this made the column smaller and left more empty
+ * space, not less. */
+:root {
+  --content-max-width: 1150px;
 }
 
 .content p,
@@ -23,13 +39,13 @@
 }
 
 .content h2 {
-  margin-top: 2.6rem;
-  padding-bottom: 0.3rem;
+  margin-top: 42px;
+  padding-bottom: 5px;
   border-bottom: 1px solid var(--table-border-color);
 }
 
 .content h3 {
-  margin-top: 2rem;
+  margin-top: 32px;
 }
 
 /* ----------------------------------------------------------------- tables */
@@ -40,7 +56,7 @@
 .content table {
   width: 100%;
   display: table;
-  margin: 1.4rem 0;
+  margin: 22px 0;
   border-collapse: collapse;
 }
 
@@ -65,7 +81,7 @@
 
 .content table td,
 .content table th {
-  padding: 0.55rem 0.85rem;
+  padding: 9px 14px;
   vertical-align: top;
   border: none;
   border-bottom: 1px solid var(--table-border-color);
@@ -104,8 +120,8 @@
   border-bottom: none;
   border-right: none;
   border-radius: 0 4px 4px 0;
-  padding: 0.85rem 1.1rem;
-  margin: 1.4rem 0;
+  padding: 14px 18px;
+  margin: 22px 0;
 }
 
 /* --------------------------------------------------------------- figures */
@@ -118,7 +134,7 @@
   height: auto;
   border-radius: 6px;
   border: 1px solid var(--table-border-color);
-  margin: 1.2rem 0;
+  margin: 19px 0;
 }
 
 /* The benchmark charts are SVGs drawn with their own transparent ground and
@@ -134,7 +150,7 @@
 .content .mermaid {
   background: none;
   text-align: center;
-  margin: 1.8rem 0;
+  margin: 29px 0;
   padding: 0;
   overflow-x: auto;
 }
@@ -191,9 +207,9 @@
  * are the book's structure and were rendering at the same weight as the
  * pages under them. */
 .chapter li.part-title {
-  font-size: 0.78rem;
+  font-size: 12px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   opacity: 0.6;
-  margin-top: 1.4rem;
+  margin-top: 22px;
 }

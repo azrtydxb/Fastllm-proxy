@@ -123,7 +123,7 @@ machine.
 
 | flag | default | |
 |---|---|---|
-| `--role` | `proxy` | `all`, `control`, or `proxy`. See [Roles](operations.md#roles) |
+| `--role` | `proxy` | `all`, `control`, or `proxy`. See [Roles](operations/configuration.md#roles) |
 | `--database-url` | — | Required by `all` and `control`; unused by `proxy` |
 | `--control-url` | — | Control plane to poll in `proxy` mode. Absent means `File` mode |
 | `--proxy-token` | — | Presented to a control plane by `proxy`; required of callers by `all`/`control` |
@@ -148,7 +148,7 @@ machine.
 
 | flag | default | |
 |---|---|---|
-| `--policy` | `cache-affinity` | Also `least-loaded`, `round-robin`, `lowest-latency`. See [tuning affinity](operations.md#tuning-affinity) |
+| `--policy` | `cache-affinity` | Also `least-loaded`, `round-robin`, `lowest-latency`. See [tuning affinity](operations/configuration.md#tuning-affinity) |
 | `--upstream-timeout` | `120` | Seconds to wait for response **headers**. Does not bound generation — a long completion is not a hung request |
 | `--max-retries` | `2` | Alternate backends tried when one fails **before any bytes are sent**. After the first byte there is nothing to retry onto without lying to the client |
 | `--pool-max-idle` | `256` | Idle upstream connections kept per backend |

@@ -47,7 +47,7 @@ move them and this file cannot notice.
 | GitHub Models · GitHub Copilot | |
 | **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
 | **Cohere** | `https://api.cohere.ai/compatibility/v1` |
-| **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [the API reference](api.md#providers) for the service-account credential |
+| **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [the API reference](providers.md#verified-base-urls) for the service-account credential |
 | **Azure OpenAI** · Azure AI | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
 | NVIDIA NIM · Databricks · HuggingFace TGI | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1` |
 | vLLM ✓ · SGLang · llama.cpp ✓ · Ollama | self-hosted, same row shape |
@@ -142,7 +142,53 @@ that diagram are drawn differently — one forwards bytes, the other builds
 them.
 
 The translation limits, field by field, are in
-[the API reference](api.md#providers).
+[the API reference](providers.md#verified-base-urls).
+
+## Verified base URLs
+
+Most providers are OpenAI-compatible, so they need no code at all — just a
+backend row pointing at their base URL. That includes **OpenRouter**, which
+itself fronts Anthropic, Gemini and several hundred other models in OpenAI
+format:
+
+```bash
+curl -X POST https://control/admin/models/$MODEL_ID/backends \
+  -H 'content-type: application/json' -b "$SESSION" \
+  -d '{"api_base":"https://openrouter.ai/api/v1",
+       "upstream_model":"anthropic/claude-sonnet-4",
+       "upstream_api_key":"sk-or-..."}'
+```
+
+Verified base URLs for the OpenAI-compatible set:
+
+| provider | `api_base` |
+|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| xAI | `https://api.x.ai/v1` |
+| Together | `https://api.together.xyz/v1` |
+| Fireworks | `https://api.fireworks.ai/inference/v1` |
+| Nebius | `https://api.studio.nebius.ai/v1` |
+| AtlasCloud | `https://api.atlascloud.ai/v1` |
+| AIHubMix | `https://aihubmix.com/v1` |
+| Z.ai | `https://api.z.ai/api/paas/v4` |
+| BigModel | `https://open.bigmodel.cn/api/paas/v4` |
+| Aliyun DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Qwen Cloud | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| Moonshot / Kimi | `https://api.moonshot.cn/v1`, `https://api.moonshot.ai/v1` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
+| GitHub Models | `https://models.github.ai/inference` |
+| Ollama | `http://localhost:11434` |
+| Cohere | `https://api.cohere.ai/compatibility/v1` |
+| Amazon Bedrock | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` |
+| Google Vertex AI | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` |
+
+**Bedrock** needs no request signing. Its OpenAI-compatible endpoint takes a
+Bedrock API key as an ordinary bearer token, so it is a plain backend row like
+any other — create the key in the Bedrock console and put it in
+`upstream_api_key`.
 
 ## What is deliberately absent
 
@@ -152,6 +198,6 @@ The translation limits, field by field, are in
 
 | | |
 |---|---|
-| [API and administration](api.md#providers) | Verified base URLs, and the per-field translation limits |
+| [API and administration](providers.md#verified-base-urls) | Verified base URLs, and the per-field translation limits |
 | [What it can do](features.md) | Routing between providers, not just to them |
 | [Operations](operations.md) | Where the encryption key lives, and why it cannot be regenerated |

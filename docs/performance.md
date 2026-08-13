@@ -364,7 +364,3 @@ would trade 1–8 µs of latency for a second copy of the tail per request,
 which is the wrong side of the trade at these magnitudes — and the parse is
 already the last thing that happens on a body that has finished streaming,
 so the client is not waiting on it.
-
----
-
-Back to the [README](../README.md).

@@ -107,7 +107,7 @@ fn the_readme_provider_count_matches_the_catalogue_page() {
     }
 }
 
-/// The endpoint list in `docs/api.md` against the constant that decides it.
+/// The endpoint list in `docs/api/endpoints.md` against the constant that decides it.
 ///
 /// An endpoint added to the code and not the docs is invisible to users; one
 /// added to the docs and not the code is a 404 with a promise behind it.
@@ -132,12 +132,18 @@ fn documented_endpoints_are_the_ones_actually_proxied() {
         "/moderations",
     ];
 
-    let api = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/api.md"))
-        .expect("docs/api.md");
+    // The page, not the chapter: `docs/api.md` is now an index, and the
+    // endpoint list lives under it. A test that reads the index would pass on
+    // a table of contents that mentions everything and documents nothing.
+    let api = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/api/endpoints.md"
+    ))
+    .expect("docs/api/endpoints.md");
     for endpoint in expected {
         assert!(
             api.contains(endpoint),
-            "docs/api.md never mentions {endpoint}, which the proxy serves"
+            "docs/api/endpoints.md never mentions {endpoint}, which the proxy serves"
         );
     }
 }

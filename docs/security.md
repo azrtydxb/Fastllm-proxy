@@ -2,7 +2,7 @@
 
 Who can call what, how secrets are stored, and where the trust boundaries are.
 The detail behind each claim here is in
-[the API reference](api.md#admin-authentication); this page is the map.
+[the API reference](api/auth.md#admin-authentication); this page is the map.
 
 ## Three kinds of caller, three mechanisms
 
@@ -151,6 +151,6 @@ they were, and it was review that caught it, not the author.
 
 | | |
 |---|---|
-| [API and administration](api.md#admin-authentication) | Route-by-route detail, and the session cookie's flags |
-| [Operations](operations.md#choosing-a-shape) | Which deployment shape puts what on the public port |
+| [API and administration](api/auth.md#admin-authentication) | Route-by-route detail, and the session cookie's flags |
+| [Operations](operations/shapes.md) | Which deployment shape puts what on the public port |
 | [Architecture](architecture.md) | Where each check happens, and why none of them is I/O |
