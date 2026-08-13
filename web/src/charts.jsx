@@ -146,8 +146,35 @@ export function TimeChart({
 }) {
   const [hover, setHover] = useState(null);
   const ref = useRef(null);
+  const box = useRef(null);
 
-  const W = 600;
+  // Render at the container's real pixel width rather than stretching a
+  // fixed viewBox to fit.
+  //
+  // `preserveAspectRatio="none"` scales x and y independently, which is fine
+  // for bars and wrong for glyphs: a 600-unit viewBox in a 1500px card
+  // stretches every tick label 2.5x horizontally and not at all vertically,
+  // so the axis reads as smeared. Measuring means one user unit is one
+  // pixel and text is drawn at the size it was asked for.
+  const [width, setWidth] = useState(600);
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = Math.round(entry.contentRect.width);
+      // Guard against 0 during mount and against a resize storm from
+      // sub-pixel jitter.
+      if (w > 0) setWidth((prev) => (Math.abs(prev - w) > 1 ? w : prev));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // `n` is a dependency because the empty state below returns early with a
+    // different element. Without it the observer binds once, to whichever
+    // branch rendered first, and a chart that mounted before its data
+    // arrived would stay at the fallback width for ever.
+  }, [points?.length]);
+
+  const W = width;
   const padL = 34;
   const padR = 8;
   const padT = 8;
@@ -181,6 +208,7 @@ export function TimeChart({
   if (!n) {
     return (
       <div
+        ref={box}
         style={{
           height,
           display: "flex",
@@ -234,11 +262,12 @@ export function TimeChart({
   };
 
   return (
-    <div style={{ position: "relative" }}>
+    <div ref={box} style={{ position: "relative" }}>
       <svg
         ref={ref}
         viewBox={`0 0 ${W} ${height}`}
-        preserveAspectRatio="none"
+        width={W}
+        height={height}
         style={{ width: "100%", height, display: "block", cursor: "crosshair" }}
         onMouseMove={onMove}
         onMouseLeave={onLeave}
