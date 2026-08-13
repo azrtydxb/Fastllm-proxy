@@ -1,0 +1,430 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "fastllm-proxy",
+  "description": "Gateway health from /metrics. Per-caller detail is deliberately absent \u2014 that cardinality is how a metrics endpoint becomes an outage \u2014 and lives in usage_events instead.",
+  "tags": [
+    "fastllm-proxy",
+    "llm"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Requests per second",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_requests_total[5m]))",
+          "legendFormat": "served",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Counter rate, not the page-measured figure the UI shows. Both are correct; this one survives a reload."
+    },
+    {
+      "id": 2,
+      "title": "Upstream errors per second",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_backend_errors_total[5m])) by (api_base)",
+          "legendFormat": "{{api_base}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Per backend, deliberately unsummed: one backend failing and the whole pool failing need different responses."
+    },
+    {
+      "id": 3,
+      "title": "Refusals per second, by reason",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_rejections_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Requests the gateway turned away itself \u2014 unauthenticated, unauthorised, rate limited, over budget. Distinct from upstream errors: the remedies have nothing in common."
+    },
+    {
+      "id": 4,
+      "title": "Time to first token",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fastllm_time_to_first_token_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fastllm_time_to_first_token_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(fastllm_time_to_first_token_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Streaming only. A non-streaming response has no separate first-byte moment, so it is not counted here rather than being counted as instant."
+    },
+    {
+      "id": 5,
+      "title": "Whole-request duration",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 7,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fastllm_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fastllm_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "In flight, per backend",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "fastllm_backend_inflight",
+          "legendFormat": "{{api_base}} {{model}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "What cache-affinity balances against. A backend pinned high while others idle is the affinity escape hatch not firing."
+    },
+    {
+      "id": 7,
+      "title": "Backend health",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "fastllm_backend_healthy",
+          "legendFormat": "{{api_base}} {{model}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "1 healthy, 0 not. Per replica \u2014 replicas disagreeing is a partition, not a dead backend."
+    },
+    {
+      "id": 8,
+      "title": "Failovers and fallback per second",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_failovers_total[5m]))",
+          "legendFormat": "failover",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(fastllm_fallback_used_total[5m]))",
+          "legendFormat": "deployment fallback",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Non-zero means chains are being walked. Sustained fallback use means the primaries are not serving."
+    },
+    {
+      "id": 9,
+      "title": "Cache hit ratio",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_cache_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(fastllm_cache_total[5m])), 1)",
+          "legendFormat": "hit ratio",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "Per process. With N replicas a repeated request only hits if it lands on the replica that served it before \u2014 the cache is deliberately not shared."
+    },
+    {
+      "id": 10,
+      "title": "Tokens per second",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_model_tokens_total[5m])) by (model, kind)",
+          "legendFormat": "{{model}} {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Only where the upstream reported counts."
+    },
+    {
+      "id": 11,
+      "title": "Snapshot age",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "fastllm_snapshot_age_seconds",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Seconds since this replica last accepted a snapshot. Climbing on one replica and not the others means that one has stopped hearing from the control plane."
+    },
+    {
+      "id": 12,
+      "title": "Usage reports dropped",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 8,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(fastllm_usage_reports_dropped_total[1h]))",
+          "legendFormat": "dropped/h",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Non-zero means billing data is being discarded because the control plane could not keep up. The design trades usage for inference under pressure \u2014 visibly, not silently."
+    },
+    {
+      "id": 13,
+      "title": "Classifier decisions per second",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 29,
+        "w": 16,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fastllm_classified_fast_total[5m]))",
+          "legendFormat": "fast tier",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(fastllm_classified_refined_total[5m]))",
+          "legendFormat": "refined tier",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(fastllm_classify_escalations_total[5m]))",
+          "legendFormat": "escalations",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(fastllm_unclassified_total[5m]))",
+          "legendFormat": "unclassified",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Escalations are the expensive path: the fast tier was not confident and a transformer ran."
+    }
+  ]
+}

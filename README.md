@@ -159,6 +159,54 @@ A p50 that moves by 20 ms and one that moves by 280 ms are different products ev
 
 Full conditions, the per-request cost breakdown, the synthetic ceilings and what has *not* been measured are in [docs/performance.md](docs/performance.md).
 
+## Quickstart
+
+Postgres and the gateway together, then a key, then a request:
+
+```bash
+docker compose up -d                       # proxy :4000, admin API :4001, postgres :5432
+
+# The migrations seed a `bootstrap` service account. Give yourself a login,
+# then mint a key against it.
+docker compose exec proxy fastllm-proxy set-password --name you --password 'change-me'
+curl -sk -c /tmp/ck -X POST https://localhost:4001/login \
+  -H 'content-type: application/json' -d '{"name":"you","password":"change-me"}'
+
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models \
+  -H 'content-type: application/json' -d '{"name":"my-model"}'          # -> {"id":N}
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models/N/backends \
+  -H 'content-type: application/json' \
+  -d '{"api_base":"http://localhost:8000/v1","upstream_model":"Qwen/Qwen3-8B"}'
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/keys \
+  -H 'content-type: application/json' -d '{"name":"first","principal_id":1}'
+```
+
+That last call returns the key once. Then it is an OpenAI endpoint:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "authorization: Bearer sk-..." -H 'content-type: application/json' \
+  -d '{"model":"my-model","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The management UI is on the same port as the admin API — open `https://localhost:4001/`
+and the same login works.
+
+### Already running LiteLLM?
+
+Point the importer at your existing config and everything comes across —
+models, backends, keys, and each key's per-model grants:
+
+```bash
+fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
+```
+
+Idempotent, so it can be re-run; re-importing an edited file converges rather
+than duplicating, and grants removed from the file are revoked. Your existing
+keys keep working against the same models they already had. `File` mode reads
+LiteLLM YAML directly too, if you would rather not adopt the database at all —
+see [docs/operations.md](docs/operations.md).
+
 ## Install
 
 ```bash
@@ -175,6 +223,8 @@ cargo build --release
 | [Semantic routing](docs/classifier.md) | Classifier tiers: measured accuracy, cost, and what is still to build |
 | [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration, metrics, logs and traces |
 | [API and administration](docs/api.md) | Endpoints, admin API, providers, routing rules, auth, TLS, budgets, rate limits |
+| [Connecting a client](docs/integrations.md) | SDKs, coding agents, frameworks, and observability — copy-paste config for each |
+| [Troubleshooting](docs/troubleshooting.md) | The failures people actually hit, and what each one means |
 | [Deployment on Kubernetes](deploy/README.md) | Manifests, adding a provider, operator runbook |
 | [TODO](TODO.md) | What is deliberately not built, and why |
 
