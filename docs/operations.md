@@ -2,12 +2,196 @@
 
 Install, the three roles, deployment shapes, and configuration.
 
-## Install
+## Choosing a shape
+
+Five, in the order deployments actually grow through them. Each is a complete,
+working configuration — pick the row that matches where you are.
+
+| | Planes | Good for |
+|---|---|---|
+| [1. A binary](#1-a-binary) | one process | a laptop, a single box, a VM |
+| [2. Docker](#2-docker) | one process | the same, without a toolchain |
+| [3. Compose, split](#3-compose-with-the-planes-split) | two containers | one host, admin API off the public port |
+| [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
+| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic |
+
+The dividing line between the first two and the rest is `--role`. One binary
+runs in three shapes, and everything below is that one flag plus what each
+shape needs to reach its neighbours.
+
+### 1. A binary
 
 ```bash
-cargo build --release
-# target/release/fastllm-proxy
+cargo build --release            # target/release/fastllm-proxy
 ```
+
+Or take a release binary and skip the toolchain. Then, against a Postgres you
+already have:
+
+```bash
+export FASTLLM_DATABASE_URL=postgres://fastllm:fastllm@localhost:5432/fastllm
+export FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32)   # keep it; see below
+
+fastllm-proxy --role all --host 0.0.0.0
+# gateway on :4000, admin API and UI on :4001
+```
+
+`--role all` is control plane and gateway in one process, sharing state
+directly — no HTTP round trip between them, and nothing to configure between
+them either. Migrations apply at startup.
+
+Then give yourself a login and a key:
+
+```bash
+fastllm-proxy set-password --name you --password 'change-me'
+```
+
+Three things about this shape worth knowing before you rely on it:
+
+- **`FASTLLM_ENCRYPTION_KEY` is not regenerable.** It encrypts
+  `model_backends.upstream_api_key` at rest. Lose it and the upstream
+  credentials in that database are gone; change it and the process will not
+  start. Put it wherever you keep secrets before you put anything in the
+  database.
+- **`--host` defaults to loopback.** Binding `0.0.0.0` is a deliberate act,
+  which is why it is not the default.
+- **:4001 is not a public port.** It serves the admin API, the UI and
+  `/snapshot` — and `/snapshot` returns *decrypted* upstream credentials to
+  anything holding the proxy token. On one box, leave it on loopback and reach
+  it over SSH.
+
+Without a database at all, `--role proxy --config config.yaml` runs `File`
+mode: models and keys come from the YAML, nothing is persisted, and there is
+no UI. That is the shape that predates the control plane, and it still works
+unchanged — see [Per-key RBAC in `File` mode](#per-key-rbac-in-file-mode).
+
+### 2. Docker
+
+Same shape, no toolchain, from the public image:
+
+```bash
+docker run -d --name fastllm \
+  -p 4000:4000 -p 127.0.0.1:4001:4001 \
+  -e FASTLLM_ROLE=all \
+  -e FASTLLM_DATABASE_URL=postgres://fastllm:fastllm@db:5432/fastllm \
+  -e FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+```
+
+Note the asymmetry in the port mappings: `:4000` is published, `:4001` is
+published to loopback only. That is the same rule as above, expressed in the
+place people actually configure it.
+
+With Postgres alongside it, the repo's root `docker-compose.yml` is the whole
+thing in one command:
+
+```bash
+docker compose up -d
+# proxy :4000, admin :4001, postgres :5432
+docker compose exec fastllm fastllm-proxy set-password --name you --password 'change-me'
+```
+
+The image already sets `FASTLLM_HOST=0.0.0.0` — a container nobody can reach
+is not useful — which is why it is absent above and deliberate in shape 1. It
+also bakes both classifier models in and points `FASTLLM_CLASSIFIER_MODEL` at
+them, so [semantic routing](classifier.md) works here out of the box; a
+hand-built binary needs `--features classifier` and a `--classifier-model`.
+
+### 3. Compose, with the planes split
+
+`deploy/docker-compose.split.yml` runs the control plane and the gateway as
+separate containers:
+
+```bash
+docker compose -f deploy/docker-compose.split.yml up -d
+```
+
+Three services: Postgres, `--role control` (database, admin API, UI,
+`/snapshot`, no proxy listener), and `--role proxy` pointed at it with
+`FASTLLM_CONTROL_URL`. They authenticate to each other with
+`FASTLLM_PROXY_TOKEN`, which both must be given the same value of.
+
+What the split buys, on one host, is that the admin API is no longer in the
+process serving public traffic. The gateway container has no database
+credentials, no encryption key, and no admin surface — it has a snapshot and a
+token. If the thing on the public port is the thing you worry about, this is
+the shape that shrinks it.
+
+What it costs is a moving part: the gateway now depends on something to start
+against. It degrades rather than fails — a proxy that cannot reach its control
+plane falls back to the last snapshot it wrote to `--snapshot-cache`
+(`/var/lib/fastllm/snapshot.json`, a volume in that file) rather than refusing
+to start. **That volume is the whole point of the fallback.** Without it, a
+gateway that restarts during a control-plane outage comes up with nothing to
+serve.
+
+This shape runs one gateway. Scaling past one wants something to balance
+across replicas and a separate snapshot cache per replica — which is where
+Compose stops being the right tool.
+
+### 4. Kubernetes, with the planes split
+
+`deploy/` holds the manifests for one real cluster, and they are worth reading
+before the chart because they are concrete:
+
+```bash
+kubectl apply -f deploy/control.yaml      # CloudNativePG cluster + --role control
+kubectl apply -f deploy/configmap.yaml    # the proxy's tuning knobs
+kubectl apply -f deploy/deployment.yaml   # --role proxy, 2 replicas
+kubectl apply -f deploy/service.yaml      # the gateway's LoadBalancer
+```
+
+Two Deployments, and the shape of each follows from what it does:
+
+| | `fastllm-control` | `fastllm-proxy` |
+|---|---|---|
+| Replicas | 1 | 2+, spread across nodes |
+| Holds | database URL, encryption key, proxy token | proxy token, control URL |
+| Serves | :4001 admin | :4000 gateway |
+| Service | ClusterIP by default | LoadBalancer |
+| Storage | the Postgres cluster | an `emptyDir` snapshot cache |
+
+The control plane is one replica deliberately: it is not on the request path,
+and a second would race the first rebuilding snapshots for no gain.
+
+The gateway is two, on different nodes, because a gateway that dies with one
+node is not a gateway. Prefix affinity is per process, so two replicas mean a
+prefix can be cached on two nodes rather than one — the cost of the
+redundancy, and it is small.
+
+The control plane's Service is ClusterIP because of `/snapshot` again. The
+manifests in `deploy/` do give it a `LoadBalancer` on a pinned VIP, with TLS
+from a `Certificate` and a comment saying exactly what that decision rests on:
+a session-authenticated admin API, TLS, and a private network. Take away any
+one of those three and it should go back to ClusterIP.
+
+### 5. Kubernetes, scaled out
+
+The chart is the generic form of the above:
+
+```bash
+helm install fastllm charts/fastllm-proxy \
+  --set proxy.replicas=6 \
+  --set database.existingSecret=fastllm-pg-app \
+  --set secrets.existingSecret=fastllm-secrets \
+  --set proxy.policy=cache-affinity
+```
+
+Scaling means scaling `proxy`. The control plane stays at one; it does not see
+request traffic, and nothing about serving more requests asks for more of it.
+
+What changes as the data plane grows:
+
+| | |
+|---|---|
+| **Prefix affinity dilutes** | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct |
+| **Health is per replica** | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom |
+| **Rate limits are per replica** | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property |
+| **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows |
+
+For the request path itself, `--workers` and `--pool-max-idle` are the knobs
+that matter, and `docs/performance.md` has the measurements rather than the
+intuitions.
 
 ## Roles
 
@@ -20,8 +204,6 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 | `control` | Database, admin API (`/admin/*` — keys, principals, roles, models, backends), `/snapshot` and `/usage` — no proxy listener | `--database-url`, `FASTLLM_ENCRYPTION_KEY` |
 
 `proxy` is the default deliberately, not `all`: it is the only role that asks for nothing beyond what a pre-control-plane deployment already passed (`--config` and nothing else), so an existing deployment upgrades to this binary without gaining a new required flag. `all` and `control` are explicit opt-ins via `--role`/`FASTLLM_ROLE`.
-
-`control` and `proxy` split for a cluster deployment where the admin API and management UI need to stay off the public listener while the proxy scales out independently — network isolation is still the right default even now that `/admin/*` has its own session-cookie authentication (see below), the same way keeping a login-gated internal tool off a public LoadBalancer is good practice regardless of the login. See `deploy/` for the manifests that wire this up on Kubernetes.
 
 `Http` mode degrades gracefully: a `proxy` that cannot reach its control plane at startup, or loses it later, falls back to the last snapshot it wrote to `--snapshot-cache` (default `/var/lib/fastllm/snapshot.json`) rather than refusing to start or dropping traffic.
 
@@ -37,19 +219,7 @@ Each imported key gets its own role, `import:<name>`, holding just that key's gr
 
 Day-to-day changes after the initial seed go through the admin API below rather than another `import` run or hand-written SQL, so they reach a running control plane immediately instead of on its next periodic rebuild.
 
-### Quickstart with docker-compose
-
-`docker-compose.yml` in the repo root brings up Postgres and `--role=all` together:
-
-```bash
-docker compose up
-# proxy on :4000, admin API on :4001, postgres on :5432
-FASTLLM_ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
-  fastllm-proxy import --config litellm_config.yaml \
-  --database-url postgres://fastllm:fastllm@localhost:5432/fastllm
-curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
-  -d '{"name":"local","principal_id":1}'
-```
+### First key, by API
 
 Principal `1` is the `bootstrap` service account the migrations seed, already
 holding the `inference` role. For anything beyond a first key, create your own:
@@ -64,9 +234,9 @@ curl -XPOST localhost:4001/admin/keys -H 'content-type: application/json' \
   -d '{"name":"ci","principal_id":2,"expires_at":"2027-01-01T00:00:00Z"}'
 ```
 
-(`import`, run here on the host rather than inside the container, needs the
-same `FASTLLM_ENCRYPTION_KEY` `docker-compose.yml` sets for `--role all` —
-they share one database, so they must agree on one key.)
+(`import`, run on the host rather than inside the container, needs the same
+`FASTLLM_ENCRYPTION_KEY` the control plane was given — they share one
+database, so they must agree on one key.)
 
 ## Configuration
 

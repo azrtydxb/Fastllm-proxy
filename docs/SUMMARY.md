@@ -5,6 +5,7 @@
 # Using it
 
 - [Getting started](getting-started.md)
+- [Performance](performance.md)
 - [What it can do](features.md)
 - [Connecting a client](integrations.md)
 - [Troubleshooting](troubleshooting.md)
@@ -18,4 +19,3 @@
 - [API and administration](api.md)
 - [Architecture](architecture.md)
 - [Semantic routing](classifier.md)
-- [Performance](performance.md)

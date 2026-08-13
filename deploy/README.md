@@ -2,6 +2,10 @@
 
 Plain manifests, applied continuously to one cluster. The reusable form is the [Helm chart](../charts/fastllm-proxy).
 
+Not on Kubernetes? [`docker-compose.split.yml`](docker-compose.split.yml) in this directory is the same
+two-plane split on a single host, and [docs/operations.md](../docs/operations.md#choosing-a-shape)
+walks through all five shapes from a bare binary up to this one.
+
 | | |
 |---|---|
 | Namespace | `fastllm` |

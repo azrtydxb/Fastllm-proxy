@@ -168,7 +168,7 @@ docker compose up -d                       # proxy :4000, admin API :4001, postg
 
 # The migrations seed a `bootstrap` service account. Give yourself a login,
 # then mint a key against it.
-docker compose exec proxy fastllm-proxy set-password --name you --password 'change-me'
+docker compose exec fastllm fastllm-proxy set-password --name you --password 'change-me'
 curl -sk -c /tmp/ck -X POST https://localhost:4001/login \
   -H 'content-type: application/json' -d '{"name":"you","password":"change-me"}'
 

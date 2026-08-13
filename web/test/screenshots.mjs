@@ -56,7 +56,7 @@ if (await page.$("form input[type=password]")) {
   await settle(2500);
 }
 
-async function shot(name, screen, prepare) {
+async function shot(name, screen, prepare, after = 1400, finalize) {
   await page.evaluate((s) => {
     const b = [...document.querySelectorAll("nav button")].find(
       (x) => x.textContent.trim() === s,
@@ -66,7 +66,13 @@ async function shot(name, screen, prepare) {
   await settle();
   if (prepare) {
     await page.evaluate(prepare);
-    await settle();
+    await settle(after);
+  }
+  // Runs after the wait, for anything that has to act on what the wait
+  // produced — scrolling to a result that did not exist when `prepare` ran.
+  if (finalize) {
+    await page.evaluate(finalize);
+    await settle(600);
   }
   const file = `${OUT}/ui-${name}.png`;
   await page.screenshot({ path: file });
@@ -92,6 +98,54 @@ await shot("timeseries-modal", "Overview", () => {
     (x) => x.textContent.trim() === "expand",
   );
   if (b) b.click();
+});
+
+// Semantic routing is configured in two places and the classifier chapter
+// needs both: how good the classes turned out, and where a class is defined.
+
+// Read-only: scoring examples against centroids that exclude them changes
+// nothing. It is also the slowest thing on the page, hence the longer wait,
+// and it renders below the table — so scroll to it or photograph the fold.
+await shot(
+  "prompt-class-eval",
+  "Prompt classes",
+  () => {
+    const b = [...document.querySelectorAll("button")].find(
+      (x) => x.textContent.trim() === "Run evaluation",
+    );
+    if (b) b.click();
+  },
+  8000,
+  () => {
+    const h = [...document.querySelectorAll("*")].find((x) =>
+      x.textContent.trim().startsWith("Leave-one-out evaluation"),
+    );
+    if (h) h.scrollIntoView({ block: "center" });
+  },
+);
+
+// React owns these inputs, so assigning `.value` is not enough — the value
+// property is shadowed by React's own descriptor and the component never
+// hears about the change. Go through the prototype setter and dispatch the
+// event React is actually listening for. Nothing is submitted: this
+// photographs the form, it does not create a class.
+await shot("prompt-class-new", "Prompt classes", () => {
+  const type = (el, value) => {
+    const proto = Object.getPrototypeOf(el);
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const form = document.querySelector("form");
+  type(form.querySelector("input"), "translation");
+  type(
+    form.querySelector("textarea"),
+    [
+      "Translate this paragraph into French",
+      "How do you say 'where is the station' in Japanese?",
+      "Render the following into formal Spanish",
+      "What's the German for a quarterly earnings report?",
+    ].join("\n"),
+  );
 });
 
 // And the permission matrix, which is the clearest single picture of the

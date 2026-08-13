@@ -27,7 +27,7 @@ deliberate — there is no default password to forget to change.
 ## 2. Give yourself a login
 
 ```bash
-docker compose exec proxy fastllm-proxy set-password --name you --password 'change-me'
+docker compose exec fastllm fastllm-proxy set-password --name you --password 'change-me'
 ```
 
 The first login created this way gets the `admin` role automatically. Every

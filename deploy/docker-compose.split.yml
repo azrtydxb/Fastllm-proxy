@@ -1,0 +1,76 @@
+# The two-plane shape, in Compose.
+#
+# The root `docker-compose.yml` runs `--role all`: one process, both planes,
+# nothing between them. This file is the next shape up — the control plane and
+# the gateway as separate containers — and it exists because that split is the
+# one people get wrong on the way to Kubernetes.
+#
+#   docker compose -f deploy/docker-compose.split.yml up -d
+#
+# The gateway is on :4000. The admin API and UI are bound to loopback
+# deliberately — see the `control` service below.
+#
+# This runs one gateway. Scaling past one is where Compose stops being the
+# right tool: `--scale proxy=N` needs the published port dropped and something
+# in front to balance across the replicas, and each replica wants its own
+# snapshot cache rather than N processes writing one file. That is Kubernetes'
+# job, and `deploy/*.yaml` and the Helm chart do it.
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: fastllm
+      POSTGRES_PASSWORD: fastllm
+      POSTGRES_DB: fastllm
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastllm"]
+      interval: 5s
+      retries: 10
+
+  # Owns the database, the admin API, the management UI and /snapshot. One
+  # replica: it is not on the request path, and a second would only race the
+  # first rebuilding snapshots.
+  control:
+    image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      FASTLLM_ROLE: control
+      FASTLLM_HOST: 0.0.0.0
+      FASTLLM_DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+      # Both planes must agree on this: it is what the proxy presents to
+      # /snapshot. Generate your own with `openssl rand -hex 24`.
+      FASTLLM_PROXY_TOKEN: pt-change-me
+      # Encrypts model_backends.upstream_api_key at rest; --role control
+      # refuses to start without it. Not a secret in this file's case because
+      # this file is a worked example — generate your own for anything real.
+      FASTLLM_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      FASTLLM_LOG: info
+    # 127.0.0.1 on purpose. /snapshot returns *decrypted* upstream credentials
+    # to anything holding the proxy token, so the admin listener is not a thing
+    # to put on a public interface without deciding to. Reach the UI over an
+    # SSH tunnel, or put a TLS terminator with your own auth in front of it.
+    ports: ["127.0.0.1:4001:4001"]
+
+  # The data plane. This is the part that scales: `--scale proxy=N`.
+  proxy:
+    image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+    depends_on: [control]
+    environment:
+      FASTLLM_ROLE: proxy
+      FASTLLM_HOST: 0.0.0.0
+      FASTLLM_CONTROL_URL: http://control:4001
+      FASTLLM_PROXY_TOKEN: pt-change-me
+      FASTLLM_LOG: info
+    ports: ["4000:4000"]
+    # The last-known-good snapshot. Without a volume here, a proxy that
+    # restarts while the control plane is down comes up with nothing to serve
+    # from — which converts a control-plane outage into a gateway outage, the
+    # exact failure the snapshot cache exists to prevent.
+    volumes: ["snapshot:/var/lib/fastllm"]
+
+volumes:
+  pgdata:
+  snapshot:
