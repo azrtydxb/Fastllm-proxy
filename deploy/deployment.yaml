@@ -42,7 +42,7 @@ spec:
           # a proxy older than the control plane reads a snapshot with fields it
           # does not know. See the note there for why this drifted from the
           # running image and what applying the stale pin did.
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-ae3f207
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-18e0909
           imagePullPolicy: Always
           args:
             - --role=proxy

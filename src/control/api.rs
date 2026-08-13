@@ -1959,20 +1959,20 @@ struct UsageSummary {
 /// One bucket of a time series. Every field is present for every bucket,
 /// including empty ones — see [`timeseries`] for why gaps are not an option.
 #[derive(Serialize)]
-struct TimeseriesPoint {
+pub struct TimeseriesPoint {
     /// Start of the bucket, RFC 3339.
-    at: chrono::DateTime<chrono::Utc>,
+    pub at: chrono::DateTime<chrono::Utc>,
     /// Everything attributable that happened in this bucket: forwarded
     /// responses *and* refusals. The two breakdowns below partition it.
-    requests: i64,
+    pub requests: i64,
     /// Responses a backend returned with a 4xx or 5xx status.
-    upstream_errors: i64,
+    pub upstream_errors: i64,
     /// Requests the gateway turned away itself, by kind. Separate from
     /// `upstream_errors` on purpose: the remedies have nothing in common.
-    refused_authorisation: i64,
-    refused_rate_limit: i64,
-    refused_budget: i64,
-    refused_no_backend: i64,
+    pub refused_authorisation: i64,
+    pub refused_rate_limit: i64,
+    pub refused_budget: i64,
+    pub refused_no_backend: i64,
     /// Refusals that never reached attribution — a 401 with no valid key, a
     /// 404 for a model that does not exist. Counted from
     /// `gateway_rejections` rather than `usage_events`, because there is no
@@ -1982,14 +1982,14 @@ struct TimeseriesPoint {
     /// unauthenticated request has neither, so including it would make every
     /// filtered view report failures it cannot attribute to the thing being
     /// filtered for.
-    refused_unattributed: i64,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    cost_micros: i64,
+    pub refused_unattributed: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cost_micros: i64,
     /// Requests contributing nothing to `cost_micros`, so a spend line can
     /// say how much of the traffic it does not cover rather than implying
     /// the rest was free.
-    unpriced_requests: i64,
+    pub unpriced_requests: i64,
     /// Whole-request latency percentiles, in milliseconds, over the
     /// forwarded responses in this bucket that were timed. `None` for a
     /// bucket with nothing to measure — which is not the same as zero, and
@@ -2117,30 +2117,22 @@ fn bucket_seconds(requested: Option<i64>, span_seconds: i64) -> i64 {
 /// "instantaneous" rather than "no data". The two want opposite treatments
 /// from a chart — a count of zero is a real point on the axis, an unknown
 /// latency is a break in the line.
-async fn timeseries(
-    State(ctx): State<Ctx>,
-    _perm: RequireRead,
-    axum::extract::Query(q): axum::extract::Query<TimeseriesQuery>,
-) -> Result<Json<Vec<TimeseriesPoint>>, ApiError> {
-    let until = q.until.unwrap_or_else(chrono::Utc::now);
-    let since = q
-        .since
-        .unwrap_or_else(|| until - chrono::Duration::hours(24));
-    if since >= until {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "since must be before until",
-        ));
-    }
-    let bucket = bucket_seconds(q.bucket, (until - since).num_seconds());
-
-    // `to_timestamp(floor(extract(epoch ...) / n) * n)` rather than
-    // `date_trunc`: `date_trunc` only knows named units, and the ladder above
-    // includes widths like five and fifteen minutes that have no name. This
-    // form buckets to an arbitrary number of seconds, and both sides of the
-    // join use it so the generated grid and the aggregated rows land on
-    // identical instants -- an off-by-one there shows up as every bucket
-    // reading zero, which is a confusing way to find out.
+/// The query behind `GET /admin/timeseries`, separated from the handler so an
+/// integration test can run it against a real database.
+///
+/// `sqlx::query_as` does not verify this statement at compile time. A
+/// malformed one — a missing comma between two CTEs, say — compiles cleanly,
+/// passes every unit test, and fails only when Postgres parses it. That
+/// shipped once: the endpoint returned 500 and the only symptom on screen
+/// was a chart showing its "control plane too old" fallback.
+async fn timeseries_rows(
+    pool: &PgPool,
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+    bucket_seconds: i64,
+    model: Option<String>,
+    principal_id: Option<i64>,
+) -> Result<Vec<TimeseriesPoint>, sqlx::Error> {
     let rows: Vec<TimeseriesRow> = sqlx::query_as(
         "WITH grid AS (
              SELECT generate_series(
@@ -2218,7 +2210,7 @@ async fn timeseries(
              WHERE ($4::text IS NULL OR m.name = $4)
                AND ($5::bigint IS NULL OR u.principal_id = $5)
              GROUP BY 1
-         )
+         ),
          rej AS (
              SELECT to_timestamp(floor(extract(epoch FROM g.at) / $3) * $3) AS at,
                     COALESCE(sum(g.count), 0)::bigint AS unattributed
@@ -2253,37 +2245,100 @@ async fn timeseries(
     )
     .bind(since)
     .bind(until)
-    .bind(bucket as f64)
-    .bind(&q.model)
-    .bind(q.principal_id)
-    .fetch_all(&ctx.pool)
+    .bind(bucket_seconds as f64)
+    .bind(&model)
+    .bind(principal_id)
+    .fetch_all(pool)
+    .await
+    ?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| TimeseriesPoint {
+            at: r.at,
+            requests: r.requests,
+            upstream_errors: r.upstream_errors,
+            refused_authorisation: r.r_auth,
+            refused_rate_limit: r.r_rate,
+            refused_budget: r.r_budget,
+            refused_no_backend: r.r_nobackend,
+            refused_unattributed: r.r_unattributed,
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            cost_micros: r.cost_micros,
+            unpriced_requests: r.unpriced,
+            // Rounded here rather than in SQL: `percentile_cont`
+            // interpolates and returns a double, and a millisecond
+            // figure with fifteen decimal places is noise in a tooltip.
+            p50_ms: r.p50.map(|v| v.round() as i64),
+            p95_ms: r.p95.map(|v| v.round() as i64),
+            ttft_p95_ms: r.ttft95.map(|v| v.round() as i64),
+        })
+        .collect())
+}
+
+/// The timeseries query, reachable from the integration test that proves it
+/// parses.
+///
+/// `sqlx::query_as` does not check this statement at compile time, so a
+/// malformed one compiles, passes every unit test, and fails when Postgres
+/// reads it. That is not hypothetical — a missing comma between two CTEs
+/// shipped, and the only symptom was a chart showing its "control plane too
+/// old" fallback while the endpoint returned 500.
+pub async fn timeseries_for_test(
+    pool: &PgPool,
+    bucket_seconds: i64,
+    model: Option<&str>,
+    principal_id: Option<i64>,
+) -> Result<Vec<TimeseriesPoint>, sqlx::Error> {
+    let until = chrono::Utc::now();
+    let since = until - chrono::Duration::hours(24);
+    timeseries_rows(
+        pool,
+        since,
+        until,
+        bucket_seconds,
+        model.map(str::to_owned),
+        principal_id,
+    )
+    .await
+}
+
+async fn timeseries(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    axum::extract::Query(q): axum::extract::Query<TimeseriesQuery>,
+) -> Result<Json<Vec<TimeseriesPoint>>, ApiError> {
+    let until = q.until.unwrap_or_else(chrono::Utc::now);
+    let since = q
+        .since
+        .unwrap_or_else(|| until - chrono::Duration::hours(24));
+    if since >= until {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "since must be before until",
+        ));
+    }
+    let bucket = bucket_seconds(q.bucket, (until - since).num_seconds());
+
+    // `to_timestamp(floor(extract(epoch ...) / n) * n)` rather than
+    // `date_trunc`: `date_trunc` only knows named units, and the ladder above
+    // includes widths like five and fifteen minutes that have no name. This
+    // form buckets to an arbitrary number of seconds, and both sides of the
+    // join use it so the generated grid and the aggregated rows land on
+    // identical instants -- an off-by-one there shows up as every bucket
+    // reading zero, which is a confusing way to find out.
+    let rows = timeseries_rows(
+        &ctx.pool,
+        since,
+        until,
+        bucket,
+        q.model.clone(),
+        q.principal_id,
+    )
     .await
     .map_err(|e| db_error("timeseries", &e))?;
-
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| TimeseriesPoint {
-                at: r.at,
-                requests: r.requests,
-                upstream_errors: r.upstream_errors,
-                refused_authorisation: r.r_auth,
-                refused_rate_limit: r.r_rate,
-                refused_budget: r.r_budget,
-                refused_no_backend: r.r_nobackend,
-                refused_unattributed: r.r_unattributed,
-                prompt_tokens: r.prompt_tokens,
-                completion_tokens: r.completion_tokens,
-                cost_micros: r.cost_micros,
-                unpriced_requests: r.unpriced,
-                // Rounded here rather than in SQL: `percentile_cont`
-                // interpolates and returns a double, and a millisecond
-                // figure with fifteen decimal places is noise in a tooltip.
-                p50_ms: r.p50.map(|v| v.round() as i64),
-                p95_ms: r.p95.map(|v| v.round() as i64),
-                ttft_p95_ms: r.ttft95.map(|v| v.round() as i64),
-            })
-            .collect(),
-    ))
+    Ok(Json(rows))
 }
 
 fn default_usage_limit() -> i64 {
