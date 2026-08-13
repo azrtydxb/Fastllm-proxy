@@ -22,7 +22,9 @@ cycles per second per stream. Response bodies here are never parsed — an
 
 | | |
 |---|---|
-| [Quickstart and clients](integrations.md) | Point an SDK, a coding agent or a framework at it |
+| [Getting started](getting-started.md) | Install, first request, and a tour of every screen |
+| [What it does, and when to use it](features.md) | Features, measured trade-offs, and where to use something else |
+| [Connecting a client](integrations.md) | Point an SDK, a coding agent or a framework at it |
 | [Troubleshooting](troubleshooting.md) | The failures people actually hit |
 | [Operations](operations.md) | The three roles, configuration, metrics, logs |
 | [API and administration](api.md) | Every endpoint, and `openapi.json` |

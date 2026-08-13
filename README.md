@@ -223,6 +223,8 @@ cargo build --release
 | [Semantic routing](docs/classifier.md) | Classifier tiers: measured accuracy, cost, and what is still to build |
 | [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration, metrics, logs and traces |
 | [API and administration](docs/api.md) | Endpoints, admin API, providers, routing rules, auth, TLS, budgets, rate limits |
+| [Getting started](docs/getting-started.md) | Install, first request, and a screenshot tour of every screen |
+| [What it does, and when to use it](docs/features.md) | The features, the measured trade-offs, and where to use something else |
 | [Connecting a client](docs/integrations.md) | SDKs, coding agents, frameworks, and observability — copy-paste config for each |
 | [Troubleshooting](docs/troubleshooting.md) | The failures people actually hit, and what each one means |
 | [Deployment on Kubernetes](deploy/README.md) | Manifests, adding a provider, operator runbook |

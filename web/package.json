@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "node test/render.mjs && node test/interact.mjs",
     "test:fixtures": "node test/verify-fixtures.mjs",
-    "test:browser": "node test/browser.mjs"
+    "test:browser": "node test/browser.mjs",
+    "screenshots": "node test/screenshots.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

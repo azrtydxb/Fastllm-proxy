@@ -4,7 +4,9 @@
 
 # Using it
 
-- [Quickstart and clients](integrations.md)
+- [Getting started](getting-started.md)
+- [What it does, and when to use it](features.md)
+- [Connecting a client](integrations.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Running it
