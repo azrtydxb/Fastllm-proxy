@@ -348,6 +348,7 @@ const TIMESERIES = (() => {
       refused_rate_limit,
       refused_budget,
       refused_no_backend,
+      refused_unattributed: i === 13 ? 6 : 0,
       prompt_tokens: requests * 120,
       completion_tokens: requests * 260,
       cost_micros: quiet ? 0 : requests * 35,

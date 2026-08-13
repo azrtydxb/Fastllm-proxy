@@ -70,10 +70,14 @@ fn main() {
     println!("tail buffer + usage extraction, per request\n");
 
     let frame = b"data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"token\"}}]}\n\n";
-    bench("push one SSE frame (memcpy into the ring)", 2_000_000, || {
-        let mut t = TailBuffer::new(DEFAULT_CAPACITY);
-        t.push(std::hint::black_box(frame));
-    });
+    bench(
+        "push one SSE frame (memcpy into the ring)",
+        2_000_000,
+        || {
+            let mut t = TailBuffer::new(DEFAULT_CAPACITY);
+            t.push(std::hint::black_box(frame));
+        },
+    );
 
     let sse = sse_tail();
     bench("push a whole 60-frame stream", 200_000, || {
@@ -97,16 +101,27 @@ fn main() {
     });
 
     let big = big_embeddings_body();
-    println!("  (embeddings fixture: {} bytes vs {DEFAULT_CAPACITY} window)", big.len());
-    bench("extract_usage: 22 KB body, tail is a fragment", 200_000, || {
-        let mut t = TailBuffer::new(DEFAULT_CAPACITY);
-        t.push(&big);
-        std::hint::black_box(t.extract_usage());
-    });
+    println!(
+        "  (embeddings fixture: {} bytes vs {DEFAULT_CAPACITY} window)",
+        big.len()
+    );
+    bench(
+        "extract_usage: 22 KB body, tail is a fragment",
+        200_000,
+        || {
+            let mut t = TailBuffer::new(DEFAULT_CAPACITY);
+            t.push(&big);
+            std::hint::black_box(t.extract_usage());
+        },
+    );
 
-    bench("extract_usage: tail carrying no usage at all", 200_000, || {
-        let mut t = TailBuffer::new(DEFAULT_CAPACITY);
-        t.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"nothing here\"}}]}\n\n");
-        std::hint::black_box(t.extract_usage());
-    });
+    bench(
+        "extract_usage: tail carrying no usage at all",
+        200_000,
+        || {
+            let mut t = TailBuffer::new(DEFAULT_CAPACITY);
+            t.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"nothing here\"}}]}\n\n");
+            std::hint::black_box(t.extract_usage());
+        },
+    );
 }

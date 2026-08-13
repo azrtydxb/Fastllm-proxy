@@ -1758,8 +1758,87 @@ async fn post_health_report(
     if !proxy_token_authorised(&headers, &ctx.proxy_token) {
         return StatusCode::UNAUTHORIZED;
     }
-    ctx.fleet.record(report, std::time::Instant::now());
+    let previous = ctx.fleet.record(report.clone(), std::time::Instant::now());
+    persist_rejection_deltas(&ctx.pool, &report, previous.as_ref()).await;
     StatusCode::NO_CONTENT
+}
+
+/// Store the increase in this replica's unattributable-refusal counters
+/// since its last report.
+///
+/// These are the refusals `usage_events` cannot hold — a 401 has no
+/// principal to attribute and a 404 has no model — so without this an error
+/// rate computed from the database is a count of failures that got far
+/// enough to be attributed, which is not the number anyone means by "errors
+/// callers saw".
+///
+/// Deltas rather than samples, because the subtraction needs the previous
+/// value and this is the one place it is already in hand. A counter that
+/// went *down* means the replica restarted with fresh counters, so the new
+/// value is the delta — the alternative, a negative, would subtract real
+/// failures from other replicas' totals in the same bucket.
+///
+/// The first report from a replica is skipped entirely rather than counted
+/// from zero. Its counter covers however long that process has been alive,
+/// which after a control-plane restart can be days, and attributing all of
+/// it to the current minute would draw a spike that never happened.
+///
+/// Failure is logged and swallowed: this is diagnostic bookkeeping arriving
+/// on a health report, and returning an error would make a replica retry a
+/// report whose real purpose — publishing backend health — already
+/// succeeded.
+async fn persist_rejection_deltas(
+    pool: &PgPool,
+    report: &crate::health_report::HealthReport,
+    previous: Option<&crate::health_report::HealthReport>,
+) {
+    let Some(prev) = previous else { return };
+    let delta = |now: u64, before: u64| -> i64 {
+        if now >= before {
+            (now - before) as i64
+        } else {
+            now as i64
+        }
+    };
+    let rows = [
+        (
+            "unauthenticated",
+            delta(
+                report.process.rejected_unauthenticated,
+                prev.process.rejected_unauthenticated,
+            ),
+        ),
+        (
+            "model_not_found",
+            delta(
+                report.process.rejected_model_not_found,
+                prev.process.rejected_model_not_found,
+            ),
+        ),
+    ];
+    for (kind, count) in rows {
+        if count == 0 {
+            continue;
+        }
+        // Bucketed to the minute and summed on conflict: reports arrive
+        // every ten seconds, so several land in the same bucket, and each
+        // carries a distinct slice of time that must add rather than
+        // overwrite.
+        if let Err(e) = sqlx::query(
+            "INSERT INTO gateway_rejections (at, replica, kind, count)
+             VALUES (date_trunc('minute', now()), $1, $2, $3)
+             ON CONFLICT (at, replica, kind)
+             DO UPDATE SET count = gateway_rejections.count + EXCLUDED.count",
+        )
+        .bind(&report.replica)
+        .bind(kind)
+        .bind(count)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(error = %e, kind, "could not record gateway rejections");
+        }
+    }
 }
 
 /// `GET /admin/fleet`: what every proxy currently reports.
@@ -1813,6 +1892,16 @@ struct TimeseriesPoint {
     refused_rate_limit: i64,
     refused_budget: i64,
     refused_no_backend: i64,
+    /// Refusals that never reached attribution — a 401 with no valid key, a
+    /// 404 for a model that does not exist. Counted from
+    /// `gateway_rejections` rather than `usage_events`, because there is no
+    /// principal to key a row on; see that table's comment.
+    ///
+    /// Excluded when the caller filters by model or principal: an
+    /// unauthenticated request has neither, so including it would make every
+    /// filtered view report failures it cannot attribute to the thing being
+    /// filtered for.
+    refused_unattributed: i64,
     prompt_tokens: i64,
     completion_tokens: i64,
     cost_micros: i64,
@@ -1843,6 +1932,7 @@ struct TimeseriesRow {
     r_rate: i64,
     r_budget: i64,
     r_nobackend: i64,
+    r_unattributed: i64,
     prompt_tokens: i64,
     completion_tokens: i64,
     cost_micros: i64,
@@ -2048,6 +2138,18 @@ async fn timeseries(
                AND ($5::bigint IS NULL OR u.principal_id = $5)
              GROUP BY 1
          )
+         rej AS (
+             SELECT to_timestamp(floor(extract(epoch FROM g.at) / $3) * $3) AS at,
+                    COALESCE(sum(g.count), 0)::bigint AS unattributed
+             FROM gateway_rejections g
+             WHERE g.at >= $1 AND g.at < $2
+               -- Only when nothing is being filtered for. These rows carry
+               -- no model and no principal, so a filtered view that included
+               -- them would attribute anonymous failures to whichever thing
+               -- the operator happened to be looking at.
+               AND $4::text IS NULL AND $5::bigint IS NULL
+             GROUP BY 1
+         )
          SELECT grid.at                                AS at,
                 COALESCE(ev.requests, 0)               AS requests,
                 COALESCE(ev.upstream_errors, 0)        AS upstream_errors,
@@ -2055,6 +2157,7 @@ async fn timeseries(
                 COALESCE(ev.r_rate, 0)                 AS r_rate,
                 COALESCE(ev.r_budget, 0)               AS r_budget,
                 COALESCE(ev.r_nobackend, 0)            AS r_nobackend,
+                COALESCE(rej.unattributed, 0)          AS r_unattributed,
                 COALESCE(ev.prompt_tokens, 0)          AS prompt_tokens,
                 COALESCE(ev.completion_tokens, 0)      AS completion_tokens,
                 COALESCE(ev.cost_micros, 0)            AS cost_micros,
@@ -2062,7 +2165,9 @@ async fn timeseries(
                 ev.p50                                 AS p50,
                 ev.p95                                 AS p95,
                 ev.ttft95                              AS ttft95
-         FROM grid LEFT JOIN ev ON ev.at = grid.at
+         FROM grid
+         LEFT JOIN ev  ON ev.at  = grid.at
+         LEFT JOIN rej ON rej.at = grid.at
          ORDER BY grid.at",
     )
     .bind(since)
@@ -2084,6 +2189,7 @@ async fn timeseries(
                 refused_rate_limit: r.r_rate,
                 refused_budget: r.r_budget,
                 refused_no_backend: r.r_nobackend,
+                refused_unattributed: r.r_unattributed,
                 prompt_tokens: r.prompt_tokens,
                 completion_tokens: r.completion_tokens,
                 cost_micros: r.cost_micros,

@@ -445,11 +445,20 @@ function TrafficHistory() {
   // the remainder or the stack double-counts every error.
   const shaped = points?.map((p) => {
     const refused =
-      p.refused_authorisation + p.refused_rate_limit + p.refused_budget + p.refused_no_backend;
+      p.refused_authorisation +
+      p.refused_rate_limit +
+      p.refused_budget +
+      p.refused_no_backend +
+      // Never reached attribution, so it is not inside `requests` and is
+      // added to the stack rather than carved out of the served band.
+      p.refused_unattributed;
     return {
       ...p,
       refused,
-      requests_ok: Math.max(0, p.requests - p.upstream_errors - refused),
+      requests_ok: Math.max(
+        0,
+        p.requests - p.upstream_errors - (refused - p.refused_unattributed),
+      ),
     };
   });
 

@@ -1413,6 +1413,12 @@ fn spawn_health_reports(
                     cache_entries: state.cache.len(),
                     cache_bytes: state.cache.bytes(),
                     usage_dropped: state.usage.dropped(),
+                    rejected_unauthenticated: state
+                        .telemetry
+                        .rejections_of(fastllm_proxy::telemetry::Rejection::Unauthenticated),
+                    rejected_model_not_found: state
+                        .telemetry
+                        .rejections_of(fastllm_proxy::telemetry::Rejection::ModelNotFound),
                 },
                 backends: registry
                     .backends()

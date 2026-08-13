@@ -147,7 +147,7 @@ pub async fn handle(
     };
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
-        return Ok(models_response(&state, &snapshot));
+        return Ok(models_response(&state, &snapshot, principal));
     }
 
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
@@ -1721,26 +1721,60 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
         .expect("static response is well-formed")
 }
 
-/// OpenAI-shaped model list, aggregated over every pool.
-/// OpenAI-shaped model list.
+/// OpenAI-shaped model list, filtered to what this caller may actually
+/// invoke.
 ///
-/// **Lists both concrete and virtual models.** `/v1/models` has never been
-/// filtered by what the caller may invoke — it enumerates what is
-/// *configured*, same as today's behaviour for concrete models — so leaving
-/// virtual models out would make them undiscoverable except by already
-/// knowing their name, without adding any actual access control: a caller
-/// with no grant for a listed model already gets 403 from `/v1/chat/completions`
-/// regardless of whether that model appeared here. Concrete models are kept
-/// in the list too, even ones that exist only as a virtual model's target —
-/// removing them would break any client still addressing them directly,
-/// which is a legitimate and unrestricted thing to do unless someone
-/// deliberately revokes the grant.
-fn models_response(state: &AppState, snapshot: &Snapshot) -> Response<ResBody> {
+/// **Lists both concrete and virtual models**, and only the ones the
+/// caller's grants cover. It used to enumerate everything *configured*, on
+/// the reasoning that listing is not access control — a caller with no grant
+/// already gets 403 from `/v1/chat/completions`, so hiding the name added
+/// nothing but obscurity.
+///
+/// That reasoning was about security, and it was right about security. It
+/// was wrong about the endpoint's job. Clients populate model pickers from
+/// this list: a coding agent pointed at a key scoped to one model offered
+/// six, five of which fail the moment they are chosen. The list is a
+/// capability advertisement, and advertising capabilities the caller does
+/// not have is a usability defect however sound the authorisation behind it
+/// is. OpenAI's own `/v1/models` returns what the key can use.
+///
+/// A virtual model is listed when the caller may invoke **any** model it can
+/// route to — its rules' targets or its defaults. Requiring all of them
+/// would hide a virtual model that would in fact work for most prompts;
+/// requiring none would advertise one that can never resolve to anything
+/// this caller is allowed. Neither is what the caller wants to know, which
+/// is "is this name worth trying".
+///
+/// An unauthenticated deployment (open snapshot, no principal) still sees
+/// everything: there are no grants to filter by, and every model is
+/// invocable.
+fn models_response(
+    state: &AppState,
+    snapshot: &Snapshot,
+    principal: Option<&Principal>,
+) -> Response<ResBody> {
     let registry = state.registry.load();
     let mut names: Vec<&str> = registry.model_names();
     names.extend(snapshot.virtual_models.keys().map(String::as_str));
     names.sort_unstable();
     names.dedup();
+
+    if let Some(p) = principal {
+        names.retain(|name| {
+            if p.may_invoke(name) {
+                return true;
+            }
+            // Not a concrete grant — but it may be a virtual model whose
+            // chain reaches something this caller does hold.
+            snapshot.virtual_models.get(*name).is_some_and(|vm| {
+                vm.rules
+                    .iter()
+                    .flat_map(|r| r.targets.iter())
+                    .chain(vm.default_targets.iter())
+                    .any(|t| p.may_invoke(&t.model))
+            })
+        });
+    }
     let data: Vec<serde_json::Value> = names
         .into_iter()
         .map(|name| {

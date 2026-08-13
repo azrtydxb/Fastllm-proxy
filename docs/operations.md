@@ -281,11 +281,27 @@ To keep raw rows longer, change `RAW_RETENTION_DAYS` in `src/control/api.rs`;
 the roll-up is additive (`ON CONFLICT DO UPDATE`), so a longer window simply
 folds later.
 
-**Still absent: unauthenticated 401s.** There is no principal to attribute
-them to, and more to the point 401 is the only refusal a stranger can trigger
-at will — recording it would let anonymous traffic drive unbounded writes
-here. That count stays in `/metrics`, as a counter rather than a row, so a
-caller-visible total still needs both sources.
+**Refusals with nobody to attribute them** — a 401 from an invalid key, a 404
+for a model that does not exist — are in `gateway_rejections` instead, and
+`/admin/timeseries` reports them as `refused_unattributed`. So a
+caller-visible error total *is* answerable from Postgres alone; it is simply
+two tables, because the two kinds of failure are shaped differently.
+
+They are counts bucketed to the minute per replica, not rows per request, and
+that is deliberate: 401 is the one refusal an anonymous stranger can trigger
+at will, so a row apiece would let unauthenticated traffic drive unbounded
+writes. The counters ride the health report the proxies already send every
+ten seconds; the control plane holds each replica's previous report, so it
+stores the delta. A counter that went *down* means that replica restarted,
+and the new value is taken as the delta rather than producing a negative. A
+replica's first report is skipped rather than counted from zero — its counter
+covers however long that process has been alive, and charging all of it to
+the current minute would draw a spike that never happened.
+
+These rows carry no model and no principal, so they are **excluded whenever
+you filter by either**. A filtered view that included them would attribute
+anonymous failures to whichever model or caller you happened to be looking
+at.
 
 This is where per-caller detail lives, and deliberately not in Prometheus: the
 answer to "which callers got slow" is per principal and per key, and a label

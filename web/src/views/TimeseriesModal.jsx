@@ -17,6 +17,7 @@ const COUNT_SERIES = [
   { key: "refused_rate_limit", label: "refused: rate limit", tone: "warn" },
   { key: "refused_budget", label: "refused: budget", tone: "violet" },
   { key: "refused_no_backend", label: "refused: no backend", tone: "bad" },
+  { key: "refused_unattributed", label: "refused: bad key / unknown model", tone: "warn" },
 ];
 
 const LATENCY_LINES = [
@@ -31,21 +32,27 @@ const TOKEN_SERIES = [
 ];
 
 /**
- * `requests` from the API counts everything attributable, refusals
- * included. A stack that plots it alongside the failures would double-count
- * them and always look like twice the traffic, so the served band is
- * derived here as the remainder.
+ * `requests` from the API counts everything *attributable*, refusals
+ * included. A stack that plotted it alongside those failures would draw each
+ * one twice and always show about double the traffic, so the served band is
+ * the remainder after they are taken out.
+ *
+ * `refused_unattributed` is the exception and is deliberately not subtracted:
+ * a 401 or an unknown-model 404 never reached attribution, so it was never
+ * inside `requests` to begin with. It rides on top of the stack as its own
+ * band, which is also the honest picture — those are requests callers made
+ * and saw fail, sitting above the traffic that got far enough to be counted.
  */
 function withDerived(points) {
   if (!points) return points;
   return points.map((p) => {
-    const failed =
+    const attributedFailures =
       p.upstream_errors +
       p.refused_authorisation +
       p.refused_rate_limit +
       p.refused_budget +
       p.refused_no_backend;
-    return { ...p, requests_ok: Math.max(0, p.requests - failed) };
+    return { ...p, requests_ok: Math.max(0, p.requests - attributedFailures) };
   });
 }
 
@@ -81,14 +88,15 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
     if (!points) return null;
     return points.reduce(
       (a, p) => ({
-        requests: a.requests + p.requests,
+        requests: a.requests + p.requests + p.refused_unattributed,
         errors: a.errors + p.upstream_errors,
         refused:
           a.refused +
           p.refused_authorisation +
           p.refused_rate_limit +
           p.refused_budget +
-          p.refused_no_backend,
+          p.refused_no_backend +
+          p.refused_unattributed,
         prompt: a.prompt + p.prompt_tokens,
         completion: a.completion + p.completion_tokens,
         cost: a.cost + p.cost_micros,

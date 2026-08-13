@@ -425,7 +425,23 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let (status, _) = chat(port, &canary_key, &name("vm-e2e-does-not-exist"));
     assert_eq!(status, 404);
 
-    // `/v1/models` lists the virtual model alongside concrete ones.
+    // `/v1/models` lists what this caller may invoke, and nothing else.
+    //
+    // `canary_key` is granted exactly one concrete model, `model_b`. What
+    // the list must therefore contain is that model *and* the virtual name,
+    // because the virtual model's rule targets `model_b` and so resolves to
+    // something this caller holds. `model_a` is granted to nobody here and
+    // must not appear.
+    //
+    // That middle case is the whole reason virtual models get their own
+    // rule rather than a plain `may_invoke` check: nothing grants the
+    // virtual name itself, and hiding it would hide a name that works.
+    //
+    // This endpoint used to list everything configured, on the reasoning
+    // that listing is not access control. It is not — the 403 above still
+    // does the enforcing — but a client builds its model picker from this
+    // list, and offering names that fail on selection is a defect that
+    // correct authorisation does not excuse.
     let resp = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
         .set("authorization", &format!("Bearer {canary_key}"))
         .call()
@@ -437,9 +453,18 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert!(ids.contains(&vm_name.as_str()));
-    assert!(ids.contains(&model_a_name.as_str()));
-    assert!(ids.contains(&model_b_name.as_str()));
+    assert!(
+        ids.contains(&model_b_name.as_str()),
+        "the concrete model this key is granted must be listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&vm_name.as_str()),
+        "a virtual model reaching a granted target must be listed: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&model_a_name.as_str()),
+        "a concrete model this key cannot invoke must not be advertised: {ids:?}"
+    );
 
     // `GET /admin/virtual-models` reflects the same rule and targets that
     // were just exercised over the data plane.

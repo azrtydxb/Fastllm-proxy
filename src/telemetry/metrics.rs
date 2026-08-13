@@ -222,6 +222,19 @@ impl Telemetry {
     }
 
     #[inline]
+    /// The count of one rejection kind so far in this process.
+    ///
+    /// Read by the health reporter, because these are the refusals that
+    /// never reach `usage_events`: they happen before a principal is known,
+    /// or before a model is resolved, so there is nothing to attribute a row
+    /// to. Exporting the counter is how a caller-visible error total stays
+    /// answerable from the database without writing a row per anonymous
+    /// request — see `crate::usage::Refusal` for why that trade is not on
+    /// offer.
+    pub fn rejections_of(&self, why: Rejection) -> u64 {
+        self.rejections[why as usize].load(Ordering::Relaxed)
+    }
+
     pub fn record_rejection(&self, why: Rejection) {
         self.rejections[why as usize].fetch_add(1, Ordering::Relaxed);
         self.record_outcome(Outcome::Rejected);

@@ -68,6 +68,21 @@ pub struct ProcessCounters {
     /// usage rather than block inference, and a silent drop makes billing
     /// quietly wrong instead of visibly incomplete.
     pub usage_dropped: u64,
+    /// Refusals this replica made *before* it could attribute a request to
+    /// anyone, so they have no `usage_events` row and never will.
+    ///
+    /// Only the kinds that are genuinely missing from that table are here.
+    /// 403/429/402 and the unreachable-chain 502 are recorded there as
+    /// `refusal` rows, and reporting them again would double-count every one
+    /// of them in any total built from both sources.
+    ///
+    /// Cumulative per process, like every other counter here; the control
+    /// plane turns them into deltas by comparing against this replica's
+    /// previous report.
+    #[serde(default)]
+    pub rejected_unauthenticated: u64,
+    #[serde(default)]
+    pub rejected_model_not_found: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,10 +194,17 @@ pub mod store {
             }
         }
 
-        pub fn record(&self, report: HealthReport, now: Instant) {
+        /// Record a report, returning the one it replaced.
+        ///
+        /// The previous report is what turns cumulative counters into
+        /// deltas, and this is the only place both are in hand at once —
+        /// returning it here avoids a second lookup that could race with
+        /// another replica's report landing in between.
+        pub fn record(&self, report: HealthReport, now: Instant) -> Option<HealthReport> {
             self.reports
                 .lock()
-                .insert(report.replica.clone(), (report, now));
+                .insert(report.replica.clone(), (report, now))
+                .map(|(previous, _)| previous)
         }
 
         /// Every replica heard from recently, newest first by replica name.
