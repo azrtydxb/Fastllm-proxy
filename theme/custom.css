@@ -1,0 +1,173 @@
+/* Presentation layer for the book.
+ *
+ * Everything here is expressed through mdBook's own theme variables rather
+ * than fixed colours, because the reader picks the theme and there are five
+ * of them. A hardcoded background is invisible in the theme you developed in
+ * and unreadable in the other four.
+ *
+ * Nothing here changes content. If a rule below is doing semantic work —
+ * hiding something, reordering something — it is in the wrong file. */
+
+/* ---------------------------------------------------------------- content */
+
+/* The stock 750px measure predates every table on this site. These pages
+ * carry wide reference tables and 1440px screenshots, both of which spend the
+ * whole budget on the first two columns and wrap the rest into noise. */
+.content main {
+  max-width: 62rem;
+}
+
+.content p,
+.content li {
+  line-height: 1.65;
+}
+
+.content h2 {
+  margin-top: 2.6rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--table-border-color);
+}
+
+.content h3 {
+  margin-top: 2rem;
+}
+
+/* ----------------------------------------------------------------- tables */
+
+/* Most tables in these docs are two-column `| | |` pairs — a term and what it
+ * means. Stock mdBook renders them with an empty header row taking up space
+ * and saying nothing. */
+.content table {
+  width: 100%;
+  display: table;
+  margin: 1.4rem 0;
+  border-collapse: collapse;
+}
+
+.content table thead th:empty {
+  padding: 0;
+  border: none;
+}
+
+.content table thead tr:has(th:empty:only-child),
+.content table thead tr:not(:has(th:not(:empty))) {
+  display: none;
+}
+
+.content table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.86em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
+.content table td,
+.content table th {
+  padding: 0.55rem 0.85rem;
+  vertical-align: top;
+  border: none;
+  border-bottom: 1px solid var(--table-border-color);
+}
+
+.content table tbody tr {
+  background: none;
+}
+
+/* The first column of a two-column table is the term. Give it the weight the
+ * markdown cannot express without bolding every single cell by hand. */
+.content table tbody td:first-child {
+  white-space: normal;
+  font-weight: 500;
+}
+
+/* Digits that line up in columns should line up. */
+.content table td code {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wide tables scroll inside themselves. The page body never scrolls
+ * sideways — a horizontally scrolling article is a broken article. */
+.content .table-wrapper,
+.content table {
+  overflow-x: auto;
+}
+
+/* -------------------------------------------------------------- callouts */
+
+/* Blockquotes carry the warnings on these pages. Stock rendering makes them
+ * look like an aside, which is the opposite of the intent. */
+.content blockquote {
+  border-left: 3px solid var(--links);
+  border-top: none;
+  border-bottom: none;
+  border-right: none;
+  border-radius: 0 4px 4px 0;
+  padding: 0.85rem 1.1rem;
+  margin: 1.4rem 0;
+}
+
+/* --------------------------------------------------------------- figures */
+
+/* Screenshots are UI, and a UI needs an edge to read as one. Without a border
+ * a dark screenshot on a dark theme bleeds into the page and the reader
+ * cannot tell where the application stops. */
+.content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid var(--table-border-color);
+  margin: 1.2rem 0;
+}
+
+/* The benchmark charts are SVGs drawn with their own transparent ground and
+ * no interior of their own to frame. */
+.content img[src$=".svg"] {
+  border: none;
+  border-radius: 0;
+}
+
+/* ---------------------------------------------------------------- mermaid */
+
+.content pre.mermaid,
+.content .mermaid {
+  background: none;
+  text-align: center;
+  margin: 1.8rem 0;
+  padding: 0;
+  overflow-x: auto;
+}
+
+.content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ------------------------------------------------------------------- code */
+
+.content code {
+  font-variant-ligatures: none;
+}
+
+/* An inline `code` span inside a heading should not shout louder than the
+ * heading it sits in. */
+.content h1 code,
+.content h2 code,
+.content h3 code,
+.content h4 code {
+  font-size: 0.92em;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+/* The section headers in SUMMARY.md ("Using it", "Running it", "Reference")
+ * are the book's structure and were rendering at the same weight as the
+ * pages under them. */
+.chapter li.part-title {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-top: 1.4rem;
+}

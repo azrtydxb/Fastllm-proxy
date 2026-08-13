@@ -22,16 +22,29 @@ fn readme() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).expect("README.md")
 }
 
+/// The catalogue itself, which lives in the book rather than the README.
+///
+/// It moved because it was the largest thing on a front page whose job is to
+/// make someone want to read further, and because a table that long wants a
+/// page of its own with the "how do I add one" material beside it. The claim
+/// stayed in the README. That split is exactly what this test is for: prose in
+/// one file, the rows it counts in another, and nothing but this to notice
+/// when they stop agreeing.
+fn providers_page() -> String {
+    fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/providers.md"))
+        .expect("docs/providers.md")
+}
+
 /// The provider section, split into its two tables.
 ///
 /// Counting rule, and the one the README's own number must follow: each table
 /// row's first cell lists providers separated by `·`, so `Together · Fireworks`
 /// is two and `Moonshot / Kimi` is one thing with two names.
-fn count_providers(readme: &str) -> (usize, usize) {
-    let section = readme
-        .split("## Providers")
+fn count_providers(page: &str) -> (usize, usize) {
+    let section = page
+        .split("## The catalogue")
         .nth(1)
-        .expect("a Providers section")
+        .expect("a catalogue section")
         .split("\n## ")
         .next()
         .unwrap();
@@ -65,9 +78,9 @@ fn count_providers(readme: &str) -> (usize, usize) {
 }
 
 #[test]
-fn the_readme_provider_count_matches_its_own_table() {
+fn the_readme_provider_count_matches_the_catalogue_page() {
     let readme = readme();
-    let (compatible, native) = count_providers(&readme);
+    let (compatible, native) = count_providers(&providers_page());
     let total = compatible + native;
 
     assert!(

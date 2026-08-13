@@ -68,6 +68,31 @@ least-loaded one. `least-loaded`, `round-robin` and `lowest-latency` are
 selectable — the last for pools whose members are not equivalent, where a slow
 backend with one queued request looks emptier than a fast one with two.
 
+### How a request finds a backend
+
+```mermaid
+flowchart TD
+    R["request<br/>model: 'assistant'"] --> V{"a virtual model?"}
+    V -->|no| POOL
+    V -->|yes| RULES["rules, in order<br/>first match wins"]
+    RULES --> CND["conditions: principal · role · prompt size<br/>streaming · headers · budget · time of day<br/>semantic class"]
+    CND --> T["targets — weighted <i>and</i> ordered<br/>a split and a failover chain at once"]
+    T --> GRANT{"caller has<br/>model:invoke?"}
+    GRANT -->|no| DROP["dropped from the chain<br/>failover never widens reach"]
+    GRANT -->|yes| POOL["the model's backends"]
+    POOL --> POL{"policy"}
+    POL -->|cache-affinity| AFF["prefix hash → the node<br/>holding that KV cache<br/><i>unless it is meaningfully hotter</i>"]
+    POL -->|least-loaded| LL["fewest in-flight"]
+    POL -->|lowest-latency| LAT["lowest EWMA latency"]
+    AFF --> B([backend])
+    LL --> B
+    LAT --> B
+```
+
+Every decision in that diagram is answered from the pre-flattened snapshot in
+memory. None of it is a query — which is the reason the whole thing is
+affordable per request.
+
 ### Virtual models: routing as configuration, not code
 
 One client-facing name, ordered rules, weighted *and* ordered targets — so a

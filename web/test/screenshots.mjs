@@ -82,6 +82,7 @@ async function shot(name, screen, prepare, after = 1400, finalize) {
 await shot("overview", "Overview");
 await shot("metrics", "Metrics");
 await shot("usage", "Usage & spend");
+await shot("providers", "Providers");
 await shot("models", "Models");
 await shot("virtual-models", "Virtual models");
 await shot("prompt-classes", "Prompt classes");

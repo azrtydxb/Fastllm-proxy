@@ -37,6 +37,29 @@ a password proves *who* is calling, not *what* they may do.
 Open **`https://localhost:4001/`** and sign in. Your browser will warn about
 the certificate — it is self-signed unless you supplied one.
 
+## The five nouns
+
+Everything below is one of these, and the relationships are the whole data
+model:
+
+```mermaid
+flowchart LR
+    subgraph SERVE["what gets served"]
+        M["<b>model</b><br/>a name clients ask for"] --> B1["<b>backend</b><br/>somewhere serving it"]
+        M --> B2["<b>backend</b>"]
+        VM["<b>virtual model</b><br/>a name with rules"] -.->|targets| M
+    end
+    subgraph WHO["who may ask"]
+        PR["<b>principal</b><br/>a person or a service"] --> RO["<b>role</b>"]
+        PR --> KY["<b>key</b> sk-…<br/>or a password"]
+        RO -->|model:invoke| M
+    end
+```
+
+Two backends under one model name make a load-balanced pool. A principal holds
+roles; roles carry grants; a key is how a principal proves it is that
+principal. Nothing else needs explaining before the first request.
+
 ## 3. Add a model
 
 A **model** is a name clients ask for. A **backend** is somewhere that serves

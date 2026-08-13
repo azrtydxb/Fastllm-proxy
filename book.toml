@@ -28,6 +28,10 @@ limit-results = 20
 
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
+# Presentation only, in mdBook's own theme variables so it survives all five
+# themes. See theme/custom.css for what each rule is fixing.
+additional-css = ["theme/custom.css"]
+
 [output.html.fold]
 enable = true
 level = 1

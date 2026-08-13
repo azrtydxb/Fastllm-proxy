@@ -15,6 +15,33 @@ working configuration — pick the row that matches where you are.
 | [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
 | [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic |
 
+```mermaid
+flowchart TB
+    subgraph S12["1 · 2 — one process"]
+        direction LR
+        c1([clients]) --> A1["--role all<br/>:4000 gateway<br/>:4001 admin"] --> db1[(Postgres)]
+    end
+
+    subgraph S3["3 — split, one host"]
+        direction LR
+        c3([clients]) --> P3["--role proxy<br/>:4000"]
+        P3 -. "snapshot poll" .-> K3["--role control<br/>:4001 · loopback"]
+        K3 --> db3[(Postgres)]
+    end
+
+    subgraph S45["4 · 5 — split, cluster"]
+        direction LR
+        c5([clients]) --> LB{{LoadBalancer}}
+        LB --> P51["proxy"]
+        LB --> P52["proxy"]
+        LB --> P53["proxy × N"]
+        P51 -. " " .-> K5["control × 1<br/>ClusterIP"]
+        P52 -. " " .-> K5
+        P53 -. "snapshot poll" .-> K5
+        K5 --> db5[(Postgres)]
+    end
+```
+
 The dividing line between the first two and the rest is `--role`. One binary
 runs in three shapes, and everything below is that one flag plus what each
 shape needs to reach its neighbours.

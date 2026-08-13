@@ -12,7 +12,7 @@ RBAC, rate limits and budgets without a database call on the request path.
 docker run ghcr.io/azrtydxb/fastllm-proxy:v0.1.0 --help
 ```
 
-[**Get started →**](getting-started.md) · [What it can do →](features.md) · [Connect a client →](integrations.md)
+[**Get started →**](getting-started.md) · [Performance →](performance.md) · [Providers →](providers.md) · [Connect a client →](integrations.md)
 
 ---
 
@@ -146,12 +146,17 @@ usage-based routing.
 | | |
 |---|---|
 | [Getting started](getting-started.md) | Install, first request, and a tour of every screen |
+| [Performance](performance.md) | Every number, its conditions, and what was *not* measured |
 | [What it can do](features.md) | Features, measured trade-offs, honest limits |
+| [Providers](providers.md) | All 80, how to add one, how credentials are handled |
 | [Connecting a client](integrations.md) | OpenAI SDKs, five coding agents, four frameworks |
 | [Troubleshooting](troubleshooting.md) | The failures people actually hit |
-| [Operations](operations.md) | The three roles, deployment shapes, configuration |
+| [Operations](operations.md) | Five deployment shapes, from one binary to a scaled cluster |
+| [Security](security.md) | Trust boundaries, what is stored and in what form |
+| [Command-line reference](cli.md) | Every flag, every subcommand |
 | [API and administration](api.md) | Every endpoint, plus `openapi.json` and Swagger |
 | [Architecture](architecture.md) | How the pieces fit, and how they fail |
+| [Changelog](changelog.md) | What changed, newest first |
 
 Deploying to Kubernetes: the [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy),
 or the [worked manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy)

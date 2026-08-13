@@ -31,45 +31,15 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 
 ## Providers
 
-**80 providers work today — 78 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list; the list exists so you do not have to go and find the base URL. The count and this table are checked against each other by `tests/doc_claims.rs`, so the number cannot drift away from the rows.
+**80 providers work today — 78 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on the list; the list exists so you do not have to go and find the base URL.
 
-A caveat this table is explicit about, because the number is otherwise a boast: **"works" here means "is a configuration row that this proxy will forward to correctly"**, which follows from the endpoint being OpenAI-shaped. The ones exercised against real traffic in this repo's tests and on its dev cluster are marked ✓. The rest carry the base URL their vendor documents — check it against their docs before pasting it into production, because vendors move them and this file cannot notice.
+A caveat that list is explicit about, because the number is otherwise a boast: **"works" here means "is a configuration row that this proxy will forward to correctly"**, which follows from the endpoint being OpenAI-shaped. The ones exercised against real traffic in this repo's tests and on its dev cluster are marked ✓ there.
 
-| reached as-is (OpenAI-compatible) | |
-|---|---|
-| **OpenRouter** ✓ (fronts ~400 models) | `https://openrouter.ai/api/v1` |
-| OpenAI · Groq · DeepSeek · xAI | `api.openai.com` · `api.groq.com` · `api.deepseek.com` · `api.x.ai` |
-| Together · Fireworks · Nebius · AtlasCloud | four endpoints, four rows |
-| Mistral · Perplexity · Cerebras · SambaNova | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1` |
-| DeepInfra · Novita · Hyperbolic · Lambda | four endpoints, four rows |
-| Z.ai · BigModel · Aliyun DashScope · Qwen Cloud | |
-| Moonshot / Kimi · Baidu Qianfan · AIHubMix | |
-| MiniMax · Volcengine Ark · Tencent Hunyuan · Sarvam | Chinese and Indian clouds, same row shape |
-| Baseten · Featherless · FriendliAI · Chutes | |
-| Nscale · GMI Cloud · Scaleway · OVHcloud | |
-| Cloudflare Workers AI · Vercel AI Gateway · v0 · Poe | |
-| NanoGPT · CometAPI · Inception · Morph | |
-| Clarifai · Weights & Biases · GradientAI · AI21 | |
-| Snowflake Cortex · Anyscale · Heroku · CompactifAI | |
-| GitHub Models · GitHub Copilot | |
-| **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
-| **Cohere** | `https://api.cohere.ai/compatibility/v1` |
-| **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [docs/api.md](docs/api.md#providers) for the service-account credential |
-| **Azure OpenAI** · Azure AI | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
-| NVIDIA NIM · Databricks · HuggingFace TGI | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1` |
-| vLLM ✓ · SGLang · llama.cpp ✓ · Ollama | self-hosted, same row shape |
-| LM Studio · KoboldCpp · TabbyAPI · text-generation-webui | local servers, same row shape |
-| Xinference · Llamafile · Docker Model Runner · Lemonade | local servers, same row shape |
-| **Voyage AI** · **Jina AI** · Infinity · TEI | embeddings and rerank — `/v1/embeddings`, `/v1/rerank` |
+The named ones: **OpenRouter** ✓ (fronts ~400 models), OpenAI, Anthropic, Gemini, **Amazon Bedrock**, **Google Vertex AI**, **Azure OpenAI**, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, Cohere, and self-hosted **vLLM** ✓, SGLang, **llama.cpp** ✓ and Ollama.
 
-| reached through their own wire format | |
-|---|---|
-| **Anthropic** | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
-| **Gemini** | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key` |
+**→ [The full catalogue, how to add one, and how credentials are handled](docs/providers.md)**
 
-Tool calling translates in both directions on native backends, streaming included, as do image and audio inputs. Native translation is opt-in per backend and byte-exact passthrough is preserved everywhere else — an `openai` backend's response is never parsed, which is where the latency numbers above come from. Full endpoint table and the translation limits are in [docs/api.md](docs/api.md#providers).
-
-**Deliberately absent**, and not counted: providers whose API is not OpenAI-shaped and would need a fourth translator in `src/protocol/` — Replicate, Predibase, Petals, Triton, WatsonX, OCI Generative AI, AWS SageMaker. Also absent are the non-LLM services a gateway has no business proxying blind: speech (Deepgram, ElevenLabs), image generation (Stability, Black Forest Labs, Recraft, Fal, RunwayML), vector stores (Milvus), and other people's gateways (Helicone, LiteLLM itself). Counting those would inflate the number without making anything work.
+Tool calling translates in both directions on native backends, streaming included, as do image and audio inputs. Native translation is opt-in per backend and byte-exact passthrough is preserved everywhere else — an `openai` backend's response is never parsed, which is where the latency numbers above come from.
 
 ## Routing
 
@@ -216,17 +186,23 @@ cargo build --release
 
 ## Documentation
 
+**Read it as a site: [azrtydxb.github.io/Fastllm-proxy](https://azrtydxb.github.io/Fastllm-proxy/)** — same files, with search, diagrams and screenshots.
+
 | | |
 |---|---|
-| [Architecture](docs/architecture.md) | Component and request-flow diagrams, failure modes, consistency guarantees, behaviour notes |
-| [Performance](docs/performance.md) | Every measured number, its conditions, and what has not been measured |
-| [Semantic routing](docs/classifier.md) | Classifier tiers: measured accuracy, cost, and what is still to build |
-| [Running it](docs/operations.md) | Install, the three roles, deployment shapes, configuration, metrics, logs and traces |
-| [API and administration](docs/api.md) | Endpoints, admin API, providers, routing rules, auth, TLS, budgets, rate limits |
 | [Getting started](docs/getting-started.md) | Install, first request, and a screenshot tour of every screen |
-| [What it can do](docs/features.md) | The features, the measured trade-offs, and where to use something else |
+| [Performance](docs/performance.md) | Every measured number, its conditions, and what has not been measured |
+| [What it can do](docs/features.md) | The features, the measured trade-offs, and how a request finds a backend |
+| [Providers](docs/providers.md) | All 80, how to add one, and how upstream credentials are handled |
 | [Connecting a client](docs/integrations.md) | SDKs, coding agents, frameworks, and observability — copy-paste config for each |
 | [Troubleshooting](docs/troubleshooting.md) | The failures people actually hit, and what each one means |
+| [Running it](docs/operations.md) | Five deployment shapes, from one binary to a scaled cluster, plus metrics, logs and traces |
+| [Security](docs/security.md) | Trust boundaries, what is stored and in what form, and the one boundary to get right |
+| [Command-line reference](docs/cli.md) | Every flag and every subcommand |
+| [API and administration](docs/api.md) | Endpoints, admin API, routing rules, auth, TLS, budgets, rate limits |
+| [Architecture](docs/architecture.md) | Component and request-flow diagrams, failure modes, consistency guarantees |
+| [Semantic routing](docs/classifier.md) | Classifier tiers: measured accuracy, cost, and configuring it in the UI |
+| [Changelog](CHANGELOG.md) | What changed, newest first |
 | [Deployment on Kubernetes](deploy/README.md) | Manifests, adding a provider, operator runbook |
 | [TODO](TODO.md) | What is deliberately not built, and why |
 
