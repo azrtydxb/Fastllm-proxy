@@ -287,6 +287,44 @@ Re-measure on your own hardware before betting on any of it.
 Reproduce any of this with `cargo run -p bench --release --bin realbench`
 (and siblings) — see [bench/](../bench/).
 
+## Usage accounting on every request
+
+**Measured** on a kw worker node (`worker-25`, aarch64, 8 cores), release
+build, `cargo run -p bench --release --bin tailparse`.
+
+Usage recording used to be limited to principals with a budget or a
+tokens-per-minute limit, so this cost fell on a minority of traffic. It is
+now paid on every request that has a principal, which makes it a per-request
+cost this file owes a number for.
+
+| what | per request | when |
+|---|---|---|
+| `TailBuffer::push`, one SSE frame | **68 ns** | per frame forwarded |
+| `TailBuffer::push`, a 60-frame stream | **661 ns** | whole stream |
+| `extract_usage`, small non-streaming body | **2.55 µs** | once, at end |
+| `extract_usage`, SSE tail (60 frames) | **1.33 µs** | once, at end |
+| `extract_usage`, 22 KB body (tail is a fragment) | **8.40 µs** | once, at end |
+| `extract_usage`, tail carrying no usage | **0.21 µs** | once, at end |
+
+Against a request whose core proxy cost is ~38 µs (`bench/micro`), the
+common cases add roughly 3–7%. The expensive row is the one the tail-buffer
+fix added: a body far larger than the 8 KiB window, where the tail is a
+fragment and the backwards scan walks it before finding the `usage` key. It
+is paid by embeddings and by long non-streaming completions, and it buys
+token counts that were previously dropped on the floor — 8 µs against a
+request that took 22 ms upstream.
+
+**None of this is I/O.** `record` is a non-blocking `try_send` into a bounded
+queue drained by a background flush, so `tests/no_io_on_hot_path.rs` still
+holds. The measurement is here because "one small parse per request" was an
+adjective until it had a number.
+
+Not tried, and why: moving the parse off the request thread entirely. It
+would trade 1–8 µs of latency for a second copy of the tail per request,
+which is the wrong side of the trade at these magnitudes — and the parse is
+already the last thing that happens on a body that has finished streaming,
+so the client is not waiting on it.
+
 ---
 
 Back to the [README](../README.md).

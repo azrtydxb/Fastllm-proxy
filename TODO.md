@@ -41,6 +41,17 @@ budgets (P3), and the embedded management UI with session authentication
 the upstream's real token counts and the control plane folds them into
 `budgets.tokens_used`.
 
+Usage is recorded for **every attributable request**, not only for principals
+under a budget or a token limit. It was the narrower rule until 2026-08-12,
+and the consequence was that a deployment enforcing nothing recorded nothing:
+one principal of seven had a budget, `usage_events` held nineteen rows, and
+the newest was five days old against several hundred served requests. Refusals
+the gateway makes itself (403/429/402, and the 502 for an unreachable chain)
+are recorded too, tagged by kind, so a total backend outage no longer writes
+zero rows and reads as a quiet period. `GET /admin/timeseries` serves that
+history bucketed, `usage_rollup_hourly` keeps it past 90 days, and the
+Overview chart draws it.
+
 ## Features
 
 ### Closing the endpoint and provider gap — done (2026-08-12)

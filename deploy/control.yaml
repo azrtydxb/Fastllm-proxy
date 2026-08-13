@@ -101,7 +101,7 @@ spec:
           # — sqlx refusing, correctly, to run against a schema newer than the
           # binary. It failed safe and the old pod kept serving, but the failure
           # mode of a stale image pin is a downgrade, not a no-op.
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-3b9bfb9
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-ae3f207
           imagePullPolicy: Always
           args:
             - --role=control

@@ -21,6 +21,10 @@ name = "tcprelay"
 path = "src/tcprelay.rs"
 
 [[bin]]
+name = "tailparse"
+path = "src/tailparse.rs"
+
+[[bin]]
 name = "micro"
 path = "src/micro.rs"
 
