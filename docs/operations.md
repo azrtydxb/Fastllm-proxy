@@ -15,38 +15,17 @@ working configuration — pick the row that matches where you are.
 | [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
 | [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic |
 
-```mermaid
-flowchart TB
-    subgraph S12["1 · 2 — one process"]
-        direction LR
-        c1([clients]) --> A1["--role all<br/>:4000 gateway<br/>:4001 admin"] --> db1[(Postgres)]
-    end
-
-    subgraph S3["3 — split, one host"]
-        direction LR
-        c3([clients]) --> P3["--role proxy<br/>:4000"]
-        P3 -. "snapshot poll" .-> K3["--role control<br/>:4001 · loopback"]
-        K3 --> db3[(Postgres)]
-    end
-
-    subgraph S45["4 · 5 — split, cluster"]
-        direction LR
-        c5([clients]) --> LB{{LoadBalancer}}
-        LB --> P51["proxy"]
-        LB --> P52["proxy"]
-        LB --> P53["proxy × N"]
-        P51 -. " " .-> K5["control × 1<br/>ClusterIP"]
-        P52 -. " " .-> K5
-        P53 -. "snapshot poll" .-> K5
-        K5 --> db5[(Postgres)]
-    end
-```
 
 The dividing line between the first two and the rest is `--role`. One binary
 runs in three shapes, and everything below is that one flag plus what each
 shape needs to reach its neighbours.
 
 ### 1. A binary
+
+```mermaid
+flowchart LR
+    c([clients]) --> A["<b>--role all</b><br/>:4000 gateway<br/>:4001 admin + UI"] --> db[(Postgres)]
+```
 
 ```bash
 cargo build --release            # target/release/fastllm-proxy
@@ -126,6 +105,13 @@ hand-built binary needs `--features classifier` and a `--classifier-model`.
 
 ### 3. Compose, with the planes split
 
+```mermaid
+flowchart LR
+    c([clients]) --> P["<b>--role proxy</b><br/>:4000 published<br/>holds a token and a snapshot"]
+    P -. "snapshot poll" .-> K["<b>--role control</b><br/>:4001 on loopback<br/>holds the database credentials"]
+    K --> db[(Postgres)]
+```
+
 `deploy/docker-compose.split.yml` runs the control plane and the gateway as
 separate containers:
 
@@ -157,6 +143,16 @@ across replicas and a separate snapshot cache per replica — which is where
 Compose stops being the right tool.
 
 ### 4. Kubernetes, with the planes split
+
+```mermaid
+flowchart LR
+    c([clients]) --> LB{{"Service<br/>LoadBalancer"}}
+    LB --> P1["proxy"]
+    LB --> P2["proxy"]
+    P1 -. " " .-> K["control × 1<br/>ClusterIP :4001"]
+    P2 -. "snapshot poll" .-> K
+    K --> db[("CloudNativePG")]
+```
 
 `deploy/` holds the manifests for one real cluster, and they are worth reading
 before the chart because they are concrete:
@@ -193,6 +189,20 @@ a session-authenticated admin API, TLS, and a private network. Take away any
 one of those three and it should go back to ClusterIP.
 
 ### 5. Kubernetes, scaled out
+
+```mermaid
+flowchart LR
+    c([clients]) --> LB{{"Service<br/>LoadBalancer"}}
+    LB --> P1["proxy"]
+    LB --> P2["proxy"]
+    LB --> P3["proxy"]
+    LB --> PN["proxy × N<br/><i>scale this</i>"]
+    P1 -. " " .-> K["control × 1<br/><i>stays at one</i>"]
+    P2 -. " " .-> K
+    P3 -. " " .-> K
+    PN -. " " .-> K
+    K --> db[(Postgres)]
+```
 
 The chart is the generic form of the above:
 
