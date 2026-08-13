@@ -711,10 +711,21 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     let _proc = start_all(port, admin_port, &database_url);
     let cookie = support::login_cookie(admin_port, &name);
 
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    // Scoped to this test's actor, not the whole table.
+    //
+    // Counting every row made this assertion a statement about the entire
+    // suite: `audit_events` is one shared table, tests run in parallel, and
+    // any other test's admin write landed in the difference. It failed in CI
+    // holding five rows from three other tests. `name` is unique per run, so
+    // this counts exactly the calls this test made.
+    let mine = |pool: sqlx::PgPool, name: String| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_events WHERE actor_name = $1")
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = mine(pool.clone(), name.clone()).await;
 
     // A read: not a change, and auditing every list call would bury the
     // changes in noise.
@@ -736,7 +747,9 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     );
 
     // A change that was refused: an attempt, not a change, and recording it as
-    // one would make the trail lie in the direction that matters most.
+    // one would make the trail lie in the direction that matters most. It
+    // carries no session, so it cannot be attributed to this actor at all —
+    // which is also why the scoped count below is the whole check for it.
     assert_eq!(
         admin_write_with_cookie(
             admin_port,
@@ -749,15 +762,14 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     );
 
     let rows: Vec<(Option<i64>, String, String, String)> = sqlx::query_as(
-        "SELECT actor_id, actor_name, action, target FROM audit_events ORDER BY id DESC LIMIT 5",
+        "SELECT actor_id, actor_name, action, target FROM audit_events
+          WHERE actor_name = $1 ORDER BY id DESC LIMIT 5",
     )
+    .bind(&name)
     .fetch_all(&pool)
     .await
     .unwrap();
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let after = mine(pool.clone(), name.clone()).await;
 
     assert_eq!(
         after - before,
