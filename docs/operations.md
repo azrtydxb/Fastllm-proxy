@@ -159,7 +159,7 @@ flowchart LR
 before the chart because they are concrete:
 
 ```bash
-kubectl apply -f deploy/control.yaml      # CloudNativePG cluster + --role control
+kubectl apply -f deploy/control.yaml      # Postgres + --role control
 kubectl apply -f deploy/configmap.yaml    # the proxy's tuning knobs
 kubectl apply -f deploy/deployment.yaml   # --role proxy, 2 replicas
 kubectl apply -f deploy/service.yaml      # the gateway's LoadBalancer
