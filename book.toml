@@ -1,0 +1,24 @@
+# mdBook over the docs that already exist, rather than a parallel copy of
+# them. `src` points at `docs/` so there is exactly one version of every page
+# and the site cannot drift from the repo.
+[book]
+title = "fastllm-proxy"
+description = "A low-latency OpenAI-compatible gateway for multi-node LLM serving"
+authors = ["fastllm-proxy contributors"]
+language = "en"
+src = "docs"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/azrtydxb/Fastllm-proxy"
+edit-url-template = "https://github.com/azrtydxb/Fastllm-proxy/edit/main/{path}"
+site-url = "/Fastllm-proxy/"
+
+[output.html.search]
+enable = true
+limit-results = 20
+
+[output.html.fold]
+enable = true
+level = 1
