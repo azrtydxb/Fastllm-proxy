@@ -34,6 +34,18 @@ pub enum Policy {
     LeastLoaded,
     /// Strict rotation. Cache-blind; present mainly as a baseline to measure against.
     RoundRobin,
+    /// Fewest microseconds of recent mean latency, tie-broken by in-flight.
+    ///
+    /// For a pool whose members are *not* equivalent — a fast local GPU
+    /// beside a slower one, or a hosted provider beside both — where
+    /// least-loaded is misled because a slow backend with one request queued
+    /// looks emptier than a fast one with two.
+    ///
+    /// Cache-blind, like the two above. On a pool of matched nodes serving
+    /// long shared prefixes, `CacheAffinity` will beat this: a prefix cache
+    /// hit is worth more than a few hundred microseconds of measured
+    /// difference between identical machines.
+    LowestLatency,
 }
 
 pub struct Router {
@@ -112,6 +124,7 @@ impl Router {
                 (candidates[n % candidates.len()], false)
             }
             Policy::LeastLoaded => (least_loaded(&candidates, &self.rr), false),
+            Policy::LowestLatency => (lowest_latency(&candidates, &self.rr), false),
             Policy::CacheAffinity => self.pick_affine(&candidates, prefix),
         };
 
@@ -176,6 +189,43 @@ fn least_loaded_for<'a>(candidates: &[&'a Arc<Backend>], prefix: u64) -> &'a Arc
 /// where there is no prefix to spread on.
 fn least_loaded<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a Arc<Backend> {
     pick_tied(candidates, rr.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Lowest recent mean latency, with in-flight as the tie-break.
+///
+/// A backend that has completed nothing yet has no estimate, and is treated
+/// as **eligible rather than fastest** — it goes into the tie-break group
+/// alongside the current best. Ranking it as 0 µs would hand it the entire
+/// pool until its first request finished; excluding it entirely would mean a
+/// replacement backend never received a request at all, and so never earned
+/// an estimate. Neither is a stable pool.
+///
+/// The tie-break is `least_loaded`, not rotation, because two backends of
+/// equal measured speed should still be balanced by queue depth — and
+/// because that is also what decides among several unmeasured ones.
+///
+/// Two scans over relaxed atomics, no allocation. Same cost shape as
+/// `least_loaded`, which is the standard this path is held to.
+fn lowest_latency<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a Arc<Backend> {
+    let best = candidates.iter().filter_map(|b| b.latency_us()).min();
+    let Some(best) = best else {
+        // Nothing measured anywhere: this is a cold pool, so fall back to the
+        // policy that needs no history.
+        return least_loaded(candidates, rr);
+    };
+    // Within 12.5% of the best counts as the same speed. Without a band the
+    // pool oscillates: whichever backend last completed a fast request wins
+    // every subsequent pick until its own queue slows it down.
+    let ceiling = best + (best >> 3);
+    let front: Vec<&Arc<Backend>> = candidates
+        .iter()
+        .filter(|b| b.latency_us().is_none_or(|us| us <= ceiling))
+        .copied()
+        .collect();
+    if front.is_empty() {
+        return least_loaded(candidates, rr);
+    }
+    least_loaded(&front, rr)
 }
 
 /// The `selector`-th of the least-loaded candidates.
@@ -300,6 +350,97 @@ model_list:
 
     fn router(policy: Policy) -> Router {
         Router::new(policy, 1024, 2048, 8, 1.5)
+    }
+
+    /// The whole point of the policy: a measurably slower backend stops
+    /// receiving traffic, even though least-loaded would keep feeding it.
+    #[test]
+    fn lowest_latency_avoids_the_slow_backend() {
+        let pool = two_node_pool();
+        let r = router(Policy::LowestLatency);
+        let backends: Vec<_> = pool.iter().collect();
+        // One node is an order of magnitude slower. Enough samples that the
+        // EWMA has converged, which is what the router actually reads.
+        for _ in 0..40 {
+            backends[0].note_latency_us(2_000);
+            backends[1].note_latency_us(60_000);
+        }
+        let fast = backends[0].uid;
+
+        let mut to_fast = 0;
+        for i in 0..200 {
+            if r.pick(&pool, i, &[]).unwrap().uid == fast {
+                to_fast += 1;
+            }
+        }
+        assert_eq!(to_fast, 200, "every request should go to the fast backend");
+    }
+
+    /// A backend that has completed nothing has no estimate, and must be
+    /// *eligible* rather than either fastest or excluded.
+    ///
+    /// Ranking it 0 µs would hand it the whole pool before it had proven
+    /// anything; excluding it would mean a freshly added backend never got a
+    /// request, so never earned an estimate, so stayed excluded for ever.
+    #[test]
+    fn an_unmeasured_backend_is_eligible_but_not_automatically_fastest() {
+        let pool = two_node_pool();
+        let r = router(Policy::LowestLatency);
+        let backends: Vec<_> = pool.iter().collect();
+        for _ in 0..40 {
+            backends[0].note_latency_us(5_000);
+        }
+        assert_eq!(backends[1].latency_us(), None, "second node is unmeasured");
+
+        let mut to_new = 0;
+        for i in 0..200 {
+            if r.pick(&pool, i, &[]).unwrap().uid == backends[1].uid {
+                to_new += 1;
+            }
+        }
+        assert!(
+            to_new > 0 && to_new < 200,
+            "an unmeasured backend must get some traffic but not all of it: {to_new}/200"
+        );
+    }
+
+    /// Backends of comparable speed are balanced by queue depth rather than
+    /// having every request chase whichever one happened to finish quickest.
+    #[test]
+    fn comparable_latencies_still_spread() {
+        let pool = two_node_pool();
+        let r = router(Policy::LowestLatency);
+        let backends: Vec<_> = pool.iter().collect();
+        for _ in 0..40 {
+            backends[0].note_latency_us(10_000);
+            backends[1].note_latency_us(10_400); // within the 12.5% band
+        }
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..50 {
+            seen.insert(r.pick(&pool, i, &[]).unwrap().uid);
+        }
+        assert_eq!(seen.len(), 2, "near-equal backends must both be used");
+    }
+
+    /// The EWMA must actually track a change, not average it away.
+    #[test]
+    fn the_latency_estimate_follows_a_backend_that_degrades() {
+        let pool = two_node_pool();
+        let b = pool.iter().next().unwrap();
+        for _ in 0..50 {
+            b.note_latency_us(1_000);
+        }
+        let settled = b.latency_us().unwrap();
+        assert!((900..=1_100).contains(&settled), "settled at {settled}");
+
+        for _ in 0..50 {
+            b.note_latency_us(50_000);
+        }
+        let degraded = b.latency_us().unwrap();
+        assert!(
+            degraded > settled * 10,
+            "a sustained slowdown must show: {settled} -> {degraded}"
+        );
     }
 
     #[test]

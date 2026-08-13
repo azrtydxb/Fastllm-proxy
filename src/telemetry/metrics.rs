@@ -523,6 +523,11 @@ impl RequestTiming {
         }
         if let Some(b) = &self.backend {
             b.duration.record_us(us);
+            // Same observation, second consumer: the histogram answers
+            // "what does the distribution look like" for a scrape, the EWMA
+            // answers "which of these is quickest right now" for the router,
+            // and only the latter can afford to be read per request.
+            b.note_latency_us(us);
         }
     }
 }

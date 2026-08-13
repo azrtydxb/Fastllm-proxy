@@ -121,6 +121,19 @@ pub struct Backend {
     inflight: AtomicUsize,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
+    /// Exponentially weighted mean whole-request latency, in microseconds.
+    ///
+    /// One `AtomicU64` rather than reading the histogram beside it, because
+    /// this is read *per request* by `Policy::LowestLatency` and the
+    /// histogram answers only by summing nineteen buckets. That is free for a
+    /// Prometheus scrape and not free on the routing path, once per candidate
+    /// backend.
+    ///
+    /// Zero means "nothing measured yet", which the router treats as
+    /// unknown-and-therefore-eligible rather than as instantaneous — a fresh
+    /// backend that read as 0 µs would win every comparison and take the
+    /// whole pool until its first request completed.
+    latency_ewma_us: AtomicU64,
     /// Whole-request wall time for requests this backend served.
     ///
     /// Lives here rather than in the telemetry module's per-model map because
@@ -178,6 +191,7 @@ impl Backend {
             inflight: AtomicUsize::new(0),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            latency_ewma_us: AtomicU64::new(0),
             duration: crate::telemetry::Histogram::new(),
         })
     }
@@ -198,6 +212,40 @@ impl Backend {
 
     pub fn errors_total(&self) -> u64 {
         self.errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Fold one completed request's duration into the latency EWMA.
+    ///
+    /// α = 1/8, chosen so a backend that degrades is reflected within a
+    /// handful of requests but a single slow generation cannot hand the whole
+    /// pool to its neighbour. Fixed-point in microseconds — no floats, no
+    /// lock, one compare-and-swap that falls back to a plain store.
+    ///
+    /// Load, compute, store rather than a CAS loop: two requests finishing
+    /// together can interleave and one update is lost. That is acceptable
+    /// here and a CAS retry is not — this runs on request completion, and an
+    /// estimate that is one sample stale is worth strictly less than the
+    /// contention avoided.
+    pub fn note_latency_us(&self, us: u64) {
+        let prev = self.latency_ewma_us.load(Ordering::Relaxed);
+        let next = if prev == 0 {
+            us
+        } else {
+            // prev * 7/8 + us * 1/8, in integers.
+            prev - (prev >> 3) + (us >> 3)
+        };
+        self.latency_ewma_us.store(next, Ordering::Relaxed);
+    }
+
+    /// The EWMA, or `None` when this backend has completed nothing yet.
+    ///
+    /// `None` rather than 0 so a caller cannot accidentally rank an unmeasured
+    /// backend as the fastest thing in the pool.
+    pub fn latency_us(&self) -> Option<u64> {
+        match self.latency_ewma_us.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(v),
+        }
     }
 
     pub fn note_error(&self) {

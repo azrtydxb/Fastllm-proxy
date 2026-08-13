@@ -630,7 +630,7 @@ A single replica enforcing the full configured limit locally would, with N repli
 | `--config` | *required* | LiteLLM-format YAML |
 | `--host` / `--port` | `127.0.0.1` / `4000` | Loopback by default; bind wider deliberately |
 | `--master-key` | from config | Bearer token required from clients |
-| `--policy` | `cache-affinity` | Or `least-loaded`, `round-robin` |
+| `--policy` | `cache-affinity` | Or `least-loaded`, `round-robin`, `lowest-latency` |
 | `--max-retries` | `2` | Alternate backends tried before any bytes reach the client |
 | `--upstream-timeout` | `120` | Seconds to *first byte*. Does not bound generation |
 | `--health-interval` | `10` | Seconds between probes |
