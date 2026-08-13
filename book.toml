@@ -15,22 +15,25 @@ src = "docs"
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
 
+# Order matters here in a way TOML makes easy to get wrong: every key below
+# belongs to [output.html], and a key written after [output.html.search]
+# belongs to *that* table instead. `additional-css` sat there for one deploy
+# and was silently ignored — no error, no warning, just an unstyled site. So
+# the subtables go last, after every key they could otherwise swallow.
 [output.html]
 default-theme = "ayu"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/azrtydxb/Fastllm-proxy"
 edit-url-template = "https://github.com/azrtydxb/Fastllm-proxy/edit/main/{path}"
 site-url = "/Fastllm-proxy/"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+# Presentation only, written in mdBook's own theme variables so it survives
+# all five themes. See theme/custom.css for what each rule is fixing.
+additional-css = ["theme/custom.css"]
 
 [output.html.search]
 enable = true
 limit-results = 20
-
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
-
-# Presentation only, in mdBook's own theme variables so it survives all five
-# themes. See theme/custom.css for what each rule is fixing.
-additional-css = ["theme/custom.css"]
 
 [output.html.fold]
 enable = true
