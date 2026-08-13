@@ -485,8 +485,9 @@ function TrafficHistory() {
         >
           {error ? (
             <NotAvailable why={error}>
-              This needs <Mono>GET /admin/timeseries</Mono>, which a control plane older than the
-              accounting change does not serve.
+              History comes from <Mono>GET /admin/timeseries</Mono>. The message above is what
+              the request actually returned — a 404 means this control plane predates the
+              endpoint, anything else is a live failure worth reading the server logs for.
             </NotAvailable>
           ) : (
             <>

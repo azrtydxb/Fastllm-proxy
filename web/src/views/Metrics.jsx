@@ -327,8 +327,13 @@ export function Metrics({ onUnauthorised, config }) {
             how={'histogram_quantile(0.99, sum by (le)\n  (rate(fastllm_ttft_seconds_bucket[5m])))'}
           />
           <Unmeasured
-            title="Anything before this page loaded"
-            why="The control plane keeps no metric history. Every line above starts empty when the page opens and fills as it polls; there is nothing older to ask it for."
+            title="Counter rates before this page loaded"
+            why={
+              "The rates above are measured by this page and start empty on every load. " +
+              "History does exist now — the chart at the top reads usage_events — but it " +
+              "counts requests, tokens and latency, not these process counters, which no " +
+              "one stores over time. Scrape /metrics if you want those historically."
+            }
             how={'rate(fastllm_requests_total[5m])'}
           />
           <Unmeasured

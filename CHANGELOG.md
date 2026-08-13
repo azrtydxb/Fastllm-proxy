@@ -3,16 +3,17 @@
 Notable changes, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-**Nothing has been released yet.** There are no tags and `Cargo.toml` still says
-`0.1.0`, so everything below is unreleased and the section is grouped by
-capability rather than by version — inventing version numbers after the fact
-would say something about stability that is not true. The first tagged release
-starts a normal `## [x.y.z]` history.
+Commit bodies carry the reasoning and the measurements and remain the better
+source for *why* anything is the way it is; this file is the summary.
 
-This file was backfilled from `git log`; commit bodies carry the reasoning and
-the measurements, and are the better source for *why* any of it is the way it is.
+## [0.1.0] — 2026-08-13
 
-## [Unreleased]
+First tagged release. Everything below was built before it, so this entry is
+a description of what 0.1.0 *is* rather than a diff against something
+earlier — grouped by capability, because there is no previous version to
+compare against.
+
+Published as `ghcr.io/azrtydxb/fastllm-proxy:v0.1.0` (linux/arm64).
 
 ### Gateway and request path
 
@@ -88,6 +89,38 @@ the measurements, and are the better source for *why* any of it is the way it is
   without disturbing in-flight generations.
 - Runs as one binary in three shapes (`all`, `control`, `proxy`); Kubernetes
   manifests in `deploy/`.
+
+### Accounting, history and the UI
+
+- Usage recorded for **every** attributable request, not only for principals
+  under a budget or a token limit — the narrower rule meant a deployment that
+  enforced nothing recorded nothing.
+- Refusals the gateway makes itself (403/429/402, and the 502 for an
+  unreachable chain) recorded and tagged by kind, so a total backend outage no
+  longer writes zero rows and reads as a quiet period. Unattributable refusals
+  (401, unknown model) counted per replica per minute instead of rowed, since
+  401 is the one refusal a stranger can trigger at will.
+- `GET /admin/timeseries` serves that history bucketed, with empty buckets as
+  explicit zeros and null latency where there was nothing to measure.
+- 90 days of per-request rows, then hourly rollups kept indefinitely. Rollups
+  carry no percentiles, because percentiles do not merge.
+- Charts on Overview and Metrics with a click-through drill-down: five ranges,
+  pan through history, filter by model or principal.
+- Model `context_length`, and a routing rule that demotes a model which cannot
+  hold the prompt plus the requested generation. Undeclared is never treated
+  as too small.
+- `--policy lowest-latency` for pools whose members are not equivalent.
+- `--webhook-url` for backend up/down and snapshot-rebuild failure, HMAC-signed.
+- `/v1/models` filtered to what the calling key may actually invoke.
+
+### Documentation and packaging
+
+- `openapi.json`, served at `/openapi.json` with Swagger UI at `/docs`, checked
+  against the router in both directions by `tests/openapi.rs`.
+- A Helm chart for deployments that are not this cluster.
+- Client integration guide (SDKs, five coding agents, four frameworks) and a
+  troubleshooting page seeded from failures that actually happened.
+- A Grafana dashboard and a signature-verifying webhook receiver in `examples/`.
 
 ### Testing
 
