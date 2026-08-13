@@ -35,8 +35,9 @@ Or take a release binary and skip the toolchain. Then, against a Postgres you
 already have:
 
 ```bash
-export FASTLLM_DATABASE_URL=postgres://fastllm:fastllm@localhost:5432/fastllm
-export FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32)   # keep it; see below
+# Keep this key. It is not regenerable — see below.
+export FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32)
+export FASTLLM_DATABASE_URL=postgres://fastllm@localhost/fastllm
 
 fastllm-proxy --role all --host 0.0.0.0
 # gateway on :4000, admin API and UI on :4001
@@ -79,7 +80,7 @@ Same shape, no toolchain, from the public image:
 docker run -d --name fastllm \
   -p 4000:4000 -p 127.0.0.1:4001:4001 \
   -e FASTLLM_ROLE=all \
-  -e FASTLLM_DATABASE_URL=postgres://fastllm:fastllm@db:5432/fastllm \
+  -e FASTLLM_DATABASE_URL=postgres://fastllm@db/fastllm \
   -e FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
 ```

@@ -150,6 +150,32 @@
   font-variant-ligatures: none;
 }
 
+/* Long lines wrap rather than scroll out of sight.
+ *
+ * mdBook's default is a horizontal scrollbar on the block, and on a trackpad
+ * with overlay scrollbars there is nothing on screen to say the line
+ * continues — a `docker run` with six `-e` flags simply ended mid-URL, and it
+ * read as the whole command. Wrapping is visual only: what you copy is still
+ * the original text, newlines included.
+ *
+ * The hanging indent is what keeps it readable. Without it a wrapped
+ * continuation starts hard against the left edge and looks like the next
+ * command rather than the rest of this one. */
+.content pre > code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-left: 2.2ch;
+  text-indent: -2.2ch;
+}
+
+/* Playground/editable blocks keep mdBook's own behaviour — those are edited,
+ * not read, and a wrapped editor is a worse editor. */
+.content pre > code.editable {
+  white-space: pre;
+  text-indent: 0;
+  padding-left: 0;
+}
+
 /* An inline `code` span inside a heading should not shout louder than the
  * heading it sits in. */
 .content h1 code,
