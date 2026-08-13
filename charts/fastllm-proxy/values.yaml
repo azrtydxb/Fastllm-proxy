@@ -1,0 +1,93 @@
+# The generic form of what deploy/*.yaml expresses concretely for one cluster.
+#
+# Only two values have no sensible default and must be set: the image and a
+# database URL (unless you let the chart create a Secret for it). Everything
+# else is here because a real deployment had to change it.
+
+image:
+  repository: ghcr.io/azrtydxb/fastllm-proxy
+  # Pin a digest or a commit tag, never a floating one. A drifting `:latest`
+  # is how a control plane silently downgraded itself into a crash loop here:
+  # sqlx refuses to run against a schema newer than the binary, correctly, and
+  # the failure arrives at startup rather than at deploy time.
+  tag: ""              # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The control plane owns the database, the admin API, the management UI and
+# /snapshot. One replica: it is not on the request path, and two would race
+# each other rebuilding snapshots for no gain.
+control:
+  enabled: true
+  replicas: 1
+  service:
+    type: ClusterIP    # LoadBalancer exposes the admin UI — read the note below
+    port: 4001
+    annotations: {}
+  # The admin listener also serves /snapshot, which returns *decrypted*
+  # upstream credentials to anything holding the proxy token. Exposing this
+  # Service is a deliberate decision, not a convenience: see
+  # docs/operations.md before changing `type`.
+  tls:
+    enabled: false
+    secretName: ""     # must contain tls.crt and tls.key
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+# The data plane. Scale this; it is the part that serves traffic.
+proxy:
+  enabled: true
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 4000
+    annotations: {}
+  # cache-affinity keeps a shared prefix on the node holding its KV cache.
+  # Use lowest-latency only for a pool whose members are not equivalent, and
+  # least-loaded if your traffic has no prefix sharing at all.
+  policy: cache-affinity
+  configPollSeconds: 5
+  healthReportIntervalSeconds: 10
+  # Seconds to wait for upstream response *headers*. Does not bound
+  # generation — a long completion is not a hung request.
+  upstreamTimeout: 120
+  shutdownGrace: 25
+  caBundle: ""         # secret name holding ca.crt, when control.tls is on
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "2", memory: 1Gi}
+
+database:
+  # Point at your own Postgres. The chart does not run one: a database is a
+  # stateful service with backup and upgrade concerns that belong to whoever
+  # operates it, not to an application chart.
+  url: ""                    # postgres://user:pass@host:5432/db
+  existingSecret: ""         # or a Secret with the key below
+  existingSecretKey: uri
+  maxConnections: 8
+
+secrets:
+  # Generate both, once, and keep them: rotating the encryption key needs
+  # `fastllm-proxy reencrypt-backends` first, not just a restart.
+  #   kubectl create secret generic fastllm-secrets \
+  #     --from-literal=proxy-token="pt-$(openssl rand -hex 24)" \
+  #     --from-literal=encryption-key="$(openssl rand -hex 32)"
+  existingSecret: ""
+  proxyTokenKey: proxy-token
+  encryptionKeyKey: encryption-key
+
+webhook:
+  url: ""
+  secret: ""
+
+otel:
+  endpoint: ""
+  sampleOneIn: 100
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+# Spread the data plane across nodes: a gateway that dies with one node is
+# not a gateway.
+topologySpreadConstraints: true

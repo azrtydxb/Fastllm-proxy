@@ -1,0 +1,28 @@
+{{ include "fastllm.fullname" . }} is installing.
+
+The gateway:   {{ include "fastllm.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.proxy.service.port }}
+The admin API: {{ include "fastllm.fullname" . }}-control.{{ .Release.Namespace }}.svc:{{ .Values.control.service.port }}
+
+There are no keys and no models yet. Give yourself a login, then use the
+management UI on the admin port — the same address, in a browser:
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "fastllm.fullname" . }}-control -- \
+    fastllm-proxy set-password --name you --password 'change-me'
+
+Already running LiteLLM? Import it instead — models, backends, keys and each
+key's per-model grants come across, and re-running converges:
+
+  fastllm-proxy import --config litellm_config.yaml --database-url <same url>
+
+{{- if eq .Values.control.service.type "LoadBalancer" }}
+
+WARNING: control.service.type is LoadBalancer. That listener serves the admin
+UI *and* /snapshot, which returns decrypted upstream credentials to anything
+holding the proxy token. Set control.tls.enabled=true, or keep it ClusterIP.
+{{- end }}
+{{- if not .Values.control.tls.enabled }}
+
+NOTE: control.tls is off, so /snapshot carries upstream credentials in clear
+text between the proxy and the control plane. Acceptable when no backend has a
+real credential; not otherwise.
+{{- end }}

@@ -1,6 +1,6 @@
 # Deploying to the kw cluster
 
-Plain manifests — this does not earn a Helm chart.
+Plain manifests, applied continuously to one cluster. The reusable form is the [Helm chart](../charts/fastllm-proxy).
 
 | | |
 |---|---|

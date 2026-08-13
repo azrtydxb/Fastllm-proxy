@@ -1,0 +1,133 @@
+{{- if .Values.proxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastllm.fullname" . }}
+  labels: {{- include "fastllm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: proxy
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels:
+        {{- include "fastllm.labels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      # A gateway that dies with one node is not a gateway. ScheduleAnyway so
+      # a single-node cluster still schedules rather than pending for ever.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: proxy
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+        # The snapshot cache emptyDir is created root-owned by the kubelet,
+        # and readOnlyRootFilesystem leaves nowhere else to write.
+        fsGroup: 65532
+      containers:
+        - name: proxy
+          image: {{ include "fastllm.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --role=proxy
+            - --policy={{ .Values.proxy.policy }}
+            - --port={{ .Values.proxy.service.port }}
+            - --config-poll={{ .Values.proxy.configPollSeconds }}
+            - --health-report-interval={{ .Values.proxy.healthReportIntervalSeconds }}
+            - --upstream-timeout={{ .Values.proxy.upstreamTimeout }}
+            - --shutdown-grace={{ .Values.proxy.shutdownGrace }}
+            {{- if .Values.proxy.caBundle }}
+            - --ca-bundle=/etc/fastllm/ca/ca.crt
+            {{- end }}
+          ports:
+            - {name: http, containerPort: {{ .Values.proxy.service.port }}}
+          env:
+            - name: FASTLLM_CONTROL_URL
+              value: {{ printf "%s://%s-control.%s.svc:%v/snapshot" (ternary "https" "http" .Values.control.tls.enabled) (include "fastllm.fullname" .) .Release.Namespace .Values.control.service.port | quote }}
+            - name: FASTLLM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ include "fastllm.secretName" . }}, key: {{ .Values.secrets.proxyTokenKey }}}
+            {{- with .Values.otel.endpoint }}
+            - {name: FASTLLM_OTEL_ENDPOINT, value: {{ . | quote }}}
+            - {name: FASTLLM_OTEL_SAMPLE_ONE_IN, value: {{ $.Values.otel.sampleOneIn | quote }}}
+            {{- end }}
+            - {name: FASTLLM_LOG, value: info}
+          volumeMounts:
+            # A restarted proxy reads its last-known-good snapshot from here
+            # and serves even if the control plane is unreachable.
+            - {name: snapshot-cache, mountPath: /var/lib/fastllm}
+            {{- if .Values.proxy.caBundle }}
+            - {name: control-ca, mountPath: /etc/fastllm/ca, readOnly: true}
+            {{- end }}
+          # Readiness tracks backends: /health is 503 with none healthy, which
+          # correctly pulls this pod out of the Service. Liveness must NOT use
+          # it, or a dead backend would restart-loop a healthy proxy.
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /metrics, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          startupProbe:
+            httpGet: {path: /metrics, port: http}
+            periodSeconds: 3
+            failureThreshold: 20
+          resources: {{- toYaml .Values.proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - {name: snapshot-cache, emptyDir: {}}
+        {{- if .Values.proxy.caBundle }}
+        - name: control-ca
+          secret:
+            secretName: {{ .Values.proxy.caBundle }}
+            # Only ca.crt — this pod has no use for tls.key and no business
+            # holding it.
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fastllm.fullname" . }}
+  labels: {{- include "fastllm.labels" . | nindent 4 }}
+  {{- with .Values.proxy.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: proxy
+  ports:
+    - {name: http, port: {{ .Values.proxy.service.port }}, targetPort: http}
+{{- end }}

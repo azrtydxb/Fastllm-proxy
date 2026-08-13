@@ -1,0 +1,111 @@
+{{- if .Values.control.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastllm.fullname" . }}-control
+  labels: {{- include "fastllm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.control.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: control
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels:
+        {{- include "fastllm.labels" . | nindent 8 }}
+        app.kubernetes.io/component: control
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: control
+          image: {{ include "fastllm.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --role=control
+            - --admin-port={{ .Values.control.service.port }}
+            {{- if .Values.control.tls.enabled }}
+            - --tls-cert=/etc/fastllm/tls/tls.crt
+            - --tls-key=/etc/fastllm/tls/tls.key
+            {{- end }}
+            {{- with .Values.webhook.url }}
+            - --webhook-url={{ . }}
+            {{- end }}
+            {{- with .Values.webhook.secret }}
+            - --webhook-secret={{ . }}
+            {{- end }}
+          ports:
+            - {name: admin, containerPort: {{ .Values.control.service.port }}}
+          env:
+            - name: FASTLLM_DATABASE_URL
+              {{- if .Values.database.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+              {{- else }}
+              value: {{ required "set database.url or database.existingSecret" .Values.database.url | quote }}
+              {{- end }}
+            - name: FASTLLM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ include "fastllm.secretName" . }}, key: {{ .Values.secrets.proxyTokenKey }}}
+            - name: FASTLLM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "fastllm.secretName" . }}, key: {{ .Values.secrets.encryptionKeyKey }}}
+            - {name: FASTLLM_DATABASE_MAX_CONNECTIONS, value: {{ .Values.database.maxConnections | quote }}}
+            - {name: FASTLLM_LOG, value: info}
+          {{- if .Values.control.tls.enabled }}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/fastllm/tls, readOnly: true}
+          {{- end }}
+          # /healthz is the dedicated unauthenticated route: the kubelet has
+          # no session cookie and no proxy token, and it does no database work,
+          # so probing every few seconds adds no query load.
+          readinessProbe:
+            httpGet: {path: /healthz, port: admin, scheme: {{ if .Values.control.tls.enabled }}HTTPS{{ else }}HTTP{{ end }}}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin, scheme: {{ if .Values.control.tls.enabled }}HTTPS{{ else }}HTTP{{ end }}}
+            periodSeconds: 20
+          startupProbe:
+            httpGet: {path: /healthz, port: admin, scheme: {{ if .Values.control.tls.enabled }}HTTPS{{ else }}HTTP{{ end }}}
+            periodSeconds: 3
+            failureThreshold: 40
+          resources: {{- toYaml .Values.control.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+      {{- if .Values.control.tls.enabled }}
+      volumes:
+        - name: tls
+          secret: {secretName: {{ required "control.tls.secretName is required when control.tls.enabled" .Values.control.tls.secretName }}}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fastllm.fullname" . }}-control
+  labels: {{- include "fastllm.labels" . | nindent 4 }}
+  {{- with .Values.control.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.control.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: control
+  ports:
+    - {name: admin, port: {{ .Values.control.service.port }}, targetPort: admin}
+{{- end }}
