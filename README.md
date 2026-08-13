@@ -21,7 +21,7 @@ fastllm-proxy addresses both: routing is prefix-aware, and response bodies are n
 - **Cache-affinity routing** with a load escape hatch. A shared prefix goes back to the node that already has its KV cache, unless that node is meaningfully hotter than the least-loaded one.
 - **Opaque response bodies.** Upstream frames reach the client exactly as they arrived — never deserialised, never re-encoded, never buffered.
 - **Cache-affinity routing, virtual models, rule-based and semantic routing** — see below.
-- **42 providers, and any OpenAI-compatible endpoint** — see below.
+- **80 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
 - **Control plane / data plane split** by a runtime flag, so one image is a single container in a lab and a scaled deployment in Kubernetes.
@@ -31,24 +31,36 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 
 ## Providers
 
-**42 providers work today — 40 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list. The count and this table are checked against each other by `tests/doc_claims.rs`, so the number cannot drift away from the rows.
+**80 providers work today — 78 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on this list; the list exists so you do not have to go and find the base URL. The count and this table are checked against each other by `tests/doc_claims.rs`, so the number cannot drift away from the rows.
+
+A caveat this table is explicit about, because the number is otherwise a boast: **"works" here means "is a configuration row that this proxy will forward to correctly"**, which follows from the endpoint being OpenAI-shaped. The ones exercised against real traffic in this repo's tests and on its dev cluster are marked ✓. The rest carry the base URL their vendor documents — check it against their docs before pasting it into production, because vendors move them and this file cannot notice.
 
 | reached as-is (OpenAI-compatible) | |
 |---|---|
-| **OpenRouter** (fronts ~400 models) | `https://openrouter.ai/api/v1` |
+| **OpenRouter** ✓ (fronts ~400 models) | `https://openrouter.ai/api/v1` |
 | OpenAI · Groq · DeepSeek · xAI | `api.openai.com` · `api.groq.com` · `api.deepseek.com` · `api.x.ai` |
 | Together · Fireworks · Nebius · AtlasCloud | four endpoints, four rows |
+| Mistral · Perplexity · Cerebras · SambaNova | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1` |
+| DeepInfra · Novita · Hyperbolic · Lambda | four endpoints, four rows |
 | Z.ai · BigModel · Aliyun DashScope · Qwen Cloud | |
 | Moonshot / Kimi · Baidu Qianfan · AIHubMix | |
-| GitHub Models · Ollama · vLLM · SGLang · llama.cpp | self-hosted or hosted, same row shape |
+| MiniMax · Volcengine Ark · Tencent Hunyuan · Sarvam | Chinese and Indian clouds, same row shape |
+| Baseten · Featherless · FriendliAI · Chutes | |
+| Nscale · GMI Cloud · Scaleway · OVHcloud | |
+| Cloudflare Workers AI · Vercel AI Gateway · v0 · Poe | |
+| NanoGPT · CometAPI · Inception · Morph | |
+| Clarifai · Weights & Biases · GradientAI · AI21 | |
+| Snowflake Cortex · Anyscale · Heroku · CompactifAI | |
+| GitHub Models · GitHub Copilot | |
 | **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
 | **Cohere** | `https://api.cohere.ai/compatibility/v1` |
 | **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [docs/api.md](docs/api.md#providers) for the service-account credential |
-| **Azure OpenAI** | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
-| Mistral · Perplexity · Cerebras · SambaNova | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1` |
-| DeepInfra · Novita · Hyperbolic · Lambda | four endpoints, four rows |
+| **Azure OpenAI** · Azure AI | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
 | NVIDIA NIM · Databricks · HuggingFace TGI | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1` |
+| vLLM ✓ · SGLang · llama.cpp ✓ · Ollama | self-hosted, same row shape |
 | LM Studio · KoboldCpp · TabbyAPI · text-generation-webui | local servers, same row shape |
+| Xinference · Llamafile · Docker Model Runner · Lemonade | local servers, same row shape |
+| **Voyage AI** · **Jina AI** · Infinity · TEI | embeddings and rerank — `/v1/embeddings`, `/v1/rerank` |
 
 | reached through their own wire format | |
 |---|---|
@@ -56,6 +68,8 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 | **Gemini** | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key` |
 
 Tool calling translates in both directions on native backends, streaming included, as do image and audio inputs. Native translation is opt-in per backend and byte-exact passthrough is preserved everywhere else — an `openai` backend's response is never parsed, which is where the latency numbers above come from. Full endpoint table and the translation limits are in [docs/api.md](docs/api.md#providers).
+
+**Deliberately absent**, and not counted: providers whose API is not OpenAI-shaped and would need a fourth translator in `src/protocol/` — Replicate, Predibase, Petals, Triton, WatsonX, OCI Generative AI, AWS SageMaker. Also absent are the non-LLM services a gateway has no business proxying blind: speech (Deepgram, ElevenLabs), image generation (Stability, Black Forest Labs, Recraft, Fal, RunwayML), vector stores (Milvus), and other people's gateways (Helicone, LiteLLM itself). Counting those would inflate the number without making anything work.
 
 ## Routing
 
