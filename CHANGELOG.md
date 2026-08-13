@@ -6,6 +6,21 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for *why* anything is the way it is; this file is the summary.
 
+## Unreleased
+
+### Fixed
+
+- `import` dropped four backend fields it had already parsed. `protocol`,
+  `auth_header`, `auth_scheme` and `default_max_tokens` are declared in the
+  config schema so a YAML file can describe an Anthropic or Azure backend, and
+  `Registry::build` honours them — but `import` wrote three columns, so the
+  same file produced an `openai` backend on `Bearer` auth once it reached the
+  database. Nothing warned: every dropped field has a valid default. Anyone who
+  imported a native-protocol backend should re-run `import`, which now
+  converges an existing row instead of only avoiding a duplicate.
+- The `FileSource` path dropped the same four, so one YAML file described a
+  different backend depending on which code path read it.
+
 ## [0.1.0] — 2026-08-13
 
 First tagged release. Everything below was built before it, so this entry is

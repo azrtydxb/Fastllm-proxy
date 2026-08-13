@@ -68,10 +68,13 @@ Three things about this shape worth knowing before you rely on it:
   anything holding the proxy token. On one box, leave it on loopback and reach
   it over SSH.
 
-Without a database at all, `--role proxy --config config.yaml` runs `File`
-mode: models and keys come from the YAML, nothing is persisted, and there is
-no UI. That is the shape that predates the control plane, and it still works
-unchanged — see [Per-key RBAC in `File` mode](#per-key-rbac-in-file-mode).
+There is also a `File` mode — `--role proxy --config config.yaml`, no
+database — that predates the control plane and still works unchanged, so a
+deployment upgrading to this binary does not break. It is compatibility, not a
+recommendation: nothing is persisted, there is no UI, no usage accounting and
+no audit log. Every shape below assumes the database, and
+[`import`](configuration.md#migrating-a-file-mode-deployment-onto-a-database)
+is how a `File`-mode deployment moves onto one.
 
 ### 2. Docker
 

@@ -23,7 +23,30 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
 ```
 
-Idempotent — seeds `models`/`model_backends` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely. Point `--role=all`/`control` at the same database afterward and the same keys keep working, with the same per-model authorisation they had in `File` mode.
+Idempotent — seeds `models`/`model_backends` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely.
+
+Everything a backend row can hold is carried across, not just the address:
+
+| from the file | into `model_backends` |
+|---|---|
+| `api_base` | the address, trailing slash trimmed |
+| `model` | `upstream_model`, with a known `provider/` prefix stripped |
+| `api_key` | `upstream_api_key`, AES-256-GCM encrypted before it reaches Postgres. LiteLLM's `not-needed`/`none` placeholders are treated as absent |
+| `protocol` | `openai` (default), `anthropic` or `gemini` |
+| `auth_header` | defaults to `authorization`; Azure OpenAI wants `api-key` |
+| `auth_scheme` | defaults to `Bearer`; `""` stores as NULL and sends the key raw |
+| `default_max_tokens` | required in practice by an Anthropic backend |
+
+Two entries sharing a `model_name` become one model with two backends — a
+load-balanced pool.
+
+**Re-importing an edited file converges.** A backend is keyed on
+`(model, api_base, upstream_model)`: a row that already exists is updated
+rather than duplicated, so a `protocol:` corrected in the file reaches the
+database. The one exception is the credential, which is written only when the
+file names one — a file with no `api_key` usually means the credential was set
+through the admin API afterwards, and overwriting it with nothing on the next
+import would revoke a working backend for no reason. Point `--role=all`/`control` at the same database afterward and the same keys keep working, with the same per-model authorisation they had in `File` mode.
 
 Each imported key gets its own role, `import:<name>`, holding just that key's grants — `models: ['*']` becomes `model:invoke` on `model/*` (i.e. allow-all), a named list becomes one grant per model. Re-importing an edited file converges: grants dropped from the file are revoked, not merely left behind. `import` never prints a key back; the config file is the only copy of the plaintext.
 

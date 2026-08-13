@@ -1,35 +1,36 @@
 # What it can do
 
-Chat, images, speech, embeddings and reranking through one endpoint, with
-routing that keeps your KV cache intact and accounting that costs nothing on
-the request path.
+The lowest-overhead router in front of everything you serve: chat, images,
+speech, embeddings and reranking through one endpoint, with routing that keeps
+your KV cache warm and accounting that costs the request path nothing.
 
 What follows is what it does and what that is worth measured — including the
 places the measurements are less flattering, because you cannot plan a
 deployment from numbers that only ever point one way.
 
-## The case it is built for
+## Where the low overhead comes from
 
-**You run your own inference, on more than one node, and the gateway is
-starting to cost you.**
+Three properties, and each is structural rather than a setting you tune.
 
-Two things go wrong when a general-purpose gateway sits in front of
-prefix-caching engines like vLLM or SGLang:
+**No I/O on the request path.** RBAC, per-model grants, rate limits and
+budgets resolve to integer comparisons against a snapshot already flattened in
+memory. `tests/no_io_on_hot_path.rs` fails the build if anything I/O-shaped
+lands there, which is what keeps it true after the fact.
 
-**Round-robin destroys the prefix cache.** These engines keep a radix/prefix KV
-cache. Two requests sharing a system prompt are far cheaper on the *same* node
-— the second reuses the first's cached prefix instead of prefilling it again. A
-round-robin balancer alternates them by construction, so every request pays
-full prefill. Nodes look evenly loaded while aggregate throughput drops, and
-adding a second node can make things *worse* than one.
+**No parsing on the response path.** An `openai`-protocol body is forwarded
+byte-for-byte in both directions — never deserialised, never re-encoded, never
+buffered. A gateway that decodes each SSE chunk to re-emit it pays thousands
+of parse cycles per second per stream, and that cost scales with how much your
+users read. This one pays none of it.
 
-**Per-token work in the proxy is per-token overhead.** A gateway that
-deserialises each SSE chunk to re-emit it does thousands of parse/re-encode
-cycles per second per stream. That is latency added to every token, and it
-scales with how much your users read.
-
-Both are addressed structurally rather than tuned around: routing is
-prefix-aware, and an `openai`-protocol response body is never parsed.
+**Routing that knows what your engine knows.** vLLM and SGLang keep a
+radix/prefix KV cache, so two requests sharing a system prompt are far cheaper
+on the *same* node — the second reuses the first's cached prefix instead of
+prefilling it again. Cache-affinity routing sends them there, unless that node
+is meaningfully hotter than the least-loaded one. Round-robin alternates them
+by construction, so every request pays full prefill: nodes look evenly loaded
+while aggregate throughput falls, and a second node can leave you worse off
+than one.
 
 ## What that is worth, measured
 

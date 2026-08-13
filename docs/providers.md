@@ -62,8 +62,8 @@ move them and this file cannot notice.
 
 ## Adding one
 
-Three ways, same result. A backend belongs to the model it serves, so you add
-a model first and then a backend under it.
+Two ways, same result. A backend belongs to the model it serves, so you add a
+model first and then a backend under it.
 
 In the UI, on **Models**:
 
@@ -83,19 +83,10 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/models/7/backends \
   }'
 ```
 
-Or in `File` mode, as YAML — the LiteLLM schema, unchanged:
-
-```yaml
-model_list:
-  - model_name: kimi-k2
-    litellm_params:
-      model: openai/moonshot-v1-128k
-      api_base: https://api.moonshot.ai/v1
-      api_key: sk-...
-```
-
-Two entries sharing a `model_name` become one load-balanced pool. That is the
-whole mechanism behind failover and traffic splitting — see
+Two backends under one model become one load-balanced pool — and two entries
+sharing a `model_name` in a LiteLLM config
+[import](operations/configuration.md#migrating-a-file-mode-deployment-onto-a-database)
+to exactly that. It is the whole mechanism behind failover and traffic splitting — see
 [virtual models](features.md#virtual-models-routing-as-configuration-not-code)
 for routing between *different* models.
 

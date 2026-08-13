@@ -131,8 +131,8 @@ pub async fn import(
 
         let api_base = entry.litellm_params.api_base.trim_end_matches('/');
         let upstream = entry.litellm_params.upstream_model(name);
-        // Idempotent on (model, api_base, upstream_model) so re-running import
-        // over an edited file adds without duplicating.
+        // Keyed on (model, api_base, upstream_model) so re-running import over
+        // an edited file converges rather than duplicating.
         //
         // upstream_api_key is encrypted at rest with AES-256-GCM
         // (`control::secrets`) before it ever reaches Postgres — see that
@@ -146,20 +146,90 @@ pub async fn import(
             .effective_api_key()
             .map(|k| secrets::encrypt(key, &k))
             .transpose()?;
-        let inserted = sqlx::query(
-            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
-             SELECT $1, $2, $3, $4
-             WHERE NOT EXISTS (
-               SELECT 1 FROM model_backends
-               WHERE model_id = $1 AND api_base = $2 AND upstream_model = $3)",
+        // The four below are why this is not a bare insert of three columns.
+        // `LitellmParams` parses `protocol`, `auth_header`, `auth_scheme` and
+        // `default_max_tokens` — they exist so a YAML file can describe an
+        // Anthropic or Azure backend — and `Registry::build` honours them on
+        // the direct `File`-mode path. Importing dropped all four, so the same
+        // file produced an `openai` backend on `Bearer` auth once it reached
+        // the database: an Anthropic upstream answering 400s that look like
+        // the provider's fault, and an Azure key sent in the wrong header.
+        // Nothing warned, because every dropped field had a valid default to
+        // fall back to.
+        let protocol = entry.litellm_params.protocol_or_default().as_str();
+        let auth_header = entry
+            .litellm_params
+            .auth_header
+            .clone()
+            .unwrap_or_else(|| "authorization".to_string());
+        // `auth_scheme: ""` means "send the key raw", which the column spells
+        // as NULL. Left as an empty string it would be prepended to the key
+        // with a space and every upstream would reject it.
+        let auth_scheme = entry
+            .litellm_params
+            .auth_scheme
+            .clone()
+            .filter(|s| !s.is_empty());
+        let default_max_tokens = entry.litellm_params.default_max_tokens.map(|t| t as i32);
+
+        let existing_backend: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM model_backends
+             WHERE model_id = $1 AND api_base = $2 AND upstream_model = $3",
         )
         .bind(model_id)
         .bind(api_base)
         .bind(&upstream)
-        .bind(encrypted_key)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        backends += inserted.rows_affected() as usize;
+
+        match existing_backend {
+            // Converge rather than leave the row as first imported. An edited
+            // file is the documented way to change policy, so a `protocol:`
+            // corrected in YAML that never reached the database would be the
+            // same silent mismatch from the other direction.
+            //
+            // The credential is the one field written only when the file names
+            // one. A file with no `api_key` usually means the credential was
+            // set through the admin API afterwards, and overwriting it with
+            // NULL on the next import would revoke a working backend for
+            // nothing.
+            Some(id) => {
+                sqlx::query(
+                    "UPDATE model_backends
+                        SET protocol = $2, auth_header = $3, auth_scheme = $4,
+                            default_max_tokens = $5,
+                            upstream_api_key = COALESCE($6, upstream_api_key)
+                      WHERE id = $1",
+                )
+                .bind(id)
+                .bind(protocol)
+                .bind(&auth_header)
+                .bind(&auth_scheme)
+                .bind(default_max_tokens)
+                .bind(encrypted_key)
+                .execute(&mut *tx)
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO model_backends
+                       (model_id, api_base, upstream_model, upstream_api_key,
+                        protocol, auth_header, auth_scheme, default_max_tokens)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(model_id)
+                .bind(api_base)
+                .bind(&upstream)
+                .bind(encrypted_key)
+                .bind(protocol)
+                .bind(&auth_header)
+                .bind(&auth_scheme)
+                .bind(default_max_tokens)
+                .execute(&mut *tx)
+                .await?;
+                backends += 1;
+            }
+        }
     }
 
     summary.models = models;
@@ -544,6 +614,106 @@ mod tests {
         // Two entries sharing a model_name are one pool with two backends.
         assert_eq!(summary.models, 1);
         assert_eq!(summary.backends, 2);
+    }
+
+    /// Every backend column a YAML file can name, checked against the row.
+    ///
+    /// This is the test that was missing. `import` wrote three columns and
+    /// silently dropped `protocol`, `auth_header`, `auth_scheme` and
+    /// `default_max_tokens`, so an Anthropic backend imported as an OpenAI one
+    /// and an Azure key went out in the wrong header — and every existing test
+    /// passed, because each dropped field has a valid default and the counts
+    /// were still right.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn import_carries_every_backend_field_the_file_can_name() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "native-import-test-");
+
+        let name = unique_name("native-import-test");
+        let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
+            "model_list:\n\
+             \x20 - model_name: {name}\n\
+             \x20   litellm_params:\n\
+             \x20     model: anthropic/claude-sonnet-4\n\
+             \x20     api_base: https://api.anthropic.com/v1\n\
+             \x20     api_key: sk-ant-test\n\
+             \x20     protocol: anthropic\n\
+             \x20     auth_header: x-api-key\n\
+             \x20     auth_scheme: \"\"\n\
+             \x20     default_max_tokens: 4096\n"
+        ))
+        .unwrap();
+
+        import(&pool, &cfg, &test_key()).await.unwrap();
+
+        let (protocol, auth_header, auth_scheme, max_tokens): (
+            String,
+            String,
+            Option<String>,
+            Option<i32>,
+        ) = sqlx::query_as(
+            "SELECT b.protocol, b.auth_header, b.auth_scheme, b.default_max_tokens
+               FROM model_backends b JOIN models m ON m.id = b.model_id
+              WHERE m.name = $1",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(protocol, "anthropic", "protocol was dropped on import");
+        assert_eq!(auth_header, "x-api-key", "auth_header was dropped");
+        // `auth_scheme: ""` means send the key raw. As an empty string it
+        // would be prepended to the key with a space; NULL is how the column
+        // spells the same intent.
+        assert_eq!(auth_scheme, None, "empty auth_scheme must store as NULL");
+        assert_eq!(max_tokens, Some(4096), "default_max_tokens was dropped");
+    }
+
+    /// An edited file has to reach the database, not just avoid duplicating.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn re_importing_an_edited_backend_converges() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup = TestCleanup::new().track_prefix("models", "name", "converge-import-test-");
+
+        let name = unique_name("converge-import-test");
+        let yaml = |protocol: &str, tokens: &str| {
+            format!(
+                "model_list:\n\
+                 \x20 - model_name: {name}\n\
+                 \x20   litellm_params:\n\
+                 \x20     api_base: https://api.anthropic.com/v1\n\
+                 \x20     api_key: sk-ant-test\n\
+                 \x20     protocol: {protocol}\n\
+                 \x20     default_max_tokens: {tokens}\n"
+            )
+        };
+
+        // Imported wrong first, the way a typo reaches production.
+        let first: crate::config::FileConfig =
+            serde_yaml::from_str(&yaml("openai", "1024")).unwrap();
+        import(&pool, &first, &test_key()).await.unwrap();
+
+        let second: crate::config::FileConfig =
+            serde_yaml::from_str(&yaml("anthropic", "4096")).unwrap();
+        let summary = import(&pool, &second, &test_key()).await.unwrap();
+        assert_eq!(summary.backends, 0, "a corrected file must not add a row");
+
+        let (protocol, max_tokens): (String, Option<i32>) = sqlx::query_as(
+            "SELECT b.protocol, b.default_max_tokens
+               FROM model_backends b JOIN models m ON m.id = b.model_id
+              WHERE m.name = $1",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(protocol, "anthropic", "the correction never reached the row");
+        assert_eq!(max_tokens, Some(4096));
     }
 
     #[tokio::test]

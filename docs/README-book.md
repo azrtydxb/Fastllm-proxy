@@ -1,12 +1,12 @@
 # fastllm-proxy
 
-**One OpenAI-compatible endpoint in front of every model you run — that does
-not cost you the throughput it was supposed to add.**
+**The lowest-overhead LLM router. Production-ready, highly available, and one
+OpenAI-compatible endpoint in front of everything you serve.**
 
-A gateway written in Rust for teams running their own inference on more than
-one node. It routes on prefix affinity so your KV cache survives load
-balancing, never parses a response body it is only forwarding, and enforces
-RBAC, rate limits and budgets without a database call on the request path.
+A load balancer and router written in Rust for teams putting real traffic
+through more than one model or node. **0.76 µs of work per request**, no I/O on
+the request path at all, and the feature set you would otherwise assemble out
+of glue — so it saves you money, uptime, and the numbers you are measured on.
 
 ```bash
 docker run ghcr.io/azrtydxb/fastllm-proxy:v0.1.0 --help
@@ -23,25 +23,57 @@ deployment.
 
 ---
 
-## The problem it solves
+## What it is
 
-Two things go wrong when a general-purpose gateway sits in front of
-prefix-caching engines like vLLM or SGLang. Both are addressed structurally
-here rather than tuned around.
+### The lowest overhead of any gateway here
 
-**Round-robin destroys the prefix cache.** These engines keep a radix/prefix
-KV cache, so two requests sharing a system prompt are far cheaper on the
-*same* node — the second reuses the first's cached prefix instead of
-prefilling it again. A round-robin balancer alternates them by construction.
-Nodes look evenly loaded while aggregate throughput drops, and adding a second
-node can make things **worse** than one.
+Nothing on the request path does I/O. Not a database call, not a file read —
+RBAC, per-model grants, rate limits and budgets are integer comparisons
+against a snapshot already flattened in memory, and a test in the repo fails
+the build if anything I/O-shaped lands there.
 
-**Per-token work in the proxy is per-token overhead.** A gateway that
-deserialises each SSE chunk to re-emit it does thousands of parse/re-encode
-cycles per second per stream. That is latency added to every token, and it
-grows with how much your users read.
+Nothing on the response path parses. An upstream's frames reach your client
+exactly as they arrived — never deserialised, never re-encoded, never
+buffered. A gateway that decodes each SSE chunk to re-emit it pays thousands
+of parse cycles per second per stream; this one pays none, so the cost does
+not grow with how much your users read.
 
-## What that is worth
+And routing knows what your engine knows: **a shared prefix goes back to the
+node already holding its KV cache**, unless that node is meaningfully hotter
+than the least-loaded one. Round-robin in front of vLLM or SGLang alternates
+those requests by construction, so every one pays full prefill — nodes look
+evenly loaded while aggregate throughput falls.
+
+### Production-ready, and highly available on purpose
+
+| | |
+|---|---|
+| **It survives its own control plane** | A proxy that loses the control plane keeps serving from its last-known-good snapshot. Configuration stops changing; traffic does not stop |
+| **Failover is part of routing** | Ordered targets are tried on `5xx`, on `429`, and on an unreachable upstream — before a byte reaches the client, and never widening a caller's reach |
+| **Health is per replica, never merged** | One replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom |
+| **Reloads in place** | `SIGHUP` or a snapshot poll swaps the routing table atomically. In-flight generations are unaffected |
+| **One binary, three shapes** | The same image is a single container on a laptop and a scaled deployment in Kubernetes, with a Helm chart and worked manifests |
+
+### The most advanced feature set, and none of it on the hot path
+
+80 providers, virtual models with weighted *and* ordered targets, rule-based
+and semantic routing, RBAC with real keys, rate limits, budgets, usage
+accounting priced per request, webhooks, Prometheus, OpenTelemetry, an OpenAPI
+spec, and a thirteen-screen management UI **embedded in the binary**.
+
+Each of those is a thing you would otherwise stand up, secure, monitor and
+carry. Here they are configuration, and none of them costs the request path a
+round trip.
+
+## What it saves you
+
+| | |
+|---|---|
+| **Money** | Prefix affinity keeps your KV cache warm, so you buy throughput from the GPUs you already own rather than from more of them. Budgets and per-model prices make spend a number you can see per principal, not a monthly surprise |
+| **Uptime** | Failover, per-replica health, a control plane you can lose, and reloads that do not drop streams |
+| **Your KPIs** | p99 time-to-first-token of **766 ms against 2921 ms** at 32 concurrent streams, and inter-token jitter 15–25% lower at *every* concurrency level. The tail is what your users feel |
+
+## The numbers, and their conditions
 
 Measured against LiteLLM on the same cluster, same backends, interleaved A/B
 runs. With the GPU removed, so the gateway is the only thing being measured:
@@ -112,9 +144,6 @@ Models, backends, keys and each key's per-model grants come across. Idempotent
 — re-importing an edited file converges rather than duplicating, and grants
 removed from the file are revoked. Your existing keys keep working against the
 same models they already had.
-
-`File` mode reads LiteLLM YAML directly, if you would rather not adopt the
-database at all.
 
 ## More than chat
 

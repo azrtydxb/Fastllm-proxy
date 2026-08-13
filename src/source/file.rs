@@ -45,12 +45,25 @@ impl SnapshotSource for FileSource {
                     .to_string(),
                 upstream_model: entry.litellm_params.upstream_model(&name),
                 api_key: entry.litellm_params.effective_api_key(),
-                // The YAML config is the single-file, no-database deployment
-                // shape; it describes OpenAI-compatible upstreams only. Native
-                // providers need the per-backend protocol and auth columns the
-                // control plane's schema carries, so they are configured
-                // there rather than duplicated into this format.
-                ..Default::default()
+                // These four are not `Default::default()`, though they were.
+                // The comment that used to sit here said this format describes
+                // OpenAI-compatible upstreams only — but `LitellmParams` parses
+                // all four, and `Registry::build` honours them on the other
+                // `File`-mode path. The same YAML therefore described a
+                // different backend depending on which path read it, and the
+                // one that dropped them was silent about it.
+                protocol: entry.litellm_params.protocol_or_default(),
+                auth_header: entry
+                    .litellm_params
+                    .auth_header
+                    .clone()
+                    .unwrap_or_else(|| "authorization".to_string()),
+                auth_scheme: entry
+                    .litellm_params
+                    .auth_scheme
+                    .clone()
+                    .filter(|s| !s.is_empty()),
+                default_max_tokens: entry.litellm_params.default_max_tokens,
             };
             match models.iter_mut().find(|m| m.name == name) {
                 Some(m) => m.backends.push(backend),

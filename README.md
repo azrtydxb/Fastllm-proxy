@@ -1,20 +1,18 @@
 # fastllm-proxy
 
-A low-latency OpenAI-compatible gateway for multi-node LLM serving, written in Rust.
+**The lowest-overhead LLM router.** Production-ready, highly available, and one OpenAI-compatible endpoint in front of everything you serve — written in Rust.
 
-It fronts several inference backends (vLLM, SGLang, llama.cpp — anything speaking the OpenAI API) behind one endpoint, and it is built for the case where a general-purpose gateway costs you throughput instead of adding it.
+It fronts any number of inference backends (vLLM, SGLang, llama.cpp, or any of [80 providers](docs/providers.md)) behind one address: **0.76 µs of work per request**, no I/O on the request path, and response bodies that are never parsed. It reads LiteLLM-format config files unchanged, so it drops into an existing setup without rewriting anything.
 
-It reads LiteLLM-format config files unchanged, so it drops into an existing `sparkrun proxy` setup without rewriting anything.
+## Why it is fast, and stays fast
 
-## Why
+**No I/O on the request path.** RBAC, rate limits and budgets are integer comparisons against a snapshot flattened in memory. `tests/no_io_on_hot_path.rs` fails the build if that stops being true.
 
-Two separate things go wrong when a conventional gateway sits in front of prefix-caching inference engines.
+**No parsing on the response path.** Upstream frames reach the client exactly as they arrived. A gateway that deserialises each SSE chunk to re-emit it does thousands of parse/re-encode cycles per second per stream; this one does none, so the cost does not grow with how much your users read.
 
-**Round-robin destroys the prefix cache.** vLLM and SGLang keep a radix/prefix KV cache. Two requests sharing a system prompt are far cheaper on the *same* node — the second reuses the first's cached prefix instead of prefilling it again. A round-robin balancer alternates them by construction, so every request pays full prefill. Nodes look evenly loaded while aggregate throughput drops, and adding a second node can make things *worse* than one.
+**Cache-affinity routing.** vLLM and SGLang keep a radix/prefix KV cache, so two requests sharing a system prompt are far cheaper on the *same* node. Round-robin alternates them by construction — nodes look evenly loaded while aggregate throughput drops. A shared prefix goes back to the node already holding its cache, unless that node is meaningfully hotter than the least-loaded one.
 
-**Per-token work in the proxy is per-token overhead.** A gateway that deserialises each SSE chunk to re-emit it is doing thousands of parse/re-encode cycles per second per stream. That is latency added to every token.
-
-fastllm-proxy addresses both: routing is prefix-aware, and response bodies are never parsed.
+**Highly available on purpose.** A proxy that loses its control plane keeps serving from its last snapshot. Failover is part of routing, health is tracked per replica and never merged, and `SIGHUP` swaps the routing table without dropping a stream.
 
 ## What it does
 
@@ -173,9 +171,8 @@ fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
 
 Idempotent, so it can be re-run; re-importing an edited file converges rather
 than duplicating, and grants removed from the file are revoked. Your existing
-keys keep working against the same models they already had. `File` mode reads
-LiteLLM YAML directly too, if you would rather not adopt the database at all —
-see [docs/operations.md](docs/operations.md).
+keys keep working against the same models they already had. See
+[docs/operations/configuration.md](docs/operations/configuration.md).
 
 ## Install
 
