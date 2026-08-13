@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastllm-proxy-config
+data:
+  # Models, backends and keys live in the control plane's database, not here.
+  # Change those through the admin API or the UI.
+  #
+  # This file carries the one thing that survives the split: the `fastllm:`
+  # tuning block, which every role reads from `--config`. Edit and re-apply to
+  # change it — the proxy hashes the file every few seconds and reloads
+  # without a rollout or a dropped generation. Allow ~60s for the kubelet to
+  # refresh the mounted copy, then one `--config-poll` interval.
+  config.yaml: |
+    fastllm:
+      # Bytes of the request body hashed into the affinity key.
+      prefix_bytes: 2048
+      # How much in-flight imbalance is tolerated before cache locality is
+      # given up. Higher favours cache hits, lower favours even load.
+      balance_abs: 8
+      balance_rel: 1.5
+      # Consecutive failed probes before a backend is evicted.
+      unhealthy_after: 2

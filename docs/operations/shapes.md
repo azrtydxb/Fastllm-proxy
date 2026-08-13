@@ -14,7 +14,7 @@ working configuration — pick the row that matches where you are.
 | [2. Docker](#2-docker) | one process | the same, without a toolchain |
 | [3. Compose, split](#3-compose-with-the-planes-split) | two containers | one host, admin API off the public port |
 | [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
-| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic |
+| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests, Helm chart, or the operator |
 
 
 The dividing line between the first two and the rest is `--role`. One binary
@@ -195,32 +195,48 @@ one of those three and it should go back to ClusterIP.
 
 ### 5. Kubernetes, scaled out
 
-```mermaid
-flowchart LR
-    c([clients]) --> LB{{"Service<br/>LoadBalancer"}}
-    LB --> P1["proxy"]
-    LB --> P2["proxy"]
-    LB --> P3["proxy"]
-    LB --> PN["proxy × N<br/><i>scale this</i>"]
-    P1 -. " " .-> K["control × 1<br/><i>stays at one</i>"]
-    P2 -. " " .-> K
-    P3 -. " " .-> K
-    PN -. " " .-> K
-    K --> db[(Postgres)]
-```
+Three ways to express the same two Deployments. They differ in who keeps them
+that shape, not in what they produce.
 
-The chart is the generic form of the above:
+| | |
+|---|---|
+| [Manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes) | `kubectl apply -k deploy/kubernetes/base/`. Read exactly what is applied, and edit it. Overlays for TLS and a LoadBalancer |
+| [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy) | Values rather than patches, and templating across many environments |
+| [Operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator) | A `FastllmProxy` resource, reconciled continuously |
 
 ```bash
+# Manifests
+kubectl apply -k deploy/kubernetes/base/
+
+# Helm
 helm install fastllm charts/fastllm-proxy \
   --set proxy.replicas=6 \
   --set database.existingSecret=fastllm-pg-app \
-  --set secrets.existingSecret=fastllm-secrets \
-  --set proxy.policy=cache-affinity
+  --set secrets.existingSecret=fastllm-secrets
+
+# Operator
+kubectl apply -f operator/deploy/crd.yaml
+kubectl apply -f operator/deploy/operator.yaml -f operator/deploy/rbac.yaml
+kubectl apply -f operator/deploy/example.yaml
 ```
 
-Scaling means scaling `proxy`. The control plane stays at one; it does not see
-request traffic, and nothing about serving more requests asks for more of it.
+**What the operator adds** is not templating — it is that the deployment stays
+the shape you asked for. A chart describes it once, at apply time; a
+Deployment edited by hand afterwards stays edited. The property worth having a
+controller for is that `spec.image` is one field and becomes *both*
+Deployments, so the two planes cannot be pinned apart by anyone editing one of
+them. They share a database schema, and the older side reads a snapshot
+carrying fields it does not understand.
+
+```console
+$ kubectl -n fastllm get fllm
+NAME      GATEWAY   CONTROL   IMAGE                                   AGE
+fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.1.0   2m
+```
+
+Scaling means scaling `proxy`. The control plane stays at one — it does not
+see request traffic, and nothing about serving more requests asks for more of
+it. The operator does not expose a replica count for it at all.
 
 What changes as the data plane grows:
 
@@ -232,5 +248,5 @@ What changes as the data plane grows:
 | **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows |
 
 For the request path itself, `--workers` and `--pool-max-idle` are the knobs
-that matter, and `docs/performance.md` has the measurements rather than the
-intuitions.
+that matter, and [the performance chapter](../performance.md) has the
+measurements rather than the intuitions.

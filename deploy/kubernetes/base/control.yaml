@@ -1,0 +1,99 @@
+# The control plane: database, admin API, management UI, /snapshot.
+#
+# One replica, deliberately. It is not on the request path, and a second would
+# race the first rebuilding snapshots for no gain.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-control
+  labels:
+    app.kubernetes.io/name: fastllm-proxy
+    app.kubernetes.io/component: control
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two control planes briefly sharing one
+  # database would both apply migrations at startup.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastllm-proxy
+      app.kubernetes.io/component: control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastllm-proxy
+        app.kubernetes.io/component: control
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control
+          image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+          args:
+            - --role=control
+            - --admin-port=4001
+          ports:
+            - { name: admin, containerPort: 4001 }
+          env:
+            - name: FASTLLM_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: fastllm-database, key: uri }
+            # Both planes must be given the same value: it is what the proxy
+            # presents to /snapshot.
+            - name: FASTLLM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: fastllm-secrets, key: proxy-token }
+            # Encrypts model_backends.upstream_api_key at rest. --role control
+            # refuses to start without it rather than falling back to
+            # plaintext. Not regenerable: losing it loses those credentials.
+            - name: FASTLLM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: fastllm-secrets, key: encryption-key }
+            - name: FASTLLM_LOG
+              value: info
+          readinessProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 20
+            failureThreshold: 3
+          # Migrations run at startup against a database that may still be
+          # coming up, so the startup budget is generous where the liveness
+          # budget is not.
+          startupProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 3
+            failureThreshold: 40
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+# ClusterIP, and that is a security decision rather than a default.
+#
+# This Service fronts /snapshot, which returns *decrypted* upstream
+# credentials to anything holding the proxy token. Exposing it — LoadBalancer,
+# Ingress, NodePort — is only defensible with TLS, a private network, and the
+# session-authenticated admin API all holding together. Take away any one and
+# it belongs back here. See docs/security.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-control
+  labels:
+    app.kubernetes.io/name: fastllm-proxy
+    app.kubernetes.io/component: control
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: fastllm-proxy
+    app.kubernetes.io/component: control
+  ports:
+    - { name: admin, port: 4001, targetPort: admin }

@@ -1,0 +1,13 @@
+# The gateway on an external address. Nothing else changes — the admin
+# Service stays ClusterIP, which is the point.
+#
+#   kubectl apply -k deploy/kubernetes/overlays/loadbalancer/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../base]
+patches:
+  - target: { kind: Service, name: fastllm-proxy }
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: LoadBalancer

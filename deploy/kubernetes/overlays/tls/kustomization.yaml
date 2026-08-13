@@ -1,0 +1,74 @@
+# TLS on the admin listener.
+#
+# This is not decoration. /snapshot returns *decrypted* upstream credentials
+# to anything holding the proxy token, so plain HTTP means every backend
+# credential crosses the cluster network in the clear. Run this overlay
+# wherever a backend has a real credential — which is every deployment that
+# talks to a hosted provider.
+#
+#   kubectl apply -k deploy/kubernetes/overlays/tls/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - certificate.yaml
+
+patches:
+  # The control plane serves TLS and mounts its own certificate.
+  - target: { kind: Deployment, name: fastllm-control }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --tls-cert=/etc/fastllm/tls/tls.crt
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --tls-key=/etc/fastllm/tls/tls.key
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: tls
+            mountPath: /etc/fastllm/tls
+            readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes
+        value:
+          - name: tls
+            secret: { secretName: fastllm-control-tls }
+      # The probes have to follow the scheme the listener now speaks.
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/scheme
+        value: HTTPS
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/scheme
+        value: HTTPS
+      - op: replace
+        path: /spec/template/spec/containers/0/startupProbe/httpGet/scheme
+        value: HTTPS
+
+  # The proxy talks https and trusts the issuing CA. Without --ca-bundle a
+  # privately-issued certificate fails the handshake and the proxy falls back
+  # to its cached snapshot, which looks like "config changes stopped working".
+  - target: { kind: Deployment, name: fastllm-proxy }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --ca-bundle=/etc/fastllm/ca/ca.crt
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: https://fastllm-control:4001/snapshot
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: control-ca
+          mountPath: /etc/fastllm/ca
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: control-ca
+          secret:
+            secretName: fastllm-control-tls
+            # ca.crt only. This pod has no use for tls.key and no business
+            # holding it.
+            items:
+              - { key: ca.crt, path: ca.crt }
