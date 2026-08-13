@@ -44,7 +44,11 @@ where
     K: Clone + serde::de::DeserializeOwned + std::fmt::Debug + serde::Serialize,
 {
     Ok(api
-        .patch(name, &PatchParams::apply(MANAGER).force(), &Patch::Apply(obj))
+        .patch(
+            name,
+            &PatchParams::apply(MANAGER).force(),
+            &Patch::Apply(obj),
+        )
         .await?)
 }
 
@@ -67,14 +71,34 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
     // control plane that does not exist yet, and would spend its first
     // interval falling back to a snapshot cache it has never written.
     let control = resources::control_deployment(&obj);
-    apply(&deploys, &resources::name_for(&obj, resources::CONTROL), &control).await?;
+    apply(
+        &deploys,
+        &resources::name_for(&obj, resources::CONTROL),
+        &control,
+    )
+    .await?;
     let control_svc = resources::service(&obj, resources::CONTROL);
-    apply(&svcs, &resources::name_for(&obj, resources::CONTROL), &control_svc).await?;
+    apply(
+        &svcs,
+        &resources::name_for(&obj, resources::CONTROL),
+        &control_svc,
+    )
+    .await?;
 
     let proxy = resources::proxy_deployment(&obj);
-    apply(&deploys, &resources::name_for(&obj, resources::PROXY), &proxy).await?;
+    apply(
+        &deploys,
+        &resources::name_for(&obj, resources::PROXY),
+        &proxy,
+    )
+    .await?;
     let proxy_svc = resources::service(&obj, resources::PROXY);
-    apply(&svcs, &resources::name_for(&obj, resources::PROXY), &proxy_svc).await?;
+    apply(
+        &svcs,
+        &resources::name_for(&obj, resources::PROXY),
+        &proxy_svc,
+    )
+    .await?;
 
     let pdb_name = resources::name_for(&obj, resources::PROXY);
     match resources::pod_disruption_budget(&obj) {
@@ -137,9 +161,17 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
         conditions: vec![Condition {
             type_: "Ready".into(),
             status: condition_status.into(),
-            reason: if ready { "AllReplicasReady" } else { "Progressing" }.into(),
+            reason: if ready {
+                "AllReplicasReady"
+            } else {
+                "Progressing"
+            }
+            .into(),
             message: if control_ready {
-                format!("{proxy_ready} of {} gateway replicas ready", obj.spec.proxy.replicas)
+                format!(
+                    "{proxy_ready} of {} gateway replicas ready",
+                    obj.spec.proxy.replicas
+                )
             } else {
                 "control plane has no ready replica".into()
             },
@@ -173,7 +205,9 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
 }
 
 fn now_rfc3339() -> String {
-    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono_now()).0.to_rfc3339()
+    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono_now())
+        .0
+        .to_rfc3339()
 }
 
 fn chrono_now() -> k8s_openapi::chrono::DateTime<k8s_openapi::chrono::Utc> {
@@ -221,7 +255,10 @@ async fn main() -> anyhow::Result<()> {
             Api::<Deployment>::all(client.clone()),
             watcher::Config::default(),
         )
-        .owns(Api::<Service>::all(client.clone()), watcher::Config::default())
+        .owns(
+            Api::<Service>::all(client.clone()),
+            watcher::Config::default(),
+        )
         .shutdown_on_signal()
         .run(reconcile, on_error, Arc::new(Ctx { client }))
         .for_each(|res| async move {
@@ -245,9 +282,18 @@ mod tests {
             FastllmProxySpec {
                 image: "ghcr.io/azrtydxb/fastllm-proxy:v0.1.0".into(),
                 image_pull_policy: "IfNotPresent".into(),
-                database: SecretRef { name: "db".into(), key: "uri".into() },
-                proxy_token: SecretRef { name: "s".into(), key: "proxy-token".into() },
-                encryption_key: SecretRef { name: "s".into(), key: "encryption-key".into() },
+                database: SecretRef {
+                    name: "db".into(),
+                    key: "uri".into(),
+                },
+                proxy_token: SecretRef {
+                    name: "s".into(),
+                    key: "proxy-token".into(),
+                },
+                encryption_key: SecretRef {
+                    name: "s".into(),
+                    key: "encryption-key".into(),
+                },
                 control: Default::default(),
                 proxy: ProxySpec::default(),
                 tuning: None,
@@ -264,7 +310,14 @@ mod tests {
     fn both_planes_run_the_same_image() {
         let cr = spec();
         let image_of = |d: &Deployment| {
-            d.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+            d.spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .containers[0]
                 .image
                 .clone()
                 .unwrap()
@@ -319,17 +372,40 @@ mod tests {
         cr.spec.control.tls_secret_name = Some("fastllm-control-tls".into());
         let d = resources::control_deployment(&cr);
         let c = &d.spec.unwrap().template.spec.unwrap().containers[0];
-        assert!(c.args.as_ref().unwrap().iter().any(|a| a.starts_with("--tls-cert")));
+        assert!(c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a.starts_with("--tls-cert")));
         for p in [&c.readiness_probe, &c.liveness_probe, &c.startup_probe] {
-            let scheme = p.as_ref().unwrap().http_get.as_ref().unwrap().scheme.clone();
+            let scheme = p
+                .as_ref()
+                .unwrap()
+                .http_get
+                .as_ref()
+                .unwrap()
+                .scheme
+                .clone();
             assert_eq!(scheme.unwrap(), "HTTPS");
         }
         // And the gateway must trust the issuing CA, or the handshake fails
         // and it serves a stale snapshot for ever.
         let p = resources::proxy_deployment(&cr);
         let pc = &p.spec.unwrap().template.spec.unwrap().containers[0];
-        assert!(pc.args.as_ref().unwrap().iter().any(|a| a.starts_with("--ca-bundle")));
-        let url = pc.env.as_ref().unwrap().iter().find(|e| e.name == "FASTLLM_CONTROL_URL").unwrap();
+        assert!(pc
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a.starts_with("--ca-bundle")));
+        let url = pc
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "FASTLLM_CONTROL_URL")
+            .unwrap();
         assert!(url.value.as_ref().unwrap().starts_with("https://"));
     }
 
@@ -338,7 +414,10 @@ mod tests {
         let mut cr = spec();
         cr.spec.proxy.policy = Policy::LowestLatency;
         let d = resources::proxy_deployment(&cr);
-        let args = d.spec.unwrap().template.spec.unwrap().containers[0].args.clone().unwrap();
+        let args = d.spec.unwrap().template.spec.unwrap().containers[0]
+            .args
+            .clone()
+            .unwrap();
         assert!(args.contains(&"--policy=lowest-latency".to_string()));
     }
 

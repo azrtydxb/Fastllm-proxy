@@ -712,7 +712,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(protocol, "anthropic", "the correction never reached the row");
+        assert_eq!(
+            protocol, "anthropic",
+            "the correction never reached the row"
+        );
         assert_eq!(max_tokens, Some(4096));
     }
 

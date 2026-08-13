@@ -23,7 +23,11 @@ pub const CONTROL: &str = "control";
 pub const PROXY: &str = "proxy";
 
 pub fn name_for(owner: &FastllmProxy, component: &str) -> String {
-    format!("{}-{}", owner.meta().name.as_deref().unwrap_or("fastllm"), component)
+    format!(
+        "{}-{}",
+        owner.meta().name.as_deref().unwrap_or("fastllm"),
+        component
+    )
 }
 
 pub fn labels(owner: &FastllmProxy, component: &str) -> BTreeMap<String, String> {
@@ -32,7 +36,10 @@ pub fn labels(owner: &FastllmProxy, component: &str) -> BTreeMap<String, String>
         ("app.kubernetes.io/name".into(), "fastllm-proxy".into()),
         ("app.kubernetes.io/instance".into(), instance),
         ("app.kubernetes.io/component".into(), component.to_string()),
-        ("app.kubernetes.io/managed-by".into(), "fastllm-operator".into()),
+        (
+            "app.kubernetes.io/managed-by".into(),
+            "fastllm-operator".into(),
+        ),
     ])
 }
 
@@ -145,7 +152,10 @@ pub fn control_deployment(owner: &FastllmProxy) -> Deployment {
     let s = &owner.spec;
     let tls = s.control.tls_secret_name.as_ref();
 
-    let mut args = vec!["--role=control".to_string(), "--admin-port=4001".to_string()];
+    let mut args = vec![
+        "--role=control".to_string(),
+        "--admin-port=4001".to_string(),
+    ];
     let mut mounts = Vec::new();
     let mut volumes = Vec::new();
     if let Some(secret) = tls {
