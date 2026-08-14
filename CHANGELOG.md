@@ -13,10 +13,10 @@ grants and the same accounting as models. Plus three importer bugs found by
 running it against a real database rather than trusting the tests.
 
 Published as `ghcr.io/azrtydxb/fastllm-proxy:v0.2.0` and
-`ghcr.io/azrtydxb/fastllm-operator:v0.2.0`, **linux/arm64 only**. The amd64
-leg was attempted and `rustc` segfaults under QEMU on the build runners before
-it compiles anything; that needs a native amd64 runner rather than more
-emulation.
+`ghcr.io/azrtydxb/fastllm-operator:v0.2.0`, **linux/amd64 and linux/arm64**.
+Each architecture is built on a runner that is that architecture and the two
+digests are merged into one manifest — the first attempt emulated amd64 with
+QEMU and `rustc` segfaulted before compiling anything.
 
 ### Added
 

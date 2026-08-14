@@ -139,14 +139,6 @@ jobs:
       # it continuously; publishing every commit publicly would make "latest"
       # mean "whatever landed most recently", which is the drift that already
       # cost this project a downgraded control plane.
-      # amd64 is emulated on these arm64 runners, so it is built for tagged
-      # releases only. Per-commit builds stay arm64-native and fast, because
-      # that is what this cluster deploys from continuously.
-      - name: Set up QEMU (for the amd64 release build)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64
 
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
@@ -191,41 +183,133 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true
 
-      - name: Build & push (arm64 → GHCR, tagged releases only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  # ---------------------------------------------------------------- release
+  #
+  # A tag builds each architecture on a runner that *is* that architecture and
+  # merges the two digests into one manifest. The previous attempt emulated
+  # amd64 with QEMU and rustc segfaulted before compiling anything — there is
+  # an amd64 runner, so there was never a reason to emulate.
+  #
+  # Split into three jobs rather than one `platforms: linux/amd64,linux/arm64`
+  # because the two legs run on different machines; `push-by-digest` is what
+  # lets them be assembled afterwards.
+
+  release-arm64:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, ui]
+    runs-on: arc-azrtydxb-publish
+    permissions: { contents: read, packages: write }
+    outputs:
+      proxy: ${{ steps.proxy.outputs.digest }}
+      operator: ${{ steps.operator.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Local arm64 builder
+        run: |
+          docker buildx create --name local-arm64 --driver docker-container \
+            --platform linux/arm64 --use
+          docker buildx inspect --bootstrap local-arm64
+      - name: Proxy (arm64, digest only)
+        id: proxy
         uses: docker/build-push-action@v6
         with:
           context: .
-          builder: fastllm
-          # arm64 only, and this is not the intended end state.
-          #
-          # `platforms: linux/amd64,linux/arm64` was tried on the v0.2.0 tag
-          # and the emulated leg died with
-          #
-          #     rustc -vV (signal: 11, SIGSEGV: invalid memory reference)
-          #
-          # — rustc crashing under qemu-user on these runners, before it
-          # compiled anything. Publishing arm64 and saying so beats a release
-          # job that fails, and beats a manifest that claims an architecture it
-          # does not contain. The fix is a native amd64 runner, not more
-          # emulation.
+          builder: local-arm64
           platforms: linux/arm64
-          push: true
-          tags: ${{ steps.public.outputs.tags }}
-          # Same cache, so this is a manifest push rather than a second build.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
-
-      - name: Build & push the operator (GHCR, tagged releases only)
-        if: startsWith(github.ref, 'refs/tags/v')
+          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
+      - name: Operator (arm64, digest only)
+        id: operator
         uses: docker/build-push-action@v6
         with:
           context: .
           file: operator/Dockerfile
-          builder: fastllm
-          # Same QEMU segfault as the proxy image above.
+          builder: local-arm64
           platforms: linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/fastllm-operator:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/fastllm-operator:latest
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
+          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
+
+  release-amd64:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, ui]
+    runs-on: arc-azrtydxb-amd64-publish
+    permissions: { contents: read, packages: write }
+    outputs:
+      proxy: ${{ steps.proxy.outputs.digest }}
+      operator: ${{ steps.operator.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The endpoint and its client certificate come from the runner's own
+      # environment, not from repository secrets — the same arrangement the
+      # other repositories on this cluster use.
+      - name: Remote amd64 builder
+        run: |
+          docker buildx create \
+            --name remote-amd64 \
+            --driver remote \
+            --platform linux/amd64 \
+            --driver-opt cacert="$BUILDKIT_CLIENT_CA" \
+            --driver-opt cert="$BUILDKIT_CLIENT_CERT" \
+            --driver-opt key="$BUILDKIT_CLIENT_KEY" \
+            "$BUILDKIT_AMD64_ENDPOINT"
+          docker buildx inspect --bootstrap remote-amd64
+      - name: Proxy (amd64, digest only)
+        id: proxy
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          builder: remote-amd64
+          platforms: linux/amd64
+          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
+      - name: Operator (amd64, digest only)
+        id: operator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: operator/Dockerfile
+          builder: remote-amd64
+          platforms: linux/amd64
+          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
+
+  release-manifest:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-arm64, release-amd64]
+    runs-on: arc-azrtydxb-publish
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble and verify both manifests
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          assemble() {
+            local image="ghcr.io/${OWNER}/$1" arm="$2" amd="$3"
+            docker buildx imagetools create \
+              -t "${image}:${VERSION}" -t "${image}:latest" \
+              "${image}@${arm}" "${image}@${amd}"
+            # Both architectures, asserted rather than assumed: a manifest that
+            # claims an architecture it does not carry is worse than one that
+            # never claimed it.
+            local archs
+            archs=$(docker buildx imagetools inspect --raw "${image}:${VERSION}" \
+                    | grep -o '"architecture": *"[a-z0-9]*"' | sort -u)
+            echo "$archs"
+            echo "$archs" | grep -q 'arm64'
+            echo "$archs" | grep -q 'amd64'
+          }
+          assemble fastllm-proxy "${{ needs.release-arm64.outputs.proxy }}" "${{ needs.release-amd64.outputs.proxy }}"
+          assemble fastllm-operator "${{ needs.release-arm64.outputs.operator }}" "${{ needs.release-amd64.outputs.operator }}"
