@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Two planes and the traffic between them: the control plane above, the
+       gateway below, and one request passing through. Legible at 16px, which
+       is the only size that matters for a tab. -->
+  <rect width="64" height="64" rx="14" fill="#0d1117"/>
+  <rect x="14" y="13" width="36" height="9" rx="4.5" fill="#4c8dff"/>
+  <rect x="14" y="42" width="36" height="9" rx="4.5" fill="#4c8dff"/>
+  <path d="M32 24.5v15" stroke="#4c8dff" stroke-width="4" stroke-linecap="round" opacity=".55"/>
+  <circle cx="32" cy="32" r="4.5" fill="#7ee787"/>
+</svg>
