@@ -32,53 +32,16 @@ path = "src/micro.rs"
 name = "load"
 path = "src/load.rs"
 
-# Evaluates Model2Vec static embedding models as a routing classifier (see
-# `src/potion.rs`). Lives in `bench` rather than the proxy so the decision of
-# *whether* to embed a model at all stays separable from the proxy's own
-# dependency tree — nothing here ships in the image.
-[[bin]]
-name = "potion"
-path = "src/potion.rs"
-
-# The same evaluation against real labelled data (HuggingFaceH4/no_robots and
-# openai/gsm8k) rather than hand-written prompts — see `src/potion_real.rs`.
-# Run `python3 bench/fetch-prompts.py` first.
-[[bin]]
-name = "potion-real"
-path = "src/potion_real.rs"
-
-# Asks the model which classes it can separate, rather than assuming — see
-# `src/potion_classes.rs`. Clustering plus a candidate taxonomy scored for
-# collisions; a prototype of the admin `evaluate` endpoint.
-[[bin]]
-name = "potion-classes"
-path = "src/potion_classes.rs"
-
-# Can the embedding tell architecture/design work from concrete coding? Uses
-# two StackExchange communities as a natural experiment — see `src/potion_arch.rs`.
-[[bin]]
-name = "potion-arch"
-path = "src/potion_arch.rs"
-
-# Does a real transformer earn its ~10x latency on the splits the static model
-# cannot do? The tier-2 question — see `src/minilm.rs`.
+# Measures a candidate tier-2 model against the splits a static embedding
+# cannot do — see `src/minilm.rs`. The one classifier instrument kept after
+# the model-selection experiments were retired: their conclusions live in
+# `docs/classifier/measurements.md`, but choosing a *new* model still needs
+# something to measure it with. Lives in `bench` rather than the proxy so the
+# decision of whether to embed a model at all stays separable from the proxy's
+# own dependency tree — nothing here ships in the image.
 [[bin]]
 name = "minilm"
 path = "src/minilm.rs"
-
-# Which classes become viable once a second tier exists, and on which tier —
-# see `src/potion_wide.rs`.
-[[bin]]
-name = "classcheck"
-path = "src/classcheck.rs"
-
-[[bin]]
-name = "potion-wide"
-path = "src/potion_wide.rs"
-
-[[bin]]
-name = "wrapskew"
-path = "src/wrapskew.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -89,7 +52,6 @@ bytes = "1"
 serde_json = "1"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-model2vec-rs = "0.2"
 fastllm-proxy = { path = "..", default-features = false, features = ["classifier"] }
 # Real transformer embeddings (ONNX via `ort`), for the tier-2 half of the
 # cascade experiment only. A heavy native dependency, which is precisely why it

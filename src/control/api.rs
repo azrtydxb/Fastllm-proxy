@@ -151,7 +151,7 @@ struct Ctx {
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
 /// body that says what was wrong. `/admin/*` is authenticated (`require_session`)
-/// and authorised (`RequirePermission`) and has a management UI (`control::ui`),
+/// and authorised (`check_permission`) and has a management UI (`control::ui`),
 /// but none of that changes the diagnostic an operator gets on failure — a bare
 /// status code would still just mean reading the SQL to find out which id was
 /// the typo.
@@ -4243,7 +4243,7 @@ async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResponse
 /// password to present).
 ///
 /// Authenticates *who* is calling and stops there — it deliberately does not
-/// decide *what* they may do. That is `RequirePermission`'s job, run as an
+/// decide *what* they may do. That is `check_permission`'s job, run as an
 /// extractor inside each handler once the session is known to be real. The
 /// two are split into separate layers rather than one, because "no session"
 /// and "a session, but not permitted to do this" are different failures a
@@ -4270,9 +4270,9 @@ async fn require_session(
     // Stashed in the request's extensions rather than threaded through as a
     // handler argument from here: this middleware runs once per request
     // before axum has even matched which handler it is bound for, so this is
-    // the only place a resolved principal id has to go. `RequirePermission`
-    // (below) reads it back out inside the matched handler's own extractor
-    // chain.
+    // the only place a resolved principal id has to go. The permission
+    // extractors below read it back out inside the matched handler's own
+    // extractor chain.
     request
         .extensions_mut()
         .insert(AdminPrincipal(principal_id));
@@ -4280,7 +4280,7 @@ async fn require_session(
 }
 
 /// The authenticated caller of an `/admin/*` request — `require_session`'s
-/// output and `RequirePermission`'s input. A newtype rather than a bare
+/// output and `check_permission`'s input. A newtype rather than a bare
 /// `i64` so it cannot be confused with some other `i64` extension a future
 /// route adds, and so it is not `Clone`-and-forgettable the way threading a
 /// raw id through would be.
@@ -4358,113 +4358,101 @@ async fn principal_has_permission(
     .await
 }
 
-/// One zero-sized marker type per permission `RequirePermission` (below) can
-/// be instantiated with. A `const VERB: &'static str` generic parameter
-/// would say the same thing more directly, but stable Rust at this crate's
-/// pinned `rust-version = "1.82"` does not allow `&str` as a const generic
-/// (`adt_const_params` is nightly-only) — a trait with an associated
-/// constant is the stable equivalent, at the cost of one marker struct per
-/// permission instead of one string literal.
-trait AdminPermission {
-    const VERB: &'static str;
-}
-
-struct ReadPermission;
-impl AdminPermission for ReadPermission {
-    const VERB: &'static str = admin_permission::READ;
-}
-
-struct KeyCreatePermission;
-impl AdminPermission for KeyCreatePermission {
-    const VERB: &'static str = admin_permission::KEY_CREATE;
-}
-
-struct KeyRevokePermission;
-impl AdminPermission for KeyRevokePermission {
-    const VERB: &'static str = admin_permission::KEY_REVOKE;
-}
-
-struct ConfigWritePermission;
-impl AdminPermission for ConfigWritePermission {
-    const VERB: &'static str = admin_permission::CONFIG_WRITE;
-}
-
+/// The permission check behind the four extractors below.
+///
 /// An extractor, not a second `from_fn` middleware layer: which permission a
-/// request needs depends on which route matched, and axum's `from_fn`
-/// layers run *before* routing has picked a handler, so they cannot see
-/// that. Adding `RequireRead`/`RequireKeyCreate`/`RequireKeyRevoke`/
-/// `RequireConfigWrite` (the aliases below) as a handler argument runs this
-/// once axum already knows which handler — and therefore which permission —
-/// applies, and its `Rejection = ApiError` turns a missing grant into 403
-/// automatically, the same way a bad `Path<i64>` already turns into 400
-/// without every handler writing that check by hand.
-struct RequirePermission<P>(std::marker::PhantomData<P>);
-
-// A hand-written `impl` rather than `#[derive(Default)]`: the derive would
-// add a `where P: Default` bound that `P` (a zero-sized marker type that
-// never needs to be constructed on its own) has no reason to satisfy.
-// `RequireRead::default()` and friends are how the tests below build one of
-// these directly, bypassing `FromRequestParts` — a generic type *alias*
-// bound to a concrete `P` cannot be called as a tuple-struct constructor in
-// Rust (`RequireRead::default()` does not compile, only
-// `RequirePermission::<ReadPermission>(..)` or this would), so `default()`
-// is the ergonomic way to spell "the permission this alias names, satisfied
-// unconditionally" at each of those call sites.
-impl<P> Default for RequirePermission<P> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
+/// request needs depends on which route matched, and axum's `from_fn` layers
+/// run *before* routing has picked a handler, so they cannot see that. Taking
+/// a `RequireRead`/`RequireKeyCreate`/`RequireKeyRevoke`/`RequireConfigWrite`
+/// as a handler argument runs this once axum already knows which handler —
+/// and therefore which permission — applies, and the `Rejection = ApiError`
+/// turns a missing grant into 403 automatically, the same way a bad
+/// `Path<i64>` already turns into 400 without every handler writing that
+/// check by hand.
+async fn check_permission(parts: &Parts, state: &Ctx, verb: &str) -> Result<(), ApiError> {
+    // `require_session` (the `from_fn` layer every `/admin/*` route is
+    // wrapped in) always runs first and always inserts this — its absence
+    // here would mean the extractor is used on a route that is not behind
+    // that layer, a wiring bug rather than a caller error, so a 500 rather
+    // than a 401/403 correctly signals that rather than being mistaken for an
+    // unauthenticated request.
+    let Some(AdminPrincipal(principal_id)) = parts.extensions.get::<AdminPrincipal>().copied()
+    else {
+        tracing::error!(
+            "an admin permission check ran with no AdminPrincipal in request extensions; \
+             is this route mounted outside require_session?"
+        );
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "authorisation check misconfigured; see server logs",
+        ));
+    };
+    let allowed = principal_has_permission(&state.pool, principal_id, verb)
+        .await
+        .map_err(|e| db_error("checking admin permission", &e))?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!("principal {principal_id} lacks the {verb:?} permission"),
+        ))
     }
 }
 
-impl<P> FromRequestParts<Ctx> for RequirePermission<P>
-where
-    P: AdminPermission + Send + Sync + 'static,
-{
+// One extractor per permission an admin route can require. Written out four
+// times rather than generated from a marker type or a macro: each is six
+// lines, and spelling the permission at the definition is what makes
+// `RequireConfigWrite` findable by grep. Unit structs, so a test that calls a
+// handler directly names the permission it is standing in for.
+
+struct RequireRead;
+
+impl FromRequestParts<Ctx> for RequireRead {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
-        // `require_session` (the `from_fn` layer every `/admin/*` route is
-        // wrapped in) always runs first and always inserts this — its
-        // absence here would mean this extractor is used on a route that
-        // is not behind that layer, a wiring bug rather than a caller
-        // error, so a 500 rather than a 401/403 correctly signals that
-        // rather than being mistaken for an unauthenticated request.
-        let Some(AdminPrincipal(principal_id)) = parts.extensions.get::<AdminPrincipal>().copied()
-        else {
-            tracing::error!(
-                "RequirePermission ran with no AdminPrincipal in request extensions; \
-                 is this route mounted outside require_session?"
-            );
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authorisation check misconfigured; see server logs",
-            ));
-        };
-        let allowed = principal_has_permission(&state.pool, principal_id, P::VERB)
+        check_permission(parts, state, admin_permission::READ)
             .await
-            .map_err(|e| db_error("checking admin permission", &e))?;
-        if allowed {
-            Ok(Self(std::marker::PhantomData))
-        } else {
-            Err(api_error(
-                StatusCode::FORBIDDEN,
-                format!(
-                    "principal {principal_id} lacks the {:?} permission",
-                    P::VERB
-                ),
-            ))
-        }
+            .map(|()| Self)
     }
 }
 
-/// Named aliases for `RequirePermission`'s four concrete instantiations —
-/// every admin handler below takes one of these as a parameter rather than
-/// spelling out `RequirePermission<SomeMarker>`, purely for readability at
-/// each call site.
-type RequireRead = RequirePermission<ReadPermission>;
-type RequireKeyCreate = RequirePermission<KeyCreatePermission>;
-type RequireKeyRevoke = RequirePermission<KeyRevokePermission>;
-type RequireConfigWrite = RequirePermission<ConfigWritePermission>;
+struct RequireKeyCreate;
+
+impl FromRequestParts<Ctx> for RequireKeyCreate {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        check_permission(parts, state, admin_permission::KEY_CREATE)
+            .await
+            .map(|()| Self)
+    }
+}
+
+struct RequireKeyRevoke;
+
+impl FromRequestParts<Ctx> for RequireKeyRevoke {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        check_permission(parts, state, admin_permission::KEY_REVOKE)
+            .await
+            .map(|()| Self)
+    }
+}
+
+struct RequireConfigWrite;
+
+impl FromRequestParts<Ctx> for RequireConfigWrite {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        check_permission(parts, state, admin_permission::CONFIG_WRITE)
+            .await
+            .map(|()| Self)
+    }
+}
 
 /// Record every configuration change, in one place.
 ///
@@ -5335,7 +5323,7 @@ mod tests {
 
         let (status, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -5349,7 +5337,7 @@ mod tests {
 
         grant_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(RoleGrant {
                 role: "inference".into(),
@@ -5360,7 +5348,7 @@ mod tests {
 
         let (_, model) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -5377,7 +5365,7 @@ mod tests {
         let upstream_credential = "sk-upstream-must-never-come-back";
         let (_, backend) = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(NewBackend::openai(
                 "http://route-test:8000/v1/",
@@ -5411,9 +5399,7 @@ mod tests {
             .any(|p| p.name == principal_name && p.allow_all));
 
         // The credential must not come back out of the read route, in any form.
-        let listed = list_models(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let json = serde_json::to_string(&listed.0).unwrap();
         assert!(!json.contains(upstream_credential));
         assert!(json.contains("has_upstream_api_key"));
@@ -5429,7 +5415,7 @@ mod tests {
 
         revoke_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path((principal_id, "inference".to_string())),
         )
         .await
@@ -5443,27 +5429,15 @@ mod tests {
             "a revoked role must reach the published snapshot too"
         );
 
-        delete_backend(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(backend_id),
-        )
-        .await
-        .unwrap();
-        delete_model(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(model_id),
-        )
-        .await
-        .unwrap();
-        delete_principal(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(principal_id),
-        )
-        .await
-        .unwrap();
+        delete_backend(State(ctx.clone()), RequireConfigWrite, Path(backend_id))
+            .await
+            .unwrap();
+        delete_model(State(ctx.clone()), RequireConfigWrite, Path(model_id))
+            .await
+            .unwrap();
+        delete_principal(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
+            .await
+            .unwrap();
         assert!(
             !cache
                 .current_snapshot()
@@ -5486,7 +5460,7 @@ mod tests {
         let principal_name = unique_name("key-listing-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -5502,9 +5476,7 @@ mod tests {
             .await
             .unwrap();
 
-        let listed = list_keys(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_keys(State(ctx.clone()), RequireRead).await.unwrap();
         let mine = listed.0.iter().find(|k| k.id == id).unwrap();
         assert_eq!(mine.principal, principal_name);
         assert_eq!(mine.name, key_name);
@@ -5532,16 +5504,16 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
 
         for (status, body) in [
-            delete_model(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
+            delete_model(State(ctx.clone()), RequireConfigWrite, Path(-1))
                 .await
                 .unwrap_err(),
-            delete_backend(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
+            delete_backend(State(ctx.clone()), RequireConfigWrite, Path(-1))
                 .await
                 .unwrap_err(),
-            delete_principal(State(ctx.clone()), RequireConfigWrite::default(), Path(-1))
+            delete_principal(State(ctx.clone()), RequireConfigWrite, Path(-1))
                 .await
                 .unwrap_err(),
-            revoke_key(State(ctx.clone()), RequireKeyRevoke::default(), Path(-1))
+            revoke_key(State(ctx.clone()), RequireKeyRevoke, Path(-1))
                 .await
                 .unwrap_err(),
         ] {
@@ -5552,7 +5524,7 @@ mod tests {
 
         let (status, body) = grant_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(1),
             Json(RoleGrant {
                 role: "not-a-role".into(),
@@ -5569,7 +5541,7 @@ mod tests {
 
         let (status, body) = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(-1),
             Json(NewBackend::openai("http://x:8000/v1", None)),
         )
@@ -5580,7 +5552,7 @@ mod tests {
 
         let (status, _) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: unique_name("bad-kind"),
                 kind: Some("robot".into()),
@@ -5599,9 +5571,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn roles_are_listed_with_their_permissions() {
         let (ctx, _cache) = test_ctx().await;
-        let roles = list_roles(State(ctx), RequireRead::default())
-            .await
-            .unwrap();
+        let roles = list_roles(State(ctx), RequireRead).await.unwrap();
         let inference = roles.0.iter().find(|r| r.name == "inference").unwrap();
         assert!(inference
             .permissions
@@ -5630,7 +5600,7 @@ mod tests {
 
         let (_, primary) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: primary_name.clone(),
                 description: String::new(),
@@ -5646,7 +5616,7 @@ mod tests {
 
         let (_, secondary) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: secondary_name.clone(),
                 description: String::new(),
@@ -5663,7 +5633,7 @@ mod tests {
         let vm_name = unique_name("vm-route-canary");
         let (status, vm) = post_virtual_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewVirtualModel {
                 name: vm_name.clone(),
                 description: String::new(),
@@ -5676,7 +5646,7 @@ mod tests {
 
         let (_, rule) = post_rule(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(vm_id),
             Json(NewRule {
                 position: 0,
@@ -5692,7 +5662,7 @@ mod tests {
 
         let _ = post_rule_target(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
                 model_id: primary_id,
@@ -5705,7 +5675,7 @@ mod tests {
 
         let _ = post_default_target(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
                 model_id: secondary_id,
@@ -5730,7 +5700,7 @@ mod tests {
         assert_eq!(published.default_targets[0].model, secondary_name);
 
         // `GET /admin/virtual-models` mirrors the same rows.
-        let listed = list_virtual_models(State(ctx.clone()), RequireRead::default())
+        let listed = list_virtual_models(State(ctx.clone()), RequireRead)
             .await
             .unwrap();
         let listed_vm = listed.0.iter().find(|v| v.name == vm_name).unwrap();
@@ -5740,13 +5710,9 @@ mod tests {
 
         // Deleting the virtual model cascades its rules and targets, and the
         // deletion reaches the published snapshot the same way creation did.
-        delete_virtual_model(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(vm_id),
-        )
-        .await
-        .unwrap();
+        delete_virtual_model(State(ctx.clone()), RequireConfigWrite, Path(vm_id))
+            .await
+            .unwrap();
         assert!(
             !cache
                 .current_snapshot()
@@ -5772,7 +5738,7 @@ mod tests {
 
         let (status, _) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: name.clone(),
                 description: String::new(),
@@ -5788,7 +5754,7 @@ mod tests {
 
         let err = post_virtual_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewVirtualModel {
                 name: name.clone(),
                 description: String::new(),
@@ -5802,7 +5768,7 @@ mod tests {
         let other_name = unique_name("vm-collision-reverse");
         let (status, _) = post_virtual_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewVirtualModel {
                 name: other_name.clone(),
                 description: String::new(),
@@ -5814,7 +5780,7 @@ mod tests {
 
         let err = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: other_name,
                 description: String::new(),
@@ -5916,7 +5882,7 @@ mod tests {
             "a failed rebuild must increment the counter GET /admin/health reports"
         );
 
-        let health = admin_health(State(ctx.clone()), RequireRead::default()).await;
+        let health = admin_health(State(ctx.clone()), RequireRead).await;
         assert_eq!(health.0.snapshot_rebuild_failures, after);
     }
 
@@ -6040,7 +6006,7 @@ mod tests {
         let principal_name = unique_name("usage-basic-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -6054,7 +6020,7 @@ mod tests {
         let model_name = unique_name("usage-basic-model");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -6142,7 +6108,7 @@ mod tests {
         let principal_name = unique_name("usage-latency");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -6156,7 +6122,7 @@ mod tests {
         let model_name = unique_name("usage-latency-model");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -6223,7 +6189,7 @@ mod tests {
         let principal_name = unique_name("usage-principal-survives");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name.clone(),
                 kind: None,
@@ -6237,7 +6203,7 @@ mod tests {
         let model_name = unique_name("usage-model-survives");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -6325,7 +6291,7 @@ mod tests {
 
         put_limits(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutLimits {
                 requests_per_min: Some(7),
@@ -6349,21 +6315,15 @@ mod tests {
             })
         );
 
-        let listed = list_limits(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_limits(State(ctx.clone()), RequireRead).await.unwrap();
         assert!(listed
             .0
             .iter()
             .any(|l| l.principal_id == principal_id && l.requests_per_min == Some(7)));
 
-        delete_limits(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(principal_id),
-        )
-        .await
-        .unwrap();
+        delete_limits(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
+            .await
+            .unwrap();
         let published_after_delete = cache
             .current_snapshot()
             .principals
@@ -6385,7 +6345,7 @@ mod tests {
         let principal_id = make_principal(&ctx, &unique_name("empty-limits-principal")).await;
         let err = put_limits(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutLimits {
                 requests_per_min: None,
@@ -6403,13 +6363,9 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new().track_prefix("principals", "name", "no-limit-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-limit-principal")).await;
-        let err = delete_limits(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(principal_id),
-        )
-        .await
-        .expect_err("no row to delete");
+        let err = delete_limits(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
+            .await
+            .expect_err("no row to delete");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
@@ -6473,7 +6429,7 @@ mod tests {
 
         put_budget(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: Some(500),
@@ -6500,9 +6456,7 @@ mod tests {
             })
         );
 
-        let listed = list_budgets(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_budgets(State(ctx.clone()), RequireRead).await.unwrap();
         assert!(listed
             .0
             .iter()
@@ -6513,7 +6467,7 @@ mod tests {
         // not just the offending row — the moment anyone created one.
         put_budget(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: None,
@@ -6523,20 +6477,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let listed = list_budgets(State(ctx.clone()), RequireRead::default())
+        let listed = list_budgets(State(ctx.clone()), RequireRead)
             .await
             .expect("a cost-only budget must not break the listing");
         assert!(listed.0.iter().any(|b| b.principal_id == principal_id
             && b.tokens_total.is_none()
             && b.cost_total_micros == Some(5_000_000)));
 
-        delete_budget(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(principal_id),
-        )
-        .await
-        .unwrap();
+        delete_budget(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
+            .await
+            .unwrap();
         let published_after_delete = cache
             .current_snapshot()
             .principals
@@ -6559,7 +6509,7 @@ mod tests {
 
         let err = put_budget(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: Some(100),
@@ -6573,7 +6523,7 @@ mod tests {
 
         let err = put_budget(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: Some(0),
@@ -6593,13 +6543,9 @@ mod tests {
         let _cleanup =
             TestCleanup::new().track_prefix("principals", "name", "no-budget-principal-");
         let principal_id = make_principal(&ctx, &unique_name("no-budget-principal")).await;
-        let err = delete_budget(
-            State(ctx.clone()),
-            RequireConfigWrite::default(),
-            Path(principal_id),
-        )
-        .await
-        .expect_err("no row to delete");
+        let err = delete_budget(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
+            .await
+            .expect_err("no row to delete");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
@@ -6619,7 +6565,7 @@ mod tests {
         let model_name = unique_name("budget-usage-model");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -6633,7 +6579,7 @@ mod tests {
         .unwrap();
         put_budget(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(PutBudget {
                 tokens_total: Some(1000),
@@ -6690,7 +6636,7 @@ mod tests {
         let principal_name = unique_name("cost-src");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name,
                 kind: None,
@@ -6704,7 +6650,7 @@ mod tests {
         let model_name = unique_name("cost-src-model");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -6785,7 +6731,7 @@ mod tests {
 
         let all = list_audit(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(serde_json::from_value(serde_json::json!({})).unwrap()),
         )
         .await
@@ -6798,7 +6744,7 @@ mod tests {
         // Substring, so /admin/keys finds everything under it.
         let filtered = list_audit(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(
                 serde_json::from_value(serde_json::json!({"target": "/admin/keys"})).unwrap(),
             ),
@@ -6815,7 +6761,7 @@ mod tests {
         // "lots" should not read a year of history into memory.
         let clamped = list_audit(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(
                 serde_json::from_value(serde_json::json!({"limit": 100000})).unwrap(),
             ),
@@ -6849,15 +6795,7 @@ mod tests {
                 verb: verb.to_string(),
                 resource: resource.map(str::to_string),
             };
-            async move {
-                grant_permission(
-                    State(ctx),
-                    RequireConfigWrite::default(),
-                    Path(role),
-                    Json(body),
-                )
-                .await
-            }
+            async move { grant_permission(State(ctx), RequireConfigWrite, Path(role), Json(body)).await }
         };
 
         // An admin verb needs no resource — a matrix cell should not have to
@@ -6869,9 +6807,7 @@ mod tests {
             .await
             .unwrap();
 
-        let roles = list_roles(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let roles = list_roles(State(ctx.clone()), RequireRead).await.unwrap();
         let view = roles.0.iter().find(|r| r.name == role).expect("role");
         assert!(view.permissions.iter().any(|p| p.verb == "usage:read"));
         assert!(view
@@ -6895,7 +6831,7 @@ mod tests {
 
         revoke_permission(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(role.clone()),
             Json(GrantPermission {
                 verb: "usage:read".into(),
@@ -6904,9 +6840,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let roles = list_roles(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let roles = list_roles(State(ctx.clone()), RequireRead).await.unwrap();
         let view = roles.0.iter().find(|r| r.name == role).expect("role");
         assert!(!view.permissions.iter().any(|p| p.verb == "usage:read"));
     }
@@ -6923,7 +6857,7 @@ mod tests {
         let principal_name = unique_name("agg");
         let (_, created) = post_principal(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewPrincipal {
                 name: principal_name,
                 kind: None,
@@ -6940,7 +6874,7 @@ mod tests {
         for (name, price) in [(&priced, Some(1_000_000)), (&unpriced, None)] {
             let _ = post_model(
                 State(ctx.clone()),
-                RequireConfigWrite::default(),
+                RequireConfigWrite,
                 Json(NewModel {
                     name: name.clone(),
                     description: String::new(),
@@ -6968,7 +6902,7 @@ mod tests {
 
         let rows = usage_summary(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(
                 serde_json::from_value(serde_json::json!({"group_by": "model"})).unwrap(),
             ),
@@ -6999,7 +6933,7 @@ mod tests {
         assert_eq!(
             usage_summary(
                 State(ctx.clone()),
-                RequireRead::default(),
+                RequireRead,
                 axum::extract::Query(
                     serde_json::from_value(serde_json::json!({"group_by": "'; DROP TABLE"}))
                         .unwrap()
@@ -7024,7 +6958,7 @@ mod tests {
         let name = unique_name("patch-model");
         let (_, created) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: name.clone(),
                 description: "before".into(),
@@ -7039,9 +6973,7 @@ mod tests {
         let id = created.0["id"].as_i64().unwrap();
 
         // The read path must show them, or a price can be set and never seen.
-        let listed = list_models(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let view = listed.0.iter().find(|m| m.id == id).expect("listed");
         assert_eq!(view.input_price_per_mtok, Some(3_000_000));
         assert_eq!(view.cache_ttl_seconds, Some(60));
@@ -7050,7 +6982,7 @@ mod tests {
         // that sets a price must not silently turn caching off.
         patch_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(id),
             Json(
                 serde_json::from_value(serde_json::json!({
@@ -7062,9 +6994,7 @@ mod tests {
         .await
         .unwrap();
 
-        let listed = list_models(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let view = listed.0.iter().find(|m| m.id == id).expect("listed");
         assert_eq!(view.input_price_per_mtok, Some(4_000_000));
         assert_eq!(view.output_price_per_mtok, Some(15_000_000), "untouched");
@@ -7074,7 +7004,7 @@ mod tests {
         // Explicit null clears, which is how a model becomes unpriced again.
         patch_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(id),
             Json(
                 serde_json::from_value(serde_json::json!({
@@ -7087,9 +7017,7 @@ mod tests {
         .await
         .unwrap();
 
-        let listed = list_models(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let view = listed.0.iter().find(|m| m.id == id).expect("listed");
         assert_eq!(view.input_price_per_mtok, None, "null clears");
         assert_eq!(view.cache_ttl_seconds, None);
@@ -7101,7 +7029,7 @@ mod tests {
 
         let missing = patch_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(-1),
             Json(serde_json::from_value(serde_json::json!({"description": "x"})).unwrap()),
         )
@@ -7119,7 +7047,7 @@ mod tests {
         let model_name = unique_name("gcp-validate");
         let (_, model) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -7149,7 +7077,7 @@ mod tests {
         // A plain API key is not a service-account key file.
         let err = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(vertex(
                 Some("sk-not-a-key-file".into()),
@@ -7163,7 +7091,7 @@ mod tests {
         // Nor is no credential at all.
         let err = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(vertex(None, Some("gcp_service_account"))),
         )
@@ -7175,7 +7103,7 @@ mod tests {
         // column's CHECK constraint as a Postgres error.
         let err = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(vertex(Some("x".into()), Some("iam_role"))),
         )
@@ -7193,7 +7121,7 @@ mod tests {
         .to_string();
         let (status, created) = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(vertex(Some(key_file), Some("gcp_service_account"))),
         )
@@ -7206,7 +7134,7 @@ mod tests {
         // unaffected by the field existing.
         let (_, plain) = post_backend(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(model_id),
             Json(NewBackend::openai("http://plain:8000/v1", None)),
         )
@@ -7226,7 +7154,7 @@ mod tests {
         let model_name = unique_name("no-budget-usage-model");
         let _ = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -7280,7 +7208,7 @@ mod tests {
             async move {
                 post_model(
                     State(ctx),
-                    RequireConfigWrite::default(),
+                    RequireConfigWrite,
                     Json(NewModel {
                         name,
                         description: String::new(),
@@ -7306,7 +7234,7 @@ mod tests {
         let vm_name = unique_name("dry-vm");
         let (_, vm) = post_virtual_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewVirtualModel {
                 name: vm_name.clone(),
                 description: String::new(),
@@ -7320,7 +7248,7 @@ mod tests {
         // it without touching the database again.
         let (_, rule) = post_rule(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(vm_id),
             Json(NewRule {
                 position: 0,
@@ -7335,7 +7263,7 @@ mod tests {
         let rule_id = rule.0["id"].as_i64().unwrap();
         let _ = post_rule_target(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
                 model_id: fast_id,
@@ -7347,7 +7275,7 @@ mod tests {
         .unwrap();
         let _ = post_default_target(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
                 model_id: slow_id,
@@ -7363,7 +7291,7 @@ mod tests {
             async move {
                 routing_dry_run(
                     State(ctx),
-                    RequireRead::default(),
+                    RequireRead,
                     Json(DryRunRequest {
                         model,
                         principal_id: None,
@@ -7437,7 +7365,7 @@ mod tests {
 
         let (status, created) = post_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewRole {
                 name: role_name.clone(),
                 description: Some("only the local models".into()),
@@ -7452,7 +7380,7 @@ mod tests {
         assert_eq!(
             post_role(
                 State(ctx.clone()),
-                RequireConfigWrite::default(),
+                RequireConfigWrite,
                 Json(NewRole {
                     name: role_name.clone(),
                     description: None,
@@ -7469,7 +7397,7 @@ mod tests {
         let principal_id = make_principal(&ctx, &unique_name("scoped-holder")).await;
         grant_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path(principal_id),
             Json(RoleGrant {
                 role: role_name.clone(),
@@ -7480,7 +7408,7 @@ mod tests {
         assert_eq!(
             delete_role(
                 State(ctx.clone()),
-                RequireConfigWrite::default(),
+                RequireConfigWrite,
                 Path(role_name.clone()),
             )
             .await
@@ -7492,7 +7420,7 @@ mod tests {
         // Once nobody holds it, it goes.
         revoke_role(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Path((principal_id, role_name.clone())),
         )
         .await
@@ -7500,7 +7428,7 @@ mod tests {
         assert_eq!(
             delete_role(
                 State(ctx.clone()),
-                RequireConfigWrite::default(),
+                RequireConfigWrite,
                 Path(role_name.clone()),
             )
             .await
@@ -7517,10 +7445,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_blanket_model_grant_is_namespaced_and_a_bare_star_is_refused() {
         let (ctx, _cache) = test_ctx().await;
-        let roles = list_roles(State(ctx.clone()), RequireRead::default())
-            .await
-            .unwrap()
-            .0;
+        let roles = list_roles(State(ctx.clone()), RequireRead).await.unwrap().0;
         let inference = roles
             .iter()
             .find(|r| r.name == "inference")
@@ -7546,14 +7471,10 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn the_config_route_reports_this_processs_own_flags() {
         let (ctx, _cache) = test_ctx().await;
-        let cfg = get_config(
-            State(ctx.clone()),
-            RequireRead::default(),
-            AdminPrincipal(1),
-        )
-        .await
-        .unwrap()
-        .0;
+        let cfg = get_config(State(ctx.clone()), RequireRead, AdminPrincipal(1))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(cfg["role"], "all");
         assert_eq!(cfg["config_poll_seconds"], 5);
         assert_eq!(cfg["cache_max_entries"], 4096);
@@ -7571,7 +7492,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_manual_rebuild_reports_the_version_it_published() {
         let (ctx, cache) = test_ctx().await;
-        let resp = rebuild_snapshot(State(ctx.clone()), RequireConfigWrite::default())
+        let resp = rebuild_snapshot(State(ctx.clone()), RequireConfigWrite)
             .await
             .unwrap()
             .0;
@@ -7597,7 +7518,7 @@ mod tests {
         let model_name = unique_name("vgroup-m");
         let (_, model) = post_model(
             State(ctx.clone()),
-            RequireConfigWrite::default(),
+            RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
@@ -7628,7 +7549,7 @@ mod tests {
 
         let rows = usage_summary(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(UsageQuery {
                 group_by: "virtual_model".into(),
                 since: None,
@@ -7652,7 +7573,7 @@ mod tests {
         // must be refused, not interpolated into the query text.
         assert!(usage_summary(
             State(ctx.clone()),
-            RequireRead::default(),
+            RequireRead,
             axum::extract::Query(UsageQuery {
                 group_by: "; DROP TABLE models".into(),
                 since: None,
@@ -7700,7 +7621,7 @@ mod tests {
         .into_response();
         assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
         assert!(
-            list_fleet(State(ctx.clone()), RequireRead::default())
+            list_fleet(State(ctx.clone()), RequireRead)
                 .await
                 .0
                 .is_empty(),
@@ -7716,9 +7637,7 @@ mod tests {
         .into_response();
         assert!(accepted.status().is_success());
 
-        let fleet = list_fleet(State(ctx.clone()), RequireRead::default())
-            .await
-            .0;
+        let fleet = list_fleet(State(ctx.clone()), RequireRead).await.0;
         assert_eq!(fleet.len(), 1);
         assert_eq!(fleet[0].snapshot_version, 42);
         assert!(

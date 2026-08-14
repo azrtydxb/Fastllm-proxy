@@ -14,7 +14,7 @@ working configuration — pick the row that matches where you are.
 | [2. Docker](#2-docker) | one process | the same, without a toolchain |
 | [3. Compose, split](#3-compose-with-the-planes-split) | two containers | one host, admin API off the public port |
 | [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
-| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests, Helm chart, or the operator |
+| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests or the Helm chart |
 
 
 The dividing line between the first two and the rest is `--role`. One binary
@@ -195,14 +195,13 @@ one of those three and it should go back to ClusterIP.
 
 ### 5. Kubernetes, scaled out
 
-Three ways to express the same two Deployments. They differ in who keeps them
-that shape, not in what they produce.
+Two ways to express the same two Deployments. They differ in how they are
+written, not in what they produce.
 
 | | |
 |---|---|
 | [Manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes) | `kubectl apply -k deploy/kubernetes/base/`. Read exactly what is applied, and edit it. Overlays for TLS and a LoadBalancer |
 | [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy) | Values rather than patches, and templating across many environments |
-| [Operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator) | A `FastllmProxy` resource, reconciled continuously |
 
 ```bash
 # Manifests
@@ -213,30 +212,18 @@ helm install fastllm charts/fastllm-proxy \
   --set proxy.replicas=6 \
   --set database.existingSecret=fastllm-pg-app \
   --set secrets.existingSecret=fastllm-secrets
-
-# Operator
-kubectl apply -f operator/deploy/crd.yaml
-kubectl apply -f operator/deploy/operator.yaml -f operator/deploy/rbac.yaml
-kubectl apply -f operator/deploy/example.yaml
 ```
 
-**What the operator adds** is not templating — it is that the deployment stays
-the shape you asked for. A chart describes it once, at apply time; a
-Deployment edited by hand afterwards stays edited. The property worth having a
-controller for is that `spec.image` is one field and becomes *both*
-Deployments, so the two planes cannot be pinned apart by anyone editing one of
-them. They share a database schema, and the older side reads a snapshot
-carrying fields it does not understand.
-
-```console
-$ kubectl -n fastllm get fllm
-NAME      GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.2.0   2m
-```
+**Pin both planes to the same image.** They share a database schema, and the
+older side reads a snapshot carrying fields it does not understand. Both
+install paths take one image tag and apply it to both Deployments — a
+`FastllmProxy` CRD and its controller used to enforce that continuously, and
+was removed as more machinery than the property was worth; keeping one value
+in one place does the same job.
 
 Scaling means scaling `proxy`. The control plane stays at one — it does not
 see request traffic, and nothing about serving more requests asks for more of
-it. The operator does not expose a replica count for it at all.
+it, so neither install path exposes a replica count for it.
 
 What changes as the data plane grows:
 

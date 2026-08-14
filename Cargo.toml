@@ -1,9 +1,8 @@
 [workspace]
-members = [".", "bench", "operator"]
+members = [".", "bench"]
 # A plain `cargo build`/`cargo test` at the workspace root must build and test
-# only the proxy: `bench` is measurement tooling and `operator` ships as its
-# own image on its own release cycle, and both take real time to compile.
-# `-p bench` / `-p fastllm-operator` still reach them explicitly.
+# only the proxy: `bench` is measurement tooling that takes real time to
+# compile and ships in nothing. `-p bench` still reaches it explicitly.
 default-members = ["."]
 
 [package]

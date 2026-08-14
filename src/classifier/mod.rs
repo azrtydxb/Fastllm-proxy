@@ -15,7 +15,7 @@
 //!
 //! # Why two tiers
 //!
-//! Measured over ~21k real prompts (`bench/potion-real`, `bench/potion-wide`),
+//! Measured over ~21k real prompts (`docs/classifier/measurements.md`),
 //! a static embedding — a token-vector lookup, no transformer — classifies in
 //! **~140µs** and reaches 82-98% precision on classes that differ by *subject*:
 //! coding, maths, chat, legal, finance, security, databases, devops. That is
@@ -176,7 +176,7 @@ impl Classifier {
     /// winner does not clear its own `min_margin` — below the floor the caller
     /// is expected to fall through to the next routing rule, which is a routing
     /// decision rather than an error. Measured coverage at various floors is in
-    /// `bench/potion-real`.
+    /// `docs/classifier/measurements.md`.
     fn nearest(
         &self,
         embedding: &[f32],

@@ -11,7 +11,7 @@ use crate::registry::{Interner, Registry};
 use crate::router::Router;
 use crate::snapshot::Snapshot;
 use crate::source::file::FileSource;
-use crate::source::{SnapshotSource, WithLegacyMasterKey};
+use crate::source::SnapshotSource;
 
 /// Speaks both schemes: cluster-local vLLM nodes are plain HTTP, but a config
 /// may equally point at a TLS-terminated or hosted endpoint.
@@ -35,7 +35,7 @@ pub struct AppState {
 
     /// Deprecated `--master-key`/`general_settings.master_key`, carried here
     /// so `reload()` (SIGHUP) can re-merge it into every fetch — see
-    /// `source::WithLegacyMasterKey` for why that merge cannot just happen
+    /// `FileSource::legacy_master_key` for why that merge cannot just happen
     /// once at startup.
     pub legacy_master_key: Option<String>,
 
@@ -398,8 +398,7 @@ impl AppState {
             .config_path
             .clone()
             .context("reload requires --config (File mode only)")?;
-        let source =
-            WithLegacyMasterKey::new(FileSource::new(path), self.legacy_master_key.clone());
+        let source = FileSource::new(path).with_legacy_master_key(self.legacy_master_key.clone());
         let snap = source
             .fetch(None)
             .await?

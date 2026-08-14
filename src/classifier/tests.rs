@@ -3,7 +3,7 @@
 //! Centroids here are hand-written unit vectors, so these assert the thing that
 //! is actually easy to get wrong — when tier 2 runs, which classes it may
 //! choose between, and what happens when it declines — rather than re-measuring
-//! embedding quality. Model quality is measured in `bench/potion-real` against
+//! embedding quality. Model quality is measured in `docs/classifier/measurements.md` against
 //! ~21k labelled prompts; a test suite is the wrong instrument for it and would
 //! only be slow and flaky.
 

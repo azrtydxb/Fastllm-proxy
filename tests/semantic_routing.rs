@@ -446,7 +446,7 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
     // the admin API, embedded by the control plane, shipped in a snapshot and
     // named by a rule actually steers a live HTTP request. Whether the model
     // generalises to held-out prompts is a different question, measured over
-    // ~21k labelled examples in `bench/potion-real`, and asserting it here
+    // ~21k labelled examples in `docs/classifier/measurements.md`, and asserting it here
     // would make this test's result depend on which other classes happen to
     // exist in a shared database.
     let matched = routed_to(port, &fx.key, &fx.virtual_name, HORTICULTURE_EXAMPLES[0]);

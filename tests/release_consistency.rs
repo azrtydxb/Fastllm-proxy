@@ -2,10 +2,9 @@
 //!
 //! # Why this is a test and not a checklist
 //!
-//! Cutting a release touches fourteen files: the two crates, the Helm chart's
-//! two version fields, the kustomize base, the operator's CRD default and its
-//! generated manifest, four compose and manifest images, and the docs that
-//! show a `docker run`. Missing one does not fail anything — it produces an
+//! Cutting a release touches nine files: the crate, the Helm chart's two
+//! version fields, the kustomize base, four compose and manifest images, and
+//! the docs that show a `docker run`. Missing one does not fail anything — it produces an
 //! install path that quietly deploys the *previous* release, which is the
 //! failure that shipped `v0.1.0` manifests describing MCP routes `v0.1.0` did
 //! not serve.
@@ -43,12 +42,6 @@ const VERSIONED: &[&str] = &[
     "deploy/kubernetes/base/kustomization.yaml",
     "docs/README-book.md",
     "docs/operations/shapes.md",
-    "operator/Cargo.toml",
-    "operator/Dockerfile",
-    "operator/README.md",
-    "operator/deploy/crd.yaml",
-    "operator/deploy/example.yaml",
-    "operator/deploy/operator.yaml",
 ];
 
 /// Any `vN.N.N` that is not the current version, in a file that ships an
@@ -145,16 +138,4 @@ fn the_chart_version_and_the_app_it_deploys_agree() {
         "Chart.yaml's version and appVersion disagree"
     );
     assert_eq!(field("appVersion:"), crate_version());
-}
-
-/// The operator ships as its own image on the same release.
-#[test]
-fn the_operator_crate_is_on_the_same_version() {
-    let operator = read("operator/Cargo.toml");
-    let version = operator
-        .lines()
-        .find_map(|l| l.strip_prefix("version = \""))
-        .and_then(|v| v.split('"').next())
-        .expect("version in operator/Cargo.toml");
-    assert_eq!(version, crate_version());
 }

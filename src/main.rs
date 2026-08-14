@@ -20,7 +20,7 @@ use fastllm_proxy::router::{Policy, Router};
 use fastllm_proxy::snapshot::Snapshot;
 use fastllm_proxy::source::file::FileSource;
 use fastllm_proxy::source::http::HttpSource;
-use fastllm_proxy::source::{spawn_poller, SnapshotSource, WithLegacyMasterKey};
+use fastllm_proxy::source::{spawn_poller, SnapshotSource};
 use fastllm_proxy::state::AppState;
 use fastllm_proxy::{health, proxy, upstream};
 
@@ -1203,7 +1203,7 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             // Unlike `File` mode, nothing here ever calls
             // `add_legacy_master_key`: `Http` mode's snapshot comes from the
             // control plane's `/snapshot`, and the poller below polls it with
-            // a plain `HttpSource`, not a `WithLegacyMasterKey`-wrapped one.
+            // a plain `HttpSource`, which carries no such key.
             // A flag that is silently stored and never consulted is worse
             // than one that says so — see Task 12's final review.
             warn!(
@@ -1219,13 +1219,13 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
             .clone()
             .context("File mode (no --control-url) requires --config")?;
         // Deprecated, but this is the one mode where it actually still works
-        // (merged in by `WithLegacyMasterKey` on every fetch, not just this
+        // (merged in by `FileSource` on every fetch, not just this
         // first one) — see the `Http`/`all` branches for why the same flag is
         // inert everywhere else.
         if master_key.is_some() {
             warn!("--master-key is deprecated; define keys under `auth:` instead");
         }
-        let file_src = WithLegacyMasterKey::new(FileSource::new(path.clone()), master_key.clone());
+        let file_src = FileSource::new(path.clone()).with_legacy_master_key(master_key.clone());
         let snap = file_src
             .fetch(None)
             .await?
@@ -1252,10 +1252,8 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
                     .config_path
                     .clone()
                     .expect("File mode always sets config_path");
-                let source = WithLegacyMasterKey::new(
-                    FileSource::new(path),
-                    state.legacy_master_key.clone(),
-                );
+                let source =
+                    FileSource::new(path).with_legacy_master_key(state.legacy_master_key.clone());
                 spawn_poller(
                     source,
                     Arc::clone(&state),

@@ -204,8 +204,9 @@ allocation is on `/metrics`, at scrape time.
 
 ### Classifier tiers
 
-Semantic routing costs what it measures. Same machine, `--release`,
-`bench/potion` and `bench/minilm`:
+Semantic routing costs what it measures. Same machine, `--release` — see
+[what the classifier costs](classifier/measurements.md) for the data and the
+method:
 
 | tier | model | p50 per prompt | what it separates |
 |---|---|---|---|

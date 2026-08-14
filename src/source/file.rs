@@ -9,11 +9,30 @@ use std::path::PathBuf;
 
 pub struct FileSource {
     path: PathBuf,
+    /// `--master-key`/`general_settings.master_key`, merged into every
+    /// snapshot this source produces.
+    ///
+    /// The legacy key is not part of the YAML schema parsed below — it is
+    /// bolted on at the CLI layer — and it lives here rather than at the call
+    /// site because *every* fetch has to carry it: the initial load, a SIGHUP
+    /// reload, and every poll tick. Applying it only to the first snapshot
+    /// would silently drop a deployment's only credential the moment the
+    /// underlying config changed. `File` mode is the only mode where the flag
+    /// does anything at all; see `main.rs` for why it is inert elsewhere.
+    legacy_master_key: Option<String>,
 }
 
 impl FileSource {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            legacy_master_key: None,
+        }
+    }
+
+    pub fn with_legacy_master_key(mut self, key: Option<String>) -> Self {
+        self.legacy_master_key = key;
+        self
     }
 }
 
@@ -124,7 +143,7 @@ impl SnapshotSource for FileSource {
         }
 
         let open = keys.is_empty();
-        Ok(Some(Snapshot {
+        let mut snap = Snapshot {
             // `File` mode has nowhere to store example prompts, so semantic
             // routing is a control-plane feature the same way virtual models
             // are.
@@ -144,7 +163,11 @@ impl SnapshotSource for FileSource {
             // doc comment on `Snapshot::virtual_models`.
             virtual_models: HashMap::new(),
             open,
-        }))
+        };
+        if let Some(key) = &self.legacy_master_key {
+            snap.add_legacy_master_key(key);
+        }
+        Ok(Some(snap))
     }
 }
 
@@ -216,6 +239,32 @@ mod tests {
             .unwrap();
         assert!(p.allow_all);
         assert!(p.may_invoke("anything"));
+    }
+
+    /// Not just the first load: a `File`-mode reload that dropped the legacy
+    /// key would take a deployment's only credential away mid-flight.
+    #[tokio::test]
+    async fn the_legacy_master_key_is_merged_into_every_fetch() {
+        let f = write_config(
+            "model_list:\n  - model_name: m\n    litellm_params: { api_base: http://h:8000/v1 }\n",
+        );
+        let src =
+            FileSource::new(f.path().into()).with_legacy_master_key(Some("sk-legacy".to_string()));
+        let first = src.fetch(None).await.unwrap().unwrap();
+        assert!(first
+            .authenticate("sk-legacy", std::time::SystemTime::now())
+            .is_ok());
+
+        std::fs::write(
+            f.path(),
+            "model_list:\n  - model_name: b\n    litellm_params: { api_base: http://h:8000/v1 }\n",
+        )
+        .unwrap();
+        let second = src.fetch(Some(first.version)).await.unwrap().unwrap();
+        assert_eq!(second.models[0].name, "b");
+        assert!(second
+            .authenticate("sk-legacy", std::time::SystemTime::now())
+            .is_ok());
     }
 
     #[tokio::test]

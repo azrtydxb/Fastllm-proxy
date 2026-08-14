@@ -204,7 +204,6 @@ cargo build --release
 | [Changelog](CHANGELOG.md) | What changed, newest first |
 | [Portable manifests](deploy/kubernetes/) | `kubectl apply -k`, with TLS and LoadBalancer overlays |
 | [Helm chart](charts/fastllm-proxy/) | The same two Deployments, as values |
-| [Kubernetes operator](operator/) | A `FastllmProxy` resource, reconciled continuously |
 | [One real cluster's manifests](deploy/README.md) | Concrete values, applied continuously — a worked example, not a template |
 | [TODO](TODO.md) | What is deliberately not built, and why |
 

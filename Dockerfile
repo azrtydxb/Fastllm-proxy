@@ -42,16 +42,14 @@ COPY migrations ./migrations
 # every local build had succeeded because the file was simply there.
 COPY openapi.json ./openapi.json
 # The root manifest declares a workspace, so cargo insists on loading every
-# member before it will build anything — omitting either of these fails the
-# build outright rather than merely skipping that member. `default-members`
-# still keeps them out of the release build; only their manifests have to be
-# readable.
+# member before it will build anything — omitting this fails the build
+# outright rather than merely skipping that member. `default-members` still
+# keeps it out of the release build; only its manifest has to be readable.
 #
 # Adding a workspace member and not a line here is a build that passes every
-# test and fails at image time, which is exactly how `operator` broke this
-# once already.
+# test and fails at image time, which is exactly how the (since removed)
+# `operator` member broke this once already.
 COPY bench ./bench
-COPY operator ./operator
 # Built `web/dist/` from the `web` stage above, not the `web/` source tree —
 # `rust-embed`'s derive macro (src/control/ui.rs) only ever reads this one
 # directory. Without this `COPY`, the directory `rust-embed` needs to exist

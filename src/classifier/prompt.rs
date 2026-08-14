@@ -8,8 +8,8 @@
 //! an operator typed: bare text. Two different distributions, and
 //! nearest-centroid classification has no way to notice.
 //!
-//! Measured with `bench/wrapskew` over 4,750 held-out prompts, centroids from
-//! bare text throughout:
+//! Measured over 4,750 held-out prompts (`docs/classifier/measurements.md`),
+//! centroids from bare text throughout:
 //!
 //! | query shape | coding precision | coding recall |
 //! |---|---|---|

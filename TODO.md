@@ -8,10 +8,12 @@ settled with measurements does not get re-litigated from intuition.
 
 Real per-key RBAC (principals, roles, permissions, SHA-256-hashed API keys),
 a control/data-plane split (`--role=control`/`proxy`, sharing `Snapshot` as
-the sole contract), three snapshot sources (file, http-poll, in-process),
+the sole contract), two snapshot sources (file and http-poll; `--role all`
+builds its own in-process and has nothing to poll),
 `fastllm-proxy import` to migrate a `File`-mode deployment onto a database,
-and the CI/deployment/docs wiring in this task. Design and self-review:
-`docs/superpowers/specs/2026-08-06-control-plane-rbac-routing-design.md`.
+and the CI/deployment/docs wiring in this task. The design as built is
+`docs/architecture.md`; the pre-build design note it was written from has been
+removed, having drifted from the code it described.
 
 Known gaps carried forward rather than silently fixed:
 
@@ -486,7 +488,7 @@ the classifier could not see the current turn at all.
 `AppState::classify` was handed the **raw request body** and embedded the first
 128 tokens of it, while class centroids are built from bare example prompts an
 operator typed. Two different text distributions compared by cosine similarity,
-with nothing able to notice. Measured with `bench/wrapskew`, 4,750 held-out
+with nothing able to notice. Measured over 4,750 held-out
 prompts, centroids from bare text throughout:
 
   query shape                 accuracy  coding prec  coding rec  mean margin

@@ -80,5 +80,4 @@ control plane reads a snapshot with fields it does not understand.
 |---|---|
 | **These manifests** | You want to read exactly what is applied, and edit it |
 | [Helm chart](../../charts/fastllm-proxy) | You want values, not patches — and templating for many environments |
-| [Operator](../../operator) | You want `kubectl get fastllmproxy` to be a thing, and the deployment reconciled continuously |
 | [`../`](../README.md) | You are looking at how one real cluster actually runs it |

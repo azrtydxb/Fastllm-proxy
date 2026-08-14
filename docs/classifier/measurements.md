@@ -3,15 +3,15 @@
 The measurements behind the design, so the decisions have their evidence
 attached and nobody re-litigates them from intuition.
 
-Everything here is reproducible:
+The instruments that produced most of these numbers were one-shot: they
+answered "which model, which classes, which token cap" once, and this page is
+the answer. They have been removed rather than left to rot — a benchmark
+nobody runs is a benchmark nobody notices has broken. What remains is the one
+question that recurs, "is this candidate model better than the incumbent":
 
 ```bash
-python3 bench/fetch-prompts.py          # labelled prompts, cached to bench/data/
-cargo run -p bench --release --bin potion        # latency and token-cap sweep
-cargo run -p bench --release --bin potion-real   # accuracy on real labelled data
-cargo run -p bench --release --bin potion-classes # which classes separate at all
-cargo run -p bench --release --bin potion-arch   # architecture vs coding
-cargo run -p bench --release --bin minilm        # does a transformer earn its cost
+python3 bench/fetch-prompts.py                    # labelled prompts, cached to bench/data/
+cargo run -p bench --release --bin minilm <dir>   # a candidate tier-2 model, same data
 ```
 
 Datasets: `HuggingFaceH4/no_robots` (9,499 human-written, human-categorised
@@ -85,7 +85,7 @@ That sounds obvious and was not what the code did. The classifier was handed
 the raw request body and read the first 128 tokens of it, while the centroids
 it compares against are built from bare example prompts an operator typed. Two
 different text distributions, and nearest-centroid classification cannot notice.
-Measured with `bench/wrapskew` over 4,750 held-out prompts:
+Measured over 4,750 held-out prompts:
 
 | query shape | accuracy | coding precision | coding recall | mean margin |
 |---|---|---|---|---|

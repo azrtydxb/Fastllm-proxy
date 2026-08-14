@@ -8,6 +8,25 @@ source for *why* anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Removed
+
+- **The Kubernetes operator** (`fastllm-operator`, the `FastllmProxy` CRD and
+  its image). It reconciled two Deployments the manifests and the Helm chart
+  already produce, and the one property it added over them — both planes
+  pinned to a single image field — is one value in one place in either of
+  those. A controller, a CRD schema, an RBAC role and a second release lane
+  were more machinery than that property was worth. Deploy with
+  `kubectl apply -k deploy/kubernetes/base/` or the chart.
+- **Seven of the classifier benchmarks** (`potion`, `potion-real`,
+  `potion-classes`, `potion-arch`, `potion-wide`, `classcheck`, `wrapskew`).
+  They answered "which model, which classes, which token cap" once; the
+  answers are in `docs/classifier/measurements.md`, which is the artefact
+  worth keeping. `bench/minilm` stays — measuring a *candidate* model is a
+  question that recurs.
+- **`docs/superpowers/`** — pre-build design notes and task lists for work
+  that shipped, unpublished by the book and already contradicted by the code
+  (they describe a third snapshot source that does not exist).
+
 ### Fixed
 
 - `POST /admin/models` silently dropped `context_length`: the field was

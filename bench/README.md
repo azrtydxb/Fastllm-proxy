@@ -55,6 +55,14 @@ produces `target/release/{upstream,load,realbench,micro,proto,tcprelay}`.
   frame is ever waiting once the wakeup is gone (measured ratio: exactly
   1.000).
 
+- **`minilm`** — the one classifier instrument still here. Measures a
+  candidate tier-2 (contextual) model against the splits a static embedding
+  cannot do, on real labelled data: `python3 bench/fetch-prompts.py` first,
+  then `cargo run -p bench --release --bin minilm <model-dir>`. The
+  model-*selection* experiments that chose `potion-code-16M` are gone; what
+  they concluded is written down in `docs/classifier/measurements.md`, which
+  is the part worth keeping.
+
 - **`tcprelay`** — the ceiling: a dumb bidirectional TCP relay
   (`tokio::io::copy_bidirectional`, no HTTP parsing, no framing, no
   decisions). No proxy that speaks HTTP on this path can beat it, so it
