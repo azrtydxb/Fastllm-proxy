@@ -18,6 +18,7 @@ pub mod health;
 /// reverse channel usage already uses.
 pub mod health_report;
 pub mod limiter;
+pub mod mcp;
 pub mod multipart;
 pub mod protocol;
 pub mod proxy;

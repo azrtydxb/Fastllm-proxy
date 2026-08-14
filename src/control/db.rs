@@ -105,12 +105,18 @@ mod tests {
             ],
             "operator is everything except model:invoke"
         );
+        // `mcp:invoke` is here and not on `inference` or `operator`: a key
+        // that may invoke models is not, by that fact, a key that may reach
+        // every tool server, because tools have side effects and models do
+        // not. This assertion is the thing that would notice a migration
+        // quietly widening either of those roles.
         assert_eq!(
             grants("admin"),
             vec![
                 "config:write *",
                 "key:create *",
                 "key:revoke *",
+                "mcp:invoke mcp/*",
                 "model:invoke model/*",
                 "usage:read *"
             ]

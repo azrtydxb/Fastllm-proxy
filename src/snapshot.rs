@@ -32,6 +32,12 @@ pub struct Principal {
     /// Already flattened from roles, wildcards and deny rules.
     pub allowed_models: HashSet<String>,
     pub allow_all: bool,
+    /// Flattened from `mcp:invoke` grants exactly as `allowed_models` is from
+    /// `model:invoke`, and separate from it on purpose: a key that may invoke
+    /// models is not, by that fact, a key that may reach every tool server
+    /// the deployment knows about. Tools have side effects; models do not.
+    pub allowed_mcp: HashSet<String>,
+    pub allow_all_mcp: bool,
     /// Role *names* this principal holds, for the "caller" match condition on
     /// a routing rule (`crate::routing::CallerMatch`). Unlike
     /// `allowed_models`, this is not further flattened — a rule asks "does
@@ -163,6 +169,30 @@ impl Default for BackendDef {
     }
 }
 
+/// An MCP server the gateway will forward tool calls to.
+///
+/// Shaped like a backend rather than like a new kind of thing: an address, a
+/// credential, and the two auth knobs. An MCP server authenticates exactly
+/// like any other upstream, and a second credential mechanism would be a
+/// second thing to rotate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerDef {
+    /// The name callers address it by, and the namespace its tools appear
+    /// under.
+    pub name: String,
+    pub url: String,
+    /// `http` (streamable) or `sse`.
+    pub transport: String,
+    pub description: String,
+    pub auth_header: String,
+    /// `None` sends the credential with no prefix.
+    pub auth_scheme: Option<String>,
+    /// Decrypted by the control plane when it builds the snapshot, exactly
+    /// like a backend's — `/snapshot` therefore carries it in usable form and
+    /// must be TLS wherever a server has a real one.
+    pub api_key: Option<String>,
+}
+
 /// One prompt class as the snapshot carries it.
 ///
 /// Deliberately not `crate::classifier::PromptClass`: this type exists in every
@@ -220,6 +250,10 @@ pub struct Snapshot {
     /// grants are: the request path may not do I/O, so anything it compares
     /// against has to arrive before the request does.
     pub prompt_classes: Vec<PromptClassDef>,
+    /// MCP servers this deployment proxies, keyed by name for the O(1) lookup
+    /// `mcp::route` does on a namespaced tool. Empty in `File` mode: there is
+    /// nowhere in a YAML config to store one, and no grants to authorise it.
+    pub mcp_servers: HashMap<String, McpServerDef>,
     /// Model to try when a request's whole routing chain is exhausted.
     ///
     /// Appended as the last candidate for every request, virtual or concrete.
@@ -284,6 +318,11 @@ pub struct WireSnapshot {
     pub virtual_models: Vec<WireVirtualModel>,
     #[serde(default)]
     pub prompt_classes: Vec<WirePromptClass>,
+    /// Same `#[serde(default)]` rationale as every field above it: a proxy
+    /// reading a last-known-good cache written before MCP existed must come
+    /// up serving traffic, not fail to parse.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerDef>,
     #[serde(default)]
     pub fallback_model: Option<String>,
     pub open: bool,
@@ -313,6 +352,10 @@ pub struct WirePrincipal {
     /// same `#[serde(default)]` rationale as `limits`.
     #[serde(default)]
     pub budget: Option<WireBudget>,
+    #[serde(default)]
+    pub allowed_mcp: Vec<String>,
+    #[serde(default)]
+    pub allow_all_mcp: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -528,6 +571,11 @@ impl Snapshot {
                 name: "legacy-master-key".into(),
                 allowed_models: HashSet::new(),
                 allow_all: true,
+                // A master key predates MCP entirely and grants nothing here:
+                // widening a legacy shared secret to reach tool servers is
+                // the opposite of what this deployment shape needs.
+                allowed_mcp: HashSet::new(),
+                allow_all_mcp: false,
                 roles: HashSet::new(),
                 limits: None,
                 budget: None,
@@ -575,6 +623,8 @@ impl Snapshot {
                     name: p.name.clone(),
                     allowed_models: p.allowed_models.iter().cloned().collect(),
                     allow_all: p.allow_all,
+                    allowed_mcp: p.allowed_mcp.iter().cloned().collect(),
+                    allow_all_mcp: p.allow_all_mcp,
                     roles: p.roles.iter().cloned().collect(),
                     limits: p.limits.map(|l| WireLimits {
                         requests_per_min: l.requests_per_min,
@@ -622,6 +672,10 @@ impl Snapshot {
                     refines: c.refines.clone(),
                 })
                 .collect(),
+            // Carried whole: the definition the control plane decrypted is
+            // exactly what the data plane needs to present upstream, which is
+            // also why /snapshot must be TLS.
+            mcp_servers: self.mcp_servers.values().cloned().collect(),
             virtual_models: self
                 .virtual_models
                 .values()
@@ -719,6 +773,8 @@ impl Snapshot {
                             name: p.name,
                             allowed_models: p.allowed_models.into_iter().collect(),
                             allow_all: p.allow_all,
+                            allowed_mcp: p.allowed_mcp.into_iter().collect(),
+                            allow_all_mcp: p.allow_all_mcp,
                             roles: p.roles.into_iter().collect(),
                             limits: p.limits.map(|l| Limits {
                                 requests_per_min: l.requests_per_min,
@@ -789,6 +845,11 @@ impl Snapshot {
                     min_margin: c.min_margin,
                     refines: c.refines,
                 })
+                .collect(),
+            mcp_servers: w
+                .mcp_servers
+                .into_iter()
+                .map(|s| (s.name.clone(), s))
                 .collect(),
             virtual_models: w
                 .virtual_models
@@ -883,6 +944,7 @@ impl Snapshot {
             models,
             virtual_models: HashMap::new(),
             prompt_classes: Vec::new(),
+            mcp_servers: Default::default(),
             fallback_model: None,
             open: false,
         }
@@ -976,6 +1038,8 @@ mod tests {
             name: "eval-team".into(),
             allowed_models: allowed.iter().map(|s| s.to_string()).collect(),
             allow_all: false,
+            allowed_mcp: Default::default(),
+            allow_all_mcp: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,
@@ -1168,6 +1232,7 @@ mod tests {
 
         let wire = WireSnapshot {
             prompt_classes: Vec::new(),
+            mcp_servers: Default::default(),
             fallback_model: None,
             version: 1,
             keys,

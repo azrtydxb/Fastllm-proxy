@@ -291,6 +291,8 @@ fn authorisation_reads_only_the_snapshot() {
             name: "p".into(),
             allowed_models: ["m".to_string()].into_iter().collect(),
             allow_all: false,
+            allowed_mcp: Default::default(),
+            allow_all_mcp: false,
             roles: std::collections::HashSet::new(),
             limits: None,
             budget: None,
@@ -298,6 +300,7 @@ fn authorisation_reads_only_the_snapshot() {
     );
     let snap = Snapshot {
         prompt_classes: Vec::new(),
+        mcp_servers: Default::default(),
         fallback_model: None,
         version: 1,
         keys,

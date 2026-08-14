@@ -861,6 +861,8 @@ mod tests {
             name: format!("p{id}"),
             allowed_models: Set::new(),
             allow_all: true,
+            allowed_mcp: Default::default(),
+            allow_all_mcp: false,
             roles: roles.iter().map(|r| r.to_string()).collect(),
             limits: None,
             budget: None,

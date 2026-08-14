@@ -108,6 +108,8 @@ mod tests {
                 name: "p".into(),
                 allowed_models: ["m".to_string()].into_iter().collect(),
                 allow_all: false,
+                allowed_mcp: Default::default(),
+                allow_all_mcp: false,
                 roles: Default::default(),
                 limits: None,
                 budget: None,

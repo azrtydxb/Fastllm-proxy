@@ -88,6 +88,10 @@ impl SnapshotSource for FileSource {
                     name: k.name.clone(),
                     allowed_models: k.models.iter().filter(|m| *m != "*").cloned().collect(),
                     allow_all,
+                    // `File` mode has nowhere to define an MCP server, so
+                    // there is nothing to grant — see `Snapshot.mcp_servers`.
+                    allowed_mcp: HashSet::new(),
+                    allow_all_mcp: false,
                     // `File` mode's `auth.keys` schema has no role concept —
                     // routing rules that match by role are a control-plane
                     // (P1) feature and `File` mode carries no virtual models
@@ -123,6 +127,9 @@ impl SnapshotSource for FileSource {
             // routing is a control-plane feature the same way virtual models
             // are.
             prompt_classes: Vec::new(),
+            // Same reason as `prompt_classes`: a YAML file has nowhere to
+            // store a server, and no grants to authorise reaching one.
+            mcp_servers: HashMap::new(),
             // `File` mode has no place to mark one, and its whole point is a
             // single YAML that says exactly what it says.
             fallback_model: None,

@@ -22,23 +22,42 @@ pub fn flatten_grants(
     perms: &[(String, String)],
     all_models: &[String],
 ) -> (HashSet<String>, bool) {
+    flatten_for("model:invoke", "model/", perms, all_models)
+}
+
+/// The same resolution for `mcp:invoke` on `mcp/<server>`.
+///
+/// Separate from `flatten_grants` at the call site and identical underneath,
+/// because the two grants must never be conflated: a key that may invoke
+/// models is not, by that fact, a key that may reach every tool server.
+pub fn flatten_mcp_grants(
+    perms: &[(String, String)],
+    all_servers: &[String],
+) -> (HashSet<String>, bool) {
+    flatten_for("mcp:invoke", "mcp/", perms, all_servers)
+}
+
+fn flatten_for(
+    want_verb: &str,
+    resource_prefix: &str,
+    perms: &[(String, String)],
+    all_names: &[String],
+) -> (HashSet<String>, bool) {
     let mut set = HashSet::new();
     for (verb, resource) in perms {
-        if verb != "model:invoke" {
+        if verb != want_verb {
             continue;
         }
-        let Some(pattern) = resource.strip_prefix("model/") else {
+        let Some(pattern) = resource.strip_prefix(resource_prefix) else {
             continue;
         };
         if pattern == "*" {
             return (HashSet::new(), true);
         }
         match pattern.strip_suffix('*') {
-            Some(prefix) => {
-                set.extend(all_models.iter().filter(|m| m.starts_with(prefix)).cloned())
-            }
+            Some(stem) => set.extend(all_names.iter().filter(|m| m.starts_with(stem)).cloned()),
             None => {
-                if all_models.iter().any(|m| m == pattern) {
+                if all_names.iter().any(|m| m == pattern) {
                     set.insert(pattern.to_string());
                 }
             }
@@ -285,6 +304,46 @@ pub async fn build_snapshot_with(
         })
         .collect();
 
+    // Loaded before the principal loop, because flattening an `mcp/<name>`
+    // grant needs the set of names that exist — the same reason `all_names`
+    // is loaded for models.
+    let mcp_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<Vec<u8>>,
+    )> = sqlx::query_as(
+        "SELECT name, url, transport, description, auth_header, auth_scheme, upstream_api_key
+               FROM mcp_servers WHERE enabled ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut mcp_servers: HashMap<String, crate::snapshot::McpServerDef> = HashMap::new();
+    for (name, url, transport, description, auth_header, auth_scheme, enc) in mcp_rows {
+        // Decrypted here for the same reason a backend credential is: the data
+        // plane has to present it, and it cannot present what it cannot read.
+        let api_key = match enc {
+            Some(bytes) => Some(crate::control::secrets::decrypt(key, &bytes)?),
+            None => None,
+        };
+        mcp_servers.insert(
+            name.clone(),
+            crate::snapshot::McpServerDef {
+                name,
+                url,
+                transport,
+                description,
+                auth_header,
+                auth_scheme,
+                api_key,
+            },
+        );
+    }
+    let all_mcp_names: Vec<String> = mcp_servers.keys().cloned().collect();
+
     let budgets_by_principal = roll_over_and_load_budgets(pool).await?;
 
     let mut principals = HashMap::new();
@@ -306,6 +365,7 @@ pub async fn build_snapshot_with(
         // invoke this *concrete* model", the same question it has always
         // answered.
         let (allowed_models, allow_all) = flatten_grants(&perms, &all_names);
+        let (allowed_mcp, allow_all_mcp) = flatten_mcp_grants(&perms, &all_mcp_names);
 
         // The raw role names, separate from `allowed_models`: a routing
         // rule's caller condition (`crate::routing::CallerMatch`) matches on
@@ -325,6 +385,8 @@ pub async fn build_snapshot_with(
                 id: id as u64,
                 name,
                 allowed_models,
+                allowed_mcp,
+                allow_all_mcp,
                 allow_all,
                 roles: role_names.into_iter().collect(),
                 limits: limits_by_principal.get(&id).copied(),
@@ -371,6 +433,7 @@ pub async fn build_snapshot_with(
         models,
         virtual_models,
         prompt_classes,
+        mcp_servers,
         fallback_model,
         open: false,
     })
