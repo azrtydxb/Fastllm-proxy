@@ -13,6 +13,18 @@ use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapsho
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
+/// `(name, url, transport, description, auth_header, auth_scheme,
+/// upstream_api_key)` as the row comes back, named for legibility.
+type McpRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<Vec<u8>>,
+);
+
 /// Resolve `model:invoke` permissions into a concrete set of model names.
 ///
 /// `model/*` short-circuits to `allow_all` rather than materialising every
@@ -307,15 +319,7 @@ pub async fn build_snapshot_with(
     // Loaded before the principal loop, because flattening an `mcp/<name>`
     // grant needs the set of names that exist — the same reason `all_names`
     // is loaded for models.
-    let mcp_rows: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<Vec<u8>>,
-    )> = sqlx::query_as(
+    let mcp_rows: Vec<McpRow> = sqlx::query_as(
         "SELECT name, url, transport, description, auth_header, auth_scheme, upstream_api_key
                FROM mcp_servers WHERE enabled ORDER BY name",
     )

@@ -744,6 +744,21 @@ async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Erro
         .await
 }
 
+/// `(id, name, url, transport, description, auth_header, auth_scheme, enabled,
+/// credential_set)` — a row shape, named because clippy is right that nine
+/// anonymous tuple elements is not a type anyone can read.
+type McpServerRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    bool,
+    bool,
+);
+
 /// An MCP server as the admin API accepts it.
 #[derive(Deserialize)]
 struct NewMcpServer {
@@ -774,17 +789,7 @@ async fn list_mcp_servers(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        bool,
-        bool,
-    )> = sqlx::query_as(
+    let rows: Vec<McpServerRow> = sqlx::query_as(
         "SELECT id, name, url, transport, description, auth_header, auth_scheme, enabled,
                     upstream_api_key IS NOT NULL
                FROM mcp_servers ORDER BY name",

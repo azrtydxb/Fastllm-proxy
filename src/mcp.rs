@@ -279,8 +279,7 @@ mod tests {
     }
 
     fn snap(servers: &[&str]) -> Snapshot {
-        let mut s = Snapshot::default();
-        s.mcp_servers = servers
+        let mcp_servers = servers
             .iter()
             .map(|n| {
                 (
@@ -297,7 +296,10 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
-        s
+        Snapshot {
+            mcp_servers,
+            ..Snapshot::default()
+        }
     }
 
     /// Two servers exposing `search` is the ordinary case, not the exotic one.
