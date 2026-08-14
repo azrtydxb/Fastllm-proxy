@@ -25,6 +25,7 @@
 # Reference
 
 - [API and administration](api.md)
+  - [Interactive API reference](api/swagger.md)
   - [The endpoints clients call](api/endpoints.md)
   - [Admin API](api/admin.md)
   - [Routing rules](api/routing-rules.md)

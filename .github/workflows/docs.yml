@@ -40,6 +40,12 @@ jobs:
           # diagrams silently do not render.
           mdbook-mermaid install .
       - run: mdbook build
+      # The interactive reference (docs/api/swagger.md) fetches this at the
+      # site root. Copied rather than duplicated into `docs/`, so there stays
+      # exactly one openapi.json and `tests/openapi.rs` keeps checking the one
+      # the binary actually serves.
+      - name: Publish openapi.json alongside the book
+        run: cp openapi.json book/openapi.json
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

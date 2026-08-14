@@ -29,6 +29,7 @@ entry whose route no longer exists.
 
 | | |
 |---|---|
+| [Interactive API reference](api/swagger.md) | Swagger UI over `openapi.json`, browsable here without a deployment |
 | [The endpoints clients call](api/endpoints.md) | The proxied surface, what is not proxied, the response cache, rate-limit headers and retries |
 | [Admin API](api/admin.md) | Models, backends, keys, principals, prices, live health, and the audit log |
 | [Routing rules](api/routing-rules.md) | The rule grammar, and the dry-run that answers which rule would decide |
