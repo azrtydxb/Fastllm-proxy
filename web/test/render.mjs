@@ -9,7 +9,7 @@
 // something that is null are all clean builds and blank pages. Three of those
 // were in the first draft of this UI.
 //
-// So this walks all thirteen screens the way an operator would, with the API
+// So this walks every screen the way an operator would, with the API
 // answering the shapes `src/control/api.rs` actually serialises, and treats a
 // console error or a thrown render as a failure. It is not a substitute for
 // looking at the thing; it is the check that the thing comes up at all.
@@ -48,7 +48,7 @@ globalThis.cancelAnimationFrame = clearTimeout;
 globalThis.console.error = dom.window.console.error;
 // React only lets `act` flush effects when it is told it is in a test
 // environment; without this every screen renders its loading state and the
-// harness passes on thirteen blank pages.
+// harness passes on a set of blank pages.
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const requested = new Set();
@@ -124,6 +124,19 @@ const SCREENS = [
   // behind the laggard is rather than printing sixteen digits at somebody.
   ["fleet", ["proxy-1", "proxy-2 (4m behind)", "stuck on an older snapshot", "USAGE DROPPED"]],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],
+  // The operator screen: the held image, the phase, and the sentence
+  // explaining why the two differ.
+  [
+    "deployment",
+    [
+      "fastllm/fastllm",
+      "Upgrading",
+      "gateway held at",
+      "ghcr.io/azrtydxb/fastllm-proxy:v0.2.0",
+      "Autoscaling",
+      "Apply to the cluster",
+    ],
+  ],
 ];
 
 const root = createRoot(document.getElementById("root"));
@@ -173,6 +186,37 @@ for (const [screen, expected] of SCREENS) {
   } else {
     console.log(`  ${screen}: ok (${text.length} chars)`);
     if (process.env.DUMP === screen) console.log("\n----\n" + text + "\n----\n");
+  }
+}
+
+// Invisible without an operator.
+//
+// The whole contract of the deployment screen is that a Helm or manifest
+// install never sees it: the routes behind it 404 there, so an entry that
+// merely looked greyed out would be a control that cannot work. This checks
+// both directions off the same capability flag the shell reads.
+{
+  const { visibleNav } = await vite.ssrLoadModule("/src/App.jsx");
+  const labels = (config) =>
+    visibleNav(config)
+      .flatMap((g) => g.items)
+      .map((i) => i.id);
+
+  const managed = labels({ operator_managed: true });
+  const unmanaged = labels({ operator_managed: false });
+  const missing = labels(null);
+
+  if (!managed.includes("deployment")) {
+    failures++;
+    console.log("  nav/operator: FAILED (no Deployment entry under an operator)");
+  } else if (unmanaged.includes("deployment") || missing.includes("deployment")) {
+    failures++;
+    console.log("  nav/operator: FAILED (Deployment entry shown without an operator)");
+  } else if (unmanaged.length !== managed.length - 1) {
+    failures++;
+    console.log("  nav/operator: FAILED (the flag hid more than the one screen)");
+  } else {
+    console.log(`  nav/operator: ok (${managed.length} screens managed, ${unmanaged.length} not)`);
   }
 }
 

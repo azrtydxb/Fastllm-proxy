@@ -18,7 +18,8 @@ docker run ghcr.io/azrtydxb/fastllm-proxy:v0.2.0 --help
 
 ![The management UI: request rate, backends up, error rate and in-flight, a 24-hour traffic chart read from the database, per-backend health per replica, and the audit log's head](images/ui-overview.png)
 
-Thirteen screens, embedded in the binary. No separate service, no extra
+Sixteen screens, embedded in the binary — seventeen under the Kubernetes
+operator, which adds one for the deployment itself. No separate service, no extra
 deployment.
 
 ---
@@ -59,7 +60,7 @@ evenly loaded while aggregate throughput falls.
 80 providers, virtual models with weighted *and* ordered targets, rule-based
 and semantic routing, RBAC with real keys, rate limits, budgets, usage
 accounting priced per request, webhooks, Prometheus, OpenTelemetry, an OpenAPI
-spec, and a thirteen-screen management UI **embedded in the binary**.
+spec, and a sixteen-screen management UI **embedded in the binary**.
 
 Each of those is a thing you would otherwise stand up, secure, monitor and
 carry. Here they are configuration, and none of them costs the request path a
@@ -117,7 +118,7 @@ Against a real vLLM the proxy's own overhead is **below the noise floor** —
 | **MCP gateway** | Every tool server behind one address, tools namespaced, and `mcp:invoke` grants that are deliberately not implied by `model:invoke` |
 | **80 providers** | Anything OpenAI-shaped is a row in a table. Anthropic and Gemini in their own wire format, translated both ways including streaming and tool calls |
 | **Control/data plane split** | One binary, three shapes. A proxy that loses its control plane keeps serving from its last snapshot |
-| **Thirteen-screen UI** | Embedded in the binary, with history, drill-downs and an audit log |
+| **Sixteen-screen UI** | Embedded in the binary, with history, drill-downs and an audit log — plus a seventeenth under the operator |
 
 ## Routing you can inspect before you trust it
 

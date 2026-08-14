@@ -14,7 +14,7 @@ working configuration — pick the row that matches where you are.
 | [2. Docker](#2-docker) | one process | the same, without a toolchain |
 | [3. Compose, split](#3-compose-with-the-planes-split) | two containers | one host, admin API off the public port |
 | [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
-| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests or the Helm chart |
+| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests, Helm chart, or the operator |
 
 
 The dividing line between the first two and the rest is `--role`. One binary
@@ -195,13 +195,14 @@ one of those three and it should go back to ClusterIP.
 
 ### 5. Kubernetes, scaled out
 
-Two ways to express the same two Deployments. They differ in how they are
-written, not in what they produce.
+Three ways to express the same two Deployments. The first two differ in how
+they are written; the third differs in what happens *after* the write.
 
 | | |
 |---|---|
 | [Manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes) | `kubectl apply -k deploy/kubernetes/base/`. Read exactly what is applied, and edit it. Overlays for TLS and a LoadBalancer |
 | [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy) | Values rather than patches, and templating across many environments |
+| [Operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator) | A `FastllmProxy` resource, reconciled continuously |
 
 ```bash
 # Manifests
@@ -212,18 +213,38 @@ helm install fastllm charts/fastllm-proxy \
   --set proxy.replicas=6 \
   --set database.existingSecret=fastllm-pg-app \
   --set secrets.existingSecret=fastllm-secrets
+
+# Operator
+kubectl apply -f operator/deploy/crd.yaml
+kubectl apply -f operator/deploy/operator.yaml -f operator/deploy/rbac.yaml
+kubectl apply -f operator/deploy/example.yaml
 ```
 
-**Pin both planes to the same image.** They share a database schema, and the
-older side reads a snapshot carrying fields it does not understand. Both
-install paths take one image tag and apply it to both Deployments — a
-`FastllmProxy` CRD and its controller used to enforce that continuously, and
-was removed as more machinery than the property was worth; keeping one value
-in one place does the same job.
+**What the operator adds** is not templating — a chart describes the
+deployment once, at apply time, and four things it cannot describe are the
+reason to run a controller:
 
-Scaling means scaling `proxy`. The control plane stays at one — it does not
-see request traffic, and nothing about serving more requests asks for more of
-it, so neither install path exposes a replica count for it.
+| | |
+|---|---|
+| **Upgrades are ordered** | The two planes share a database schema. `spec.image` rolls the *control plane first*, and the gateway is held at the image it is running until that has finished. An image that cannot be pulled therefore takes the control plane down and leaves the gateway serving |
+| **A rotated Secret rolls the pods that read it** | `secretKeyRef` env is resolved once, at container start. The pod templates carry a hash of the resolved material, so rotating the proxy token — or cert-manager renewing the control-plane certificate — is a rollout instead of a change that quietly does nothing |
+| **A bad configuration is refused, not deployed** | Every referenced Secret is resolved and checked before anything is applied. A missing key or a 31-byte encryption key becomes a condition naming the Secret and the key, rather than pods in `CreateContainerConfigError` |
+| **The install finishes** | `bootstrap` runs `set-password` as a Job once the control plane is ready, so the deployment ends with a UI somebody can log into rather than one nobody can |
+
+```console
+$ kubectl -n fastllm get fllm
+NAME      PHASE   GATEWAY   CONTROL   IMAGE                                   AGE
+fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.2.0   2m
+```
+
+`IMAGE` is what is actually serving, not what was asked for — during an
+upgrade it lags `spec.image`, which is the point of printing it.
+
+Scaling means scaling `proxy`, by `replicas` or by `autoscaling` (an HPA on
+CPU; the controller then stops writing the replica count so the two do not
+fight). The control plane stays at one — it does not see request traffic, and
+nothing about serving more requests asks for more of it, so no install path
+exposes a replica count for it.
 
 What changes as the data plane grows:
 

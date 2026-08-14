@@ -1,10 +1,15 @@
 // The shell: sidebar, header, and which screen is mounted.
 //
-// Navigation is a `useState` and a hash, not a router. There are thirteen
+// Navigation is a `useState` and a hash, not a router. There are sixteen
 // screens, no nested routes, and no parameters beyond "which one" — a router
 // would be a dependency carrying its own upgrade treadmill for a `switch`.
 // The hash is there so a reload, and a link pasted to a colleague, both land
 // where they were.
+//
+// One of them is conditional: **Deployment** exists only where a Kubernetes
+// operator manages this process, because it edits a `FastllmProxy` resource
+// rather than the database. `visibleNav` is what keeps it out of every other
+// install, and the shell falls back to Overview if a hash names it anyway.
 
 import React, { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "./api.js";
@@ -26,6 +31,7 @@ import { LimitsAndBudgets } from "./views/LimitsAndBudgets.jsx";
 import { Audit } from "./views/Audit.jsx";
 import { Fleet } from "./views/Fleet.jsx";
 import { Settings } from "./views/Settings.jsx";
+import { Deployment } from "./views/Deployment.jsx";
 
 const SCREENS = {
   overview: { title: "Overview", subtitle: "control plane, fleet and backends", view: Overview },
@@ -63,6 +69,12 @@ const SCREENS = {
   audit: { title: "Audit log", subtitle: "append-only · every /admin/* mutation", view: Audit },
   fleet: { title: "Fleet", subtitle: "what each proxy replica can see", view: Fleet },
   settings: { title: "Settings", subtitle: "fallback, and what this process was started with", view: Settings },
+  // Only reachable under an operator — see NAV below and `operator_managed`.
+  deployment: {
+    title: "Deployment",
+    subtitle: "the FastllmProxy an operator reconciles",
+    view: Deployment,
+  },
 };
 
 const NAV = [
@@ -98,10 +110,23 @@ const NAV = [
     label: "SYSTEM",
     items: [
       { id: "fleet", label: "Fleet" },
+      // Absent unless an operator manages this deployment. Not disabled,
+      // absent: a greyed-out entry invites somebody to work out how to enable
+      // it, when the honest answer is that this install has nothing to show
+      // there. See `visibleNav`.
+      { id: "deployment", label: "Deployment", needs: "operator_managed" },
       { id: "settings", label: "Settings" },
     ],
   },
 ];
+
+/** The nav minus anything this deployment cannot do. */
+export function visibleNav(config) {
+  return NAV.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.needs || Boolean(config?.[item.needs])),
+  })).filter((group) => group.items.length > 0);
+}
 
 function screenFromHash() {
   const id = window.location.hash.replace(/^#\/?/, "");
@@ -178,7 +203,12 @@ export function App() {
     }
   };
 
-  const active = SCREENS[screen];
+  // A hash naming a screen this deployment does not have — `#/deployment` on
+  // a Helm install, or a bookmark carried between clusters — falls back to
+  // Overview rather than rendering a page whose every request 404s.
+  const reachable =
+    screen !== "deployment" || Boolean(config?.operator_managed);
+  const active = reachable ? SCREENS[screen] : SCREENS.overview;
   const View = active.view;
   const onUnauthorised = () => setAuthed(false);
 
@@ -216,7 +246,7 @@ export function App() {
             gap: 16,
           }}
         >
-          {NAV.map((group) => (
+          {visibleNav(config).map((group) => (
             <div key={group.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div
                 style={{

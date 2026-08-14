@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fastllm-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-operator
+  namespace: fastllm-system
+  labels:
+    app.kubernetes.io/name: fastllm-operator
+spec:
+  # Two replicas, one leader. Every replica runs and exactly one holds the
+  # `fastllm-operator-leader` Lease and reconciles; the other waits. Pinning
+  # this to a single replica — which it used to be — is not availability but
+  # the absence of it: a node drain leaves the cluster with no controller
+  # until the pod is rescheduled. See operator/src/lease.rs.
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastllm-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastllm-operator
+    spec:
+      serviceAccountName: fastllm-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      # Two replicas on one node survive a process crash and not a node
+      # failure, which is the failure this is here for.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: fastllm-operator
+      containers:
+        - name: operator
+          image: ghcr.io/azrtydxb/fastllm-operator:v0.2.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8080
+          env:
+            - name: FASTLLM_OPERATOR_LOG
+              value: info
+            # The lease holder's identity, and the namespace the Lease lives
+            # in. The pod name is unique in a namespace at any one time, which
+            # is exactly what a holder identity has to be.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+          # `/healthz` is "the process is alive"; `/readyz` is "it has a
+          # working API client". A standby replica is deliberately both — it
+          # is doing its job by waiting, and restarting it would achieve
+          # nothing.
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+# Scrape target for the operator's own metrics: reconciles, failures, and
+# which replica is the leader. A controller with no metrics is one you find
+# out about from the thing it was supposed to be managing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastllm-operator
+  namespace: fastllm-system
+  labels:
+    app.kubernetes.io/name: fastllm-operator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: fastllm-operator
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics

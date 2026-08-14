@@ -64,6 +64,11 @@ const SCREENS = [
   "limits",
   "audit",
   "fleet",
+  // Only exists under an operator, so it is walked only when the control
+  // plane this is pointed at says so — checked below rather than assumed,
+  // because asserting it unconditionally would fail every Helm deployment
+  // and asserting it never would test nothing.
+  "deployment",
   "settings",
 ];
 
@@ -149,7 +154,26 @@ async function inspect() {
 
 // --- every screen ----------------------------------------------------------
 
+// Whether this deployment has an operator, asked of the control plane rather
+// than assumed. The deployment screen exists only there.
+const managed = await page.evaluate(async () => {
+  const r = await fetch("/admin/config", { credentials: "same-origin" });
+  return r.ok ? Boolean((await r.json()).operator_managed) : false;
+});
+console.log(`  (operator-managed: ${managed})`);
+
 for (const [i, screen] of SCREENS.entries()) {
+  if (screen === "deployment" && !managed) {
+    // And prove it is *absent*, not merely unvisited: the nav must not offer
+    // a screen whose every request would 404.
+    const offered = await page.evaluate(() =>
+      [...document.querySelectorAll("nav button")].some((b) =>
+        b.textContent.includes("Deployment"),
+      ),
+    );
+    note(!offered, "deployment screen hidden without an operator", offered && "nav offers it");
+    continue;
+  }
   consoleErrors.length = 0;
   failedRequests.length = 0;
   await page.goto(`${url}/#/${screen}`, { waitUntil: "networkidle2" });
@@ -193,6 +217,73 @@ if (hasVm) {
   await page.screenshot({ path: `${SHOTS}14-dryrun.png` });
 } else {
   console.log("  — no virtual model configured; dry-run not exercised");
+}
+
+// The operator screen, driven for real: read the resource, change nothing,
+// and confirm the page is showing live status rather than an empty form.
+if (managed) {
+  await page.goto(`${url}/#/deployment`, { waitUntil: "networkidle2" });
+  await new Promise((r) => setTimeout(r, 900));
+  const state = await page.evaluate(() => {
+    const t = document.querySelector("main").innerText;
+    const inputs = [...document.querySelectorAll("input")].filter((i) => i.type !== "checkbox");
+    return {
+      text: t,
+      filled: inputs.filter((i) => i.value && i.value.length).length,
+      apply: [...document.querySelectorAll("button")].find((b) =>
+        b.textContent.includes("Apply to the cluster"),
+      )?.disabled,
+    };
+  });
+  note(state.filled >= 3, "the form is populated from the live resource", `${state.filled} fields`);
+  note(state.text.includes("SERVING"), "it reports what is actually serving");
+  note(state.apply === true, "Apply is disabled until something is edited");
+
+  // A nav entry that exists, and reaches the screen.
+  const inNav = await page.evaluate(() =>
+    [...document.querySelectorAll("nav button")].some((b) => b.textContent.includes("Deployment")),
+  );
+  note(inNav, "the Deployment entry is in the nav under an operator");
+
+  // Editing arms the button, discarding disarms it. Deliberately stops short
+  // of clicking Apply: this harness is pointed at whatever deployment it is
+  // given, and a browser test that scaled somebody's gateway to prove it can
+  // would be a bad trade. The write path is covered by `interact.mjs`, which
+  // asserts the exact body this button sends, and end to end against the
+  // admin API.
+  const armed = await page.evaluate(() => {
+    const input = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent.includes("GATEWAY REPLICAS"))
+      ?.querySelector("input");
+    if (!input) return null;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    ).set;
+    setter.call(input, "5");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const afterEdit = await page.evaluate(
+    () =>
+      [...document.querySelectorAll("button")].find((b) =>
+        b.textContent.includes("Apply to the cluster"),
+      )?.disabled,
+  );
+  note(armed && afterEdit === false, "editing a field arms Apply");
+
+  await page.$$eval("button", (bs) => bs.find((b) => b.textContent.trim() === "Discard")?.click());
+  await new Promise((r) => setTimeout(r, 400));
+  const afterDiscard = await page.evaluate(
+    () =>
+      [...document.querySelectorAll("button")].find((b) =>
+        b.textContent.includes("Apply to the cluster"),
+      )?.disabled,
+  );
+  note(afterDiscard === true, "Discard puts the form back to the live values");
+
+  await page.screenshot({ path: `${SHOTS}15-deployment.png` });
 }
 
 // The 1280 width a laptop actually uses, to catch a layout that only works at

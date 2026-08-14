@@ -1,0 +1,104 @@
+# A complete FastllmProxy. The Secrets it names are yours to create:
+#
+#   kubectl create namespace fastllm
+#   kubectl -n fastllm create secret generic fastllm-database \
+#     --from-literal=uri='postgres://user:pass@host:5432/fastllm'
+#   kubectl -n fastllm create secret generic fastllm-secrets \
+#     --from-literal=proxy-token="pt-$(openssl rand -hex 24)" \
+#     --from-literal=encryption-key="$(openssl rand -hex 32)" \
+#     --from-literal=admin-password="$(openssl rand -base64 24)"
+#
+# Get any of that wrong and the resource says so — `kubectl describe fllm`
+# names the Secret and the key rather than leaving pods in
+# CreateContainerConfigError.
+apiVersion: fastllm.io/v1alpha1
+kind: FastllmProxy
+metadata:
+  name: fastllm
+  namespace: fastllm
+spec:
+  image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
+
+  database:
+    name: fastllm-database
+    key: uri
+  proxyToken:
+    name: fastllm-secrets
+    key: proxy-token
+  # Immutable, and the API server enforces it: changing this key without
+  # running `reencrypt-backends` makes every stored upstream credential
+  # undecryptable.
+  encryptionKey:
+    name: fastllm-secrets
+    key: encryption-key
+
+  # Without this the install finishes with a UI nobody can log into: a freshly
+  # migrated database has no password on any principal. The controller runs
+  # `set-password` as a Job, once, after the control plane is ready.
+  bootstrap:
+    name: admin
+    password:
+      name: fastllm-secrets
+      key: admin-password
+
+  observability:
+    logLevel: info
+    logFormat: json
+    # Only does anything in an image built with the `otel` feature.
+    # otlpEndpoint: http://otel-collector.observability:4317
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      # The label your Prometheus selects ServiceMonitors by. Without it the
+      # object exists and is never read.
+      # labels: { release: kube-prometheus-stack }
+
+  proxy:
+    replicas: 3
+    policy: cacheAffinity
+    serviceType: ClusterIP
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: "2", memory: 1Gi }
+
+    # Where a pinned load-balancer address goes, and anything else your LB
+    # implementation reads.
+    # serviceAnnotations:
+    #   io.cilium/lb-ipam-ips: 192.168.10.125
+
+    # autoscaling:
+    #   enabled: true
+    #   minReplicas: 3
+    #   maxReplicas: 12
+    #   targetCpuUtilizationPercentage: 70
+
+    # ingress:
+    #   enabled: true
+    #   className: nginx
+    #   host: llm.example.com
+    #   tlsSecretName: llm-tls
+
+    # pod:
+    #   nodeSelector: { node-role.kubernetes.io/gpu-adjacent: "true" }
+    #   tolerations:
+    #     - key: dedicated
+    #       operator: Equal
+    #       value: inference
+    #       effect: NoSchedule
+    #   priorityClassName: production
+    #   # Anything this CRD does not model yet. Appended last, so it wins.
+    #   extraArgs: ["--max-body-bytes=8388608"]
+
+  # Uncomment once cert-manager has issued a certificate into this Secret.
+  # /snapshot carries decrypted upstream credentials, so this is not optional
+  # wherever a backend has a real one — see docs/security.md. A renewal rolls
+  # both planes on its own: the certificate is part of the config hash.
+  # control:
+  #   tlsSecretName: fastllm-control-tls
+
+  tuning: |
+    fastllm:
+      prefix_bytes: 2048
+      balance_abs: 8
+      balance_rel: 1.5
+      unhealthy_after: 2

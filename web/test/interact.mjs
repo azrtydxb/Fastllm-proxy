@@ -198,6 +198,7 @@ const SCREENS = [
   "rbac",
   "limits",
   "audit",
+  "deployment",
   "fleet",
   "settings",
 ];
@@ -576,6 +577,58 @@ await goto("audit");
     await click(older);
     check("pagination is keyset, on before=", !!lastCall("GET", "before="));
   }
+}
+
+// The deployment screen: what it PATCHes, and what it must not.
+await goto("deployment");
+{
+  sent.length = 0;
+  const fieldNamed = (label) =>
+    $("label")
+      .find((l) => l.textContent.includes(label))
+      ?.querySelector("input, select");
+
+  await fill(fieldNamed("GATEWAY REPLICAS"), "6");
+  await click(byText("Apply to the cluster"));
+  const call = lastCall("PATCH", "/admin/deployment");
+  check("scaling sends a PATCH to /admin/deployment", !!call, "no PATCH was sent");
+  check(
+    "replicas is sent as a number",
+    call?.body?.replicas === 6,
+    `sent ${JSON.stringify(call?.body?.replicas)}`,
+  );
+  // The reason a merge patch is used at all: a body carrying every field
+  // would rewrite values managed in Git and roll the deployment for changes
+  // nobody made.
+  check(
+    "and nothing else is",
+    call && Object.keys(call.body).length === 1,
+    `sent ${JSON.stringify(call?.body)}`,
+  );
+
+  // An image change is the one edit with an ordering consequence, so it must
+  // arrive as `image` at the top level rather than under `proxy`.
+  sent.length = 0;
+  await goto("deployment");
+  await fill(fieldNamed("IMAGE"), "ghcr.io/azrtydxb/fastllm-proxy:v0.4.0");
+  await click(byText("Apply to the cluster"));
+  const upgrade = lastCall("PATCH", "/admin/deployment");
+  check(
+    "an image change is sent as image",
+    upgrade?.body?.image === "ghcr.io/azrtydxb/fastllm-proxy:v0.4.0",
+    `sent ${JSON.stringify(upgrade?.body)}`,
+  );
+
+  // Nothing typed, nothing sent: an empty patch still bumps the resource's
+  // generation, which is a rollout for no reason.
+  sent.length = 0;
+  await goto("deployment");
+  await click(byText("Apply to the cluster"));
+  check(
+    "an untouched form sends nothing",
+    !lastCall("PATCH", "/admin/deployment"),
+    "a PATCH was sent for a form nobody edited",
+  );
 }
 
 // Logout last, on purpose: it is a real control and must work, but clicking

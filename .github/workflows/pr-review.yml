@@ -36,7 +36,7 @@ jobs:
 
           # What a reader is promised somewhere: the request path, the admin
           # API, the schema, the flags, and the published spec.
-          behaviour=$(changed 'src/**' 'migrations/**' 'openapi.json' 'charts/**' 'deploy/**' | head -50)
+          behaviour=$(changed 'src/**' 'migrations/**' 'openapi.json' 'charts/**' 'deploy/**' 'operator/**' | head -50)
           docs=$(changed 'docs/**' 'README.md' 'CHANGELOG.md' '**/README.md')
 
           if [ -z "$behaviour" ]; then

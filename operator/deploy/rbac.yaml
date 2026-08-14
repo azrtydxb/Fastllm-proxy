@@ -1,0 +1,109 @@
+# What the operator may do, and nothing beyond it.
+#
+# The one permission an operator is often given by reflex and this one still
+# does not have: writing Secrets. It reads the three a `FastllmProxy` names —
+# it has to, to tell you *which* one is missing a key and to notice a rotation
+# — but it can never create or modify one, so a compromised controller cannot
+# mint itself a credential the cluster would then trust.
+#
+# It also touches nothing outside the objects it creates: no node access, no
+# namespace creation, no cluster-scoped writes other than the CRD status.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fastllm-operator
+  namespace: fastllm-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fastllm-operator
+rules:
+  # `patch` as well as read, and only because of what the next rule grants:
+  # Kubernetes refuses to let a controller create a Role conferring
+  # permissions it does not itself hold. The control plane's Role carries
+  # `get`/`patch` on one FastllmProxy, so this must too. The controller never
+  # patches a spec of its own accord — it only writes status.
+  - apiGroups: ["fastllm.io"]
+    resources: ["fastllmproxies"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Status is a subresource with its own rule, so the controller can report
+  # what it observes without being able to rewrite the spec it was given.
+  - apiGroups: ["fastllm.io"]
+    resources: ["fastllmproxies/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read-only, and only so preflight can say which Secret or which key is
+  # wrong instead of leaving pods in CreateContainerConfigError, and so a
+  # rotated value can roll the pods that read it. No create, no update, no
+  # delete — see src/preflight.rs.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The one-shot Job that creates the first admin login.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election, so more than one replica can run without two of them
+  # writing the same objects — see src/lease.rs.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Optional: only used when a FastllmProxy asks for a ServiceMonitor. Listed
+  # unconditionally because RBAC cannot be conditional, and harmless on a
+  # cluster with no Prometheus operator — the API group simply does not exist.
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The control plane gets its own ServiceAccount and a Role naming exactly
+  # one FastllmProxy, so the management UI can show and edit the deployment it
+  # is part of. Namespaced Roles only — this cannot grant anything
+  # cluster-wide, and `resourceNames` on the Role it writes keeps a control
+  # plane from reaching a sibling deployment in the same namespace.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events are how a reconcile failure reaches `kubectl describe`.
+  #
+  # Both API groups, and that is not belt-and-braces: `kube`'s recorder writes
+  # through `events.k8s.io/v1`, while `kubectl describe` and older tooling
+  # read the core-group view of the same objects. Granting only the core group
+  # — which this did — means every event is refused with a 403 that appears
+  # nowhere except the controller's own log. Found by running it, not by a
+  # test: RBAC is only real against an API server.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fastllm-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fastllm-operator
+subjects:
+  - kind: ServiceAccount
+    name: fastllm-operator
+    namespace: fastllm-system

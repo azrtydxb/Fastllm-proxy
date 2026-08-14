@@ -1,4 +1,4 @@
-// One loading pattern, so thirteen screens do not each invent their own.
+// One loading pattern, so sixteen screens do not each invent their own.
 //
 // Every screen needs the same four things: fetch on mount, keep the previous
 // data visible while refetching, surface an error without blanking the page,

@@ -8,15 +8,50 @@ source for *why* anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Added
+
+- **The Kubernetes operator earns its keep.** It was removed earlier in this
+  cycle for reconciling two Deployments a chart already produces; it is back
+  because the four things a chart genuinely cannot do are now implemented and
+  verified against a live cluster:
+  - **Ordered upgrades.** The two planes share a database schema, so
+    `spec.image` rolls the control plane *first* and holds the gateway at the
+    image it is running until that has finished. Verified with a deliberately
+    unpullable tag: the control plane went down, the gateway kept serving on
+    the old image, and the `Upgrading` condition said which and why.
+  - **Rotation that takes effect.** Both pod templates carry a hash of the
+    resolved Secret material, so rotating the proxy token — or cert-manager
+    renewing the control-plane certificate — rolls the pods instead of
+    silently doing nothing until an unrelated restart.
+  - **Preflight.** Every referenced Secret is resolved and checked before
+    anything is applied; a missing key or a short encryption key becomes a
+    condition naming the Secret and the key rather than pods in
+    `CreateContainerConfigError`. `encryptionKey` is immutable, enforced by
+    the API server through a CEL rule.
+  - **A finished install.** `bootstrap` runs `set-password` as a Job once the
+    control plane is ready, so the deployment ends with a UI that can be
+    signed into. Verified end to end: `POST /login` returns 200 and the admin
+    API answers with the cookie, 401 without.
+
+- **The management UI knows when an operator runs it.** A **Deployment**
+  screen — image, replicas, policy, timeouts, workers, pool size, autoscaling,
+  plus phase, conditions and what is actually serving — that patches the
+  `FastllmProxy` and lets the operator roll it out. It appears *only* under an
+  operator: the control plane learns it is managed from an environment
+  variable only this controller sets, so a Helm or manifest install has no
+  such screen and `GET /admin/deployment` answers 404. The control plane
+  reaches the API server through its own ServiceAccount and a Role naming one
+  `resourceName`, with `get` and `patch` and nothing else.
+
+  Plus the day-1 fields a real cluster cannot do without — Service
+  annotations (a pinned load-balancer address), scheduling, ingress, HPA,
+  `workers`/`poolMaxIdle`, OTLP, a ServiceMonitor, and `extraArgs`/`extraEnv`
+  as the escape hatch — and, for the operator itself, leader election over a
+  Lease (so it runs two replicas rather than one), Kubernetes Events, and its
+  own `/metrics`, `/healthz` and `/readyz`.
+
 ### Removed
 
-- **The Kubernetes operator** (`fastllm-operator`, the `FastllmProxy` CRD and
-  its image). It reconciled two Deployments the manifests and the Helm chart
-  already produce, and the one property it added over them — both planes
-  pinned to a single image field — is one value in one place in either of
-  those. A controller, a CRD schema, an RBAC role and a second release lane
-  were more machinery than that property was worth. Deploy with
-  `kubectl apply -k deploy/kubernetes/base/` or the chart.
 - **Seven of the classifier benchmarks** (`potion`, `potion-real`,
   `potion-classes`, `potion-arch`, `potion-wide`, `classcheck`, `wrapskew`).
   They answered "which model, which classes, which token cap" once; the

@@ -147,6 +147,12 @@ struct Ctx {
     /// health is a statement about *now*, and a row saying a backend was up two
     /// hours ago is history nobody asked for. See `crate::health_report`.
     fleet: Arc<crate::health_report::store::Fleet>,
+    /// The `FastllmProxy` managing this process, if one does.
+    ///
+    /// `None` for every other way of running this — File mode, Helm, a
+    /// laptop — and that is what makes the UI's deployment screen appear only
+    /// where it can do something. See `control::k8s`.
+    operator: Option<Arc<crate::control::k8s::Operator>>,
 }
 
 /// Every admin route fails the same way `post_key` does: a status plus a JSON
@@ -4631,6 +4637,10 @@ async fn get_config(
         "models": models,
         "models_unpriced": unpriced,
         "models_cached": cached,
+        // What the UI keys its deployment screen off. A boolean rather than
+        // the resource reference: a deployment nobody operates should not
+        // learn a namespace/name it cannot use.
+        "operator_managed": ctx.operator.is_some(),
     })))
 }
 
@@ -4651,6 +4661,88 @@ async fn rebuild_snapshot(
     Ok(Json(serde_json::json!({
         "snapshot_version": snapshot.version,
         "rebuild_failures": ctx.snapshot_rebuild_failures.load(Ordering::Relaxed),
+    })))
+}
+
+/// `GET /admin/deployment`: the `FastllmProxy` running this process.
+///
+/// 404 when nothing operates this deployment, which is the same answer the UI
+/// uses to hide the screen — `GET /admin/config`'s `operator_managed` is the
+/// cheap version of this question, asked once at load.
+async fn get_deployment(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(op) = ctx.operator.as_ref() else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "this deployment is not managed by the fastllm operator",
+        ));
+    };
+    let cr = op.get().await.map_err(|e| {
+        // The API server's own message names the missing RBAC rule when that
+        // is the problem, which is the usual problem.
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            format!("reading the FastllmProxy: {e}"),
+        )
+    })?;
+    // Deliberately a projection, not the whole resource: the CR carries
+    // Secret *references*, and echoing the shape of a deployment's secret
+    // wiring into a UI response is a detail that has no business being there.
+    Ok(Json(serde_json::json!({
+        "namespace": op.namespace,
+        "name": op.name,
+        "image": cr.pointer("/spec/image"),
+        "proxy": {
+            "replicas": cr.pointer("/spec/proxy/replicas"),
+            "policy": cr.pointer("/spec/proxy/policy"),
+            "upstream_timeout": cr.pointer("/spec/proxy/upstreamTimeout"),
+            "workers": cr.pointer("/spec/proxy/workers"),
+            "pool_max_idle": cr.pointer("/spec/proxy/poolMaxIdle"),
+            "service_type": cr.pointer("/spec/proxy/serviceType"),
+            "autoscaling": cr.pointer("/spec/proxy/autoscaling"),
+        },
+        "status": cr.get("status"),
+    })))
+}
+
+/// `PATCH /admin/deployment`: change the shape of this deployment.
+///
+/// The write half of the screen. Everything it can change is a field the
+/// operator already knows how to roll out safely — an image change is
+/// sequenced across the two planes, a replica change is a scale — and the
+/// allowlist is enforced by the type, not by this handler: see
+/// `control::k8s::DeploymentEdit` for what is deliberately not in it.
+async fn patch_deployment(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(edit): Json<crate::control::k8s::DeploymentEdit>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(op) = ctx.operator.as_ref() else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "this deployment is not managed by the fastllm operator",
+        ));
+    };
+    let Some(patch) = edit.into_patch() else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "no changes: send at least one field",
+        ));
+    };
+    let cr = op.patch_spec(patch).await.map_err(|e| {
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            format!("patching the FastllmProxy: {e}"),
+        )
+    })?;
+    // No `refresh(&ctx)`: nothing here touches the database or the snapshot.
+    // What this changed is a Kubernetes resource, and the operator — not this
+    // process — is what acts on it.
+    Ok(Json(serde_json::json!({
+        "image": cr.pointer("/spec/image"),
+        "generation": cr.pointer("/metadata/generation"),
     })))
 }
 
@@ -4914,7 +5006,17 @@ pub async fn serve(
         fleet: Arc::new(crate::health_report::store::Fleet::new(
             std::time::Duration::from_secs(30),
         )),
+        // Detected once, at startup: whether an operator manages this
+        // deployment cannot change without the pod being recreated by that
+        // very operator.
+        operator: crate::control::k8s::Operator::from_env().map(Arc::new),
     };
+    if let Some(op) = &ctx.operator {
+        tracing::info!(
+            resource = %format!("{}/{}", op.namespace, op.name),
+            "operator-managed: the deployment screen is available"
+        );
+    }
     // Every mutating route below ends in `refresh(&ctx)` — the one write
     // path that publishes through `SnapshotSink::store_snapshot`. That is
     // what keeps the published snapshot and (in `--role all`) the routing
@@ -5015,6 +5117,10 @@ pub async fn serve(
         .route("/admin/routing/dry-run", post(routing_dry_run))
         .route("/admin/prices/sync", post(sync_prices))
         .route("/admin/config", get(get_config))
+        .route(
+            "/admin/deployment",
+            get(get_deployment).patch(patch_deployment),
+        )
         .route("/admin/snapshot/rebuild", post(rebuild_snapshot))
         .route("/admin/sessions/revoke-all", post(revoke_all_sessions))
         .route(
@@ -5268,6 +5374,10 @@ mod tests {
             snapshot_rebuild_failures: Arc::new(AtomicU64::new(0)),
             reconcile: Arc::new(ReconcileState::new()),
             tls_enabled: false,
+            // No cluster in a test, and no pretending there is one: the two
+            // deployment routes answer 404 here, which is the same answer
+            // every non-operator deployment gets.
+            operator: None,
             fleet: Arc::new(crate::health_report::store::Fleet::new(
                 std::time::Duration::from_secs(30),
             )),

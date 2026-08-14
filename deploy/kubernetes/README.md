@@ -80,4 +80,5 @@ control plane reads a snapshot with fields it does not understand.
 |---|---|
 | **These manifests** | You want to read exactly what is applied, and edit it |
 | [Helm chart](../../charts/fastllm-proxy) | You want values, not patches — and templating for many environments |
+| [Operator](../../operator) | You want the deployment *kept* that shape: upgrades ordered across the two planes, a rotated Secret actually rolling the pods, and the admin login created for you |
 | [`../`](../README.md) | You are looking at how one real cluster actually runs it |

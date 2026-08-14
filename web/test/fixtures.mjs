@@ -30,6 +30,59 @@ const FIXTURES = {
     models: 2,
     models_unpriced: 1,
     models_cached: 1,
+    // This fixture is an operator-managed deployment, so the Deployment
+    // screen is reachable. `render.mjs` also mounts the shell with this
+    // false, which is the case that must show no such screen at all.
+    operator_managed: true,
+  },
+  // Mid-upgrade on purpose: the control plane has rolled to v0.3.0 and the
+  // gateway is still held at v0.2.0. A fixture that was simply Ready would
+  // never exercise the banner or the "serving" column, which are the two
+  // things this screen exists to show.
+  "/admin/deployment": {
+    namespace: "fastllm",
+    name: "fastllm",
+    image: "ghcr.io/azrtydxb/fastllm-proxy:v0.3.0",
+    proxy: {
+      replicas: 3,
+      policy: "cacheAffinity",
+      upstream_timeout: 120,
+      workers: null,
+      pool_max_idle: 64,
+      service_type: "ClusterIP",
+      autoscaling: {
+        enabled: false,
+        minReplicas: 2,
+        maxReplicas: 10,
+        targetCpuUtilizationPercentage: 70,
+      },
+    },
+    status: {
+      phase: "Upgrading",
+      proxyReplicas: "3/3",
+      controlReady: true,
+      observedImage: "ghcr.io/azrtydxb/fastllm-proxy:v0.2.0",
+      bootstrapped: true,
+      configHash: "9f2c41ab77de0051",
+      observedGeneration: 7,
+      conditions: [
+        {
+          type: "SecretsResolved",
+          status: "True",
+          reason: "Resolved",
+          message: "every referenced Secret exists and is usable",
+          lastTransitionTime: "2026-08-14T10:00:00Z",
+        },
+        {
+          type: "Upgrading",
+          status: "True",
+          reason: "RollingControlPlane",
+          message:
+            "control plane moving to ghcr.io/azrtydxb/fastllm-proxy:v0.3.0; gateway held at ghcr.io/azrtydxb/fastllm-proxy:v0.2.0",
+          lastTransitionTime: "2026-08-14T10:04:00Z",
+        },
+      ],
+    },
   },
   // Two replicas that disagree about one backend and about the snapshot
   // version: the two states this UI exists to surface, so the banners and the

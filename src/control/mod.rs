@@ -8,6 +8,7 @@ pub mod build;
 pub mod db;
 pub mod gcp;
 pub mod import;
+pub mod k8s;
 pub mod pricing;
 pub mod reconcile;
 pub mod secrets;

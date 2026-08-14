@@ -1,6 +1,7 @@
 # A tour of the UI
 
-Thirteen screens, embedded in the binary. What each one answers, and the one
+Sixteen screens, embedded in the binary, and a seventeenth that appears only
+under the Kubernetes operator. What each one answers, and the one
 thing on it worth knowing before you trust it.
 
 ## Overview — is it healthy, and what has it been doing
@@ -117,3 +118,20 @@ session including your own.
 | [Troubleshooting](troubleshooting.md) | The failures people actually hit |
 | [Operations](operations.md) | The three roles, deployment shapes, configuration |
 | [API and administration](api.md) | Every endpoint, and `openapi.json` |
+
+## Deployment
+
+**Only under the Kubernetes operator.** Every other screen edits a row in
+Postgres; this one edits the `FastllmProxy` resource that describes the
+deployment itself — image, gateway replicas, selection policy, upstream
+timeout, worker count, connection pool, and autoscaling — alongside the phase,
+the conditions, the config hash and the image that is *actually* serving,
+which during an ordered upgrade is not the one in the spec.
+
+Applying a change patches the resource and hands it to the operator. The page
+says so: a rollout is not a snapshot, and reporting "saved" while two
+Deployments are still turning over would be a lie of tense.
+
+Installs without an operator do not have this screen at all — not disabled,
+absent — and the routes behind it answer 404. See
+[the operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator).

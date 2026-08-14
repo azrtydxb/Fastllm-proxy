@@ -263,6 +263,120 @@
         ]
       }
     },
+    "/admin/deployment": {
+      "get": {
+        "summary": "The FastllmProxy resource running this deployment, and its status",
+        "description": "404 when no operator manages this deployment, which is also how the management UI decides whether to show the screen at all.",
+        "operationId": "get_admin_deployment",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "Not managed by the fastllm operator"
+          },
+          "502": {
+            "description": "The Kubernetes API could not be read"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "summary": "Change the shape of this deployment: image, replicas, policy, autoscaling",
+        "description": "A merge patch against the FastllmProxy spec, restricted to fields the operator can roll out safely. Secret references, service type and bootstrap are deliberately not editable here.",
+        "operationId": "patch_admin_deployment",
+        "tags": [
+          "admin"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image": {
+                    "type": "string"
+                  },
+                  "replicas": {
+                    "type": "integer"
+                  },
+                  "policy": {
+                    "type": "string",
+                    "enum": [
+                      "cacheAffinity",
+                      "leastLoaded",
+                      "roundRobin",
+                      "lowestLatency"
+                    ]
+                  },
+                  "upstream_timeout": {
+                    "type": "integer"
+                  },
+                  "workers": {
+                    "type": "integer"
+                  },
+                  "pool_max_idle": {
+                    "type": "integer"
+                  },
+                  "autoscaling_enabled": {
+                    "type": "boolean"
+                  },
+                  "autoscaling_min_replicas": {
+                    "type": "integer"
+                  },
+                  "autoscaling_max_replicas": {
+                    "type": "integer"
+                  },
+                  "autoscaling_target_cpu": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Patched"
+          },
+          "400": {
+            "description": "No fields, or a field this route does not accept"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "Not managed by the fastllm operator"
+          },
+          "502": {
+            "description": "The Kubernetes API rejected the patch"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/fallback-model": {
       "get": {
         "summary": "Read fallback-model",
@@ -2397,7 +2511,7 @@
             "description": "The tool name carried no server namespace"
           },
           "404": {
-            "description": "No such server, or this key may not reach it \u2014 deliberately the same answer"
+            "description": "No such server, or this key may not reach it — deliberately the same answer"
           },
           "502": {
             "description": "The server did not return a usable reply"

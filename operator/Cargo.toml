@@ -1,0 +1,57 @@
+[package]
+name = "fastllm-operator"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Kubernetes operator for fastllm-proxy"
+license = "Apache-2.0"
+
+[lib]
+name = "fastllm_operator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fastllm-operator"
+path = "src/main.rs"
+
+# Emits the CRD YAML from the same Rust types the controller reconciles, so
+# the manifest in deploy/ cannot drift from the struct. `cargo run -p
+# fastllm-operator --bin crdgen > operator/deploy/crd.yaml`.
+[[bin]]
+name = "crdgen"
+path = "src/crdgen.rs"
+
+[dependencies]
+kube = { version = "0.99", default-features = false, features = [
+    "client",
+    "derive",
+    "runtime",
+    "rustls-tls",
+] }
+k8s-openapi = { version = "0.24", features = ["latest", "schemars"] }
+schemars = "0.8"
+# Named directly only to choose the crypto provider — see main(). Without it
+# rustls panics at the first TLS handshake because more than one provider
+# feature is enabled somewhere in the tree.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+# Hashing the resolved Secret material into the pod template, so a rotation is
+# a rollout rather than a no-op — see `src/preflight.rs`. Same crates the
+# proxy already uses for the same job, so the workspace grows no new tree.
+sha2 = "0.10"
+hex = "0.4"
+# The operator's own /metrics and probes (`src/obs.rs`). Four counters and a
+# scrape: hyper is already in this workspace's lock, and a metrics client
+# library would be a registry, a macro layer and an exporter for that.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
