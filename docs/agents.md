@@ -5,6 +5,10 @@
 calls tools, it spends money — so "which of our keys may set which agent
 running" is a question somebody eventually has to answer.
 
+![The Agents screen: each agent with its URL, pinned A2A version, whether a credential is set, and whether it is enabled](images/ui-agents.png)
+
+Add one on **Agents**, or by API:
+
 ```bash
 curl -sk -b /tmp/ck -X POST https://control:4001/admin/a2a-agents \
   -H 'content-type: application/json' -d '{
