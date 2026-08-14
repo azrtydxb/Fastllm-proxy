@@ -9,6 +9,7 @@
 - [Performance](performance.md)
 - [What it can do](features.md)
 - [Providers](providers.md)
+- [MCP gateway](mcp.md)
 - [Connecting a client](integrations.md)
 - [Troubleshooting](troubleshooting.md)
 

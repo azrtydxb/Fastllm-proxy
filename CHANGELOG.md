@@ -8,6 +8,20 @@ source for *why* anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Added
+
+- **MCP gateway.** One endpoint in front of every tool server, with the same
+  keys and the same grant machinery as models. A server is a row; a grant is
+  `mcp:invoke` on `mcp/<name>` and is deliberately not implied by
+  `model:invoke`, because tools have side effects and models do not. Tools
+  arrive namespaced `<server>__<tool>` so two servers can both expose
+  `search`. `GET /v1/mcp/servers`, `POST /v1/mcp/tools/list`,
+  `POST /v1/mcp/tools/call`, an **MCP servers** screen, and admin CRUD under
+  `/admin/mcp-servers`. `stdio` servers are deliberately unsupported — see
+  docs/mcp.md.
+- **Interactive API reference** on the docs site, rendering the same
+  `openapi.json` the control plane serves at `/openapi.json`.
+
 ### Fixed
 
 - `import` dropped four backend fields it had already parsed. `protocol`,

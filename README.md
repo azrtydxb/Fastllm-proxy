@@ -191,6 +191,7 @@ cargo build --release
 | [Performance](docs/performance.md) | Every measured number, its conditions, and what has not been measured |
 | [What it can do](docs/features.md) | The features, the measured trade-offs, and how a request finds a backend |
 | [Providers](docs/providers.md) | All 80, how to add one, and how upstream credentials are handled |
+| [MCP gateway](docs/mcp.md) | Tool servers behind one endpoint, namespaced and authorised |
 | [Connecting a client](docs/integrations.md) | SDKs, coding agents, frameworks, and observability — copy-paste config for each |
 | [Troubleshooting](docs/troubleshooting.md) | The failures people actually hit, and what each one means |
 | [Running it](docs/operations.md) | Five deployment shapes, from one binary to a scaled cluster, plus metrics, logs and traces |

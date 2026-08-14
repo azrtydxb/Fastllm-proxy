@@ -136,6 +136,19 @@ Anything OpenAI-shaped works whether or not it is on the list. Anthropic and
 Gemini are reached in their own wire format, translated in both directions
 including streaming and tool calls.
 
+## Tools, not just models
+
+An MCP gateway on the same endpoint and the same keys: a tool server is a row,
+its tools arrive namespaced `<server>__<tool>` so two servers can both expose
+`search`, and access is `mcp:invoke` on `mcp/<name>` — deliberately **not**
+implied by `model:invoke`, because tools have side effects and models do not.
+
+A caller lists every tool it may reach in one call and hands the result
+straight to any OpenAI-compatible model. One server being down names itself in
+`unreachable` rather than failing the list.
+
+[The MCP gateway →](mcp.md)
+
 ## Beyond chat: what else it serves
 
 Twelve `POST` endpoints, not one. Anything OpenAI-shaped that carries a
