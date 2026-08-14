@@ -15,6 +15,18 @@ use std::collections::{HashMap, HashSet};
 
 /// `(name, url, transport, description, auth_header, auth_scheme,
 /// upstream_api_key)` as the row comes back, named for legibility.
+/// `(name, url, description, protocol_version, auth_header, auth_scheme,
+/// upstream_api_key)`.
+type A2aRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<Vec<u8>>,
+);
+
 type McpRow = (
     String,
     String,
@@ -42,6 +54,14 @@ pub fn flatten_grants(
 /// Separate from `flatten_grants` at the call site and identical underneath,
 /// because the two grants must never be conflated: a key that may invoke
 /// models is not, by that fact, a key that may reach every tool server.
+/// The same resolution for `agent:invoke` on `agent/<name>`.
+pub fn flatten_agent_grants(
+    perms: &[(String, String)],
+    all_agents: &[String],
+) -> (HashSet<String>, bool) {
+    flatten_for("agent:invoke", "agent/", perms, all_agents)
+}
+
 pub fn flatten_mcp_grants(
     perms: &[(String, String)],
     all_servers: &[String],
@@ -366,6 +386,47 @@ pub async fn build_snapshot_with(
     }
     let all_mcp_names: Vec<String> = mcp_servers.keys().cloned().collect();
 
+    let agent_rows: Vec<A2aRow> = sqlx::query_as(
+        "SELECT name, url, description, protocol_version, auth_header, auth_scheme,
+                upstream_api_key
+           FROM a2a_agents WHERE enabled ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut a2a_agents: HashMap<String, crate::snapshot::A2aAgentDef> = HashMap::new();
+    for (name, url, description, protocol_version, auth_header, auth_scheme, enc) in agent_rows {
+        // Dropped rather than fatal, for the reason spelled out above the MCP
+        // loop: one unreadable row must not stop the control plane publishing.
+        let api_key = match enc {
+            None => None,
+            Some(bytes) => match crate::control::secrets::decrypt(key, &bytes) {
+                Ok(plaintext) => Some(plaintext),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        agent = %name,
+                        "dropping A2A agent: its credential failed to decrypt; excluded from \
+                         this snapshot rather than failing the whole rebuild."
+                    );
+                    continue;
+                }
+            },
+        };
+        a2a_agents.insert(
+            name.clone(),
+            crate::snapshot::A2aAgentDef {
+                name,
+                url,
+                description,
+                protocol_version,
+                auth_header,
+                auth_scheme,
+                api_key,
+            },
+        );
+    }
+    let all_agent_names: Vec<String> = a2a_agents.keys().cloned().collect();
+
     let budgets_by_principal = roll_over_and_load_budgets(pool).await?;
 
     let mut principals = HashMap::new();
@@ -388,6 +449,7 @@ pub async fn build_snapshot_with(
         // answered.
         let (allowed_models, allow_all) = flatten_grants(&perms, &all_names);
         let (allowed_mcp, allow_all_mcp) = flatten_mcp_grants(&perms, &all_mcp_names);
+        let (allowed_agents, allow_all_agents) = flatten_agent_grants(&perms, &all_agent_names);
 
         // The raw role names, separate from `allowed_models`: a routing
         // rule's caller condition (`crate::routing::CallerMatch`) matches on
@@ -409,6 +471,8 @@ pub async fn build_snapshot_with(
                 allowed_models,
                 allowed_mcp,
                 allow_all_mcp,
+                allowed_agents,
+                allow_all_agents,
                 allow_all,
                 roles: role_names.into_iter().collect(),
                 limits: limits_by_principal.get(&id).copied(),
@@ -456,6 +520,7 @@ pub async fn build_snapshot_with(
         virtual_models,
         prompt_classes,
         mcp_servers,
+        a2a_agents,
         fallback_model,
         open: false,
     })

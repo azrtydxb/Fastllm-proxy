@@ -39,6 +39,120 @@
     }
   },
   "paths": {
+    "/admin/a2a-agents": {
+      "get": {
+        "summary": "List A2A agents. Reports whether a credential is set, never what it is",
+        "operationId": "get_admin_a2a_agents",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Register an A2A agent",
+        "operationId": "post_admin_a2a_agents",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "201": {
+            "description": "Created"
+          },
+          "409": {
+            "description": "An agent by that name already exists"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/a2a-agents/{id}": {
+      "patch": {
+        "summary": "Update an A2A agent",
+        "operationId": "patch_admin_a2a_agents_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "204": {
+            "description": "Updated"
+          },
+          "404": {
+            "description": "No such agent"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Delete an A2A agent",
+        "operationId": "delete_admin_a2a_agents_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such agent"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/audit": {
       "get": {
         "summary": "The change log, newest first, keyset-paginated",
@@ -1886,6 +2000,87 @@
         "security": [
           {
             "proxyToken": []
+          }
+        ]
+      }
+    },
+    "/v1/agents": {
+      "get": {
+        "summary": "A2A agents this key may invoke",
+        "operationId": "get_v1_agents",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/agents/{name}": {
+      "post": {
+        "summary": "Every A2A JSON-RPC method on one path. Only the methods this gateway forwards are accepted",
+        "operationId": "post_v1_agent_rpc",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          },
+          "400": {
+            "description": "Not JSON-RPC, or a method this gateway does not forward"
+          },
+          "404": {
+            "description": "No such agent, or this key may not invoke it"
+          },
+          "502": {
+            "description": "The agent is unreachable"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/agents/{name}/.well-known/agent-card.json": {
+      "get": {
+        "summary": "The agent's card, with `url` rewritten to this gateway so the next call is still authorised and attributed",
+        "operationId": "get_v1_agent_card",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          },
+          "404": {
+            "description": "No such agent, or this key may not invoke it"
+          },
+          "502": {
+            "description": "The agent served no readable card at either well-known path"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
           }
         ]
       }

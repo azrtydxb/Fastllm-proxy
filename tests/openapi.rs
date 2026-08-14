@@ -110,6 +110,25 @@ fn mcp_routes() -> Vec<(String, String)> {
     out
 }
 
+/// The agent routes the spec describes must be dispatched by `proxy.rs`.
+///
+/// Weaker than the `MCP_ROUTES` check because the paths are templated, but it
+/// still fails if `agent_route` stops handling one of the two shapes.
+#[test]
+fn the_agent_routes_the_spec_describes_are_dispatched() {
+    let src = source("src/proxy.rs");
+    assert!(
+        src.contains("fn agent_route("),
+        "the spec describes /v1/agents/{{name}} but proxy.rs has no agent_route"
+    );
+    for needle in [".well-known/agent-card.json", ".well-known/agent.json"] {
+        assert!(
+            src.contains(needle),
+            "the spec describes the agent card but proxy.rs never matches {needle}"
+        );
+    }
+}
+
 /// Every MCP route in that list must also be in the spec, in the direction the
 /// admin check already covers for `/admin/*`.
 #[test]
@@ -203,6 +222,17 @@ fn the_spec_describes_no_route_that_does_not_exist() {
         .map(str::to_string)
         .collect();
     data_plane.extend(mcp_routes().into_iter().map(|(_, p)| format!("/v1{p}")));
+    // Templated by agent name, so there is no literal path to enumerate from
+    // a const the way `MCP_ROUTES` is. Listed here and asserted below to be
+    // dispatched, which is the closest thing to deriving them.
+    data_plane.extend(
+        [
+            "/v1/agents/{name}",
+            "/v1/agents/{name}/.well-known/agent-card.json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
 
     let mut stale = Vec::new();
     for (path, verbs) in spec_paths() {

@@ -25,7 +25,7 @@ pub enum AuthError {
     Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Principal {
     pub id: PrincipalId,
     pub name: String,
@@ -38,6 +38,11 @@ pub struct Principal {
     /// the deployment knows about. Tools have side effects; models do not.
     pub allowed_mcp: HashSet<String>,
     pub allow_all_mcp: bool,
+    /// Flattened from `agent:invoke`, separate from both of the above for the
+    /// same reason they are separate from each other: an agent acts, and a
+    /// key that may invoke models has not been told it may do that.
+    pub allowed_agents: HashSet<String>,
+    pub allow_all_agents: bool,
     /// Role *names* this principal holds, for the "caller" match condition on
     /// a routing rule (`crate::routing::CallerMatch`). Unlike
     /// `allowed_models`, this is not further flattened — a rule asks "does
@@ -193,6 +198,24 @@ pub struct McpServerDef {
     pub api_key: Option<String>,
 }
 
+/// An A2A agent this gateway will forward JSON-RPC to.
+///
+/// Deliberately the same shape as [`McpServerDef`] rather than a generalised
+/// "upstream": the two differ in what they carry (a protocol version here, a
+/// transport there) and collapsing them would mean a field that is `None` for
+/// half the rows and a comment explaining when it applies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aAgentDef {
+    pub name: String,
+    pub url: String,
+    pub description: String,
+    /// `0.3` or `1.0`, pinned per agent — never inferred from the request.
+    pub protocol_version: String,
+    pub auth_header: String,
+    pub auth_scheme: Option<String>,
+    pub api_key: Option<String>,
+}
+
 /// One prompt class as the snapshot carries it.
 ///
 /// Deliberately not `crate::classifier::PromptClass`: this type exists in every
@@ -254,6 +277,8 @@ pub struct Snapshot {
     /// `mcp::route` does on a namespaced tool. Empty in `File` mode: there is
     /// nowhere in a YAML config to store one, and no grants to authorise it.
     pub mcp_servers: HashMap<String, McpServerDef>,
+    /// A2A agents, keyed by name for the same O(1) lookup.
+    pub a2a_agents: HashMap<String, A2aAgentDef>,
     /// Model to try when a request's whole routing chain is exhausted.
     ///
     /// Appended as the last candidate for every request, virtual or concrete.
@@ -324,6 +349,8 @@ pub struct WireSnapshot {
     #[serde(default)]
     pub mcp_servers: Vec<McpServerDef>,
     #[serde(default)]
+    pub a2a_agents: Vec<A2aAgentDef>,
+    #[serde(default)]
     pub fallback_model: Option<String>,
     pub open: bool,
 }
@@ -356,6 +383,10 @@ pub struct WirePrincipal {
     pub allowed_mcp: Vec<String>,
     #[serde(default)]
     pub allow_all_mcp: bool,
+    #[serde(default)]
+    pub allowed_agents: Vec<String>,
+    #[serde(default)]
+    pub allow_all_agents: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -576,6 +607,8 @@ impl Snapshot {
                 // the opposite of what this deployment shape needs.
                 allowed_mcp: HashSet::new(),
                 allow_all_mcp: false,
+                allowed_agents: HashSet::new(),
+                allow_all_agents: false,
                 roles: HashSet::new(),
                 limits: None,
                 budget: None,
@@ -625,6 +658,8 @@ impl Snapshot {
                     allow_all: p.allow_all,
                     allowed_mcp: p.allowed_mcp.iter().cloned().collect(),
                     allow_all_mcp: p.allow_all_mcp,
+                    allowed_agents: p.allowed_agents.iter().cloned().collect(),
+                    allow_all_agents: p.allow_all_agents,
                     roles: p.roles.iter().cloned().collect(),
                     limits: p.limits.map(|l| WireLimits {
                         requests_per_min: l.requests_per_min,
@@ -676,6 +711,7 @@ impl Snapshot {
             // exactly what the data plane needs to present upstream, which is
             // also why /snapshot must be TLS.
             mcp_servers: self.mcp_servers.values().cloned().collect(),
+            a2a_agents: self.a2a_agents.values().cloned().collect(),
             virtual_models: self
                 .virtual_models
                 .values()
@@ -775,6 +811,8 @@ impl Snapshot {
                             allow_all: p.allow_all,
                             allowed_mcp: p.allowed_mcp.into_iter().collect(),
                             allow_all_mcp: p.allow_all_mcp,
+                            allowed_agents: p.allowed_agents.into_iter().collect(),
+                            allow_all_agents: p.allow_all_agents,
                             roles: p.roles.into_iter().collect(),
                             limits: p.limits.map(|l| Limits {
                                 requests_per_min: l.requests_per_min,
@@ -850,6 +888,11 @@ impl Snapshot {
                 .mcp_servers
                 .into_iter()
                 .map(|s| (s.name.clone(), s))
+                .collect(),
+            a2a_agents: w
+                .a2a_agents
+                .into_iter()
+                .map(|a| (a.name.clone(), a))
                 .collect(),
             virtual_models: w
                 .virtual_models
@@ -945,6 +988,7 @@ impl Snapshot {
             virtual_models: HashMap::new(),
             prompt_classes: Vec::new(),
             mcp_servers: Default::default(),
+            a2a_agents: Default::default(),
             fallback_model: None,
             open: false,
         }
@@ -1040,6 +1084,8 @@ mod tests {
             allow_all: false,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,
@@ -1233,6 +1279,7 @@ mod tests {
         let wire = WireSnapshot {
             prompt_classes: Vec::new(),
             mcp_servers: Default::default(),
+            a2a_agents: Default::default(),
             fallback_model: None,
             version: 1,
             keys,

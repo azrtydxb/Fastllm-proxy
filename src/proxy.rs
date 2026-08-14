@@ -73,6 +73,7 @@ pub const MCP_ROUTES: &[(&str, &str)] = &[
     ("GET", "/mcp/servers"),
     ("POST", "/mcp/tools/list"),
     ("POST", "/mcp/tools/call"),
+    ("GET", "/agents"),
 ];
 
 const PROXIED_SUFFIXES: &[&str] = &[
@@ -185,6 +186,39 @@ pub async fn handle(
         }
         Some(McpRoute::ToolsCall) => {
             return Ok(mcp_tools_call(req, state, principal, &snapshot).await);
+        }
+        Some(McpRoute::Agents) => {
+            return Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "object": "list",
+                    "data": crate::a2a::visible_agents(&snapshot, principal),
+                })
+                .to_string(),
+            ));
+        }
+        None => {}
+    }
+
+    match agent_route(&method, subpath) {
+        Some(AgentRoute::Card(name)) => {
+            // `Host` is what the client dialled; a card rewritten to a
+            // name it cannot resolve is worse than not rewriting it.
+            let host = req
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let self_url = if host.is_empty() {
+                String::new()
+            } else {
+                format!("http://{host}")
+            };
+            return Ok(agent_card(&state, principal, &snapshot, &name, &self_url).await);
+        }
+        Some(AgentRoute::Rpc(name)) => {
+            return Ok(agent_rpc(req, state, principal, &snapshot, &name).await);
         }
         None => {}
     }
@@ -1535,6 +1569,7 @@ enum McpRoute {
     Servers,
     ToolsList,
     ToolsCall,
+    Agents,
 }
 
 fn mcp_route(method: &Method, subpath: &str) -> Option<McpRoute> {
@@ -1542,6 +1577,36 @@ fn mcp_route(method: &Method, subpath: &str) -> Option<McpRoute> {
         ("GET", "/mcp/servers") => Some(McpRoute::Servers),
         ("POST", "/mcp/tools/list") => Some(McpRoute::ToolsList),
         ("POST", "/mcp/tools/call") => Some(McpRoute::ToolsCall),
+        ("GET", "/agents") => Some(McpRoute::Agents),
+        _ => None,
+    }
+}
+
+/// `/v1/agents/<name>` and `/v1/agents/<name>/.well-known/...`.
+///
+/// Parsed rather than listed in `MCP_ROUTES` because the agent name is a path
+/// segment, so there is no fixed path to enumerate — the spec describes these
+/// with `{name}` and `tests/openapi.rs` treats them as templated.
+enum AgentRoute {
+    Card(String),
+    Rpc(String),
+}
+
+fn agent_route(method: &Method, subpath: &str) -> Option<AgentRoute> {
+    let rest = subpath.strip_prefix("/agents/")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match method.as_str() {
+        "GET" => {
+            let (name, tail) = rest.split_once('/')?;
+            // Both spellings, because neither is universal in the wild.
+            (tail == ".well-known/agent-card.json" || tail == ".well-known/agent.json")
+                .then(|| AgentRoute::Card(name.to_string()))
+        }
+        // No trailing segment: every JSON-RPC method arrives on one path, which
+        // is what the A2A spec asks for.
+        "POST" if !rest.contains('/') => Some(AgentRoute::Rpc(rest.to_string())),
         _ => None,
     }
 }
@@ -1589,6 +1654,154 @@ async fn mcp_roundtrip(
         }
     };
     crate::mcp::parse_reply(content_type.as_deref(), &bytes)
+}
+
+/// `GET /v1/agents/{name}/.well-known/agent-card.json`.
+///
+/// Fetched from the agent and rewritten so its `url` points here. A card that
+/// still names the agent sends the client's *next* request straight past the
+/// key check and the spend attribution — which would make this gateway a
+/// discovery service and nothing else.
+async fn agent_card(
+    state: &Arc<AppState>,
+    principal: Option<&Principal>,
+    snapshot: &Snapshot,
+    name: &str,
+    // Where the client reached us, taken from the request rather than
+    // configured: a deployment is behind a Service, a VIP, an Ingress and a
+    // port-forward at different times, and a configured base URL is wrong for
+    // three of those.
+    self_url: &str,
+) -> Response<ResBody> {
+    let Some(agent) = crate::a2a::route(snapshot, principal, name) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            &format!("no agent {name:?} available to this key"),
+        );
+    };
+
+    for url in crate::a2a::card_urls(agent) {
+        let mut builder = Request::builder().method(Method::GET).uri(&url);
+        for (n, v) in crate::a2a::auth_headers(agent) {
+            builder = builder.header(n, v);
+        }
+        let Ok(req) = builder.body(Full::new(Bytes::new())) else {
+            continue;
+        };
+        let Ok(resp) = state.client.request(req).await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let (_, body) = resp.into_parts();
+        let Ok(collected) = Limited::new(body, state.max_body_bytes).collect().await else {
+            continue;
+        };
+        let Ok(mut card) = serde_json::from_slice::<serde_json::Value>(&collected.to_bytes())
+        else {
+            continue;
+        };
+        crate::a2a::rewrite_card(&mut card, agent, self_url);
+        return json_response(StatusCode::OK, card.to_string());
+    }
+
+    error_response(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        &format!("agent {name:?} served no readable card at either well-known path"),
+    )
+}
+
+/// `POST /v1/agents/{name}`: every A2A JSON-RPC method, on one path.
+async fn agent_rpc(
+    req: Request<Incoming>,
+    state: Arc<AppState>,
+    principal: Option<&Principal>,
+    snapshot: &Snapshot,
+    name: &str,
+) -> Response<ResBody> {
+    let Some(agent) = crate::a2a::route(snapshot, principal, name) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            &format!("no agent {name:?} available to this key"),
+        );
+    };
+
+    let (_, body) = req.into_parts();
+    let bytes = match Limited::new(body, state.max_body_bytes).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "could not read request body",
+            )
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!("body is not JSON-RPC: {e}"),
+            )
+        }
+    };
+    // A closed list. An unknown method forwarded blind is a request whose
+    // effects nobody here can describe, made with a credential the caller
+    // never sees.
+    if crate::a2a::method_is_forwarded(&parsed).is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!(
+                "method {:?} is not forwarded; this gateway forwards: {}",
+                parsed.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                crate::a2a::FORWARDED_METHODS.join(", ")
+            ),
+        );
+    }
+
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(&agent.url)
+        .header("content-type", "application/json");
+    for (n, v) in crate::a2a::auth_headers(agent) {
+        builder = builder.header(n, v);
+    }
+    let Ok(upstream) = builder.body(Full::new(bytes)) else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "could not build the upstream request",
+        );
+    };
+
+    match state.client.request(upstream).await {
+        Ok(resp) => {
+            // Forwarded, not parsed: `message/stream` is an SSE response and
+            // buffering it to inspect it would defeat streaming for the same
+            // reason it would on a completion.
+            let (mut parts, body) = resp.into_parts();
+            for name in HOP_BY_HOP {
+                parts.headers.remove(*name);
+            }
+            parts.headers.remove(CONTENT_LENGTH);
+            Response::from_parts(parts, body.boxed())
+        }
+        Err(e) => {
+            warn!(agent = %name, error = %e, "A2A agent unreachable");
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                &format!("agent {name:?} is unreachable"),
+            )
+        }
+    }
 }
 
 /// `POST /v1/mcp/tools/list`: every tool the caller can reach, namespaced.
@@ -2241,6 +2454,8 @@ mod tests {
                 allow_all: false,
                 allowed_mcp: Default::default(),
                 allow_all_mcp: false,
+                allowed_agents: Default::default(),
+                allow_all_agents: false,
                 roles: HashSet::new(),
                 limits: None,
                 budget: None,
@@ -2404,6 +2619,8 @@ mod tests {
                 allow_all: true,
                 allowed_mcp: Default::default(),
                 allow_all_mcp: false,
+                allowed_agents: Default::default(),
+                allow_all_agents: false,
                 roles: HashSet::new(),
                 limits,
                 budget,
@@ -2488,6 +2705,8 @@ mod tests {
             allow_all: true,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,
@@ -2711,6 +2930,8 @@ model_list:
             allow_all: false,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,
@@ -2722,6 +2943,8 @@ model_list:
             allow_all: false,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,

@@ -8,6 +8,7 @@ pub mod classifier;
 
 /// Exact-match response caching. Unconditional: it carries no model and costs
 /// nothing until a model turns it on.
+pub mod a2a;
 pub mod cache;
 pub mod config;
 #[cfg(feature = "control")]

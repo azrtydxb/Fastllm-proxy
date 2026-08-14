@@ -293,6 +293,8 @@ fn authorisation_reads_only_the_snapshot() {
             allow_all: false,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: std::collections::HashSet::new(),
             limits: None,
             budget: None,
@@ -301,6 +303,7 @@ fn authorisation_reads_only_the_snapshot() {
     let snap = Snapshot {
         prompt_classes: Vec::new(),
         mcp_servers: Default::default(),
+        a2a_agents: Default::default(),
         fallback_model: None,
         version: 1,
         keys,

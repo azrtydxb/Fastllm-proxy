@@ -863,6 +863,8 @@ mod tests {
             allow_all: true,
             allowed_mcp: Default::default(),
             allow_all_mcp: false,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: roles.iter().map(|r| r.to_string()).collect(),
             limits: None,
             budget: None,

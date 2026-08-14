@@ -92,6 +92,8 @@ impl SnapshotSource for FileSource {
                     // there is nothing to grant — see `Snapshot.mcp_servers`.
                     allowed_mcp: HashSet::new(),
                     allow_all_mcp: false,
+                    allowed_agents: HashSet::new(),
+                    allow_all_agents: false,
                     // `File` mode's `auth.keys` schema has no role concept —
                     // routing rules that match by role are a control-plane
                     // (P1) feature and `File` mode carries no virtual models
@@ -130,6 +132,7 @@ impl SnapshotSource for FileSource {
             // Same reason as `prompt_classes`: a YAML file has nowhere to
             // store a server, and no grants to authorise reaching one.
             mcp_servers: HashMap::new(),
+            a2a_agents: HashMap::new(),
             // `File` mode has no place to mark one, and its whole point is a
             // single YAML that says exactly what it says.
             fallback_model: None,

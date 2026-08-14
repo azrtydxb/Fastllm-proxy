@@ -110,6 +110,8 @@ mod tests {
                 allow_all: false,
                 allowed_mcp: Default::default(),
                 allow_all_mcp: false,
+                allowed_agents: Default::default(),
+                allow_all_agents: false,
                 roles: Default::default(),
                 limits: None,
                 budget: None,

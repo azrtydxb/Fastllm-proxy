@@ -759,6 +759,232 @@ type McpServerRow = (
     bool,
 );
 
+/// `(id, name, url, description, protocol_version, auth_header, auth_scheme,
+/// enabled, credential_set)`.
+type A2aAgentRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    bool,
+    bool,
+);
+
+#[derive(Deserialize)]
+struct NewA2aAgent {
+    name: String,
+    url: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    auth_header: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// `GET /admin/a2a-agents`. Reports whether a credential is set, never what.
+async fn list_a2a_agents(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows: Vec<A2aAgentRow> = sqlx::query_as(
+        "SELECT id, name, url, description, protocol_version, auth_header, auth_scheme, enabled,
+                upstream_api_key IS NOT NULL
+           FROM a2a_agents ORDER BY name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("a2a agent list", &e))?;
+
+    let data: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(
+            |(id, name, url, description, version, header, scheme, enabled, cred)| {
+                serde_json::json!({
+                    "id": id, "name": name, "url": url, "description": description,
+                    "protocol_version": version, "auth_header": header,
+                    "auth_scheme": scheme, "enabled": enabled, "credential_set": cred,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(serde_json::json!({ "data": data })))
+}
+
+/// `POST /admin/a2a-agents`.
+async fn post_a2a_agent(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewA2aAgent>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    if body.name.is_empty()
+        || !body
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name must be alphanumeric with - or _: it is a URL path segment",
+        ));
+    }
+    let version = body.protocol_version.unwrap_or_else(|| "0.3".to_string());
+    if version != "0.3" && version != "1.0" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "protocol_version must be \"0.3\" or \"1.0\", pinned rather than inferred: a \
+             guessed version means the agent card and the responses that follow it disagree",
+        ));
+    }
+    let encrypted = body
+        .upstream_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| crate::control::secrets::encrypt(&ctx.key, k))
+        .transpose()
+        .map_err(|e| {
+            tracing::error!(error = %e, "encrypting an A2A agent credential failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not encrypt upstream_api_key; the agent was not created",
+            )
+        })?;
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO a2a_agents
+           (name, url, description, protocol_version, auth_header, auth_scheme,
+            upstream_api_key, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(&body.name)
+    .bind(&body.url)
+    .bind(&body.description)
+    .bind(&version)
+    .bind(body.auth_header.as_deref().unwrap_or("authorization"))
+    .bind(match body.auth_scheme.as_deref() {
+        None => Some("Bearer"),
+        Some("") => None,
+        Some(scheme) => Some(scheme),
+    })
+    .bind(encrypted)
+    .bind(body.enabled.unwrap_or(true))
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("an agent named {:?} already exists", body.name),
+            )
+        } else {
+            db_error("a2a agent creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": body.name })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PatchA2aAgent {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Absent leaves the credential alone; `""` clears it.
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+}
+
+/// `PATCH /admin/a2a-agents/{id}`.
+async fn patch_a2a_agent(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchA2aAgent>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(v) = body.protocol_version.as_deref() {
+        if v != "0.3" && v != "1.0" {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "protocol_version must be \"0.3\" or \"1.0\"",
+            ));
+        }
+    }
+    let encrypted = match body.upstream_api_key.as_deref().map(str::trim) {
+        Some("") => Some(None),
+        Some(k) => Some(Some(
+            crate::control::secrets::encrypt(&ctx.key, k).map_err(|e| {
+                tracing::error!(error = %e, "encrypting an A2A agent credential failed");
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not encrypt upstream_api_key; nothing was changed",
+                )
+            })?,
+        )),
+        None => None,
+    };
+    let result = sqlx::query(
+        "UPDATE a2a_agents
+            SET url = COALESCE($2, url),
+                description = COALESCE($3, description),
+                protocol_version = COALESCE($4, protocol_version),
+                enabled = COALESCE($5, enabled),
+                upstream_api_key = CASE WHEN $6 THEN $7 ELSE upstream_api_key END,
+                updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.url.as_deref())
+    .bind(body.description.as_deref())
+    .bind(body.protocol_version.as_deref())
+    .bind(body.enabled)
+    .bind(encrypted.is_some())
+    .bind(encrypted.flatten())
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("a2a agent update", &e))?;
+    if result.rows_affected() == 0 {
+        return Err(api_error(StatusCode::NOT_FOUND, "no such agent"));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/a2a-agents/{id}`.
+async fn delete_a2a_agent(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let result = sqlx::query("DELETE FROM a2a_agents WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("a2a agent deletion", &e))?;
+    if result.rows_affected() == 0 {
+        return Err(api_error(StatusCode::NOT_FOUND, "no such agent"));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// An MCP server as the admin API accepts it.
 #[derive(Deserialize)]
 struct NewMcpServer {
@@ -2672,6 +2898,7 @@ const GRANTABLE_VERBS: &[&str] = &[
     admin_permission::CONFIG_WRITE,
     "model:invoke",
     "mcp:invoke",
+    "agent:invoke",
 ];
 
 #[derive(Deserialize)]
@@ -2785,6 +3012,7 @@ fn validate_grant(verb: &str, resource: &str) -> Result<(), ApiError> {
     if let Some(prefix) = match verb {
         "model:invoke" => Some("model/"),
         "mcp:invoke" => Some("mcp/"),
+        "agent:invoke" => Some("agent/"),
         _ => None,
     } {
         if !resource.starts_with(prefix) {
@@ -4697,6 +4925,14 @@ pub async fn serve(
         .route("/admin/principals/{id}/roles", post(grant_role))
         .route("/admin/principals/{id}/roles/{role}", delete(revoke_role))
         .route("/admin/principals/{id}/password", put(put_password))
+        .route(
+            "/admin/a2a-agents",
+            get(list_a2a_agents).post(post_a2a_agent),
+        )
+        .route(
+            "/admin/a2a-agents/{id}",
+            axum::routing::patch(patch_a2a_agent).delete(delete_a2a_agent),
+        )
         .route(
             "/admin/mcp-servers",
             get(list_mcp_servers).post(post_mcp_server),

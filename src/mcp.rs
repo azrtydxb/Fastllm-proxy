@@ -272,6 +272,8 @@ mod tests {
             allow_all: false,
             allowed_mcp: mcp.iter().map(|s| s.to_string()).collect(),
             allow_all_mcp: all,
+            allowed_agents: Default::default(),
+            allow_all_agents: false,
             roles: HashSet::new(),
             limits: None,
             budget: None,
