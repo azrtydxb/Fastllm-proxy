@@ -107,9 +107,14 @@ spec:
           # sha-e3a1dcb while the cluster ran two migrations past it (0026
           # mcp_servers, 0027 a2a_agents), and applying it would have taken the
           # control plane down rather than doing nothing.
+          #
+          # A released tag rather than a `sha-` build, now that there is one:
+          # `0.2.0` is the same image as `ghcr.io/azrtydxb/fastllm-proxy:v0.2.0`
+          # (CI strips the `v` for this registry), so what runs here is what
+          # anyone else installing this version gets.
           # `deployment.yaml` carries the same tag and must move at the same
           # time: the two planes share a schema.
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-03104e6
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:0.2.0
           imagePullPolicy: Always
           args:
             - --role=control
