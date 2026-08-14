@@ -31,10 +31,13 @@ source for *why* anything is the way it is; this file is the summary.
   entirely, so a key imported out of a rate-limited `File`-mode deployment
   arrived in the database unlimited. The key worked, which is why nobody
   would have looked.
-- LiteLLM's native provider prefixes were not stripped from the upstream model
-  name, so `anthropic/claude-sonnet-4` was sent to Anthropic as a model called
-  `anthropic/claude-sonnet-4`. `anthropic/`, `gemini/`, `azure/`, `azure_ai/`,
-  `vertex_ai/` and `bedrock/` now strip like `openai/` always did.
+- A LiteLLM `anthropic/`-style prefix was never stripped, so
+  `anthropic/claude-sonnet-4` reached Anthropic as a model by that name. It is
+  now stripped **only when the backend speaks that protocol**: to OpenRouter
+  the same string is the model id and stripping it would ask for a model that
+  does not exist. `openrouter/` joins the transport prefixes, and exactly one
+  prefix is ever removed, so `openrouter/anthropic/claude-sonnet-4` becomes
+  the OpenRouter id `anthropic/claude-sonnet-4`.
 
 ## [0.1.0] — 2026-08-13
 

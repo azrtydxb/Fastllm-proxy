@@ -30,7 +30,7 @@ Everything a backend row can hold is carried across, not just the address:
 | from the file | into `model_backends` |
 |---|---|
 | `api_base` | the address, trailing slash trimmed |
-| `model` | `upstream_model`, with a known `provider/` prefix stripped |
+| `model` | `upstream_model`. A transport prefix (`openai/`, `vllm/`, `openrouter/`) is stripped; a wire-format prefix (`anthropic/`, `gemini/`) only when the backend speaks that protocol, so an OpenRouter id like `anthropic/claude-sonnet-4` survives intact |
 | `api_key` | `upstream_api_key`, AES-256-GCM encrypted before it reaches Postgres. LiteLLM's `not-needed`/`none` placeholders are treated as absent |
 | `protocol` | `openai` (default), `anthropic` or `gemini` |
 | `auth_header` | defaults to `authorization`; Azure OpenAI wants `api-key` |

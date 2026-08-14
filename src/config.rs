@@ -239,10 +239,32 @@ impl LitellmParams {
         else {
             return fallback.to_string();
         };
-        for provider in PROVIDER_PREFIXES {
+        // Transport prefixes first: these name *how* the backend is reached,
+        // so what follows is the model's real name upstream. `openrouter/`
+        // belongs here and what remains after it is an OpenRouter model id,
+        // which is itself namespaced — `openrouter/anthropic/claude-sonnet-4`
+        // must become `anthropic/claude-sonnet-4`, not `claude-sonnet-4`.
+        // Only one prefix is ever stripped, which is what makes that work.
+        for provider in TRANSPORT_PREFIXES {
             if let Some(rest) = raw.strip_prefix(provider) {
                 if !rest.is_empty() {
                     return rest.to_string();
+                }
+            }
+        }
+        // A native prefix is stripped only when it names the wire format this
+        // backend actually speaks. `anthropic/claude-sonnet-4` means two
+        // different things depending on where it is pointed: to Anthropic it
+        // is a model called `claude-sonnet-4`, and to OpenRouter it is a model
+        // whose id is the whole string. Stripping unconditionally asks
+        // OpenRouter for a model that does not exist.
+        let protocol = self.protocol_or_default();
+        for (prefix, native) in NATIVE_PREFIXES {
+            if protocol == *native {
+                if let Some(rest) = raw.strip_prefix(prefix) {
+                    if !rest.is_empty() {
+                        return rest.to_string();
+                    }
                 }
             }
         }
@@ -301,25 +323,41 @@ impl LitellmParams {
 }
 
 /// Provider prefixes LiteLLM may prepend that are not part of the model name.
-/// Prefixes LiteLLM qualifies a model name with, which the upstream must not
-/// see.
+/// Prefixes that name how a backend is *reached*, not what the model is
+/// called once the request arrives.
 ///
-/// The native ones are here for the same reason the OpenAI-compatible ones
-/// are: `anthropic/claude-sonnet-4` imported verbatim is sent to Anthropic as
-/// a model called `anthropic/claude-sonnet-4`, which does not exist. Only a
-/// known prefix is stripped, so a model whose own name contains a slash —
-/// `Qwen/Qwen3-8B` — survives intact.
-const PROVIDER_PREFIXES: &[&str] = &[
+/// Stripping these is unambiguous: LiteLLM writes `openai/<model>` to say "an
+/// OpenAI-compatible endpoint", and vLLM or SGLang expect the bare name.
+/// `openrouter/` is the same statement about transport, and what follows it is
+/// an OpenRouter model id — which is itself namespaced, so stripping exactly
+/// one prefix leaves `anthropic/claude-sonnet-4` intact, which is what
+/// OpenRouter is asked for.
+///
+/// Only a known prefix is stripped, so a model whose own name contains a
+/// slash — `Qwen/Qwen3-8B` — survives.
+const TRANSPORT_PREFIXES: &[&str] = &[
     "openai/",
     "hosted_vllm/",
     "vllm/",
     "openai_like/",
-    "anthropic/",
-    "gemini/",
-    "azure/",
-    "azure_ai/",
-    "vertex_ai/",
-    "bedrock/",
+    "openrouter/",
+];
+
+/// Prefixes that name a wire format, stripped only when the backend speaks it.
+///
+/// `anthropic/claude-sonnet-4` is two different things depending on where it
+/// points. Sent to Anthropic it is a model called `claude-sonnet-4` and the
+/// prefix has to go. Sent to OpenRouter — or any other gateway that namespaces
+/// its catalogue — the whole string is the id and stripping it asks for a
+/// model that does not exist.
+///
+/// `azure/`, `vertex_ai/` and `bedrock/` are deliberately absent. They name
+/// OpenAI-shaped endpoints, so the protocol cannot tell them apart from a
+/// gateway's namespaced id, and guessing wrong breaks a working backend to
+/// tidy up a name.
+const NATIVE_PREFIXES: &[(&str, crate::protocol::Protocol)] = &[
+    ("anthropic/", crate::protocol::Protocol::Anthropic),
+    ("gemini/", crate::protocol::Protocol::Gemini),
 ];
 
 #[cfg(test)]
@@ -348,23 +386,65 @@ mod auth_scheme_and_prefix_tests {
         assert_eq!(named.auth_scheme_or_default(), Some("Token".into()));
     }
 
-    /// A native backend's model name is sent to the provider, so a LiteLLM
-    /// prefix on it names a model that does not exist there.
+    /// The same string means different things depending on where it points,
+    /// and getting this wrong breaks a working backend rather than a broken
+    /// one.
     #[test]
-    fn a_provider_prefix_is_stripped_and_a_model_name_with_a_slash_is_not() {
+    fn a_native_prefix_is_stripped_only_when_the_backend_speaks_that_protocol() {
+        // To Anthropic, `anthropic/claude-sonnet-4` is a model called
+        // `claude-sonnet-4`.
+        let native = params(
+            "{ api_base: https://api.anthropic.com/v1, model: anthropic/claude-sonnet-4, \
+               protocol: anthropic }",
+        );
+        assert_eq!(native.upstream_model("fallback"), "claude-sonnet-4");
+
+        // To OpenRouter, the whole string is the model id. Stripping it asks
+        // for a model that does not exist.
+        let gateway =
+            params("{ api_base: https://openrouter.ai/api/v1, model: anthropic/claude-sonnet-4 }");
+        assert_eq!(
+            gateway.upstream_model("fallback"),
+            "anthropic/claude-sonnet-4",
+            "an OpenRouter id must survive intact"
+        );
+
+        let gemini_native = params(
+            "{ api_base: https://generativelanguage.googleapis.com, \
+               model: gemini/gemini-2.0-flash, protocol: gemini }",
+        );
+        assert_eq!(gemini_native.upstream_model("fallback"), "gemini-2.0-flash");
+    }
+
+    /// Transport prefixes say how the backend is reached, so they always go —
+    /// and exactly one goes, which is what leaves an OpenRouter id namespaced.
+    #[test]
+    fn a_transport_prefix_is_always_stripped_and_only_one_of_them() {
         for (raw, want) in [
-            ("anthropic/claude-sonnet-4", "claude-sonnet-4"),
-            ("gemini/gemini-2.0-flash", "gemini-2.0-flash"),
-            ("azure/gpt-4o", "gpt-4o"),
-            ("vertex_ai/gemini-2.0-flash", "gemini-2.0-flash"),
-            ("bedrock/anthropic.claude-v2", "anthropic.claude-v2"),
             ("openai/Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
-            // Not a provider prefix: the org is part of the name.
+            ("hosted_vllm/Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
+            (
+                "openrouter/anthropic/claude-sonnet-4",
+                "anthropic/claude-sonnet-4",
+            ),
+            ("openrouter/openai/gpt-4o", "openai/gpt-4o"),
+            // Not a prefix at all: the org is part of the name.
             ("Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
         ] {
             let p = params(&format!("{{ api_base: http://h/v1, model: {raw} }}"));
             assert_eq!(p.upstream_model("fallback"), want, "for {raw}");
         }
+    }
+
+    /// `azure/` and friends name OpenAI-shaped endpoints, so nothing
+    /// distinguishes them from a gateway namespace. Left alone deliberately.
+    #[test]
+    fn an_openai_shaped_provider_prefix_is_left_alone() {
+        let p = params(
+            "{ api_base: https://x.openai.azure.com/openai/deployments/gpt-4o, \
+                          model: azure/gpt-4o, auth_header: api-key, auth_scheme: \"\" }",
+        );
+        assert_eq!(p.upstream_model("fallback"), "azure/gpt-4o");
     }
 }
 
