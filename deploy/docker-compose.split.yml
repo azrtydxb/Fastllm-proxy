@@ -33,7 +33,7 @@ services:
   # replica: it is not on the request path, and a second would only race the
   # first rebuilding snapshots.
   control:
-    image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+    image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
     depends_on:
       postgres: { condition: service_healthy }
     environment:
@@ -56,7 +56,7 @@ services:
 
   # The data plane. This is the part that scales: `--scale proxy=N`.
   proxy:
-    image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+    image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
     depends_on: [control]
     environment:
       FASTLLM_ROLE: proxy

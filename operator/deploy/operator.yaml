@@ -31,7 +31,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: operator
-          image: ghcr.io/azrtydxb/fastllm-operator:v0.1.0
+          image: ghcr.io/azrtydxb/fastllm-operator:v0.2.0
           imagePullPolicy: IfNotPresent
           env:
             - name: FASTLLM_OPERATOR_LOG

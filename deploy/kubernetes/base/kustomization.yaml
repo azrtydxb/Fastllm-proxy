@@ -20,11 +20,11 @@ labels:
   - includeSelectors: false
     pairs:
       app.kubernetes.io/part-of: fastllm-proxy
-      app.kubernetes.io/version: v0.1.0
+      app.kubernetes.io/version: v0.2.0
 
 # One place to change the tag for both planes. They share a database schema,
 # so a proxy older than its control plane reads a snapshot with fields it does
 # not understand — never pin them apart.
 images:
   - name: ghcr.io/azrtydxb/fastllm-proxy
-    newTag: v0.1.0
+    newTag: v0.2.0

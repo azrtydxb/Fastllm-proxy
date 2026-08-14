@@ -2,7 +2,7 @@
 
 ```bash
 helm install gw ./charts/fastllm-proxy \
-  --set image.tag=v0.1.0 \
+  --set image.tag=v0.2.0 \
   --set database.url="postgres://user:pass@postgres:5432/fastllm"
 ```
 

@@ -18,7 +18,7 @@ metadata:
   name: fastllm
   namespace: fastllm
 spec:
-  image: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+  image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
   database:      { name: fastllm-database, key: uri }
   proxyToken:    { name: fastllm-secrets,  key: proxy-token }
   encryptionKey: { name: fastllm-secrets,  key: encryption-key }
@@ -30,7 +30,7 @@ spec:
 ```console
 $ kubectl -n fastllm get fllm
 NAME      GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.1.0   2m
+fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.2.0   2m
 ```
 
 A full example, including TLS and the tuning block, is in

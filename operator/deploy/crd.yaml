@@ -114,7 +114,7 @@ spec:
                 - name
                 type: object
               image:
-                default: ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+                default: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
                 description: |-
                   The image **both** planes run.
 

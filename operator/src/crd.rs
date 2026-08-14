@@ -236,7 +236,7 @@ pub struct Condition {
 }
 
 fn default_image() -> String {
-    "ghcr.io/azrtydxb/fastllm-proxy:v0.1.0".to_string()
+    "ghcr.io/azrtydxb/fastllm-proxy:v0.2.0".to_string()
 }
 fn default_pull_policy() -> String {
     "IfNotPresent".to_string()

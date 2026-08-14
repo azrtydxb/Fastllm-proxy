@@ -5,7 +5,7 @@
 # driver — and bundling them would mean every operator upgrade pulled 200MB of
 # things a controller never executes.
 #
-#   docker build -f operator/Dockerfile -t ghcr.io/azrtydxb/fastllm-operator:v0.1.0 .
+#   docker build -f operator/Dockerfile -t ghcr.io/azrtydxb/fastllm-operator:v0.2.0 .
 #
 # Context is the repository root, not `operator/`: the crate is a workspace
 # member, so its dependency versions come from the root Cargo.lock and

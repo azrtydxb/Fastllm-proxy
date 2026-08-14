@@ -86,7 +86,7 @@ docker run -d --name fastllm \
   -e FASTLLM_ROLE=all \
   -e FASTLLM_DATABASE_URL=postgres://fastllm@db/fastllm \
   -e FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  ghcr.io/azrtydxb/fastllm-proxy:v0.1.0
+  ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
 ```
 
 Note the asymmetry in the port mappings: `:4000` is published, `:4001` is
@@ -231,7 +231,7 @@ carrying fields it does not understand.
 ```console
 $ kubectl -n fastllm get fllm
 NAME      GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.1.0   2m
+fastllm   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.2.0   2m
 ```
 
 Scaling means scaling `proxy`. The control plane stays at one — it does not

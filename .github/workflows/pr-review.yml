@@ -1,0 +1,144 @@
+# Two questions a reviewer asks on every pull request, asked automatically.
+#
+# Neither is a language model and neither tries to judge whether the
+# documentation is *good*. They answer one mechanical question each — "this
+# changed, did the thing that describes it change too?" — because that is the
+# question that actually gets forgotten, and a deterministic check gives the
+# same answer every time.
+#
+# Both are advisory in the sense that a human can override them: say why in
+# the PR body and they pass. What they cannot be is silent.
+name: pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  docs-follow-the-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did behaviour change without the docs changing?
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          changed() { git diff --name-only "$BASE" "$HEAD" -- "$@"; }
+
+          # What a reader is promised somewhere: the request path, the admin
+          # API, the schema, the flags, and the published spec.
+          behaviour=$(changed 'src/**' 'migrations/**' 'openapi.json' 'charts/**' 'deploy/**' 'operator/**' | head -50)
+          docs=$(changed 'docs/**' 'README.md' 'CHANGELOG.md' '**/README.md')
+
+          if [ -z "$behaviour" ]; then
+            echo "No behavioural change — nothing to document."; exit 0
+          fi
+          if [ -n "$docs" ]; then
+            echo "Behaviour changed and documentation changed with it:"
+            echo "$docs" | sed 's/^/  /'
+            exit 0
+          fi
+          # The escape hatch is a sentence, not a checkbox: whoever skips this
+          # has to say why, and the reason lands in the PR where a reviewer
+          # reads it.
+          if printf '%s' "$BODY" | grep -qiE 'no docs needed:'; then
+            echo "Skipped by the PR body:"
+            printf '%s' "$BODY" | grep -iE 'no docs needed:' | sed 's/^/  /'
+            exit 0
+          fi
+
+          echo "::error title=Documentation may be stale::These changed, and nothing under docs/ did."
+          echo "$behaviour" | sed 's/^/  /'
+          cat <<'EOF'
+
+          This repository's rule is that documentation is part of the change,
+          not a follow-up — a comment or a page describing behaviour the code
+          no longer has is worse than none, because it actively misleads.
+
+          Update whichever of these the change touched:
+
+            docs/                  the book: features, endpoints, operations
+            README.md              user-facing behaviour, flags, endpoints
+            CHANGELOG.md           anything someone upgrading would want
+            deploy/README.md       anything an operator does
+            charts/*/README.md     anything a chart value does
+
+          Or put a line in the PR body saying why none of them applies:
+
+            No docs needed: internal refactor, no behaviour or interface change.
+          EOF
+          exit 1
+
+  gui-follows-the-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the admin API change without the UI changing?
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          changed() { git diff --name-only "$BASE" "$HEAD" -- "$@"; }
+
+          # Only the admin API and the shapes it serves. The proxy's own
+          # request path has no screen and never should — this check is about
+          # `/admin/*`, which the management UI is the only client of.
+          api=$(changed 'src/control/api.rs' 'src/control/build.rs' 'migrations/**')
+          # A route added is the case that matters; a route deleted is caught
+          # by tests/openapi.rs from the other direction.
+          new_routes=$(git diff "$BASE" "$HEAD" -- src/control/api.rs \
+                       | grep -E '^\+.*\.route\("/admin/' || true)
+          ui=$(changed 'web/src/**' 'web/test/**')
+
+          if [ -z "$api" ] && [ -z "$new_routes" ]; then
+            echo "The admin API did not change."; exit 0
+          fi
+          if [ -n "$ui" ]; then
+            echo "Admin API changed and the UI changed with it:"
+            echo "$ui" | sed 's/^/  /'
+            exit 0
+          fi
+          if printf '%s' "$BODY" | grep -qiE 'no ui needed:'; then
+            echo "Skipped by the PR body:"
+            printf '%s' "$BODY" | grep -iE 'no ui needed:' | sed 's/^/  /'
+            exit 0
+          fi
+
+          if [ -n "$new_routes" ]; then
+            echo "::error title=New admin routes with no UI change::"
+            echo "$new_routes" | sed 's/^/  /'
+          else
+            echo "::error title=Admin API changed with no UI change::"
+            echo "$api" | sed 's/^/  /'
+          fi
+          cat <<'EOF'
+
+          The management UI is the only client of /admin/*, so a route or a
+          field added there is a thing an operator can only reach with curl
+          until a screen catches up. Every feature in this repository that
+          shipped without one was invisible to the people it was for.
+
+          Add or update:
+
+            web/src/views/       the screen
+            web/test/fixtures.mjs  what it renders against
+            web/test/render.mjs    what must appear on it
+
+          Or put a line in the PR body saying why not:
+
+            No UI needed: internal endpoint, not operator-facing.
+          EOF
+          exit 1

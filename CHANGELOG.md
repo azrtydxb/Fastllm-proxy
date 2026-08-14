@@ -6,7 +6,11 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for *why* anything is the way it is; this file is the summary.
 
-## Unreleased
+## [0.2.0] — 2026-08-14
+
+Two new gateways — tool servers and agents — behind the same keys, the same
+grants and the same accounting as models. Plus three importer bugs found by
+running it against a real database rather than trusting the tests.
 
 ### Added
 

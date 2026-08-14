@@ -280,7 +280,7 @@ mod tests {
         let mut cr = FastllmProxy::new(
             "demo",
             FastllmProxySpec {
-                image: "ghcr.io/azrtydxb/fastllm-proxy:v0.1.0".into(),
+                image: "ghcr.io/azrtydxb/fastllm-proxy:v0.2.0".into(),
                 image_pull_policy: "IfNotPresent".into(),
                 database: SecretRef {
                     name: "db".into(),

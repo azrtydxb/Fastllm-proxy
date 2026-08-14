@@ -9,7 +9,7 @@ the request path at all, and the feature set you would otherwise assemble out
 of glue — so it saves you money, uptime, and the numbers you are measured on.
 
 ```bash
-docker run ghcr.io/azrtydxb/fastllm-proxy:v0.1.0 --help
+docker run ghcr.io/azrtydxb/fastllm-proxy:v0.2.0 --help
 ```
 
 [**Get started →**](getting-started.md) · [Performance →](performance.md) · [Providers →](providers.md) · [Connect a client →](integrations.md)
@@ -195,4 +195,4 @@ Deploying to Kubernetes: the [Helm chart](https://github.com/azrtydxb/Fastllm-pr
 or the [worked manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy)
 for one real cluster.
 
-Apache-2.0 · [source](https://github.com/azrtydxb/Fastllm-proxy) · [v0.1.0](https://github.com/azrtydxb/Fastllm-proxy/releases/tag/v0.1.0)
+Apache-2.0 · [source](https://github.com/azrtydxb/Fastllm-proxy) · [v0.2.0](https://github.com/azrtydxb/Fastllm-proxy/releases/tag/v0.2.0)
