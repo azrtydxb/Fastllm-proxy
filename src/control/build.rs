@@ -329,9 +329,27 @@ pub async fn build_snapshot_with(
     for (name, url, transport, description, auth_header, auth_scheme, enc) in mcp_rows {
         // Decrypted here for the same reason a backend credential is: the data
         // plane has to present it, and it cannot present what it cannot read.
+        //
+        // Dropped rather than propagated, exactly as an undecryptable backend
+        // is. `?` here meant one MCP server encrypted under a previous key
+        // took down the whole rebuild — no snapshot at all, so every model
+        // stopped being published too. A tool server nobody can authenticate
+        // to is a smaller failure than a control plane that cannot publish.
         let api_key = match enc {
-            Some(bytes) => Some(crate::control::secrets::decrypt(key, &bytes)?),
             None => None,
+            Some(bytes) => match crate::control::secrets::decrypt(key, &bytes) {
+                Ok(plaintext) => Some(plaintext),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        server = %name,
+                        "dropping MCP server: its credential failed to decrypt; excluded from \
+                         this snapshot rather than failing the whole rebuild. Re-set it through \
+                         the admin API with the current FASTLLM_ENCRYPTION_KEY."
+                    );
+                    continue;
+                }
+            },
         };
         mcp_servers.insert(
             name.clone(),
@@ -1002,6 +1020,43 @@ mod tests {
         assert!(
             snapshot.models.iter().any(|m| m.name == other_model),
             "an unrelated model must be unaffected"
+        );
+    }
+
+    /// The same tolerance for a tool server, and it was not there.
+    ///
+    /// `?` on the decrypt meant one MCP server encrypted under a previous key
+    /// failed the entire rebuild — no snapshot, so every model stopped being
+    /// published as well. Found when a server created against the deployed
+    /// control plane's real key made seventeen unrelated database tests fail,
+    /// because they build snapshots with a test key against the same schema.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn one_undecryptable_mcp_server_is_dropped_and_the_rest_still_builds() {
+        use crate::control::secrets::test_key;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup = TestCleanup::new().track_prefix("mcp_servers", "name", "undecryptable-mcp");
+
+        let name = unique_name("undecryptable-mcp");
+        // Ciphertext this key cannot authenticate: exactly what a row
+        // encrypted under a previous FASTLLM_ENCRYPTION_KEY looks like.
+        sqlx::query("INSERT INTO mcp_servers (name, url, upstream_api_key) VALUES ($1, $2, $3)")
+            .bind(&name)
+            .bind("https://example.invalid/mcp")
+            .bind(vec![0u8; 64])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let snap = build_snapshot(&pool, &test_key()).await.expect(
+            "one undecryptable MCP server must not fail the rebuild — that would stop every \
+             model being published too",
+        );
+        assert!(
+            !snap.mcp_servers.contains_key(&name),
+            "the unreadable server must be excluded, not served with no credential"
         );
     }
 
