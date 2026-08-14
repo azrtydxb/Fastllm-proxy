@@ -14,6 +14,7 @@ import { Login } from "./views/Login.jsx";
 import { Overview } from "./views/Overview.jsx";
 import { Metrics } from "./views/Metrics.jsx";
 import { Usage } from "./views/Usage.jsx";
+import { McpServers } from "./views/McpServers.jsx";
 import { Providers } from "./views/Providers.jsx";
 import { Models } from "./views/Models.jsx";
 import { VirtualModels } from "./views/VirtualModels.jsx";
@@ -45,6 +46,11 @@ const SCREENS = {
     view: VirtualModels,
   },
   classes: { title: "Prompt classes", subtitle: "semantic routing · two tiers", view: PromptClasses },
+  mcp: {
+    title: "MCP servers",
+    subtitle: "one endpoint in front of every tool server",
+    view: McpServers,
+  },
   keys: { title: "API keys", subtitle: "SHA-256 hashed · prefix stored in the clear", view: Keys },
   rbac: { title: "Principals & roles", subtitle: "RBAC and per-model grants", view: Principals },
   limits: { title: "Limits & budgets", subtitle: "tokens, money, or both", view: LimitsAndBudgets },
@@ -69,6 +75,7 @@ const NAV = [
       { id: "models", label: "Models" },
       { id: "routing", label: "Virtual models" },
       { id: "classes", label: "Prompt classes" },
+      { id: "mcp", label: "MCP servers" },
     ],
   },
   {

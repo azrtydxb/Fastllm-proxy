@@ -249,6 +249,32 @@ const FIXTURES = {
       window_start: "2026-08-01T00:00:00Z",
     },
   ],
+  "/admin/mcp-servers": {
+    data: [
+      {
+        id: 1,
+        name: "github",
+        url: "https://mcp.github.example/mcp",
+        transport: "http",
+        description: "issues and pull requests",
+        auth_header: "authorization",
+        auth_scheme: "Bearer",
+        enabled: true,
+        credential_set: true,
+      },
+      {
+        id: 2,
+        name: "internal-wiki",
+        url: "https://wiki.internal/mcp",
+        transport: "sse",
+        description: "",
+        auth_header: "x-api-key",
+        auth_scheme: null,
+        enabled: false,
+        credential_set: false,
+      },
+    ],
+  },
   "/admin/prompt-classes": [
     {
       id: 1,

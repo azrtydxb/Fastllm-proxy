@@ -107,6 +107,9 @@ const SCREENS = [
   // fails if the conditions are read from the wrong shape again.
   ["routing", ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"]],
   ["classes", ["coding", "no centroid", "cannot route"]],
+  // A disabled server, one with no credential, and the namespacing note: the
+  // three things this screen exists to make visible.
+  ["mcp", ["github", "internal-wiki", "disabled", "no credential", "server__tool"]],
   ["keys", ["ci-runner", "revoked", "sk-abcd1234"]],
   ["rbac", ["ops@kryton", "batch-etl", "admin"]],
   // $155.00 of a $500.00 cap. Formatted money must keep its cents: dropping
