@@ -57,12 +57,26 @@ if (await page.$("form input[type=password]")) {
 }
 
 async function shot(name, screen, prepare, after = 1400, finalize) {
-  await page.evaluate((s) => {
+  // Throws rather than photographing whatever was already on screen.
+  //
+  // `if (b) b.click()` silently produced a `ui-mcp.png` showing Prompt
+  // classes, because the control plane being photographed was running an
+  // image that predated the screen. A screenshot of the wrong screen is worse
+  // than a missing one: it ships to the docs looking plausible.
+  const found = await page.evaluate((s) => {
     const b = [...document.querySelectorAll("nav button")].find(
       (x) => x.textContent.trim() === s,
     );
-    if (b) b.click();
+    if (!b) return false;
+    b.click();
+    return true;
   }, screen);
+  if (!found) {
+    throw new Error(
+      `no nav button named ${JSON.stringify(screen)} at ${URL} — is that ` +
+        `control plane running an image with this screen?`,
+    );
+  }
   await settle();
   if (prepare) {
     await page.evaluate(prepare);
@@ -86,6 +100,7 @@ await shot("providers", "Providers");
 await shot("models", "Models");
 await shot("virtual-models", "Virtual models");
 await shot("prompt-classes", "Prompt classes");
+await shot("mcp", "MCP servers");
 await shot("keys", "API keys");
 await shot("rbac", "Principals & roles");
 await shot("limits", "Limits & budgets");
