@@ -726,9 +726,13 @@ mod tests {
     async fn import_carries_the_limits_and_budget_on_a_key() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
+        // `import` creates a role per key (`import:<name>`) as well as the
+        // principal, and tracking only the principal left fifteen of them
+        // behind in the shared database before anyone noticed.
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "limits-import-test-")
-            .track_prefix("principals", "name", "limits-sa-");
+            .track_prefix("principals", "name", "limits-sa-")
+            .track_prefix("roles", "name", "import:limits-sa-");
 
         let model = unique_name("limits-import-test");
         let principal = unique_name("limits-sa");
