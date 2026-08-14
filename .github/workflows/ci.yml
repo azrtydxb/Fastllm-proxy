@@ -247,26 +247,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # The endpoint and its client certificate come from the runner's own
-      # environment, not from repository secrets — the same arrangement the
-      # other repositories on this cluster use.
-      - name: Remote amd64 builder
+      # Built natively, not through a remote buildkit. Another repository on
+      # this cluster points this runner at a remote amd64 endpoint via
+      # `BUILDKIT_AMD64_ENDPOINT` and a client certificate in the runner's
+      # environment; those variables are not set for this repository, and this
+      # runner is amd64 itself, so there is nothing to reach out to.
+      - name: Local amd64 builder
         run: |
-          docker buildx create \
-            --name remote-amd64 \
-            --driver remote \
-            --platform linux/amd64 \
-            --driver-opt cacert="$BUILDKIT_CLIENT_CA" \
-            --driver-opt cert="$BUILDKIT_CLIENT_CERT" \
-            --driver-opt key="$BUILDKIT_CLIENT_KEY" \
-            "$BUILDKIT_AMD64_ENDPOINT"
-          docker buildx inspect --bootstrap remote-amd64
+          docker buildx create --name local-amd64 --driver docker-container \
+            --platform linux/amd64 --use
+          docker buildx inspect --bootstrap local-amd64
       - name: Proxy (amd64, digest only)
         id: proxy
         uses: docker/build-push-action@v6
         with:
           context: .
-          builder: remote-amd64
+          builder: local-amd64
           platforms: linux/amd64
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (amd64, digest only)
@@ -275,7 +271,7 @@ jobs:
         with:
           context: .
           file: operator/Dockerfile
-          builder: remote-amd64
+          builder: local-amd64
           platforms: linux/amd64
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
 
