@@ -195,7 +195,7 @@ export function Agents({ onUnauthorised, go }) {
           <Card title="Add an agent">
             <form onSubmit={create}>
               <Stack gap={10}>
-                <Field label="NAME" hint="also the namespace its tools appear under">
+                <Field label="NAME" hint="how clients address it: /v1/agents/&lt;name&gt;">
                   <input
                     placeholder="planner"
                     value={draft.name}
@@ -262,8 +262,8 @@ export function Agents({ onUnauthorised, go }) {
           <Card title="How a client uses this">
             <Stack gap={8}>
               <Muted>
-                One address, one key. The tools of every server this key may
-                reach come back from a single call:
+                One address, one key. The card comes back rewritten to point
+                here, so the call it names is still authorised:
               </Muted>
               <Mono style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6 }}>
                 GET /v1/agents

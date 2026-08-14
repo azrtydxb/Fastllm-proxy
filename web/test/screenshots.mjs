@@ -101,6 +101,7 @@ await shot("models", "Models");
 await shot("virtual-models", "Virtual models");
 await shot("prompt-classes", "Prompt classes");
 await shot("mcp", "MCP servers");
+await shot("agents", "Agents");
 await shot("keys", "API keys");
 await shot("rbac", "Principals & roles");
 await shot("limits", "Limits & budgets");
