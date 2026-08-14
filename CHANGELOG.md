@@ -12,6 +12,12 @@ Two new gateways — tool servers and agents — behind the same keys, the same
 grants and the same accounting as models. Plus three importer bugs found by
 running it against a real database rather than trusting the tests.
 
+Published as `ghcr.io/azrtydxb/fastllm-proxy:v0.2.0` and
+`ghcr.io/azrtydxb/fastllm-operator:v0.2.0`, **linux/arm64 only**. The amd64
+leg was attempted and `rustc` segfaults under QEMU on the build runners before
+it compiles anything; that needs a native amd64 runner rather than more
+emulation.
+
 ### Added
 
 - **MCP gateway.** One endpoint in front of every tool server, with the same

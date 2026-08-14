@@ -191,6 +191,30 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true
 
+      - name: Build & push (arm64 → GHCR, tagged releases only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          builder: fastllm
+          # arm64 only, and this is not the intended end state.
+          #
+          # `platforms: linux/amd64,linux/arm64` was tried on the v0.2.0 tag
+          # and the emulated leg died with
+          #
+          #     rustc -vV (signal: 11, SIGSEGV: invalid memory reference)
+          #
+          # — rustc crashing under qemu-user on these runners, before it
+          # compiled anything. Publishing arm64 and saying so beats a release
+          # job that fails, and beats a manifest that claims an architecture it
+          # does not contain. The fix is a native amd64 runner, not more
+          # emulation.
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.public.outputs.tags }}
+          # Same cache, so this is a manifest push rather than a second build.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
+
       - name: Build & push the operator (GHCR, tagged releases only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v6
@@ -198,24 +222,10 @@ jobs:
           context: .
           file: operator/Dockerfile
           builder: fastllm
-          platforms: linux/amd64,linux/arm64
+          # Same QEMU segfault as the proxy image above.
+          platforms: linux/arm64
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/fastllm-operator:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/fastllm-operator:latest
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
-
-      - name: Build & push (arm64 → GHCR, tagged releases only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          builder: fastllm
-          # Both architectures on a release, so `docker run` works for
-          # someone who is not on arm64. Emulated, therefore slow, therefore
-          # not on every commit.
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.public.outputs.tags }}
-          # Same cache, so this is a manifest push rather than a second build.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
