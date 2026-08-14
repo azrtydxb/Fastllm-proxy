@@ -76,7 +76,11 @@ fn every_install_path_points_at_the_current_release() {
             }
             for found in versions_in(line) {
                 if found != want {
-                    stale.push(format!("{file}:{} names {found}, not {want}\n    {}", n + 1, line.trim()));
+                    stale.push(format!(
+                        "{file}:{} names {found}, not {want}\n    {}",
+                        n + 1,
+                        line.trim()
+                    ));
                 }
             }
         }
