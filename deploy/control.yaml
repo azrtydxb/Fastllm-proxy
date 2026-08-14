@@ -101,7 +101,15 @@ spec:
           # — sqlx refusing, correctly, to run against a schema newer than the
           # binary. It failed safe and the old pod kept serving, but the failure
           # mode of a stale image pin is a downgrade, not a no-op.
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-e3a1dcb
+          #
+          # So this pin has an obligation attached: whenever the cluster is
+          # rolled to a newer build by hand, roll this file with it. It sat at
+          # sha-e3a1dcb while the cluster ran two migrations past it (0026
+          # mcp_servers, 0027 a2a_agents), and applying it would have taken the
+          # control plane down rather than doing nothing.
+          # `deployment.yaml` carries the same tag and must move at the same
+          # time: the two planes share a schema.
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-03104e6
           imagePullPolicy: Always
           args:
             - --role=control

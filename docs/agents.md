@@ -9,6 +9,13 @@ running" is a question somebody eventually has to answer.
 
 Add one on **Agents**, or by API:
 
+> **Needs a build newer than `v0.1.0`.** This landed after that release, so
+> the `ghcr.io/azrtydxb/fastllm-proxy:v0.1.0` that the [portable
+> manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes),
+> the Helm chart and the operator default to does not serve these routes —
+> `/admin/*` answers 404 and there is no screen. Pin `:latest` or a `sha-`
+> build until the next tagged release.
+
 ```bash
 curl -sk -b /tmp/ck -X POST https://control:4001/admin/a2a-agents \
   -H 'content-type: application/json' -d '{

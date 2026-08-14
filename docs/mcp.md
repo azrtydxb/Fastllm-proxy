@@ -3,6 +3,13 @@
 **One endpoint in front of every tool server**, for the same reason there is
 one in front of every model.
 
+> **Needs a build newer than `v0.1.0`.** This landed after that release, so
+> the `ghcr.io/azrtydxb/fastllm-proxy:v0.1.0` that the [portable
+> manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes),
+> the Helm chart and the operator default to does not serve these routes —
+> `/admin/*` answers 404 and there is no screen. Pin `:latest` or a `sha-`
+> build until the next tagged release.
+
 A team running four MCP servers otherwise hands every agent four addresses,
 four credentials and four separate trust decisions — and has nowhere to answer
 "which of our keys can reach the one that writes to production". Here a server
