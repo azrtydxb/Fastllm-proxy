@@ -6,6 +6,20 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for *why* anything is the way it is; this file is the summary.
 
+## Unreleased
+
+### Fixed
+
+- `POST /admin/models` silently dropped `context_length`: the field was
+  PATCH-only, so a caller who sent it at creation got 201 and a model with no
+  context window. It is settable at creation now.
+- **Every request struct in the admin API now rejects fields it does not
+  model.** serde drops unknown fields by default, which is how the above went
+  unnoticed — and turning strictness on immediately found two more callers
+  sending `roles` to `POST /admin/principals`, an endpoint that has never
+  taken one. One of them passed `["inference"]` and believed it granted a
+  role.
+
 ## [0.2.0] — 2026-08-14
 
 Two new gateways — tool servers and agents — behind the same keys, the same

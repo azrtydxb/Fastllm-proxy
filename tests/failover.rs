@@ -402,7 +402,7 @@ async fn provision(
         admin_port,
         cookie,
         "/admin/principals",
-        serde_json::json!({"name": principal, "roles": []}),
+        serde_json::json!({"name": principal}),
     );
     let principal_id = p["id"].as_i64().unwrap();
     grant_models(
@@ -589,7 +589,7 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
         admin_port,
         &cookie,
         "/admin/principals",
-        serde_json::json!({"name": narrow_name, "roles": []}),
+        serde_json::json!({"name": narrow_name}),
     );
     let narrow_id = narrow["id"].as_i64().unwrap();
     grant_models(

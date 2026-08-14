@@ -182,6 +182,7 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewKey {
     name: String,
     principal_id: i64,
@@ -401,6 +402,7 @@ async fn list_principals(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewPrincipal {
     name: String,
     /// `service_account` by default: a `user` is only useful once it has a
@@ -492,6 +494,7 @@ async fn delete_principal(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RoleGrant {
     role: String,
 }
@@ -703,6 +706,7 @@ async fn list_models(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewModel {
     name: String,
     #[serde(default)]
@@ -723,6 +727,14 @@ struct NewModel {
     /// differ.
     #[serde(default)]
     cache_ttl_seconds: Option<i32>,
+    /// Declared context window, used to demote a model whose window is too
+    /// small for the request rather than letting the upstream refuse it.
+    ///
+    /// Settable here as well as by PATCH because it was PATCH-only, and a
+    /// caller who sent it to this route got no error and no context length —
+    /// the field was simply dropped.
+    #[serde(default)]
+    context_length: Option<i32>,
 }
 
 /// A model and a virtual model sharing a name would make the `model` field
@@ -774,6 +786,7 @@ type A2aAgentRow = (
 );
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewA2aAgent {
     name: String,
     url: String,
@@ -898,6 +911,7 @@ async fn post_a2a_agent(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatchA2aAgent {
     #[serde(default)]
     url: Option<String>,
@@ -987,6 +1001,7 @@ async fn delete_a2a_agent(
 
 /// An MCP server as the admin API accepts it.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewMcpServer {
     name: String,
     url: String,
@@ -1127,6 +1142,7 @@ async fn post_mcp_server(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatchMcpServer {
     #[serde(default)]
     url: Option<String>,
@@ -1235,14 +1251,15 @@ async fn post_model(
     }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+             cache_ttl_seconds, context_length) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
     .bind(body.input_price_per_mtok)
     .bind(body.output_price_per_mtok)
     .bind(body.cache_ttl_seconds)
+    .bind(body.context_length)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1273,6 +1290,7 @@ async fn post_model(
 /// Clearing is spelled explicitly: `null` sets the column to NULL, which is how
 /// a model becomes unpriced or stops caching again.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatchModel {
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
@@ -1400,6 +1418,7 @@ async fn delete_model(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewBackend {
     api_base: String,
     /// Absent means "the model's own name", matching what `File` mode does
@@ -1752,6 +1771,7 @@ async fn list_virtual_models(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewVirtualModel {
     name: String,
     #[serde(default)]
@@ -1831,6 +1851,7 @@ async fn delete_virtual_model(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewRule {
     /// Where this rule sits in its virtual model's evaluation order —
     /// load-bearing, not cosmetic: the first matching rule wins.
@@ -1913,6 +1934,7 @@ async fn delete_rule(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewTarget {
     model_id: i64,
     #[serde(default = "default_target_weight")]
@@ -2120,6 +2142,7 @@ async fn sync_prices(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SyncPricesRequest {
     #[serde(default)]
     source: Option<crate::control::pricing::Source>,
@@ -2130,6 +2153,7 @@ struct SyncPricesRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DryRunRequest {
     /// The name a client would put in `model`. A virtual model is the
     /// interesting case; a concrete one resolves to itself.
@@ -2489,6 +2513,7 @@ struct TimeseriesRow {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TimeseriesQuery {
     #[serde(default)]
     since: Option<chrono::DateTime<chrono::Utc>>,
@@ -2507,6 +2532,7 @@ struct TimeseriesQuery {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UsageQuery {
     #[serde(default = "default_group_by")]
     group_by: String,
@@ -2902,6 +2928,7 @@ const GRANTABLE_VERBS: &[&str] = &[
 ];
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GrantPermission {
     verb: String,
     /// `*` for the admin verbs, or `model/<name>` for `model:invoke`. Absent
@@ -3046,6 +3073,7 @@ struct AuditView {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditQuery {
     /// Newest first, so a UI's first page is the interesting one.
     #[serde(default = "default_audit_limit")]
@@ -3207,6 +3235,7 @@ async fn list_limits(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PutLimits {
     #[serde(default)]
     requests_per_min: Option<i32>,
@@ -3372,6 +3401,7 @@ async fn list_budgets(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PutBudget {
     /// Either cap, or both. At least one is required — a budget with neither
     /// limits nothing and would be a silent no-op.
@@ -3479,6 +3509,7 @@ async fn delete_budget(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReconcileCountWire {
     principal_id: u64,
     requests: u64,
@@ -3486,6 +3517,7 @@ struct ReconcileCountWire {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReconcileRequest {
     replica_id: String,
     counts: Vec<ReconcileCountWire>,
@@ -3854,6 +3886,7 @@ async fn get_snapshot(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoRe
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UsageBatchRequest {
     events: Vec<UsageEvent>,
 }
@@ -4144,6 +4177,7 @@ fn clear_cookie_header(secure: bool) -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginRequest {
     name: String,
     password: String,
@@ -4497,6 +4531,7 @@ async fn post_role(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewRole {
     name: String,
     #[serde(default)]
@@ -4728,6 +4763,7 @@ async fn audit_changes(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetPassword {
     password: String,
 }
@@ -5148,6 +5184,38 @@ mod tests {
         );
     }
 
+    /// Two failures with one cause: a field the caller sent that the API did
+    /// not model.
+    ///
+    /// `context_length` was PATCH-only, so `POST /admin/models` accepted a
+    /// request carrying it, returned 201, and created a model with no context
+    /// window — silently, because serde drops unknown fields by default. It
+    /// was found by reading a row after registering a real model, which is the
+    /// only way it could be found.
+    ///
+    /// The field is settable here now, and every request struct in this module
+    /// rejects what it does not understand, so the next one of these is a 400
+    /// instead of a shrug.
+    #[test]
+    fn a_field_the_admin_api_does_not_model_is_refused_rather_than_dropped() {
+        // Settable at creation, which is the specific bug.
+        let ok: Result<NewModel, _> = serde_json::from_value(serde_json::json!({
+            "name": "m", "context_length": 262144
+        }));
+        assert_eq!(ok.expect("valid").context_length, Some(262144));
+
+        // And anything unmodelled is now an error rather than silence. A
+        // plausible typo is the case that matters: it looks like it worked.
+        for bad in [
+            serde_json::json!({"name": "m", "contextLength": 262144}),
+            serde_json::json!({"name": "m", "context_len": 262144}),
+            serde_json::json!({"name": "m", "cache_ttl": 60}),
+        ] {
+            let r: Result<NewModel, _> = serde_json::from_value(bad.clone());
+            assert!(r.is_err(), "{bad} was accepted and silently dropped");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn creating_a_key_returns_plaintext_once_and_stores_only_the_hash() {
@@ -5299,6 +5367,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -5568,6 +5637,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -5583,6 +5653,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -5708,6 +5779,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -5749,6 +5821,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -5988,6 +6061,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -6089,6 +6163,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -6169,6 +6244,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -6550,6 +6626,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -6636,6 +6713,7 @@ mod tests {
                 input_price_per_mtok: Some(1_000_000),
                 output_price_per_mtok: Some(1_000_000),
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -6869,6 +6947,7 @@ mod tests {
                     input_price_per_mtok: price,
                     output_price_per_mtok: price,
                     cache_ttl_seconds: None,
+                    context_length: None,
                 }),
             )
             .await
@@ -6952,6 +7031,7 @@ mod tests {
                 input_price_per_mtok: Some(3_000_000),
                 output_price_per_mtok: Some(15_000_000),
                 cache_ttl_seconds: Some(60),
+                context_length: None,
             }),
         )
         .await
@@ -7046,6 +7126,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -7152,6 +7233,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -7205,6 +7287,7 @@ mod tests {
                         input_price_per_mtok: None,
                         output_price_per_mtok: None,
                         cache_ttl_seconds: None,
+                        context_length: None,
                     }),
                 )
                 .await
@@ -7521,6 +7604,7 @@ mod tests {
                 input_price_per_mtok: None,
                 output_price_per_mtok: None,
                 cache_ttl_seconds: None,
+                context_length: None,
             }),
         )
         .await
@@ -7721,6 +7805,7 @@ async fn list_prompt_classes(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewPromptClass {
     name: String,
     #[serde(default)]
@@ -7840,6 +7925,7 @@ async fn post_prompt_class(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewExample {
     prompt: String,
 }
@@ -8100,6 +8186,7 @@ async fn get_fallback_model(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FallbackModel {
     /// `null` clears it, leaving no deployment-wide last resort.
     model_id: Option<i64>,

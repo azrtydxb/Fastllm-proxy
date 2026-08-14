@@ -361,7 +361,11 @@ async fn provision(
         admin_port,
         cookie,
         "/admin/principals",
-        serde_json::json!({"name": principal, "roles": ["inference"]}),
+        // No `roles` here: `POST /admin/principals` does not take one, and
+        // this line used to pass `["inference"]` and have it silently dropped.
+        // The grant that actually matters is the per-model one below, which is
+        // why nothing ever noticed.
+        serde_json::json!({"name": principal}),
     );
     let principal_id = p["id"].as_i64().expect("principal id");
     grant_one_model(pool, principal_id, &model, &format!("np-role-{suffix}")).await;

@@ -264,7 +264,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         admin_port,
         cookie,
         "/admin/principals",
-        serde_json::json!({"name": principal, "roles": []}),
+        serde_json::json!({"name": principal}),
     );
     let principal_id = p["id"].as_i64().unwrap();
     grant_all(pool, principal_id, &format!("sr-role-{suffix}")).await;
