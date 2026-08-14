@@ -193,6 +193,7 @@ const SCREENS = [
   "routing",
   "classes",
   "mcp",
+  "agents",
   "keys",
   "rbac",
   "limits",

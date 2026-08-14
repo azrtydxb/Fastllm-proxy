@@ -19,6 +19,14 @@ source for *why* anything is the way it is; this file is the summary.
   `POST /v1/mcp/tools/call`, an **MCP servers** screen, and admin CRUD under
   `/admin/mcp-servers`. `stdio` servers are deliberately unsupported — see
   docs/mcp.md.
+- **A2A gateway.** One address in front of every agent: `GET /v1/agents`, the
+  agent card at `/v1/agents/{name}/.well-known/…` **rewritten to point at this
+  gateway** so the client's next call is still authorised and attributed, and
+  `POST /v1/agents/{name}` carrying every JSON-RPC method. Protocol versions
+  are pinned per agent rather than inferred, forwarded methods are a closed
+  list, and `agent:invoke` is implied by neither `model:invoke` nor
+  `mcp:invoke`. An **Agents** screen and `/admin/a2a-agents` CRUD. Translation
+  between 0.3 and 1.0 is deliberately not done — see docs/agents.md.
 - **Interactive API reference** on the docs site, rendering the same
   `openapi.json` the control plane serves at `/openapi.json`.
 

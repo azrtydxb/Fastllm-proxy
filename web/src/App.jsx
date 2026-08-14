@@ -14,6 +14,7 @@ import { Login } from "./views/Login.jsx";
 import { Overview } from "./views/Overview.jsx";
 import { Metrics } from "./views/Metrics.jsx";
 import { Usage } from "./views/Usage.jsx";
+import { Agents } from "./views/Agents.jsx";
 import { McpServers } from "./views/McpServers.jsx";
 import { Providers } from "./views/Providers.jsx";
 import { Models } from "./views/Models.jsx";
@@ -46,6 +47,11 @@ const SCREENS = {
     view: VirtualModels,
   },
   classes: { title: "Prompt classes", subtitle: "semantic routing · two tiers", view: PromptClasses },
+  agents: {
+    title: "Agents",
+    subtitle: "A2A, with the card rewritten to point here",
+    view: Agents,
+  },
   mcp: {
     title: "MCP servers",
     subtitle: "one endpoint in front of every tool server",
@@ -76,6 +82,7 @@ const NAV = [
       { id: "routing", label: "Virtual models" },
       { id: "classes", label: "Prompt classes" },
       { id: "mcp", label: "MCP servers" },
+      { id: "agents", label: "Agents" },
     ],
   },
   {

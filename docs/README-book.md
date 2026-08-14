@@ -113,6 +113,7 @@ Against a real vLLM the proxy's own overhead is **below the noise floor** —
 | **RBAC with real keys** | Principals, roles, per-model grants. Keys SHA-256 hashed, passwords Argon2id — deliberately different |
 | **Budgets and rate limits** | Enforced with an integer comparison on the request path, not a query |
 | **Usage accounting** | Every attributable request, priced at the price in force when it ran, in integer micro-units |
+| **A2A gateway** | Agents behind one address, their cards rewritten so the next call is still authorised, versions pinned rather than guessed |
 | **MCP gateway** | Every tool server behind one address, tools namespaced, and `mcp:invoke` grants that are deliberately not implied by `model:invoke` |
 | **80 providers** | Anything OpenAI-shaped is a row in a table. Anthropic and Gemini in their own wire format, translated both ways including streaming and tool calls |
 | **Control/data plane split** | One binary, three shapes. A proxy that loses its control plane keeps serving from its last snapshot |
@@ -180,6 +181,7 @@ usage-based routing.
 | [What it can do](features.md) | Features, measured trade-offs, honest limits |
 | [Providers](providers.md) | All 80, how to add one, how credentials are handled |
 | [MCP gateway](mcp.md) | One endpoint in front of every tool server, with the same grants |
+| [A2A agents](agents.md) | One address in front of every agent, card rewritten to keep calls attributed |
 | [Connecting a client](integrations.md) | OpenAI SDKs, five coding agents, four frameworks |
 | [Troubleshooting](troubleshooting.md) | The failures people actually hit |
 | [Operations](operations.md) | Five deployment shapes, from one binary to a scaled cluster |

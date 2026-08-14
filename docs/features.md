@@ -149,6 +149,12 @@ straight to any OpenAI-compatible model. One server being down names itself in
 
 [The MCP gateway →](mcp.md)
 
+And the same for **A2A agents**: one address, cards rewritten so the client's
+next call is still authorised and attributed, protocol versions pinned rather
+than guessed, and `agent:invoke` implied by neither of the other two.
+
+[A2A agents →](agents.md)
+
 ## Beyond chat: what else it serves
 
 Twelve `POST` endpoints, not one. Anything OpenAI-shaped that carries a

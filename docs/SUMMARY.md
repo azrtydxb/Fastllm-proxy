@@ -10,6 +10,7 @@
 - [What it can do](features.md)
 - [Providers](providers.md)
 - [MCP gateway](mcp.md)
+- [A2A agents](agents.md)
 - [Connecting a client](integrations.md)
 - [Troubleshooting](troubleshooting.md)
 

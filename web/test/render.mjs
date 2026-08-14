@@ -110,6 +110,9 @@ const SCREENS = [
   // A disabled server, one with no credential, and the namespacing note: the
   // three things this screen exists to make visible.
   ["mcp", ["github", "internal-wiki", "disabled", "no credential", "server__tool"]],
+  // The pinned version and the card rewrite are the two things this screen
+  // exists to make visible.
+  ["agents", ["planner", "deployer", "0.3", "1.0", "disabled", "rewritten to point at this gateway"]],
   ["keys", ["ci-runner", "revoked", "sk-abcd1234"]],
   ["rbac", ["ops@kryton", "batch-etl", "admin"]],
   // $155.00 of a $500.00 cap. Formatted money must keep its cents: dropping

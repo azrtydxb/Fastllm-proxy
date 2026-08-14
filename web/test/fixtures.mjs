@@ -249,6 +249,32 @@ const FIXTURES = {
       window_start: "2026-08-01T00:00:00Z",
     },
   ],
+  "/admin/a2a-agents": {
+    data: [
+      {
+        id: 1,
+        name: "planner",
+        url: "https://planner.agents.internal/a2a",
+        description: "breaks a goal into steps",
+        protocol_version: "0.3",
+        auth_header: "authorization",
+        auth_scheme: "Bearer",
+        enabled: true,
+        credential_set: true,
+      },
+      {
+        id: 2,
+        name: "deployer",
+        url: "https://deployer.agents.internal/a2a",
+        description: "",
+        protocol_version: "1.0",
+        auth_header: "authorization",
+        auth_scheme: "Bearer",
+        enabled: false,
+        credential_set: false,
+      },
+    ],
+  },
   "/admin/mcp-servers": {
     data: [
       {
