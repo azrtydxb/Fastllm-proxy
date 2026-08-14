@@ -2671,6 +2671,7 @@ const GRANTABLE_VERBS: &[&str] = &[
     admin_permission::KEY_REVOKE,
     admin_permission::CONFIG_WRITE,
     "model:invoke",
+    "mcp:invoke",
 ];
 
 #[derive(Deserialize)]
@@ -2778,13 +2779,18 @@ fn validate_grant(verb: &str, resource: &str) -> Result<(), ApiError> {
             ),
         ));
     }
-    if verb == "model:invoke" {
-        // `model/*` is every model; `model/<name>` is one. Anything else would
-        // silently match nothing, which on a matrix looks like access granted.
-        if !resource.starts_with("model/") {
+    // Both scoped verbs, and both for the same reason: a resource that does
+    // not match the expected prefix silently matches nothing, which on a
+    // permission matrix reads as access granted.
+    if let Some(prefix) = match verb {
+        "model:invoke" => Some("model/"),
+        "mcp:invoke" => Some("mcp/"),
+        _ => None,
+    } {
+        if !resource.starts_with(prefix) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                "model:invoke needs a resource of model/* or model/<name>".to_string(),
+                format!("{verb} needs a resource of {prefix}* or {prefix}<name>"),
             ));
         }
     } else if resource != "*" {
@@ -4838,6 +4844,25 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gap that made the MCP gateway unusable end to end: every piece
+    /// worked — schema, snapshot, routing, the screen — and the grant could
+    /// not be written, because this allowlist had never heard of the verb.
+    /// Found by granting it against a real deployment, not by a unit test.
+    #[test]
+    fn mcp_invoke_can_be_granted_and_is_scoped_like_model_invoke() {
+        assert!(validate_grant("mcp:invoke", "mcp/*").is_ok());
+        assert!(validate_grant("mcp:invoke", "mcp/github").is_ok());
+
+        // A resource with the wrong prefix matches nothing at flatten time,
+        // which on a permission matrix reads as access granted.
+        assert!(validate_grant("mcp:invoke", "*").is_err());
+        assert!(validate_grant("mcp:invoke", "model/github").is_err());
+
+        // And the admin verbs still refuse a scope they cannot express.
+        assert!(validate_grant("config:write", "mcp/github").is_err());
+        assert!(validate_grant("config:write", "*").is_ok());
+    }
 
     /// Shared with `control::import::tests` — see `secrets::test_key` for
     /// why every DB-backed test in `control::*` must use the same key
