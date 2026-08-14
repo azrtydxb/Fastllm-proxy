@@ -30,7 +30,6 @@
 //! that deciding **whether** the caller may make it costs one set lookup.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::snapshot::{McpServerDef, Principal, Snapshot};
 
@@ -248,12 +247,16 @@ pub fn route<'a>(
 pub fn invocable_servers<'a>(
     snap: &'a Snapshot,
     principal: Option<&Principal>,
-) -> BTreeMap<&'a str, &'a McpServerDef> {
-    snap.mcp_servers
-        .iter()
-        .filter(|(name, _)| may_invoke(principal, name, snap.open))
-        .map(|(name, def)| (name.as_str(), def))
-        .collect()
+) -> Vec<&'a McpServerDef> {
+    let mut out: Vec<&McpServerDef> = snap
+        .mcp_servers
+        .values()
+        .filter(|def| may_invoke(principal, &def.name, snap.open))
+        .collect();
+    // Stable order, so an aggregate listing does not reshuffle between calls
+    // for reasons a caller cannot see.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 #[cfg(test)]
@@ -397,5 +400,110 @@ mod tests {
         def.auth_scheme = None;
         let raw = auth_headers(&def);
         assert!(raw.contains(&("authorization".to_string(), "tok".to_string())));
+    }
+}
+
+// ---------------------------------------------------------------- transport
+
+/// Everything the handlers need to reach a server, without `mcp` knowing what
+/// an `AppState` is.
+pub struct Call<'a> {
+    pub server: &'a McpServerDef,
+    pub body: serde_json::Value,
+}
+
+impl<'a> Call<'a> {
+    /// `tools/list` against one server.
+    pub fn list(server: &'a McpServerDef) -> Self {
+        Self {
+            server,
+            body: rpc(1, "tools/list", serde_json::json!({})),
+        }
+    }
+
+    /// `tools/call`, with the namespace already stripped off the tool name —
+    /// the server knows its tools by their own names and has never heard of
+    /// this gateway's prefix.
+    pub fn invoke(server: &'a McpServerDef, tool: &str, arguments: serde_json::Value) -> Self {
+        Self {
+            server,
+            body: rpc(
+                2,
+                "tools/call",
+                serde_json::json!({ "name": tool, "arguments": arguments }),
+            ),
+        }
+    }
+}
+
+/// An SSE-framed JSON-RPC reply, reduced to the JSON it carries.
+///
+/// MCP's streamable-HTTP transport is allowed to answer a plain request with
+/// `text/event-stream` holding a single `data:` line, and several published
+/// servers do. Handing that to `serde_json` unchanged fails, and the failure
+/// looks like the server returned nonsense rather than like a framing
+/// difference — so it is unwrapped here, once, where the reason can be
+/// written down.
+pub fn parse_reply(content_type: Option<&str>, raw: &[u8]) -> Option<serde_json::Value> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let looks_sse = content_type.is_some_and(|c| c.starts_with("text/event-stream"))
+        || text.trim_start().starts_with("event:")
+        || text.trim_start().starts_with("data:");
+    if !looks_sse {
+        return serde_json::from_str(text).ok();
+    }
+    // The last `data:` line wins: a server may send a comment or an `event:`
+    // line first, and only one JSON-RPC reply is ever carried.
+    text.lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str(d.trim()).ok())
+        .next_back()
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    /// The tool name that goes upstream is the server's own, never the
+    /// gateway's namespaced one.
+    #[test]
+    fn the_namespace_is_stripped_before_the_call_leaves() {
+        let def = McpServerDef {
+            name: "github".into(),
+            url: "https://x/mcp".into(),
+            transport: "http".into(),
+            description: String::new(),
+            auth_header: "authorization".into(),
+            auth_scheme: Some("Bearer".into()),
+            api_key: None,
+        };
+        let call = Call::invoke(&def, "search", serde_json::json!({"q": "x"}));
+        assert_eq!(call.body["method"], "tools/call");
+        assert_eq!(
+            call.body["params"]["name"], "search",
+            "the server has never heard of this gateway's prefix"
+        );
+    }
+
+    /// Several published servers answer a plain POST with a one-line SSE
+    /// frame. Failing to parse that reads as "the server returned nonsense".
+    #[test]
+    fn an_sse_framed_reply_is_unwrapped() {
+        let sse =
+            b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+        let v = parse_reply(Some("text/event-stream"), sse).expect("unwrapped");
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 0);
+
+        // And a plain JSON body still parses as itself.
+        let plain = br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        assert!(parse_reply(Some("application/json"), plain).is_some());
+        // Detected by shape too, for a server that mislabels its content type.
+        assert!(parse_reply(None, sse).is_some());
+    }
+
+    #[test]
+    fn a_reply_that_is_neither_is_none_rather_than_a_panic() {
+        assert!(parse_reply(Some("text/html"), b"<html>502</html>").is_none());
+        assert!(parse_reply(None, &[0xff, 0xfe]).is_none());
     }
 }

@@ -355,6 +355,120 @@
         ]
       }
     },
+    "/admin/mcp-servers": {
+      "get": {
+        "summary": "List MCP servers. Reports whether a credential is set, never what it is",
+        "operationId": "get_admin_mcp_servers",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Register an MCP server",
+        "operationId": "post_admin_mcp_servers",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "201": {
+            "description": "Created"
+          },
+          "409": {
+            "description": "A server by that name already exists"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/mcp-servers/{id}": {
+      "patch": {
+        "summary": "Update an MCP server. An absent upstream_api_key leaves the stored credential alone; \"\" clears it",
+        "operationId": "patch_admin_mcp_servers_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "204": {
+            "description": "Updated"
+          },
+          "404": {
+            "description": "No such server"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Delete an MCP server",
+        "operationId": "delete_admin_mcp_servers_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such server"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/models": {
       "get": {
         "summary": "Read models",
@@ -2046,6 +2160,81 @@
             "description": "No backend in the chain could be reached"
           }
         }
+      }
+    },
+    "/v1/mcp/servers": {
+      "get": {
+        "summary": "MCP servers this key may invoke",
+        "operationId": "get_v1_mcp_servers",
+        "tags": [
+          "mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/mcp/tools/call": {
+      "post": {
+        "summary": "Invoke one namespaced tool. {\"name\": \"<server>__<tool>\", \"arguments\": {}}",
+        "operationId": "post_v1_mcp_tools_call",
+        "tags": [
+          "mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          },
+          "400": {
+            "description": "The tool name carried no server namespace"
+          },
+          "404": {
+            "description": "No such server, or this key may not reach it \u2014 deliberately the same answer"
+          },
+          "502": {
+            "description": "The server did not return a usable reply"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/mcp/tools/list": {
+      "post": {
+        "summary": "Every tool across every server this key may invoke, namespaced <server>__<tool>. `unreachable` names servers that did not answer, so a missing tool is diagnosable",
+        "operationId": "post_v1_mcp_tools_list",
+        "tags": [
+          "mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Missing or unknown API key"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/models": {

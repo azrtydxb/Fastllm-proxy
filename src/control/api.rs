@@ -744,6 +744,240 @@ async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Erro
         .await
 }
 
+/// An MCP server as the admin API accepts it.
+#[derive(Deserialize)]
+struct NewMcpServer {
+    name: String,
+    url: String,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    auth_header: Option<String>,
+    /// `""` sends the credential with no prefix, which is what several MCP
+    /// hosts want. Absent means `Bearer`, exactly as for a model backend.
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// `GET /admin/mcp-servers`.
+///
+/// Reports **whether** a credential is set and never what it is — the same
+/// rule `/admin/models` follows, and the reason `upstream_api_key` is not in
+/// the select list at all rather than filtered out afterwards.
+async fn list_mcp_servers(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        bool,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT id, name, url, transport, description, auth_header, auth_scheme, enabled,
+                    upstream_api_key IS NOT NULL
+               FROM mcp_servers ORDER BY name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("mcp server list", &e))?;
+
+    let data: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(
+            |(id, name, url, transport, description, auth_header, auth_scheme, enabled, cred)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "url": url,
+                    "transport": transport,
+                    "description": description,
+                    "auth_header": auth_header,
+                    "auth_scheme": auth_scheme,
+                    "enabled": enabled,
+                    "credential_set": cred,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(serde_json::json!({ "data": data })))
+}
+
+/// `POST /admin/mcp-servers`.
+async fn post_mcp_server(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewMcpServer>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Checked here as well as by the column constraint, so the operator gets a
+    // sentence instead of a Postgres error: the name is a path segment and a
+    // tool-name namespace, and both constrain it.
+    if !body
+        .name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || body.name.is_empty()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name must be alphanumeric with - or _: it is both a URL path segment and the \
+             namespace this server's tools appear under",
+        ));
+    }
+    let transport = body.transport.unwrap_or_else(|| "http".to_string());
+    if transport != "http" && transport != "sse" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "transport must be \"http\" (streamable) or \"sse\"",
+        ));
+    }
+    let encrypted = body
+        .upstream_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| crate::control::secrets::encrypt(&ctx.key, k))
+        .transpose()
+        .map_err(|e| {
+            tracing::error!(error = %e, "encrypting an MCP server credential failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not encrypt upstream_api_key; the server was not created",
+            )
+        })?;
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO mcp_servers
+           (name, url, transport, description, auth_header, auth_scheme, upstream_api_key, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(&body.name)
+    .bind(&body.url)
+    .bind(&transport)
+    .bind(&body.description)
+    .bind(body.auth_header.as_deref().unwrap_or("authorization"))
+    // Absent is `Bearer`; an explicit empty string is NULL, meaning send the
+    // credential raw. Same three states as a model backend.
+    .bind(match body.auth_scheme.as_deref() {
+        None => Some("Bearer"),
+        Some("") => None,
+        Some(scheme) => Some(scheme),
+    })
+    .bind(encrypted)
+    .bind(body.enabled.unwrap_or(true))
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("an MCP server named {:?} already exists", body.name),
+            )
+        } else {
+            db_error("mcp server creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": body.name })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PatchMcpServer {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Absent leaves the stored credential alone; `""` clears it. Without the
+    /// distinction there would be no way to edit a description without
+    /// re-sending a secret.
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+}
+
+/// `PATCH /admin/mcp-servers/{id}`.
+async fn patch_mcp_server(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchMcpServer>,
+) -> Result<StatusCode, ApiError> {
+    let encrypted = match body.upstream_api_key.as_deref().map(str::trim) {
+        Some("") => Some(None),
+        Some(k) => Some(Some(
+            crate::control::secrets::encrypt(&ctx.key, k).map_err(|e| {
+                tracing::error!(error = %e, "encrypting an MCP server credential failed");
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not encrypt upstream_api_key; nothing was changed",
+                )
+            })?,
+        )),
+        None => None,
+    };
+    let result = sqlx::query(
+        "UPDATE mcp_servers
+            SET url = COALESCE($2, url),
+                description = COALESCE($3, description),
+                enabled = COALESCE($4, enabled),
+                upstream_api_key = CASE WHEN $5 THEN $6 ELSE upstream_api_key END,
+                updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.url.as_deref())
+    .bind(body.description.as_deref())
+    .bind(body.enabled)
+    .bind(encrypted.is_some())
+    .bind(encrypted.flatten())
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("mcp server update", &e))?;
+    if result.rows_affected() == 0 {
+        return Err(api_error(StatusCode::NOT_FOUND, "no such MCP server"));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/mcp-servers/{id}`.
+///
+/// Grants naming this server are left behind deliberately: they are rows in
+/// `permissions`, an operator may be replacing the server, and a grant on a
+/// name that does not exist simply matches nothing (`flatten_mcp_grants` only
+/// keeps names that resolve).
+async fn delete_mcp_server(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let result = sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("mcp server deletion", &e))?;
+    if result.rows_affected() == 0 {
+        return Err(api_error(StatusCode::NOT_FOUND, "no such MCP server"));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn post_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
@@ -4452,6 +4686,14 @@ pub async fn serve(
         .route("/admin/principals/{id}/roles", post(grant_role))
         .route("/admin/principals/{id}/roles/{role}", delete(revoke_role))
         .route("/admin/principals/{id}/password", put(put_password))
+        .route(
+            "/admin/mcp-servers",
+            get(list_mcp_servers).post(post_mcp_server),
+        )
+        .route(
+            "/admin/mcp-servers/{id}",
+            axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
+        )
         .route("/admin/models", get(list_models).post(post_model))
         .route(
             "/admin/models/{id}",

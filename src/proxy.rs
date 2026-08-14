@@ -62,6 +62,19 @@ use std::time::SystemTime;
 pub type ResBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
 /// Endpoints forwarded to a backend. Everything else is served locally.
+/// The gateway's own MCP routes, as `(method, subpath under /v1)`.
+///
+/// These are not pass-through, so they cannot live in `PROXIED_SUFFIXES` — but
+/// they still need to be enumerable, because `tests/openapi.rs` checks the
+/// published spec against what this server actually serves in both directions
+/// and a hand-maintained allowlist over there is exactly the drift that check
+/// exists to catch.
+pub const MCP_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/mcp/servers"),
+    ("POST", "/mcp/tools/list"),
+    ("POST", "/mcp/tools/call"),
+];
+
 const PROXIED_SUFFIXES: &[&str] = &[
     "/chat/completions",
     "/completions",
@@ -151,6 +164,31 @@ pub async fn handle(
     }
 
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
+
+    // The MCP gateway. Separate from `PROXIED_SUFFIXES` because these are not
+    // pass-through: the gateway answers `servers` itself, fans `tools/list`
+    // out across everything the caller may reach, and rewrites a namespaced
+    // tool name on the way to a single server.
+    match mcp_route(&method, subpath) {
+        Some(McpRoute::Servers) => {
+            return Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "object": "list",
+                    "data": crate::mcp::visible_servers(&snapshot, principal),
+                })
+                .to_string(),
+            ));
+        }
+        Some(McpRoute::ToolsList) => {
+            return Ok(mcp_tools_list(state, principal, &snapshot).await);
+        }
+        Some(McpRoute::ToolsCall) => {
+            return Ok(mcp_tools_call(req, state, principal, &snapshot).await);
+        }
+        None => {}
+    }
+
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
         return Ok(proxy_request(req, state, subpath, principal, &snapshot).await);
@@ -1489,6 +1527,178 @@ fn bearer_token(header: &str) -> Option<&str> {
         .eq_ignore_ascii_case("bearer")
         .then(|| token.trim())
         .filter(|t| !t.is_empty())
+}
+
+/// Which MCP route a request names, if any.
+#[derive(Debug, PartialEq, Eq)]
+enum McpRoute {
+    Servers,
+    ToolsList,
+    ToolsCall,
+}
+
+fn mcp_route(method: &Method, subpath: &str) -> Option<McpRoute> {
+    match (method.as_str(), subpath) {
+        ("GET", "/mcp/servers") => Some(McpRoute::Servers),
+        ("POST", "/mcp/tools/list") => Some(McpRoute::ToolsList),
+        ("POST", "/mcp/tools/call") => Some(McpRoute::ToolsCall),
+        _ => None,
+    }
+}
+
+/// One JSON-RPC round trip to an MCP server.
+///
+/// Returns the parsed reply, or `None` for anything that did not come back as
+/// a JSON-RPC body — a connection failure, a 502 from something in the middle,
+/// an HTML error page. The caller decides what that means, because it means
+/// different things for an aggregate list and a single call.
+async fn mcp_roundtrip(
+    state: &Arc<AppState>,
+    server: &crate::snapshot::McpServerDef,
+    body: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(&server.url)
+        .header("content-type", "application/json");
+    for (name, value) in crate::mcp::auth_headers(server) {
+        builder = builder.header(name, value);
+    }
+    let req = builder
+        .body(Full::new(Bytes::from(body.to_string())))
+        .expect("well-formed MCP request");
+
+    let resp = match state.client.request(req).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(server = %server.name, error = %e, "MCP server unreachable");
+            return None;
+        }
+    };
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let (_, body) = resp.into_parts();
+    let bytes = match Limited::new(body, state.max_body_bytes).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            warn!(server = %server.name, error = %e, "MCP reply could not be read");
+            return None;
+        }
+    };
+    crate::mcp::parse_reply(content_type.as_deref(), &bytes)
+}
+
+/// `POST /v1/mcp/tools/list`: every tool the caller can reach, namespaced.
+///
+/// Servers are queried concurrently and a server that fails contributes
+/// nothing rather than failing the request. Four servers where one is down
+/// should still list the tools on the other three — and `unreachable` names
+/// which ones did not answer, so a missing tool is diagnosable rather than
+/// merely absent.
+async fn mcp_tools_list(
+    state: Arc<AppState>,
+    principal: Option<&Principal>,
+    snapshot: &Snapshot,
+) -> Response<ResBody> {
+    // Sequential, and that is a deliberate limit rather than an oversight.
+    // Concurrency here needs `'static` futures (a `JoinSet`) and therefore an
+    // owned clone of each server definition, or a `futures` dependency this
+    // crate does not otherwise carry. Deployments have a handful of servers,
+    // and `tools/list` is a setup-time call an agent makes once — not
+    // per-request work. Revisit when someone has ten servers and the wall
+    // clock says so.
+    let servers = crate::mcp::invocable_servers(snapshot, principal);
+    let mut tools = Vec::new();
+    let mut unreachable = Vec::new();
+    for def in servers {
+        match mcp_roundtrip(&state, def, crate::mcp::Call::list(def).body).await {
+            Some(body) => tools.extend(crate::mcp::tools_from_result(&def.name, &body)),
+            None => unreachable.push(def.name.clone()),
+        }
+    }
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "object": "list",
+            "data": tools,
+            "unreachable": unreachable,
+        })
+        .to_string(),
+    )
+}
+
+/// `POST /v1/mcp/tools/call`: `{"name": "<server>__<tool>", "arguments": {...}}`.
+async fn mcp_tools_call(
+    req: Request<Incoming>,
+    state: Arc<AppState>,
+    principal: Option<&Principal>,
+    snapshot: &Snapshot,
+) -> Response<ResBody> {
+    let (_, body) = req.into_parts();
+    let bytes = match Limited::new(body, state.max_body_bytes).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "could not read request body",
+            )
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!("body is not JSON: {e}"),
+            )
+        }
+    };
+    let Some(name) = parsed.get("name").and_then(|n| n.as_str()) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "missing \"name\"",
+        );
+    };
+    let arguments = parsed
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let (server, tool) = match crate::mcp::route(snapshot, principal, name) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return error_response(
+                StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST),
+                "invalid_request_error",
+                &e.message(),
+            )
+        }
+    };
+
+    match mcp_roundtrip(
+        &state,
+        server,
+        crate::mcp::Call::invoke(server, &tool, arguments).body,
+    )
+    .await
+    {
+        Some(reply) => json_response(StatusCode::OK, reply.to_string()),
+        // 502, not 500: the failure is upstream and the client can tell those
+        // apart in a way that matters when four servers are behind one address.
+        None => error_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            &format!("MCP server {:?} did not return a usable reply", server.name),
+        ),
+    }
 }
 
 fn json_response(status: StatusCode, body: String) -> Response<ResBody> {

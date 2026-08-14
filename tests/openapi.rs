@@ -87,6 +87,48 @@ fn proxied_suffixes() -> BTreeSet<String> {
     out
 }
 
+/// `(method, subpath)` from `proxy::MCP_ROUTES`, parsed from the source the
+/// dispatch actually uses.
+fn mcp_routes() -> Vec<(String, String)> {
+    let src = source("src/proxy.rs");
+    let start = src
+        .find("pub const MCP_ROUTES")
+        .expect("MCP_ROUTES in src/proxy.rs");
+    let end = src[start..].find("];").expect("end of MCP_ROUTES") + start;
+    let mut out = Vec::new();
+    for line in src[start..end].lines() {
+        let line = line.trim();
+        if !line.starts_with('(') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('"').collect();
+        if parts.len() >= 4 {
+            out.push((parts[1].to_string(), parts[3].to_string()));
+        }
+    }
+    assert!(!out.is_empty(), "no MCP routes parsed");
+    out
+}
+
+/// Every MCP route in that list must also be in the spec, in the direction the
+/// admin check already covers for `/admin/*`.
+#[test]
+fn every_mcp_route_is_in_the_spec() {
+    let spec = spec_paths();
+    let mut missing = Vec::new();
+    for (method, subpath) in mcp_routes() {
+        let path = format!("/v1{subpath}");
+        let verb = method.to_lowercase();
+        if !spec.get(&path).is_some_and(|v| v.contains(&verb)) {
+            missing.push(format!("{method} {path}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "MCP routes absent from openapi.json: {missing:?}"
+    );
+}
+
 fn spec_paths() -> BTreeMap<String, BTreeSet<String>> {
     let raw = source("openapi.json");
     let v: serde_json::Value = serde_json::from_str(&raw).expect("openapi.json is valid JSON");
@@ -153,12 +195,18 @@ fn the_spec_describes_no_route_that_does_not_exist() {
         .map(|s| format!("/v1{s}"))
         .collect();
     // Data-plane routes live in `proxy.rs`'s dispatch rather than an axum
-    // router, so they are checked against their own sources.
-    let data_plane: BTreeSet<&str> = ["/v1/models", "/health", "/metrics"].into_iter().collect();
+    // router, so they are checked against their own sources. The MCP routes
+    // are read from `MCP_ROUTES` rather than repeated here: a second
+    // hand-maintained list is the drift this whole file exists to catch.
+    let mut data_plane: BTreeSet<String> = ["/v1/models", "/health", "/metrics"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    data_plane.extend(mcp_routes().into_iter().map(|(_, p)| format!("/v1{p}")));
 
     let mut stale = Vec::new();
     for (path, verbs) in spec_paths() {
-        if proxied.contains(&path) || data_plane.contains(path.as_str()) {
+        if proxied.contains(&path) || data_plane.contains(&path) {
             continue;
         }
         for verb in verbs {
