@@ -124,6 +124,19 @@ remain the readable description of it — but they are no longer what is
 applied. Editing one and running `kubectl apply` will be undone on the next
 reconcile. Edit the `FastllmProxy` instead, or the UI.
 
+The operator itself runs in `fastllm-system`, two replicas behind a Lease so a
+node drain does not leave the cluster without a controller, with its own
+`/metrics`, `/healthz` and `/readyz`:
+
+```bash
+kubectl apply -f operator/deploy/crd.yaml -f operator/deploy/rbac.yaml -f operator/deploy/operator.yaml
+kubectl -n fastllm-system set image deploy/fastllm-operator \
+  operator=192.168.10.123/azrtydxb/fastllm-proxy/operator:sha-<commit>
+```
+
+(The manifest ships the public `ghcr.io` tag; this cluster pulls the sha build
+from its own registry, same as the proxy.)
+
 ### Adopting it (what was actually done)
 
 A running deployment cannot simply be handed over: `spec.selector` is
@@ -165,7 +178,21 @@ xargs kubectl -n fastllm delete < /tmp/old-rs
 
 Nothing in Postgres is touched by any of this: models, keys, grants, routing
 rules and usage are the control plane's, not the operator's, and the resource
-only ever names the Secrets the control plane already read.
+only ever names the Secrets the control plane already read. Verified by
+comparing before and after: same six models on both gateway addresses, the
+same eight backends all healthy, and `models=7 backends=8 keys=18
+principals=7 rules=2 vmodels=1` on both sides of the cutover.
+
+Two things worth knowing before doing this again:
+
+- **Pre-label the running pods** with the operator's selector labels
+  (`app.kubernetes.io/name`, `instance`, `component`) *before* applying the
+  resource. The Service selector flips to those labels the moment the
+  operator reconciles, and without them the VIP has no endpoints until the
+  new pods pass readiness.
+- **Do not copy `serviceAnnotations` into a scratch namespace** to test a
+  render. kube-vip honours them wherever they appear, and a second Service
+  claiming a production VIP is a bad way to find that out.
 
 ## First install
 

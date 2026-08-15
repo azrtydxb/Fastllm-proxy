@@ -31,7 +31,14 @@ metadata:
   name: fastllm
   namespace: fastllm
 spec:
-  image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:0.2.0
+  # What the cluster is running. The operator is the source of truth for this
+  # once applied — an image change here, in the UI, or by `kubectl patch` all
+  # arrive at the same place, and re-applying a stale value would roll the
+  # deployment *backwards*.
+  image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:sha-5dfb2e0
+  # As the manifests had it: the tag is rebuilt in place on this cluster, so
+  # `IfNotPresent` would pin a node to whatever it happened to cache first.
+  imagePullPolicy: Always
 
   database:
     name: fastllm-pg-app
