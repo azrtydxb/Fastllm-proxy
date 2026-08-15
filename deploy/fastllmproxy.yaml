@@ -67,6 +67,12 @@ spec:
     serviceAnnotations:
       kube-vip.io/loadbalancerIPs: 192.168.10.125
       kube-vip.io/vipHost: km02
+    # Both addresses the gateway already answers on. The names are the merge
+    # key an existing Service is patched against, so they match the live ones
+    # exactly — change a name and the node port is reallocated.
+    servicePorts:
+      - { name: http, port: 80 }
+      - { name: api, port: 4000 }
     resources:
       requests: { cpu: 100m, memory: 128Mi }
       limits: { cpu: "2", memory: 1Gi }

@@ -740,6 +740,7 @@ mod tests {
         SecretRef, ServiceType,
     };
     use k8s_openapi::api::apps::v1::DeploymentStatus;
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
     fn spec() -> FastllmProxy {
         let mut cr = FastllmProxy::new(
@@ -955,6 +956,62 @@ mod tests {
             .metadata
             .annotations
             .is_none());
+    }
+
+    /// A gateway fronted at both `:80` and `:4000` is ordinary — a plain
+    /// `http://host/` in any client config produces it — and a single
+    /// hardcoded port silently drops one of them on adoption.
+    #[test]
+    fn the_gateway_service_publishes_every_port_asked_for() {
+        let mut cr = spec();
+        // The default: one port, unchanged.
+        let ports = |cr: &FastllmProxy| {
+            resources::service(cr, resources::PROXY)
+                .spec
+                .unwrap()
+                .ports
+                .unwrap()
+                .iter()
+                .map(|p| (p.name.clone().unwrap(), p.port))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ports(&cr), vec![("http".to_string(), 4000)]);
+
+        cr.spec.proxy.service_ports = vec![
+            crd::ServicePortSpec {
+                name: "http".into(),
+                port: 80,
+            },
+            crd::ServicePortSpec {
+                name: "api".into(),
+                port: 4000,
+            },
+        ];
+        assert_eq!(
+            ports(&cr),
+            vec![("http".to_string(), 80), ("api".to_string(), 4000)]
+        );
+        // Every one of them targets the single container port.
+        for p in resources::service(&cr, resources::PROXY)
+            .spec
+            .unwrap()
+            .ports
+            .unwrap()
+        {
+            assert_eq!(p.target_port.unwrap(), IntOrString::String("http".into()));
+        }
+
+        // The admin Service is one port by construction and must not inherit
+        // the gateway's list.
+        assert_eq!(
+            resources::service(&cr, resources::CONTROL)
+                .spec
+                .unwrap()
+                .ports
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// A PDB of minAvailable:1 over a single pod blocks every voluntary

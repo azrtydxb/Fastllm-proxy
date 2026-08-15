@@ -304,6 +304,24 @@ pub struct IngressSpec {
     pub tls_secret_name: Option<String>,
 }
 
+/// One port on the gateway Service.
+///
+/// Every entry targets the container's HTTP port; this list is about which
+/// addresses callers may use, not about the gateway listening more than once.
+/// A deployment fronted at both `:80` and `:4000` — which is what happens the
+/// moment anyone puts a plain `http://host/` in a client config — cannot be
+/// described by a single hardcoded port, and losing the second one on
+/// adoption is a silent outage for whoever was using it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePortSpec {
+    /// Port name. Kubernetes requires one on a multi-port Service, and it is
+    /// the merge key an existing Service is patched against — keep it stable
+    /// or the node port is reallocated.
+    pub name: String,
+    pub port: i32,
+}
+
 /// Semantic routing. Only meaningful in an image built with the `classifier`
 /// features; the flags are inert otherwise.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -351,6 +369,11 @@ pub struct ProxySpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub service_annotations: BTreeMap<String, String>,
 
+    /// Ports the gateway Service publishes. Empty means one port, 4000,
+    /// named `http`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_ports: Vec<ServicePortSpec>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
 
@@ -384,6 +407,7 @@ impl Default for ProxySpec {
             upstream_timeout: default_upstream_timeout(),
             service_type: ServiceType::default(),
             service_annotations: BTreeMap::new(),
+            service_ports: Vec::new(),
             resources: None,
             workers: None,
             pool_max_idle: None,

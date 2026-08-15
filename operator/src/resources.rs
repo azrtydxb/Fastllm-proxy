@@ -643,17 +643,37 @@ pub fn service(owner: &FastllmProxy, component: &str) -> Service {
             &owner.spec.proxy.service_annotations,
         ),
     };
+    // The gateway may publish several addresses for one listener — `:80` and
+    // `:4000` is the common pair, and dropping one on adoption is an outage
+    // for everyone who used it. The admin plane is one port by construction.
+    let ports = if component == CONTROL || owner.spec.proxy.service_ports.is_empty() {
+        vec![ServicePort {
+            name: Some(target.to_string()),
+            port,
+            target_port: Some(IntOrString::String(target.to_string())),
+            ..Default::default()
+        }]
+    } else {
+        owner
+            .spec
+            .proxy
+            .service_ports
+            .iter()
+            .map(|p| ServicePort {
+                name: Some(p.name.clone()),
+                port: p.port,
+                target_port: Some(IntOrString::String(target.to_string())),
+                ..Default::default()
+            })
+            .collect()
+    };
+
     Service {
         metadata: meta_with_annotations(owner, component, annotations),
         spec: Some(ServiceSpec {
             type_: Some(type_.to_string()),
             selector: Some(selector(owner, component)),
-            ports: Some(vec![ServicePort {
-                name: Some(target.to_string()),
-                port,
-                target_port: Some(IntOrString::String(target.to_string())),
-                ..Default::default()
-            }]),
+            ports: Some(ports),
             ..Default::default()
         }),
         ..Default::default()

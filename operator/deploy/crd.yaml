@@ -1651,6 +1651,25 @@ spec:
                       type: string
                     description: Annotations on the gateway Service — where a load-balancer implementation takes its pinned address, its pool, or its health check. Without this a deployment on a real cluster cannot express the one thing it most needs to.
                     type: object
+                  servicePorts:
+                    description: Ports the gateway Service publishes. Empty means one port, 4000, named `http`.
+                    items:
+                      description: |-
+                        One port on the gateway Service.
+
+                        Every entry targets the container's HTTP port; this list is about which addresses callers may use, not about the gateway listening more than once. A deployment fronted at both `:80` and `:4000` — which is what happens the moment anyone puts a plain `http://host/` in a client config — cannot be described by a single hardcoded port, and losing the second one on adoption is a silent outage for whoever was using it.
+                      properties:
+                        name:
+                          description: Port name. Kubernetes requires one on a multi-port Service, and it is the merge key an existing Service is patched against — keep it stable or the node port is reallocated.
+                          type: string
+                        port:
+                          format: int32
+                          type: integer
+                      required:
+                      - name
+                      - port
+                      type: object
+                    type: array
                   serviceType:
                     default: ClusterIP
                     description: Service type for the gateway. The admin Service is always ClusterIP, which is the point of having two.

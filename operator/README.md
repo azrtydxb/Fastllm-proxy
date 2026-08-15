@@ -144,6 +144,7 @@ a page that password protects.
 | `proxy.upstreamTimeout` | Seconds to wait for response *headers* |
 | `proxy.workers` / `proxy.poolMaxIdle` | The two knobs that matter under load — see [docs/performance.md](../docs/performance.md) |
 | `proxy.serviceType` / `proxy.serviceAnnotations` | For the **gateway** only. The annotations are where a pinned load-balancer address goes |
+| `proxy.servicePorts` | Every address the gateway answers on — `:80` **and** `:4000` is the common pair. Empty means one port, 4000 |
 | `proxy.ingress` | `enabled`, `className`, `host`, `path`, `annotations`, `tlsSecretName` |
 | `proxy.classifier` | Tier-1 and tier-2 model directories for semantic routing |
 | `proxy.resources` | Compute resources for the gateway container |
