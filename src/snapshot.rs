@@ -250,6 +250,14 @@ pub struct ModelDef {
     /// this field exists to avoid; routing that treated it as zero would stop
     /// using every model nobody has filled in. Callers must branch on it.
     pub context_length: Option<u64>,
+    /// How to choose between this model's backends, when it has more than
+    /// one. `None` means the deployment's `--policy`.
+    ///
+    /// Per model rather than per process because the right answer depends on
+    /// what the backends *are*: two identical local replicas sharing a prefix
+    /// cache want affinity, three hosted providers of differing speed want
+    /// lowest-latency, and one deployment commonly has both.
+    pub policy: Option<crate::router::Policy>,
     pub backends: Vec<BackendDef>,
 }
 
@@ -454,6 +462,12 @@ pub struct WireModelDef {
     /// unknown is a state the consumers already have to handle.
     #[serde(default)]
     pub context_length: Option<u64>,
+    /// Per-model load-balancing policy, in the same spelling `--policy` uses.
+    /// Absent means the deployment default — and an unrecognised value is
+    /// read as absent rather than rejected, so a control plane that learns a
+    /// new policy cannot stop an older proxy from routing.
+    #[serde(default)]
+    pub policy: Option<String>,
     pub backends: Vec<WireBackendDef>,
 }
 
@@ -680,6 +694,7 @@ impl Snapshot {
                     name: m.name.clone(),
                     cache_ttl_seconds: m.cache_ttl.map(|d| d.as_secs()),
                     context_length: m.context_length,
+                    policy: m.policy.map(|p| p.as_str().to_string()),
                     backends: m
                         .backends
                         .iter()
@@ -840,6 +855,7 @@ impl Snapshot {
                         .filter(|s| *s > 0)
                         .map(std::time::Duration::from_secs),
                     context_length: m.context_length.filter(|c| *c > 0),
+                    policy: m.policy.as_deref().and_then(crate::router::Policy::parse),
                     backends: m
                         .backends
                         .into_iter()
@@ -1030,6 +1046,7 @@ mod tests {
     fn a_model_survives_the_round_trip_through_the_wire_format() {
         let snap = Snapshot {
             models: vec![ModelDef {
+                policy: None,
                 name: "m".into(),
                 cache_ttl: Some(std::time::Duration::from_secs(120)),
                 context_length: None,
@@ -1184,6 +1201,7 @@ mod tests {
         snap.version = 42;
         snap.principals.get_mut(&1).unwrap().allow_all = false;
         snap.models.push(ModelDef {
+            policy: None,
             name: "qwen3".into(),
             cache_ttl: None,
             context_length: None,

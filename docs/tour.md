@@ -36,7 +36,7 @@ four p99s is not a p99, and the screen says so rather than quietly averaging.
 
 ## Usage & spend — who used what, and what it cost
 
-![The Usage and spend screen: totals for requests, tokens and spend, grouped by principal, model, virtual model or day](images/ui-usage.png)
+![The Usage and spend screen: totals for requests, tokens and spend, grouped by principal, model, frontend model or day](images/ui-usage.png)
 
 Folded from `usage_events`, one row per request. A model with no price
 contributes nothing to spend and is counted as *unpriced* rather than as zero,
@@ -72,7 +72,7 @@ Roles carry permissions; principals hold roles. The matrix is the clearest
 single picture of it — click a cell to grant or revoke. **Model grants** is the
 same idea for `model:invoke`, per model.
 
-A grant on a virtual model does **not** unlock the concrete models behind it.
+A grant on a frontend model does **not** unlock the backend models behind it.
 Failover can never widen a caller's reach.
 
 ## Limits & budgets — caps that are enforced without a database call

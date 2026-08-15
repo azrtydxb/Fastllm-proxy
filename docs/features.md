@@ -65,7 +65,12 @@ marginally *ahead* of no-proxy, which is measurement noise and reported as such.
 
 Cache-affinity with a load escape hatch: a shared prefix returns to the node
 holding its KV cache, unless that node is meaningfully hotter than the
-least-loaded one. `least-loaded`, `round-robin` and `lowest-latency` are
+least-loaded one. The policy is **per backend model**: two identical local
+replicas sharing a prefix cache want affinity, three hosted providers of
+differing speed want `lowest-latency`, and one deployment commonly has both —
+so `--policy` is the default and each backend model may override it (**Backend
+models** screen, or `policy` on the admin API). `least-loaded`, `round-robin`
+and `lowest-latency` are
 selectable — the last for pools whose members are not equivalent, where a slow
 backend with one queued request looks emptier than a fast one with two.
 
@@ -73,7 +78,7 @@ backend with one queued request looks emptier than a fast one with two.
 
 ```mermaid
 flowchart TD
-    R["request<br/>model: 'assistant'"] --> V{"a virtual model?"}
+    R["request<br/>model: 'assistant'"] --> V{"a frontend model?"}
     V -->|no| POOL
     V -->|yes| RULES["rules, in order<br/>first match wins"]
     RULES --> CND["conditions: principal · role · prompt size<br/>streaming · headers · budget · time of day<br/>semantic class"]

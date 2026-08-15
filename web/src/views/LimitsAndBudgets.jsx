@@ -312,7 +312,7 @@ export function LimitsAndBudgets({ onUnauthorised }) {
             />
             <Muted>
               Degradation is a routing rule, not a special case — which is why there is no switch
-              for it here. It lives on the virtual model whose traffic should degrade.
+              for it here. It lives on the frontend model whose traffic should degrade.
             </Muted>
           </Stack>
         </Card>

@@ -173,7 +173,7 @@ export function VirtualModels({ onUnauthorised }) {
         {!vm ? (
           <Card>
             <Empty>
-              A virtual model is a name callers can ask for that resolves to a chain of real ones.
+              A frontend model is a name callers ask for; it resolves to a chain of backend models.
               Create one to start.
             </Empty>
           </Card>

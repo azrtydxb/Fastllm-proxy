@@ -340,6 +340,65 @@ await goto("models");
     document.getElementById("root").textContent.includes("is not a number"),
   );
 
+  // Load balancing, per backend model. The flag it overrides is
+  // deployment-wide, so a pool of two identical replicas and a pool of three
+  // hosted providers could not both be right before this existed.
+  sent.length = 0;
+  await goto("models");
+  await click(containing("edit"));
+  const lb = $("label")
+    .find((l) => l.textContent.includes("LOAD BALANCING"))
+    ?.querySelector("select");
+  await fill(lb, "lowest-latency");
+  await click(byText("Save"));
+  const lbCall = lastCall("PATCH", "/admin/models/");
+  check(
+    "a per-model policy is sent as policy",
+    lbCall?.body?.policy === "lowest-latency",
+    `sent ${JSON.stringify(lbCall?.body?.policy)}`,
+  );
+
+  // And clearing it means "follow the deployment default" — an explicit null,
+  // because PATCH treats an absent field as "leave alone".
+  sent.length = 0;
+  await goto("models");
+  await click(containing("edit"));
+  const lb2 = $("label")
+    .find((l) => l.textContent.includes("LOAD BALANCING"))
+    ?.querySelector("select");
+  await fill(lb2, "");
+  await click(byText("Save"));
+  check(
+    "clearing it sends an explicit null",
+    lastCall("PATCH", "/admin/models/")?.body?.policy === null,
+    `sent ${JSON.stringify(lastCall("PATCH", "/admin/models/")?.body?.policy)}`,
+  );
+
+  // Price sync: the preview, then the override that makes an already-priced
+  // model reachable at all — including one stuck at a wrong 0.
+  sent.length = 0;
+  await goto("models");
+  await click(containing("Sync prices"));
+  check(
+    "sync previews first",
+    lastCall("POST", "/admin/prices/sync")?.body?.dry_run === true,
+  );
+  check(
+    "and does not overwrite by default",
+    lastCall("POST", "/admin/prices/sync")?.body?.overwrite === false,
+  );
+  const force = $("input").find((i) => i.type === "checkbox");
+  if (force) {
+    await click(force);
+    check(
+      "ticking replace re-previews with overwrite",
+      lastCall("POST", "/admin/prices/sync")?.body?.overwrite === true,
+      `sent ${JSON.stringify(lastCall("POST", "/admin/prices/sync")?.body)}`,
+    );
+  } else {
+    check("the replace-prices toggle exists", false, "no checkbox in the preview");
+  }
+
   // Context length: empty must clear it to null rather than send 0. The
   // handler refuses a non-positive length, so sending 0 would surface as a
   // 400 an operator cannot act on -- and reading empty as "unlimited" would

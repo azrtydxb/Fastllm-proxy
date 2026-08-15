@@ -10,6 +10,41 @@ source for *why* anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Load balancing is per backend model, not per process.** `--policy` was a
+  deployment-wide flag, which is the wrong shape the moment one control plane
+  serves both kinds of pool — two identical local replicas sharing a prefix
+  cache want `cache-affinity`, three hosted providers of differing speed want
+  `lowest-latency`, and a flag can only be one of them. Each backend model may
+  now carry its own (migration 0028, `policy` on `POST`/`PATCH /admin/models`,
+  a control on the **Backend models** screen). Unset means the deployment
+  default, so an existing database behaves exactly as it did.
+- **The price sync can replace a price that is already set.** It never
+  overwrote by design — a negotiated rate must not be replaced by a list
+  price — but that left a model priced *wrongly* unreachable from the UI,
+  including one sitting at `0`, which reads as free. The preview now has a
+  "replace prices that are already set" toggle, off by default, that
+  re-previews as it changes.
+
+### Changed
+
+- **Two words for two things: backend model and frontend model.** A backend
+  model is what a request is routed *to* (one name, its backends, its
+  load-balancing policy); a frontend model is what a client asks *for* (rules
+  and weights resolving to a chain of backend models). The UI, the navigation
+  and the documentation use them consistently; the admin API still spells them
+  `models` and `virtual-models` in its paths, so every existing script and the
+  OpenAPI description keep working.
+
+### Fixed
+
+- **Declared context windows never reached routing.** `Registry` carried a
+  `context_length` map whose doc comment said it was filled from the snapshot,
+  and nothing ever filled it — so `routing::candidates`' context-window
+  fallback, which demotes a model whose window provably cannot hold the
+  request, could not fire in any production build. The column, the admin API
+  field and the routing code were all present and correct; only the wiring
+  between them was missing.
+
 - **The Kubernetes operator earns its keep.** It was removed earlier in this
   cycle for reconciling two Deployments a chart already produces; it is back
   because the four things a chart genuinely cannot do are now implemented and

@@ -39,6 +39,10 @@ export function Models({ onUnauthorised }) {
   const [drafts, setDrafts] = useState({});
   const [editing, setEditing] = useState(null);
   const [sync, setSync] = useState(null);
+  // Without this a model that already has a price can never be re-synced from
+  // the UI — including one sitting at a wrong 0, which reads as "free" and is
+  // exactly the case somebody wants to fix.
+  const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const { data, error, loading, reload, setError } = useLoader(
@@ -107,10 +111,16 @@ export function Models({ onUnauthorised }) {
     }
   };
 
-  const runSync = async (dry) => {
+  // `force` is passed rather than read from state: the checkbox re-previews
+  // in the same tick it changes, and `setOverwrite` has not landed yet.
+  const runSync = async (dry, force = overwrite) => {
     setBusy(true);
     try {
-      const resp = await api.post("/admin/prices/sync", { dry_run: dry, source: "both" });
+      const resp = await api.post("/admin/prices/sync", {
+        dry_run: dry,
+        source: "both",
+        overwrite: force,
+      });
       setSync({ ...resp, applied: !dry });
       if (!dry) reload();
       setError(null);
@@ -127,8 +137,10 @@ export function Models({ onUnauthorised }) {
 
       <Row>
         <Muted>
-          Concrete models. Prices are per million tokens; caching is opt-in per model. A model with
-          no price stores NULL rather than zero, so spend is reported as unpriced instead of free.
+          Backend models: what requests are actually routed to. One name, one or more backends,
+          and how to load-balance between them. Prices are per million tokens; caching is opt-in
+          per model. A model with no price stores NULL rather than zero, so spend is reported as
+          unpriced instead of free.
         </Muted>
         <Spacer />
         <Button onClick={() => runSync(true)} disabled={busy}>
@@ -160,10 +172,25 @@ export function Models({ onUnauthorised }) {
               </Table>
             )}
             <Row>
-              <Muted>
-                Existing prices are never overwritten: a rate you negotiated must not be replaced
-                by a list price.
-              </Muted>
+              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={overwrite}
+                  onChange={(e) => {
+                    setOverwrite(e.target.checked);
+                    // Re-preview immediately: the counts and the list on
+                    // screen were computed under the old setting, and leaving
+                    // them there would make the Apply button claim a number
+                    // it is no longer about to do.
+                    runSync(true, e.target.checked);
+                  }}
+                />
+                <Muted>
+                  Replace prices that are already set. Off by default: a rate you negotiated must
+                  not be replaced by a list price. On, when a model is priced wrongly — a stale
+                  figure, or a 0 that reads as free.
+                </Muted>
+              </label>
               <Spacer />
               {!sync.applied && sync.updated > 0 && (
                 <Button variant="primary" onClick={() => runSync(false)} disabled={busy}>
@@ -391,6 +418,15 @@ const SYNC_COLS = [
  * silently cleared a price would turn a typo into a model that reports its
  * spend as unpriced.
  */
+// The same four the router implements and the CRD spells, in the same
+// vocabulary — a value chosen here is stored verbatim and read by `--policy`.
+const POLICIES = [
+  ["cache-affinity", "cache affinity — a shared prefix returns to the node holding its KV cache"],
+  ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
+  ["lowest-latency", "lowest latency — for backends that are not equally fast"],
+  ["round-robin", "round robin — strict rotation, cache-blind"],
+];
+
 function PriceEditor({ model, onSave }) {
   const [input, setInput] = useState(
     model.input_price_per_mtok === null ? "" : String(model.input_price_per_mtok / 1e6),
@@ -401,6 +437,10 @@ function PriceEditor({ model, onSave }) {
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [context, setContext] = useState(model.context_length ?? "");
   const [description, setDescription] = useState(model.description || "");
+  // "" is not a policy, it is the absence of one — the deployment's --policy
+  // decides. Kept distinct from a chosen value so clearing the field means
+  // "go back to the default" rather than "leave whatever was there".
+  const [policy, setPolicy] = useState(model.policy || "");
 
   // Absent, cleared and mistyped are three different things and only the
   // first two are intentional. `JSON.stringify` renders NaN as `null`, and to
@@ -452,6 +492,23 @@ function PriceEditor({ model, onSave }) {
             placeholder="262144"
           />
         </Field>
+        <Field
+          label="LOAD BALANCING"
+          hint={
+            (model.backends || []).length > 1
+              ? `how requests are spread across this model's ${model.backends.length} backends`
+              : "only takes effect once this model has more than one backend"
+          }
+        >
+          <select value={policy} onChange={(e) => setPolicy(e.target.value)}>
+            <option value="">deployment default</option>
+            {POLICIES.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="DESCRIPTION">
           <input value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
@@ -480,6 +537,9 @@ function PriceEditor({ model, onSave }) {
                 // model that accepts no tokens is not a thing and coercing it
                 // would leave an operator believing they had set a limit.
                 context_length: context === "" ? null : positive(context, "context length"),
+                // Empty is an explicit null: it clears the override so the
+                // model follows the deployment's --policy again.
+                policy: policy === "" ? null : policy,
                 description,
               });
             } catch (e) {

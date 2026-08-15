@@ -625,6 +625,10 @@ struct ModelView {
     /// Absent is a third state, not zero — routing demotes a model only when
     /// the figure is known and too small.
     context_length: Option<i64>,
+    /// How to choose between this model's backends. Absent means the
+    /// deployment's `--policy`, which is what every model meant before this
+    /// was settable.
+    policy: Option<String>,
     backends: Vec<BackendView>,
 }
 
@@ -640,10 +644,11 @@ async fn list_models(
         Option<i64>,
         Option<i32>,
         Option<i64>,
+        Option<String>,
     );
     let models: Vec<ModelRow> = sqlx::query_as(
         "SELECT id, name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds, context_length FROM models ORDER BY name",
+             cache_ttl_seconds, context_length, policy FROM models ORDER BY name",
     )
     .fetch_all(&ctx.pool)
     .await
@@ -673,6 +678,7 @@ async fn list_models(
                     output_price_per_mtok,
                     cache_ttl_seconds,
                     context_length,
+                    policy,
                 )| ModelView {
                     id,
                     name,
@@ -681,6 +687,7 @@ async fn list_models(
                     output_price_per_mtok,
                     cache_ttl_seconds,
                     context_length,
+                    policy,
                     backends: backends
                         .iter()
                         .filter(|(_, model_id, ..)| *model_id == id)
@@ -741,6 +748,33 @@ struct NewModel {
     /// the field was simply dropped.
     #[serde(default)]
     context_length: Option<i32>,
+    /// How to choose between this model's backends: `cache-affinity`,
+    /// `least-loaded`, `round-robin` or `lowest-latency`. Unset means the
+    /// deployment's `--policy`, and only matters once a model has more than
+    /// one backend.
+    #[serde(default)]
+    policy: Option<String>,
+}
+
+/// Accept only a policy this build knows, and say which ones those are.
+///
+/// `Ok(None)` for absent — meaning the deployment default — which is a
+/// different thing from an empty string, and both spell "unset" here so a UI
+/// clearing the field does not have to send `null` specifically.
+fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = policy.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    match crate::router::Policy::parse(raw) {
+        Some(p) => Ok(Some(p.as_str().to_string())),
+        None => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown policy {raw:?}; expected one of cache-affinity, least-loaded, \
+                 round-robin, lowest-latency, or omit it to use the deployment default"
+            ),
+        )),
+    }
 }
 
 /// A model and a virtual model sharing a name would make the `model` field
@@ -1255,10 +1289,15 @@ async fn post_model(
             ),
         ));
     }
+    // Validated here rather than by a CHECK constraint (see migration 0028):
+    // the proxy tolerates an unknown policy by falling back to the default,
+    // but an operator typing one into this API deserves to be told, not to
+    // wonder later why the model ignored it.
+    let policy = validated_policy(body.policy.as_deref())?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds, context_length) \
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+             cache_ttl_seconds, context_length, policy) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
@@ -1266,6 +1305,7 @@ async fn post_model(
     .bind(body.output_price_per_mtok)
     .bind(body.cache_ttl_seconds)
     .bind(body.context_length)
+    .bind(policy)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1310,6 +1350,10 @@ struct PatchModel {
     /// is not the same as zero — see `ModelDef::context_length`.
     #[serde(default, deserialize_with = "double_option")]
     context_length: Option<Option<i64>>,
+    /// `null` clears it back to the deployment default; omitting it leaves
+    /// the model's policy alone.
+    #[serde(default, deserialize_with = "double_option")]
+    policy: Option<Option<String>>,
 }
 
 /// Tells "absent" apart from "present and null".
@@ -1367,6 +1411,12 @@ async fn patch_model(
         ));
     }
 
+    // Same validation as creation: an unknown policy is refused here rather
+    // than accepted and quietly ignored by every proxy that reads it.
+    let policy = match &body.policy {
+        Some(inner) => validated_policy(inner.as_deref())?,
+        None => None,
+    };
     // `COALESCE($n, column)` would make "set to null" impossible, so each field
     // carries its own "was it present" flag instead.
     let done = sqlx::query(
@@ -1375,7 +1425,8 @@ async fn patch_model(
            input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
            output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
            cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END,
-           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END
+           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END,
+           policy                = CASE WHEN $12 THEN $13 ELSE policy                END
          WHERE id = $1",
     )
     .bind(id)
@@ -1389,6 +1440,8 @@ async fn patch_model(
     .bind(body.cache_ttl_seconds.flatten())
     .bind(body.context_length.is_some())
     .bind(body.context_length.flatten())
+    .bind(body.policy.is_some())
+    .bind(policy)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("model update", &e))?;
@@ -5208,6 +5261,41 @@ pub async fn serve(
 }
 
 #[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    /// The stored spelling is the one `--policy` takes, so a value typed in
+    /// the UI, written to the column and read by a proxy cannot drift apart.
+    #[test]
+    fn a_known_policy_is_stored_in_the_canonical_spelling() {
+        assert_eq!(
+            validated_policy(Some(" lowest-latency ")).unwrap(),
+            Some("lowest-latency".to_string())
+        );
+    }
+
+    /// Absent and empty both mean "the deployment default", so a UI clearing
+    /// the field does not have to send `null` specifically.
+    #[test]
+    fn absent_and_empty_both_mean_the_deployment_default() {
+        assert_eq!(validated_policy(None).unwrap(), None);
+        assert_eq!(validated_policy(Some("")).unwrap(), None);
+        assert_eq!(validated_policy(Some("   ")).unwrap(), None);
+    }
+
+    /// A typo is refused here rather than accepted and silently ignored by
+    /// every proxy that reads it — the proxy tolerates the unknown value, but
+    /// an operator who typed it deserves to hear about it now.
+    #[test]
+    fn an_unknown_policy_is_refused_and_says_what_is_allowed() {
+        let (status, body) = validated_policy(Some("cacheAffinity")).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body.0["error"].as_str().unwrap();
+        assert!(message.contains("cache-affinity"), "{message}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5460,6 +5548,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -5712,6 +5801,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: primary_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -5728,6 +5818,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: secondary_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -5850,6 +5941,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -5892,6 +5984,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: other_name,
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6132,6 +6225,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6234,6 +6328,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6315,6 +6410,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6677,6 +6773,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6762,6 +6859,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 // $1 per Mtok in and out, so 3 tokens would price at 3 micros
@@ -6986,6 +7084,7 @@ mod tests {
                 State(ctx.clone()),
                 RequireConfigWrite,
                 Json(NewModel {
+                    policy: None,
                     name: name.clone(),
                     description: String::new(),
                     input_price_per_mtok: price,
@@ -7070,6 +7169,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: name.clone(),
                 description: "before".into(),
                 input_price_per_mtok: Some(3_000_000),
@@ -7159,6 +7259,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7266,6 +7367,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7320,6 +7422,7 @@ mod tests {
                     State(ctx),
                     RequireConfigWrite,
                     Json(NewModel {
+                        policy: None,
                         name,
                         description: String::new(),
                         input_price_per_mtok: None,
@@ -7630,6 +7733,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
+                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,

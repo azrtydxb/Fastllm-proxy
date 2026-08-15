@@ -154,10 +154,22 @@ const FIXTURES = {
       output_price_per_mtok: 0,
       cache_ttl_seconds: 300,
       context_length: 262144,
+      // Two backends and no policy of its own: the case the load-balancing
+      // control exists for, and the state ("deployment default") it starts in.
+      policy: null,
       backends: [
         {
           id: 11,
           api_base: "http://10.42.1.7:8000/v1",
+          upstream_model: "qwen2.5-32b",
+          has_upstream_api_key: false,
+          protocol: "openai",
+          auth_header: "authorization",
+          default_max_tokens: null,
+        },
+        {
+          id: 12,
+          api_base: "http://10.42.1.8:8000/v1",
           upstream_model: "qwen2.5-32b",
           has_upstream_api_key: false,
           protocol: "openai",

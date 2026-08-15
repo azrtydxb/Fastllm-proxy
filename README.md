@@ -18,7 +18,7 @@ It fronts any number of inference backends (vLLM, SGLang, llama.cpp, or any of [
 
 - **Cache-affinity routing** with a load escape hatch. A shared prefix goes back to the node that already has its KV cache, unless that node is meaningfully hotter than the least-loaded one.
 - **Opaque response bodies.** Upstream frames reach the client exactly as they arrived — never deserialised, never re-encoded, never buffered.
-- **Cache-affinity routing, virtual models, rule-based and semantic routing** — see below.
+- **Cache-affinity routing, frontend models, rule-based and semantic routing** — see below.
 - **80 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
@@ -41,7 +41,19 @@ Tool calling translates in both directions on native backends, streaming include
 
 ## Routing
 
-A **virtual model** is a client-facing name with an ordered list of rules and a fallback chain. First rule whose conditions match wins; conditions within a rule are AND'd; targets are weighted *and* ordered, so a rule is both a split and a failover chain.
+Two words, used consistently from here on:
+
+| | |
+|---|---|
+| **Backend model** | What a request is routed *to*: one name, one or more backends behind it, and a load-balancing policy for choosing between them |
+| **Frontend model** | What a client asks *for*: a name that resolves, by rules and weights, to a chain of backend models |
+
+A client can address either — a backend model resolves to itself. The admin
+API still spells these `models` and `virtual-models` in its paths, which is
+what every existing script and the OpenAPI description use; the vocabulary
+changed, the wire format did not.
+
+A **frontend model** is a client-facing name with an ordered list of rules and a fallback chain. First rule whose conditions match wins; conditions within a rule are AND'd; targets are weighted *and* ordered, so a rule is both a split and a failover chain.
 
 Route on any of these:
 

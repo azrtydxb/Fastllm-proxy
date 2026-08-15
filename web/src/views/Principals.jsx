@@ -378,7 +378,7 @@ export function Principals({ onUnauthorised }) {
             <Muted>
               There is no finer-grained permission than{" "}
               <Mono style={{ color: "var(--fg-2)" }}>config:write</Mono> for managing principals or
-              virtual models — a permission per table would multiply roles for no operator-visible
+              frontend models — a permission per table would multiply roles for no operator-visible
               benefit. A session alone is not authority: every{" "}
               <Mono style={{ color: "var(--fg-2)" }}>/admin/*</Mono> handler checks a permission and
               answers 403 without one.

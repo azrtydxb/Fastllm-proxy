@@ -99,6 +99,16 @@ pub struct ModelEntry {
     /// The name clients address this model by.
     pub model_name: String,
     pub litellm_params: LitellmParams,
+    /// How to choose between this model's replicas, overriding `--policy`.
+    /// Ignored by LiteLLM, like everything else under `fastllm:`.
+    ///
+    /// Here as well as in the database because `File` mode and the control
+    /// plane must describe the same deployment: a field one path honours and
+    /// the other drops is how the same YAML came to mean two different things
+    /// once already (see `LitellmParams`'s note about the four backend
+    /// fields).
+    #[serde(default)]
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

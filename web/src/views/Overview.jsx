@@ -297,7 +297,7 @@ export function Overview({ onUnauthorised, config, go }) {
 
         <Stack gap={14}>
           <Card
-            title="Traffic by virtual model"
+            title="Traffic by frontend model"
             subtitle="what callers asked for, before routing decided"
           >
             {(data.traffic || []).length === 0 ? (

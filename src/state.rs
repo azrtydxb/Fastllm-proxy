@@ -441,6 +441,7 @@ mod tests {
         Snapshot {
             version: 1,
             models: vec![ModelDef {
+                policy: None,
                 name: name.to_string(),
                 cache_ttl: None,
                 context_length: None,

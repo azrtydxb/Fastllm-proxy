@@ -296,8 +296,33 @@ impl Drop for InflightGuard {
     }
 }
 
-/// The set of backends serving one client-facing model name.
-pub type Pool = Arc<Vec<Arc<Backend>>>;
+/// The set of backends serving one backend model, and how to choose between
+/// them.
+///
+/// The policy lives here rather than only on the `Router` because it is a
+/// property of the pool, not of the process: a model served by two identical
+/// local replicas wants prefix affinity, while one fronted by three hosted
+/// providers of differing speed wants lowest-latency, and a deployment
+/// routinely has both. `None` means "whatever the deployment was started
+/// with" (`--policy`), which is what every pool meant before this existed.
+#[derive(Debug, Default)]
+pub struct PoolInner {
+    pub backends: Vec<Arc<Backend>>,
+    pub policy: Option<crate::router::Policy>,
+}
+
+impl std::ops::Deref for PoolInner {
+    type Target = [Arc<Backend>];
+
+    // So a pool still reads as the list of backends it mostly is: `pool.iter()`,
+    // `pool.len()` and indexing all keep working, and only code that cares
+    // about the policy has to know there is more here than a Vec.
+    fn deref(&self) -> &Self::Target {
+        &self.backends
+    }
+}
+
+pub type Pool = Arc<PoolInner>;
 
 /// Immutable routing table.
 #[derive(Default)]
@@ -383,7 +408,27 @@ impl Registry {
                 )
             })
         });
-        Self::build_from_entries(entries, interner, previous)
+        let policies = snapshot
+            .models
+            .iter()
+            .filter_map(|m| m.policy.map(|p| (m.name.clone(), p)))
+            .collect();
+        let mut registry =
+            Self::build_from_entries_with_policies(entries, &policies, interner, previous)?;
+        // Declared context windows, which this field's doc comment has always
+        // claimed were filled in here and never were: the map stayed empty in
+        // every production build, so `Registry::context_length` answered
+        // `None` for every model and the context-window fallback in
+        // `routing::candidates` — a model whose window provably cannot hold
+        // the request is demoted rather than tried first — could not fire at
+        // all. The column, the admin API field and the routing code were all
+        // present and correct; only the wiring between them was missing.
+        registry.context_length = snapshot
+            .models
+            .iter()
+            .filter_map(|m| m.context_length.map(|len| (m.name.clone(), len)))
+            .collect();
+        Ok(registry)
     }
 
     /// Tokens a model can accept, or `None` when nobody has declared it.
@@ -404,6 +449,15 @@ impl Registry {
 
     fn build_from_entries(
         entries: impl Iterator<Item = (String, String, BackendDef)>,
+        interner: &Interner,
+        previous: Option<&Registry>,
+    ) -> Result<Self> {
+        Self::build_from_entries_with_policies(entries, &HashMap::new(), interner, previous)
+    }
+
+    fn build_from_entries_with_policies(
+        entries: impl Iterator<Item = (String, String, BackendDef)>,
+        policies: &HashMap<String, crate::router::Policy>,
         interner: &Interner,
         previous: Option<&Registry>,
     ) -> Result<Self> {
@@ -445,7 +499,13 @@ impl Registry {
         all.sort_by_key(|b| b.uid);
 
         Ok(Self {
-            pools: pools.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
+            pools: pools
+                .into_iter()
+                .map(|(name, backends)| {
+                    let policy = policies.get(&name).copied();
+                    (name, Arc::new(PoolInner { backends, policy }))
+                })
+                .collect(),
             all,
             // Filled by `build_from_snapshot`; the YAML path has nowhere to
             // declare a context window, so it stays empty and every model

@@ -1,0 +1,19 @@
+-- How to choose between one backend model's replicas.
+--
+-- Until now the load-balancing policy was a process flag (`--policy`), which
+-- makes it a property of the deployment rather than of the pool it applies
+-- to. That is wrong the moment one control plane serves both kinds of model,
+-- which is the normal case: two identical local replicas sharing a prefix
+-- cache want `cache-affinity`, while three hosted providers of differing
+-- speed want `lowest-latency`, and a flag can only be one of them.
+--
+-- NULL means "whatever the deployment was started with", which is what every
+-- model meant before this column existed — so an existing database keeps
+-- behaving exactly as it did.
+--
+-- Stored as the same string `--policy` accepts, so a value typed in the UI,
+-- written here and passed on the command line cannot drift apart. Validated
+-- by the admin API rather than by a CHECK constraint: a proxy that meets a
+-- policy it does not know falls back to the default instead of refusing to
+-- route, and a constraint here would make adding a policy a migration.
+ALTER TABLE models ADD COLUMN policy TEXT;

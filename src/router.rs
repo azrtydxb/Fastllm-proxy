@@ -26,7 +26,10 @@ use crate::registry::{Backend, BackendUid, Pool};
 /// this stays on the stack and the hot path allocates nothing.
 type Candidates<'a> = SmallVec<[&'a Arc<Backend>; 8]>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum Policy {
     /// Prefix-affinity, falling back to least-loaded when a node runs hot.
     CacheAffinity,
@@ -46,6 +49,34 @@ pub enum Policy {
     /// hit is worth more than a few hundred microseconds of measured
     /// difference between identical machines.
     LowestLatency,
+}
+
+impl Policy {
+    /// The spelling used on the wire, in the database and on the command
+    /// line — one vocabulary, so a value typed into the UI, stored in a
+    /// column and read from `--policy` cannot disagree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CacheAffinity => "cache-affinity",
+            Self::LeastLoaded => "least-loaded",
+            Self::RoundRobin => "round-robin",
+            Self::LowestLatency => "lowest-latency",
+        }
+    }
+
+    /// Parse that spelling. `None` for anything else, which callers treat as
+    /// "unset" rather than as an error: a control plane newer than this proxy
+    /// may name a policy this build has never heard of, and falling back to
+    /// the deployment default is better than refusing to route.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "cache-affinity" => Some(Self::CacheAffinity),
+            "least-loaded" => Some(Self::LeastLoaded),
+            "round-robin" => Some(Self::RoundRobin),
+            "lowest-latency" => Some(Self::LowestLatency),
+            _ => None,
+        }
+    }
 }
 
 pub struct Router {
@@ -118,7 +149,12 @@ impl Router {
             return Some(Arc::clone(candidates[0]));
         }
 
-        let (chosen, remember) = match self.policy {
+        // The pool's own policy when it has one, the deployment's otherwise.
+        // A model served by two identical local replicas and one fronted by
+        // three hosted providers of different speeds want different answers,
+        // and a single process routinely serves both.
+        let policy = pool.policy.unwrap_or(self.policy);
+        let (chosen, remember) = match policy {
             Policy::RoundRobin => {
                 let n = self.rr.fetch_add(1, Ordering::Relaxed);
                 (candidates[n % candidates.len()], false)
@@ -350,6 +386,62 @@ model_list:
 
     fn router(policy: Policy) -> Router {
         Router::new(policy, 1024, 2048, 8, 1.5)
+    }
+
+    /// The same pool, with a policy of its own.
+    fn pool_with(policy: Policy) -> Pool {
+        let base = two_node_pool();
+        Arc::new(crate::registry::PoolInner {
+            backends: base.backends.clone(),
+            policy: Some(policy),
+        })
+    }
+
+    /// A pool's own policy wins over the deployment's.
+    ///
+    /// The case this exists for: one control plane serving two identical
+    /// local replicas *and* three hosted providers of different speeds. A
+    /// single `--policy` has to be wrong for one of them.
+    #[test]
+    fn a_pool_with_its_own_policy_does_not_use_the_deployment_default() {
+        // Deployment default is round-robin, which alternates.
+        let r = router(Policy::RoundRobin);
+
+        // With no policy of its own, the pool alternates.
+        let shared = two_node_pool();
+        let a = r.pick(&shared, 1, &[]).unwrap().uid;
+        let b = r.pick(&shared, 1, &[]).unwrap().uid;
+        assert_ne!(a, b, "round-robin alternates");
+
+        // With lowest-latency of its own, the same pool sticks to the fast
+        // backend no matter how many times it is asked.
+        let own = pool_with(Policy::LowestLatency);
+        for _ in 0..40 {
+            own.backends[0].note_latency_us(2_000);
+            own.backends[1].note_latency_us(60_000);
+        }
+        let fast = own.backends[0].uid;
+        for _ in 0..20 {
+            assert_eq!(
+                r.pick(&own, 7, &[]).unwrap().uid,
+                fast,
+                "the pool's own policy decides, not the deployment's"
+            );
+        }
+    }
+
+    /// And an unset policy still means "whatever the deployment said", which
+    /// is what every pool meant before this was settable.
+    #[test]
+    fn an_unset_pool_policy_falls_back_to_the_deployment() {
+        let pool = two_node_pool();
+        assert!(pool.policy.is_none());
+        let r = router(Policy::CacheAffinity);
+        // Cache affinity: the same prefix returns to the same backend.
+        let first = r.pick(&pool, 42, &[]).unwrap().uid;
+        for _ in 0..10 {
+            assert_eq!(r.pick(&pool, 42, &[]).unwrap().uid, first);
+        }
     }
 
     /// The whole point of the policy: a measurably slower backend stops

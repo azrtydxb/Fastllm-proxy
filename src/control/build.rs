@@ -155,12 +155,15 @@ pub async fn build_snapshot_with(
     key: &EncryptionKey,
     embed: Option<&dyn PromptClassEmbedder>,
 ) -> anyhow::Result<Snapshot> {
-    let model_rows: Vec<(i64, String, Option<i32>, Option<i64>)> = sqlx::query_as(
-        "SELECT id, name, cache_ttl_seconds, context_length FROM models ORDER BY name",
+    // Named, because the row grew a fifth column and an anonymous tuple that
+    // wide stops being readable at the call site.
+    type ModelRow = (i64, String, Option<i32>, Option<i64>, Option<String>);
+    let model_rows: Vec<ModelRow> = sqlx::query_as(
+        "SELECT id, name, cache_ttl_seconds, context_length, policy FROM models ORDER BY name",
     )
     .fetch_all(pool)
     .await?;
-    let all_names: Vec<String> = model_rows.iter().map(|(_, n, _, _)| n.clone()).collect();
+    let all_names: Vec<String> = model_rows.iter().map(|(_, n, ..)| n.clone()).collect();
 
     type BackendRow = (
         i64,
@@ -181,7 +184,7 @@ pub async fn build_snapshot_with(
     .await?;
 
     let mut models = Vec::new();
-    for (id, name, cache_ttl_seconds, context_length) in &model_rows {
+    for (id, name, cache_ttl_seconds, context_length, policy) in &model_rows {
         let mut backends = Vec::new();
         for (
             _,
@@ -299,6 +302,11 @@ pub async fn build_snapshot_with(
             // A non-positive limit is meaningless and is read as unknown
             // rather than as a model that can accept nothing.
             context_length: context_length.filter(|c| *c > 0).map(|c| c as u64),
+            // An unrecognised policy is read as unset, not as an error: the
+            // column is deliberately unconstrained (see migration 0028), so a
+            // typo demotes the model to the deployment default rather than
+            // failing every snapshot build for every model.
+            policy: policy.as_deref().and_then(crate::router::Policy::parse),
             backends,
         });
     }

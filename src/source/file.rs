@@ -84,6 +84,10 @@ impl SnapshotSource for FileSource {
                 Some(m) => m.backends.push(backend),
                 None => models.push(ModelDef {
                     name,
+                    policy: entry
+                        .policy
+                        .as_deref()
+                        .and_then(crate::router::Policy::parse),
                     // File mode has no place to configure a TTL, so caching is
                     // off — the same as any model that has not asked for it.
                     cache_ttl: None,
