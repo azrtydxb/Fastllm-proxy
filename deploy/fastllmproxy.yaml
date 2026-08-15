@@ -1,0 +1,88 @@
+# This cluster, as a resource the operator reconciles.
+#
+# Every value here was read off the running Deployments and Services before
+# adoption, not chosen — the point of the exercise was that adopting a live
+# deployment changes who manages it and nothing else. What each unobvious one
+# is preserving:
+#
+#   pod.labels          The Services select `app: fastllm-*`, including
+#                       `fastllm-proxy-alt` on .126, which this resource does
+#                       not own. The operator selects by
+#                       `app.kubernetes.io/*`, so without these labels on the
+#                       pods both VIPs would resolve to no endpoints.
+#   serviceAnnotations  kube-vip pins the addresses by annotation. Drop them
+#                       and the VIP is released and reassigned.
+#   control.serviceType The admin plane is deliberately reachable on .129,
+#                       TLS-only — see deploy/README.md for the three
+#                       preconditions that rests on. The CRD refuses this
+#                       without tlsSecretName.
+#
+# Deliberately absent: `bootstrap`. The admin login already exists; a
+# bootstrap block would run `set-password` and reset a password somebody is
+# using.
+#
+# The Deployments' `spec.selector` is immutable and the old one
+# (`app: fastllm-*`) is not what the operator writes, so adoption is not an
+# in-place apply — see "Adopting it" in deploy/README.md for the
+# orphan-and-recreate cutover that keeps the gateway serving throughout.
+apiVersion: fastllm.io/v1alpha1
+kind: FastllmProxy
+metadata:
+  name: fastllm
+  namespace: fastllm
+spec:
+  image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:0.2.0
+
+  database:
+    name: fastllm-pg-app
+    key: uri
+  proxyToken:
+    name: fastllm-proxy-token
+    key: token
+  encryptionKey:
+    name: fastllm-encryption-key
+    key: key
+
+  observability:
+    logLevel: info
+
+  control:
+    tlsSecretName: fastllm-control-tls
+    serviceType: LoadBalancer
+    serviceAnnotations:
+      kube-vip.io/loadbalancerIPs: 192.168.10.129
+      kube-vip.io/vipHost: km02
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { cpu: "1", memory: 1Gi }
+    pod:
+      labels:
+        app: fastllm-control
+
+  proxy:
+    replicas: 2
+    policy: cacheAffinity
+    upstreamTimeout: 120
+    serviceType: LoadBalancer
+    serviceAnnotations:
+      kube-vip.io/loadbalancerIPs: 192.168.10.125
+      kube-vip.io/vipHost: km02
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: "2", memory: 1Gi }
+    pod:
+      labels:
+        app: fastllm-proxy
+
+  # Verbatim from the `fastllm-proxy-config` ConfigMap the manifests created.
+  # The operator mounts its own ConfigMap (`fastllm-proxy`) built from this,
+  # so the old one is orphaned after adoption and can be deleted.
+  tuning: |
+    fastllm:
+      # One replica today, so affinity has nothing to choose between. These are
+      # the defaults, written out so they are easy to tune when .246 returns
+      # from ASUS and the pool goes back to two.
+      prefix_bytes: 2048
+      balance_abs: 8
+      balance_rel: 1.5
+      unhealthy_after: 2

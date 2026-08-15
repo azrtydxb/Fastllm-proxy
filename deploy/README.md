@@ -109,6 +109,64 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
 
 (`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role unless it already holds one granting `config:write`. The condition is the *permission*, not "has any role": the seeded `bootstrap` principal already holds `inference` so keys minted against it can invoke models, and an earlier "has no role at all" check silently skipped the grant for it — producing an account that logged in and then got 403 everywhere, including from the routes needed to repair it. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
 
+## Managed by the operator
+
+This cluster's two Deployments are reconciled by
+[the operator](../operator), from [`fastllmproxy.yaml`](fastllmproxy.yaml) —
+so `kubectl -n fastllm get fllm` is the state of the deployment, the
+management UI has a **Deployment** screen that edits it, a rotated Secret
+rolls the pods that read it, and an image change rolls the control plane
+before the gateway rather than both at once.
+
+The manifests in this directory (`control.yaml`, `deployment.yaml`,
+`service.yaml`, `configmap.yaml`) are what the deployment was built from and
+remain the readable description of it — but they are no longer what is
+applied. Editing one and running `kubectl apply` will be undone on the next
+reconcile. Edit the `FastllmProxy` instead, or the UI.
+
+### Adopting it (what was actually done)
+
+A running deployment cannot simply be handed over: `spec.selector` is
+immutable on a Deployment and the operator's selector
+(`app.kubernetes.io/*`) is not the one the manifests used (`app: fastllm-*`),
+so a server-side apply is rejected outright. Both gateway VIPs also select
+`app: fastllm-proxy`, so pods without that label would leave `.125` and
+`.126` with no endpoints.
+
+The cutover that keeps the gateway serving throughout:
+
+```bash
+# 1. Back up what cannot be regenerated: the database, and the manifests as
+#    they stand.
+kubectl -n fastllm exec fastllm-pg-1 -- pg_dump -U postgres -d fastllm --no-owner > fastllm.sql
+kubectl -n fastllm get deploy,svc,cm,pdb -o yaml > fastllm-manifests.yaml
+
+# 2. Note the ReplicaSets that are about to be orphaned, by name. Orphaning a
+#    Deployment leaves its ReplicaSet behind still managing its pods, so
+#    deleting the pods later would only make it create more; the RS is what
+#    has to go, and by name rather than by label — the new pods deliberately
+#    carry the same `app:` label as the old ones.
+kubectl -n fastllm get rs -l app=fastllm-proxy -o name > /tmp/old-rs
+kubectl -n fastllm get rs -l app=fastllm-control -o name >> /tmp/old-rs
+
+# 3. Orphan the old Deployments. The pods keep running and keep serving —
+#    they still carry `app: fastllm-*`, so both VIPs still resolve to them.
+kubectl -n fastllm delete deploy fastllm-proxy fastllm-control --cascade=orphan
+
+# 4. Hand it to the operator. `pod.labels` in fastllmproxy.yaml is what makes
+#    the new pods answer on the same Services as the orphaned ones, so the
+#    two sets serve side by side while the new ones come up.
+kubectl apply -f deploy/fastllmproxy.yaml
+kubectl -n fastllm rollout status deploy/fastllm-proxy
+
+# 5. Once the new pods are Ready, retire the orphans.
+xargs kubectl -n fastllm delete < /tmp/old-rs
+```
+
+Nothing in Postgres is touched by any of this: models, keys, grants, routing
+rules and usage are the control plane's, not the operator's, and the resource
+only ever names the Secrets the control plane already read.
+
 ## First install
 
 Generate the proxy token — shared between `fastllm-control` and `fastllm-proxy`, checked only by `/snapshot`/`/usage`/`/limits/reconcile` (the machine-to-machine routes). It is not what protects `/admin/*` — that is the session-cookie login described below:
