@@ -378,7 +378,20 @@ pub fn proxy_deployment(owner: &FastllmProxy, image: &str, config_hash: &str) ->
     let s = &owner.spec;
     let tls = s.control.tls_secret_name.as_ref();
     let scheme = if tls.is_some() { "https" } else { "http" };
-    let control_host = name_for(owner, CONTROL);
+    // Fully qualified, not the bare Service name.
+    //
+    // Both resolve from a pod in the same namespace, but a certificate is
+    // issued for the name a client actually uses, and cert-manager writes
+    // `<service>.<namespace>.svc` — the short form is not a SAN. Getting this
+    // wrong does not fail loudly: the handshake fails, the proxy falls back to
+    // its cached snapshot, and configuration changes appear to stop working
+    // for no visible reason. Found while adopting a running deployment whose
+    // certificate carried exactly those two names.
+    let control_host = format!(
+        "{}.{}.svc",
+        name_for(owner, CONTROL),
+        owner.meta().namespace.clone().unwrap_or_default()
+    );
     let over = &s.proxy.pod;
 
     let mut args = vec![

@@ -1101,6 +1101,27 @@ mod tests {
         assert!(url.value.as_ref().unwrap().starts_with("https://"));
     }
 
+    /// The control-plane URL has to match what the certificate was issued
+    /// for. cert-manager writes `<service>.<namespace>.svc`; the bare Service
+    /// name is not a SAN, and a proxy that cannot complete the handshake
+    /// serves its cached snapshot for ever without saying why.
+    #[test]
+    fn the_gateway_reaches_the_control_plane_by_its_certificate_name() {
+        let cr = spec();
+        let d = resources::proxy_deployment(&cr, "img", "h");
+        let url = d.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "FASTLLM_CONTROL_URL")
+            .unwrap()
+            .value
+            .clone()
+            .unwrap();
+        assert_eq!(url, "http://demo-control.fastllm.svc:4001/snapshot");
+    }
+
     #[test]
     fn policy_reaches_the_flag_the_binary_accepts() {
         let mut cr = spec();
