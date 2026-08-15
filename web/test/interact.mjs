@@ -629,6 +629,16 @@ await goto("deployment");
     !lastCall("PATCH", "/admin/deployment"),
     "a PATCH was sent for a form nobody edited",
   );
+
+  // And it says so. The prop was honoured by the DOM and ignored by the
+  // styling, so a button that could not be pressed looked exactly like one
+  // that could — first noticed on a screenshot of this very screen.
+  const apply = containing("Apply to the cluster");
+  check(
+    "a disabled button looks disabled",
+    apply && apply.disabled && Number(apply.style.opacity) < 1,
+    `disabled=${apply?.disabled} opacity=${apply?.style.opacity || "unset"}`,
+  );
 }
 
 // Logout last, on purpose: it is a real control and must work, but clicking

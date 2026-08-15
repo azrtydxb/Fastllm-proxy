@@ -248,8 +248,15 @@ export function Button({ variant = "ghost", children, style, ...rest }) {
       border: "1px solid var(--bad-line)",
     },
   };
+  // A disabled button that looks enabled is a button people click and then
+  // wonder about. This applies UI-wide rather than per screen: the prop was
+  // being honoured by the DOM and ignored by the styling, so every "Save"
+  // waiting on a valid form, and every control mid-request, looked live.
+  const state = rest.disabled
+    ? { opacity: 0.45, cursor: "not-allowed" }
+    : { cursor: "pointer" };
   return (
-    <button style={{ ...base, ...(variants[variant] || {}), ...style }} {...rest}>
+    <button style={{ ...base, ...(variants[variant] || {}), ...state, ...style }} {...rest}>
       {children}
     </button>
   );
