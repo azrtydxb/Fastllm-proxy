@@ -193,6 +193,12 @@ Two things worth knowing before doing this again:
 - **Do not copy `serviceAnnotations` into a scratch namespace** to test a
   render. kube-vip honours them wherever they appear, and a second Service
   claiming a production VIP is a bad way to find that out.
+- **Expect a few seconds of external unreachability per VIP.** Updating a
+  Service makes kube-vip re-announce the address, so `.125` and `.126` blink
+  from outside the cluster while ARP settles — in-cluster traffic and the
+  pods themselves are unaffected throughout. It looks alarming and is not:
+  during this cutover the same addresses answered 200, then nothing, then 200
+  again within a few seconds, twice.
 
 ## First install
 
