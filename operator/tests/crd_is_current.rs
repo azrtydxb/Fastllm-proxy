@@ -38,4 +38,17 @@ fn the_manifest_carries_the_validations_the_schema_cannot_express() {
             .is_some(),
         "autoscaling bounds rule"
     );
+    // Exposing the admin plane in the clear would publish decrypted upstream
+    // credentials; the API server refuses it rather than the controller
+    // noticing afterwards.
+    let control = crd
+        .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/control/x-kubernetes-validations")
+        .expect("control exposure rule");
+    assert!(
+        control[0]["rule"]
+            .as_str()
+            .unwrap()
+            .contains("tlsSecretName"),
+        "{control}"
+    );
 }

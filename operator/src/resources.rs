@@ -629,10 +629,11 @@ pub fn service(owner: &FastllmProxy, component: &str) -> Service {
         CONTROL => (
             4001,
             "admin",
-            // Always ClusterIP. This Service fronts /snapshot, which returns
-            // decrypted upstream credentials to anything holding the proxy
-            // token — so it is not a field on the spec.
-            "ClusterIP",
+            // ClusterIP unless the spec says otherwise, and the CRD refuses
+            // anything else without TLS: this Service fronts /snapshot, which
+            // returns decrypted upstream credentials to anything holding the
+            // proxy token.
+            owner.spec.control.service_type.as_str(),
             &owner.spec.control.service_annotations,
         ),
         _ => (

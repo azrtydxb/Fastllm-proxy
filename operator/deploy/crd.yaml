@@ -65,6 +65,7 @@ spec:
               control:
                 default:
                   pod: {}
+                  serviceType: ClusterIP
                 description: The control plane. Its replica count is absent on purpose — see the type doc on [`FastllmProxySpec`].
                 properties:
                   pod:
@@ -738,8 +739,19 @@ spec:
                   serviceAnnotations:
                     additionalProperties:
                       type: string
-                    description: Annotations on the admin Service. Its *type* is not configurable — see `resources::service`.
+                    description: Annotations on the admin Service — where a pinned load-balancer address goes when this plane is exposed at all.
                     type: object
+                  serviceType:
+                    default: ClusterIP
+                    description: |-
+                      Service type for the admin listener.
+
+                      `ClusterIP` unless you mean otherwise, and the API server will refuse anything else without `tlsSecretName` — this Service fronts `/snapshot`, which hands *decrypted* upstream credentials to anything holding the proxy token, so exposing it in the clear is not a configuration, it is an accident. Exposed **and** TLS-only is a real deployment (see `deploy/README.md`, which runs exactly that on a pinned VIP), and the earlier design — hardcoded ClusterIP, no field — simply could not describe it.
+                    enum:
+                    - ClusterIP
+                    - LoadBalancer
+                    - NodePort
+                    type: string
                   tlsSecretName:
                     description: |-
                       TLS for the admin listener, which also serves `/snapshot`.
@@ -748,6 +760,9 @@ spec:
                     nullable: true
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'control.serviceType other than ClusterIP requires control.tlsSecretName: the admin Service fronts /snapshot, which returns decrypted upstream credentials'
+                  rule: '!has(self.serviceType) || self.serviceType == ''ClusterIP'' || has(self.tlsSecretName)'
               database:
                 description: Postgres connection string. Not a database this operator runs — see the module doc for why.
                 properties:

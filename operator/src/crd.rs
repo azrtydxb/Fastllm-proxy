@@ -239,10 +239,23 @@ pub struct ControlSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_secret_name: Option<String>,
 
-    /// Annotations on the admin Service. Its *type* is not configurable —
-    /// see `resources::service`.
+    /// Annotations on the admin Service — where a pinned load-balancer
+    /// address goes when this plane is exposed at all.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub service_annotations: BTreeMap<String, String>,
+
+    /// Service type for the admin listener.
+    ///
+    /// `ClusterIP` unless you mean otherwise, and the API server will refuse
+    /// anything else without `tlsSecretName` — this Service fronts
+    /// `/snapshot`, which hands *decrypted* upstream credentials to anything
+    /// holding the proxy token, so exposing it in the clear is not a
+    /// configuration, it is an accident. Exposed **and** TLS-only is a real
+    /// deployment (see `deploy/README.md`, which runs exactly that on a
+    /// pinned VIP), and the earlier design — hardcoded ClusterIP, no field —
+    /// simply could not describe it.
+    #[serde(default)]
+    pub service_type: ServiceType,
 
     #[serde(default)]
     pub pod: PodOverrides,
@@ -602,6 +615,21 @@ pub fn manifest() -> serde_json::Value {
                             reencrypt-backends` first.",
             }]),
         );
+
+    // Exposing the admin plane without TLS would put the session cookie, the
+    // proxy token and every decrypted upstream credential on the network in
+    // the clear. Refused at apply time rather than reported afterwards.
+    if let Some(control) = props.get_mut("control").and_then(|v| v.as_object_mut()) {
+        control.insert(
+            "x-kubernetes-validations".to_string(),
+            serde_json::json!([{
+                "rule": "!has(self.serviceType) || self.serviceType == 'ClusterIP' || has(self.tlsSecretName)",
+                "message": "control.serviceType other than ClusterIP requires control.tlsSecretName: \
+                            the admin Service fronts /snapshot, which returns decrypted upstream \
+                            credentials",
+            }]),
+        );
+    }
 
     // A maximum below the minimum is an autoscaler that never scales, and the
     // API server can say so at apply time instead of an operator finding out

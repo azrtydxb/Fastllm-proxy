@@ -910,7 +910,9 @@ mod tests {
 
     /// The admin Service fronts /snapshot, which hands decrypted upstream
     /// credentials to anything holding the proxy token. Making the gateway
-    /// externally reachable must never carry the admin plane with it.
+    /// externally reachable must never carry the admin plane with it — they
+    /// are separate fields, and exposing the admin one is refused by the CRD
+    /// without TLS (see `manifest`'s CEL rules).
     #[test]
     fn exposing_the_gateway_leaves_the_admin_service_internal() {
         let mut cr = spec();
@@ -919,6 +921,18 @@ mod tests {
         let gateway = resources::service(&cr, resources::PROXY);
         assert_eq!(admin.spec.unwrap().type_.unwrap(), "ClusterIP");
         assert_eq!(gateway.spec.unwrap().type_.unwrap(), "LoadBalancer");
+
+        // And when it is deliberately exposed, with TLS, it is that.
+        cr.spec.control.service_type = ServiceType::LoadBalancer;
+        cr.spec.control.tls_secret_name = Some("fastllm-control-tls".into());
+        assert_eq!(
+            resources::service(&cr, resources::CONTROL)
+                .spec
+                .unwrap()
+                .type_
+                .unwrap(),
+            "LoadBalancer"
+        );
     }
 
     /// The knob a real cluster cannot do without: a pinned load-balancer

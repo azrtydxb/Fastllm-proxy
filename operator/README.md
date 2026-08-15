@@ -137,6 +137,7 @@ a page that password protects.
 | `observability.serviceMonitor` | `enabled`, `interval`, `labels`. Skipped without complaint where the Prometheus operator is not installed |
 | `control.tlsSecretName` | Turns on TLS for the admin listener — and moves the probes and the gateway's `--ca-bundle` with it |
 | `control.resources` / `control.serviceAnnotations` | |
+| `control.serviceType` | `ClusterIP` by default. Anything else is **refused by the API server** without `tlsSecretName` — this Service fronts `/snapshot`, which returns decrypted upstream credentials |
 | `proxy.replicas` | Gateway replicas. Below 2, no PodDisruptionBudget is created |
 | `proxy.autoscaling` | `enabled`, `minReplicas`, `maxReplicas`, `targetCpuUtilizationPercentage`. While enabled, `replicas` is left to the HPA |
 | `proxy.policy` | `cacheAffinity` (default), `leastLoaded`, `roundRobin`, `lowestLatency` |
@@ -167,11 +168,14 @@ A gateway reports unready until at least one model **backend** is healthy, so
 a brand-new install sits in `Degraded` until a model is added. The `Ready`
 condition says so rather than leaving you to find out.
 
-`control.replicas` is absent on purpose, and the admin Service is always
-ClusterIP: it fronts `/snapshot`, which returns *decrypted* upstream
-credentials to anything holding the proxy token. Exposing that is a decision
-with three preconditions ([docs/security.md](../docs/security.md)), not a
-field with a default.
+`control.replicas` is absent on purpose. The admin Service defaults to
+ClusterIP because it fronts `/snapshot`, which returns *decrypted* upstream
+credentials to anything holding the proxy token — but exposing it deliberately,
+TLS-only, on its own address is a real deployment
+([deploy/README.md](../deploy/README.md) runs exactly that), so it is a field
+whose unsafe value the CRD refuses rather than a decision the schema pretends
+nobody makes. Exposing it still rests on the preconditions in
+[docs/security.md](../docs/security.md).
 
 ## Developing
 
