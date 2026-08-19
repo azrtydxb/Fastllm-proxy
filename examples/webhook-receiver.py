@@ -24,6 +24,8 @@ SECRET = os.environ.get("FASTLLM_WEBHOOK_SECRET", "").encode()
 
 
 class Handler(BaseHTTPRequestHandler):
+    """Verify the signature if a secret is set, then print each event."""
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
 

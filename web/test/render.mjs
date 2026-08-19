@@ -17,7 +17,7 @@
 // Run with `npm test` from `web/`.
 
 import { JSDOM } from "jsdom";
-import { FIXTURES, USAGE, fixtureFor } from "./fixtures.mjs";
+import { fixtureFor } from "./fixtures.mjs";
 
 const dom = new JSDOM(
   '<!doctype html><html><body><div id="root"></div></body></html>',

@@ -21,7 +21,8 @@ COPY web/ ./
 # is the one place the UI is guaranteed to be built before it is embedded, and
 # a screen that throws on mount — or a button that posts a body the handler
 # discards — would otherwise ship as something nobody noticed until an
-# operator opened it.
+# operator opened it. Two RUNs, not one: which step failed is the diagnosis.
+# hadolint ignore=DL3059
 RUN npm test
 RUN npm run build
 
@@ -108,7 +109,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM debian:trixie-slim
 
 # ca-certificates is what makes an `https://` api_base work: the proxy prefers
-# the system root store and only falls back to its bundled copy.
+# the system root store and only falls back to its bundled copy. Unpinned on
+# purpose: Debian drops old versions from the mirrors, so a pin rots into a
+# build that cannot run anywhere.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \

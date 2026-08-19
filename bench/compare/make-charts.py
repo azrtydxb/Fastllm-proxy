@@ -49,6 +49,7 @@ LEVELS = [1, 2, 4, 8, 16, 32, 48, 64]
 
 
 def load(name):
+    """One sweep's results, keyed gateway -> concurrency -> row."""
     rows = {}
     with open(os.path.join(HERE, "results", name)) as f:
         for line in f:
@@ -58,15 +59,18 @@ def load(name):
 
 
 def x_of(c):
-    # Concurrency doubles, so place it on a log2 axis. Linear spacing would
-    # crush every low-concurrency point against the left edge, which is where
-    # the interesting difference lives.
+    """Concurrency doubles, so place it on a log2 axis.
+
+    Linear spacing would crush every low-concurrency point against the left
+    edge, which is where the interesting difference lives.
+    """
     return PAD["l"] + (math.log2(c) / math.log2(64)) * (W - PAD["l"] - PAD["r"])
 
 
 def svg_chart(
     title, series, theme, log=False, ticks=5, fmt=str, marker=None, ylabel=""
 ):
+    """Render one chart as an SVG string, hand-built so nothing is imported."""
     t = THEMES[theme]
     values = [p[1] for s in series for p in s["points"] if p[1] > 0]
     hi = max(values)
@@ -82,8 +86,10 @@ def svg_chart(
         return H - PAD["b"] - frac * (H - PAD["t"] - PAD["b"])
 
     out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
-        f'font-family="{MONO}" role="img" aria-label="{title}">'
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
+            f'font-family="{MONO}" role="img" aria-label="{title}">'
+        )
     ]
 
     for i in range(ticks + 1):
@@ -158,6 +164,7 @@ def svg_chart(
 
 
 def write(name, title, series_fn, **kw):
+    """One chart per theme, so the README renders in light and dark."""
     os.makedirs(OUT, exist_ok=True)
     for theme in THEMES:
         path = os.path.join(OUT, f"{name}-{theme}.svg")
@@ -167,6 +174,7 @@ def write(name, title, series_fn, **kw):
 
 
 def main():
+    """Every chart in bench/compare/charts, from the two sweep files."""
     mock = load("sweep_mock.jsonl")
     real = load("sweep_real.jsonl")
 

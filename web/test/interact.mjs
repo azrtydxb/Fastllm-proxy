@@ -25,7 +25,7 @@
 // the API returns, and it is the wire format rather than the struct shape.
 
 import { JSDOM } from "jsdom";
-import { FIXTURES, USAGE, fixtureFor } from "./fixtures.mjs";
+import { fixtureFor } from "./fixtures.mjs";
 
 const dom = new JSDOM(
   '<!doctype html><html><body><div id="root"></div></body></html>',

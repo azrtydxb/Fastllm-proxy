@@ -100,6 +100,7 @@ def load(name):
 
 
 def write(name, records):
+    """Save the whole set; partial progress survives a throttled run."""
     os.makedirs(DATA_DIR, exist_ok=True)
     path = os.path.join(DATA_DIR, name)
     with open(path, "w") as f:
@@ -108,6 +109,7 @@ def write(name, records):
 
 
 def main():
+    """Top up the prompt sets to their targets, resuming where a run stopped."""
     target = 9500
     existing = load("no_robots.json")
     if len(existing) < target:

@@ -34,6 +34,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # system libstdc++/libssl the build stage used, and matching that exactly is
 # what keeps "it built" and "it starts" the same statement.
 FROM debian:trixie-slim
+# Unpinned on purpose: Debian drops old versions from the mirrors, so a pin
+# rots into a build that cannot run anywhere.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
