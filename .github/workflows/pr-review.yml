@@ -44,20 +44,21 @@ jobs:
           fi
           if [ -n "$docs" ]; then
             echo "Behaviour changed and documentation changed with it:"
-            echo "$docs" | sed 's/^/  /'
+            echo "  ${docs//$'\n'/$'\n'  }"
             exit 0
           fi
           # The escape hatch is a sentence, not a checkbox: whoever skips this
           # has to say why, and the reason lands in the PR where a reviewer
           # reads it.
-          if printf '%s' "$BODY" | grep -qiE 'no docs needed:'; then
+          reason=$(printf '%s' "$BODY" | grep -iE 'no docs needed:' || true)
+          if [ -n "$reason" ]; then
             echo "Skipped by the PR body:"
-            printf '%s' "$BODY" | grep -iE 'no docs needed:' | sed 's/^/  /'
+            echo "  ${reason//$'\n'/$'\n'  }"
             exit 0
           fi
 
           echo "::error title=Documentation may be stale::These changed, and nothing under docs/ did."
-          echo "$behaviour" | sed 's/^/  /'
+          echo "  ${behaviour//$'\n'/$'\n'  }"
           cat <<'EOF'
 
           This repository's rule is that documentation is part of the change,
@@ -108,21 +109,22 @@ jobs:
           fi
           if [ -n "$ui" ]; then
             echo "Admin API changed and the UI changed with it:"
-            echo "$ui" | sed 's/^/  /'
+            echo "  ${ui//$'\n'/$'\n'  }"
             exit 0
           fi
-          if printf '%s' "$BODY" | grep -qiE 'no ui needed:'; then
+          reason=$(printf '%s' "$BODY" | grep -iE 'no ui needed:' || true)
+          if [ -n "$reason" ]; then
             echo "Skipped by the PR body:"
-            printf '%s' "$BODY" | grep -iE 'no ui needed:' | sed 's/^/  /'
+            echo "  ${reason//$'\n'/$'\n'  }"
             exit 0
           fi
 
           if [ -n "$new_routes" ]; then
             echo "::error title=New admin routes with no UI change::"
-            echo "$new_routes" | sed 's/^/  /'
+            echo "  ${new_routes//$'\n'/$'\n'  }"
           else
             echo "::error title=Admin API changed with no UI change::"
-            echo "$api" | sed 's/^/  /'
+            echo "  ${api//$'\n'/$'\n'  }"
           fi
           cat <<'EOF'
 

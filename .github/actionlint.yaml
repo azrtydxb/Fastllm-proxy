@@ -1,0 +1,7 @@
+# Self-hosted ARC runner scale sets on the kw cluster. actionlint only
+# knows GitHub-hosted labels, so the real ones are declared here.
+self-hosted-runner:
+  labels:
+    - arc-azrtydxb
+    - arc-azrtydxb-publish
+    - arc-azrtydxb-amd64-publish
