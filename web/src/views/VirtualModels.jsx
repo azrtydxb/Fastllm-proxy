@@ -93,7 +93,8 @@ export function VirtualModels({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const vm = data.vms.find((v) => v.id === selected) || data.vms[0] || null;
 
@@ -101,7 +102,11 @@ export function VirtualModels({ onUnauthorised }) {
     e.preventDefault();
     if (!creating.trim()) return;
     const ok = await attempt(
-      () => api.post("/admin/virtual-models", { name: creating.trim(), description: "" }),
+      () =>
+        api.post("/admin/virtual-models", {
+          name: creating.trim(),
+          description: "",
+        }),
       setError,
       onUnauthorised,
     );
@@ -153,9 +158,13 @@ export function VirtualModels({ onUnauthorised }) {
                 }}
               >
                 {v.name}
-                <span style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>
+                <span
+                  style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}
+                >
                   {v.rules.length} rule{v.rules.length === 1 ? "" : "s"}
-                  {v.default_targets.length ? ` · ${v.default_targets.length} default` : ""}
+                  {v.default_targets.length
+                    ? ` · ${v.default_targets.length} default`
+                    : ""}
                 </span>
               </button>
             );
@@ -173,8 +182,8 @@ export function VirtualModels({ onUnauthorised }) {
         {!vm ? (
           <Card>
             <Empty>
-              A frontend model is a name callers ask for; it resolves to a chain of backend models.
-              Create one to start.
+              A frontend model is a name callers ask for; it resolves to a chain
+              of backend models. Create one to start.
             </Empty>
           </Card>
         ) : (
@@ -182,20 +191,37 @@ export function VirtualModels({ onUnauthorised }) {
             <Card>
               <Row style={{ flexWrap: "nowrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <Mono style={{ font: "500 15px/1.2 var(--mono)" }}>{vm.name}</Mono>
-                  <div style={{ font: "400 11px var(--sans)", color: "var(--fg-4)", marginTop: 4 }}>
-                    First rule whose conditions match wins · conditions AND&rsquo;d · targets
-                    weighted and ordered
+                  <Mono style={{ font: "500 15px/1.2 var(--mono)" }}>
+                    {vm.name}
+                  </Mono>
+                  <div
+                    style={{
+                      font: "400 11px var(--sans)",
+                      color: "var(--fg-4)",
+                      marginTop: 4,
+                    }}
+                  >
+                    First rule whose conditions match wins · conditions
+                    AND&rsquo;d · targets weighted and ordered
                   </div>
                 </div>
                 <Spacer />
-                <Button onClick={() => setSim(sim ? null : { streaming: true, prompt_tokens: 0 })}>
+                <Button
+                  onClick={() =>
+                    setSim(sim ? null : { streaming: true, prompt_tokens: 0 })
+                  }
+                >
                   {sim ? "Close dry-run" : "Dry-run a request"}
                 </Button>
                 <Button
                   variant="smallDanger"
                   onClick={async () => {
-                    if (!window.confirm(`Delete ${vm.name}, its rules and targets?`)) return;
+                    if (
+                      !window.confirm(
+                        `Delete ${vm.name}, its rules and targets?`,
+                      )
+                    )
+                      return;
                     const ok = await attempt(
                       () => api.del(`/admin/virtual-models/${vm.id}`),
                       setError,
@@ -225,8 +251,8 @@ export function VirtualModels({ onUnauthorised }) {
             {vm.rules.length === 0 && (
               <Card>
                 <Empty>
-                  No rules. Every request to {vm.name} goes to its defaults below, then to the
-                  deployment fallback.
+                  No rules. Every request to {vm.name} goes to its defaults
+                  below, then to the deployment fallback.
                 </Empty>
               </Card>
             )}
@@ -235,8 +261,14 @@ export function VirtualModels({ onUnauthorised }) {
               const chips = conditionChips(r);
               const total = r.targets.reduce((a, t) => a + t.weight, 0) || 1;
               return (
-                <Card key={r.id} style={{ borderLeft: "3px solid var(--accent)" }}>
-                  <Row gap={10} style={{ marginBottom: 12, flexWrap: "nowrap" }}>
+                <Card
+                  key={r.id}
+                  style={{ borderLeft: "3px solid var(--accent)" }}
+                >
+                  <Row
+                    gap={10}
+                    style={{ marginBottom: 12, flexWrap: "nowrap" }}
+                  >
                     <Pill tone="accent" mono>
                       rule {i}
                     </Pill>
@@ -291,7 +323,9 @@ export function VirtualModels({ onUnauthorised }) {
                     >
                       TARGETS
                     </span>
-                    {r.targets.length === 0 && <Muted>none — this rule matches and serves nothing</Muted>}
+                    {r.targets.length === 0 && (
+                      <Muted>none — this rule matches and serves nothing</Muted>
+                    )}
                     {r.targets.map((t, j) => (
                       <React.Fragment key={t.id}>
                         <div
@@ -306,8 +340,15 @@ export function VirtualModels({ onUnauthorised }) {
                           }}
                         >
                           <Dot tone="ok" size={6} />
-                          <Mono style={{ font: "400 12px var(--mono)" }}>{t.model}</Mono>
-                          <span style={{ font: "400 10px var(--sans)", color: "var(--fg-4)" }}>
+                          <Mono style={{ font: "400 12px var(--mono)" }}>
+                            {t.model}
+                          </Mono>
+                          <span
+                            style={{
+                              font: "400 10px var(--sans)",
+                              color: "var(--fg-4)",
+                            }}
+                          >
                             w{t.weight}
                           </span>
                           <div style={{ width: 52 }}>
@@ -329,7 +370,14 @@ export function VirtualModels({ onUnauthorised }) {
                           </Button>
                         </div>
                         {j < r.targets.length - 1 && (
-                          <span style={{ font: "400 11px var(--mono)", color: "#3f4650" }}>→</span>
+                          <span
+                            style={{
+                              font: "400 11px var(--mono)",
+                              color: "#3f4650",
+                            }}
+                          >
+                            →
+                          </span>
                         )}
                       </React.Fragment>
                     ))}
@@ -367,7 +415,9 @@ export function VirtualModels({ onUnauthorised }) {
               subtitle="used when no rule matches · the deployment fallback is appended after these"
             >
               <Row gap={8}>
-                {vm.default_targets.length === 0 && <Muted>none configured</Muted>}
+                {vm.default_targets.length === 0 && (
+                  <Muted>none configured</Muted>
+                )}
                 {vm.default_targets.map((t) => (
                   <div
                     key={t.id}
@@ -382,8 +432,15 @@ export function VirtualModels({ onUnauthorised }) {
                     }}
                   >
                     <Dot tone="ok" size={6} />
-                    <Mono style={{ font: "400 12px var(--mono)" }}>{t.model}</Mono>
-                    <span style={{ font: "400 10px var(--sans)", color: "var(--fg-4)" }}>
+                    <Mono style={{ font: "400 12px var(--mono)" }}>
+                      {t.model}
+                    </Mono>
+                    <span
+                      style={{
+                        font: "400 10px var(--sans)",
+                        color: "var(--fg-4)",
+                      }}
+                    >
                       w{t.weight}
                     </span>
                     <Button
@@ -391,7 +448,8 @@ export function VirtualModels({ onUnauthorised }) {
                       style={{ border: "none", padding: "0 2px" }}
                       onClick={async () => {
                         const ok = await attempt(
-                          () => api.del(`/admin/virtual-model-defaults/${t.id}`),
+                          () =>
+                            api.del(`/admin/virtual-model-defaults/${t.id}`),
                           setError,
                           onUnauthorised,
                         );
@@ -404,7 +462,11 @@ export function VirtualModels({ onUnauthorised }) {
                 ))}
                 {data.fallback?.name && (
                   <>
-                    <span style={{ font: "400 11px var(--mono)", color: "#3f4650" }}>→</span>
+                    <span
+                      style={{ font: "400 11px var(--mono)", color: "#3f4650" }}
+                    >
+                      →
+                    </span>
                     <div
                       style={{
                         display: "flex",
@@ -417,10 +479,20 @@ export function VirtualModels({ onUnauthorised }) {
                       }}
                     >
                       <Dot tone="muted" size={6} />
-                      <Mono style={{ font: "400 12px var(--mono)", color: "var(--fg-3)" }}>
+                      <Mono
+                        style={{
+                          font: "400 12px var(--mono)",
+                          color: "var(--fg-3)",
+                        }}
+                      >
                         {data.fallback.name}
                       </Mono>
-                      <span style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>
+                      <span
+                        style={{
+                          font: "400 10px var(--sans)",
+                          color: "var(--fg-5)",
+                        }}
+                      >
                         deployment fallback
                       </span>
                     </div>
@@ -474,7 +546,11 @@ function AddTarget({ models, onAdd }) {
   }
   return (
     <Row gap={6} style={{ flexWrap: "nowrap" }}>
-      <select value={modelId} onChange={(e) => setModelId(e.target.value)} style={{ fontSize: 12 }}>
+      <select
+        value={modelId}
+        onChange={(e) => setModelId(e.target.value)}
+        style={{ fontSize: 12 }}
+      >
         <option value="">model…</option>
         {models.map((m) => (
           <option key={m.id} value={m.id}>
@@ -540,17 +616,29 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
   const submit = async () => {
     const match_condition = {};
     if (c.class) match_condition.class = c.class;
-    if (c.roles) match_condition.roles = c.roles.split(",").map((s) => s.trim()).filter(Boolean);
-    if (c.min_prompt_tokens) match_condition.min_prompt_tokens = Number(c.min_prompt_tokens);
-    if (c.max_max_tokens) match_condition.max_max_tokens = Number(c.max_max_tokens);
+    if (c.roles)
+      match_condition.roles = c.roles
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (c.min_prompt_tokens)
+      match_condition.min_prompt_tokens = Number(c.min_prompt_tokens);
+    if (c.max_max_tokens)
+      match_condition.max_max_tokens = Number(c.max_max_tokens);
     if (c.stream === "true") match_condition.stream = true;
     if (c.stream === "false") match_condition.stream = false;
     if (c.min_budget_used_percent)
-      match_condition.min_budget_used_percent = Number(c.min_budget_used_percent);
+      match_condition.min_budget_used_percent = Number(
+        c.min_budget_used_percent,
+      );
     if (c.max_inflight_per_backend)
-      match_condition.max_inflight_per_backend = Number(c.max_inflight_per_backend);
+      match_condition.max_inflight_per_backend = Number(
+        c.max_inflight_per_backend,
+      );
     if (c.header_name && c.header_value)
-      match_condition.headers = { [c.header_name.toLowerCase()]: c.header_value };
+      match_condition.headers = {
+        [c.header_name.toLowerCase()]: c.header_value,
+      };
     if (c.after) match_condition.after = c.after;
     if (c.before) match_condition.before = c.before;
 
@@ -585,12 +673,16 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
   return (
     <Card title={`New rule — position ${vm.rules.length}`} tone="accent">
       <Muted>
-        Appended last, so it is evaluated after every existing rule. Every field left blank is
-        simply not part of the condition.
+        Appended last, so it is evaluated after every existing rule. Every field
+        left blank is simply not part of the condition.
       </Muted>
       <Grid cols={4} gap={10} style={{ marginTop: 12 }}>
         <Field label="PROMPT CLASS">
-          <input placeholder="coding" value={c.class || ""} onChange={(e) => set({ class: e.target.value })} />
+          <input
+            placeholder="coding"
+            value={c.class || ""}
+            onChange={(e) => set({ class: e.target.value })}
+          />
         </Field>
         <Field label="ROLES (any of)">
           <input
@@ -600,7 +692,10 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
           />
         </Field>
         <Field label="STREAM">
-          <select value={c.stream || ""} onChange={(e) => set({ stream: e.target.value })}>
+          <select
+            value={c.stream || ""}
+            onChange={(e) => set({ stream: e.target.value })}
+          >
             <option value="">any</option>
             <option value="true">true</option>
             <option value="false">false</option>
@@ -618,7 +713,10 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
             onChange={(e) => set({ max_max_tokens: e.target.value })}
           />
         </Field>
-        <Field label="BUDGET USED % ≥" hint="degrade instead of refusing at the cap">
+        <Field
+          label="BUDGET USED % ≥"
+          hint="degrade instead of refusing at the cap"
+        >
           <input
             value={c.min_budget_used_percent || ""}
             onChange={(e) => set({ min_budget_used_percent: e.target.value })}
@@ -631,7 +729,10 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
           />
         </Field>
         <Field label="FIRST TARGET">
-          <select value={c.model_id || ""} onChange={(e) => set({ model_id: e.target.value })}>
+          <select
+            value={c.model_id || ""}
+            onChange={(e) => set({ model_id: e.target.value })}
+          >
             <option value="">none yet</option>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -655,10 +756,18 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
           />
         </Field>
         <Field label="AFTER (HH:MM)">
-          <input placeholder="22:00" value={c.after || ""} onChange={(e) => set({ after: e.target.value })} />
+          <input
+            placeholder="22:00"
+            value={c.after || ""}
+            onChange={(e) => set({ after: e.target.value })}
+          />
         </Field>
         <Field label="BEFORE (HH:MM)">
-          <input placeholder="06:00" value={c.before || ""} onChange={(e) => set({ before: e.target.value })} />
+          <input
+            placeholder="06:00"
+            value={c.before || ""}
+            onChange={(e) => set({ before: e.target.value })}
+          />
         </Field>
       </Grid>
       <Row gap={8} style={{ marginTop: 14 }}>
@@ -695,7 +804,9 @@ function DryRun({ vm, principals, state, setState, onError }) {
       }
       const resp = await api.post("/admin/routing/dry-run", {
         model: vm.name,
-        principal_id: state.principal_id ? Number(state.principal_id) : undefined,
+        principal_id: state.principal_id
+          ? Number(state.principal_id)
+          : undefined,
         streaming: !!state.streaming,
         prompt_tokens: Number(state.prompt_tokens) || 0,
         max_tokens: state.max_tokens ? Number(state.max_tokens) : undefined,
@@ -714,7 +825,9 @@ function DryRun({ vm, principals, state, setState, onError }) {
   return (
     <Card tone="accent" style={{ background: "var(--panel-2)" }}>
       <Row gap={10} style={{ marginBottom: 14 }}>
-        <span style={{ font: "600 12px var(--sans)", color: "var(--accent-soft)" }}>
+        <span
+          style={{ font: "600 12px var(--sans)", color: "var(--accent-soft)" }}
+        >
           Dry-run a request
         </span>
         <Muted>evaluates rules without dispatching</Muted>
@@ -723,7 +836,9 @@ function DryRun({ vm, principals, state, setState, onError }) {
         <Field label="PRINCIPAL">
           <select
             value={state.principal_id || ""}
-            onChange={(e) => setState({ ...state, principal_id: e.target.value })}
+            onChange={(e) =>
+              setState({ ...state, principal_id: e.target.value })
+            }
           >
             <option value="">anonymous</option>
             {principals.map((p) => (
@@ -736,13 +851,17 @@ function DryRun({ vm, principals, state, setState, onError }) {
         <Field label="PROMPT TOKENS">
           <input
             value={state.prompt_tokens ?? ""}
-            onChange={(e) => setState({ ...state, prompt_tokens: e.target.value })}
+            onChange={(e) =>
+              setState({ ...state, prompt_tokens: e.target.value })
+            }
           />
         </Field>
         <Field label="STREAM">
           <select
             value={state.streaming ? "true" : "false"}
-            onChange={(e) => setState({ ...state, streaming: e.target.value === "true" })}
+            onChange={(e) =>
+              setState({ ...state, streaming: e.target.value === "true" })
+            }
           >
             <option value="true">true</option>
             <option value="false">false</option>
@@ -765,17 +884,26 @@ function DryRun({ vm, principals, state, setState, onError }) {
           <input
             placeholder="x-fastllm-tier"
             value={state.header_name || ""}
-            onChange={(e) => setState({ ...state, header_name: e.target.value })}
+            onChange={(e) =>
+              setState({ ...state, header_name: e.target.value })
+            }
           />
         </Field>
         <Field label="HEADER VALUE">
           <input
             value={state.header_value || ""}
-            onChange={(e) => setState({ ...state, header_value: e.target.value })}
+            onChange={(e) =>
+              setState({ ...state, header_value: e.target.value })
+            }
           />
         </Field>
         <div style={{ display: "flex", alignItems: "flex-end" }}>
-          <Button variant="primary" onClick={run} disabled={busy} style={{ width: "100%" }}>
+          <Button
+            variant="primary"
+            onClick={run}
+            disabled={busy}
+            style={{ width: "100%" }}
+          >
             {busy ? "Evaluating…" : "Evaluate"}
           </Button>
         </div>
@@ -796,7 +924,9 @@ function DryRun({ vm, principals, state, setState, onError }) {
           }}
         >
           <Pill tone={result.matched_rule === null ? "quiet" : "ok"} mono>
-            {result.matched_rule === null ? "NO RULE" : `RULE ${result.matched_rule}`}
+            {result.matched_rule === null
+              ? "NO RULE"
+              : `RULE ${result.matched_rule}`}
           </Pill>
           <span style={{ font: "400 12px var(--sans)", color: "var(--fg-2)" }}>
             {result.matched_rule === null
@@ -816,16 +946,17 @@ function DryRun({ vm, principals, state, setState, onError }) {
           </span>
           <Spacer />
           <Muted>
-            health is not consulted here — this says which rule matched, not which replica is
-            reachable
+            health is not consulted here — this says which rule matched, not
+            which replica is reachable
           </Muted>
         </div>
       )}
       {result && result.candidates.length === 0 && (
         <div style={{ marginTop: 10 }}>
           <Muted style={{ color: "var(--warn-fg)" }}>
-            The chain is empty: this request would 404. Every candidate was either unconfigured or
-            dropped because the caller lacks model:invoke on it.
+            The chain is empty: this request would 404. Every candidate was
+            either unconfigured or dropped because the caller lacks model:invoke
+            on it.
           </Muted>
         </div>
       )}

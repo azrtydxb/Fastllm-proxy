@@ -58,7 +58,8 @@ export function McpServers({ onUnauthorised, go }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const servers = data.data || [];
 
@@ -97,7 +98,12 @@ export function McpServers({ onUnauthorised, go }) {
   };
 
   const remove = async (s) => {
-    if (!window.confirm(`Delete MCP server ${s.name}? Its tools stop being reachable.`)) return;
+    if (
+      !window.confirm(
+        `Delete MCP server ${s.name}? Its tools stop being reachable.`,
+      )
+    )
+      return;
     const ok = await attempt(
       () => api.del(`/admin/mcp-servers/${s.id}`),
       setError,
@@ -138,17 +144,25 @@ export function McpServers({ onUnauthorised, go }) {
                       <Mono key="n" style={{ font: "500 12px var(--mono)" }}>
                         {s.name}
                       </Mono>,
-                      <Mono key="u" style={{ color: "var(--fg-3)", fontSize: 11 }}>
+                      <Mono
+                        key="u"
+                        style={{ color: "var(--fg-3)", fontSize: 11 }}
+                      >
                         {s.url}
                       </Mono>,
-                      <Pill key="t" tone={s.transport === "http" ? "ok" : "violet"}>
+                      <Pill
+                        key="t"
+                        tone={s.transport === "http" ? "ok" : "violet"}
+                      >
                         {s.transport}
                       </Pill>,
                       <span key="c" style={{ color: "var(--fg-3)" }}>
                         {s.credential_set ? (
                           <>
                             credential set{" "}
-                            <Mono style={{ fontSize: 11, color: "var(--fg-4)" }}>
+                            <Mono
+                              style={{ fontSize: 11, color: "var(--fg-4)" }}
+                            >
                               {s.auth_header}
                               {s.auth_scheme ? ` ${s.auth_scheme} …` : " …"}
                             </Mono>
@@ -160,7 +174,11 @@ export function McpServers({ onUnauthorised, go }) {
                       <Pill key="e" tone={s.enabled ? "ok" : "warn"}>
                         {s.enabled ? "enabled" : "disabled"}
                       </Pill>,
-                      <Row key="a" gap={6} style={{ justifyContent: "flex-end" }}>
+                      <Row
+                        key="a"
+                        gap={6}
+                        style={{ justifyContent: "flex-end" }}
+                      >
                         <Button variant="small" onClick={() => toggle(s)}>
                           {s.enabled ? "disable" : "enable"}
                         </Button>
@@ -179,8 +197,8 @@ export function McpServers({ onUnauthorised, go }) {
             <Card title="Who can reach these" tone="warn">
               <Muted>
                 A server existing is not a key being able to call it. Access is{" "}
-                <Mono>mcp:invoke</Mono> on <Mono>mcp/&lt;name&gt;</Mono>, granted
-                on{" "}
+                <Mono>mcp:invoke</Mono> on <Mono>mcp/&lt;name&gt;</Mono>,
+                granted on{" "}
                 <Button variant="small" onClick={() => go && go("rbac")}>
                   Principals &amp; roles
                 </Button>
@@ -196,24 +214,36 @@ export function McpServers({ onUnauthorised, go }) {
           <Card title="Add a server">
             <form onSubmit={create}>
               <Stack gap={10}>
-                <Field label="NAME" hint="also the namespace its tools appear under">
+                <Field
+                  label="NAME"
+                  hint="also the namespace its tools appear under"
+                >
                   <input
                     placeholder="github"
                     value={draft.name}
-                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, name: e.target.value })
+                    }
                   />
                 </Field>
                 <Field label="URL">
                   <input
                     placeholder="https://mcp.example.com/mcp"
                     value={draft.url}
-                    onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, url: e.target.value })
+                    }
                   />
                 </Field>
-                <Field label="TRANSPORT" hint="streamable HTTP, or the older SSE framing">
+                <Field
+                  label="TRANSPORT"
+                  hint="streamable HTTP, or the older SSE framing"
+                >
                   <select
                     value={draft.transport}
-                    onChange={(e) => setDraft({ ...draft, transport: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, transport: e.target.value })
+                    }
                   >
                     <option value="http">http · streamable</option>
                     <option value="sse">sse</option>
@@ -222,7 +252,9 @@ export function McpServers({ onUnauthorised, go }) {
                 <Field label="DESCRIPTION">
                   <input
                     value={draft.description}
-                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, description: e.target.value })
+                    }
                   />
                 </Field>
                 <Field
@@ -233,20 +265,26 @@ export function McpServers({ onUnauthorised, go }) {
                     type="password"
                     placeholder="optional"
                     value={draft.upstream_api_key}
-                    onChange={(e) => setDraft({ ...draft, upstream_api_key: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, upstream_api_key: e.target.value })
+                    }
                   />
                 </Field>
                 <Grid cols="1fr 1fr" gap={10}>
                   <Field label="AUTH HEADER">
                     <input
                       value={draft.auth_header}
-                      onChange={(e) => setDraft({ ...draft, auth_header: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, auth_header: e.target.value })
+                      }
                     />
                   </Field>
                   <Field label="SCHEME" hint="empty sends the key raw">
                     <input
                       value={draft.auth_scheme}
-                      onChange={(e) => setDraft({ ...draft, auth_scheme: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, auth_scheme: e.target.value })
+                      }
                     />
                   </Field>
                 </Grid>
@@ -263,7 +301,9 @@ export function McpServers({ onUnauthorised, go }) {
                 One address, one key. The tools of every server this key may
                 reach come back from a single call:
               </Muted>
-              <Mono style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6 }}>
+              <Mono
+                style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6 }}
+              >
                 POST /v1/mcp/tools/list
                 <br />
                 POST /v1/mcp/tools/call

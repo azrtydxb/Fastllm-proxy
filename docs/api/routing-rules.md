@@ -8,17 +8,17 @@ fallback. First rule whose conditions match wins; conditions within a rule are
 AND'd. Targets are weighted (relative shares, not percentages), and the target
 list is a **fallback chain**, not just a split.
 
-| condition | matches on | reads |
-|---|---|---|
-| `principals`, `roles` | who is calling | request |
-| `min/max_prompt_tokens` | estimated prompt size | request |
-| `min/max_max_tokens` | requested generation length | request |
-| `stream` | whether the client asked for a stream | request |
-| `headers` | exact header values, all must match | request |
-| `min/max_budget_used_percent` | how much of the caller's budget is spent | snapshot |
-| `max_inflight_per_backend` | how busy this rule's own targets are | **live cluster state** |
-| `class` | which prompt class the classifier assigned — see [semantic routing](../classifier.md) |
-| `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window | **clock** |
+| condition                                       | matches on                                                                            | reads                  |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- |
+| `principals`, `roles`                           | who is calling                                                                        | request                |
+| `min/max_prompt_tokens`                         | estimated prompt size                                                                 | request                |
+| `min/max_max_tokens`                            | requested generation length                                                           | request                |
+| `stream`                                        | whether the client asked for a stream                                                 | request                |
+| `headers`                                       | exact header values, all must match                                                   | request                |
+| `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                              | snapshot               |
+| `max_inflight_per_backend`                      | how busy this rule's own targets are                                                  | **live cluster state** |
+| `class`                                         | which prompt class the classifier assigned — see [semantic routing](../classifier.md) |
+| `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window                                                                     | **clock**              |
 
 The last two rows are marked because they matter: every other condition is a
 pure function of the request, so the same request always routes the same way

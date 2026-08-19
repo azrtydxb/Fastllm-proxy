@@ -7,10 +7,10 @@ principles.
 
 Two constants throughout:
 
-| | |
-|---|---|
+|              |                                                                  |
+| ------------ | ---------------------------------------------------------------- |
 | **Base URL** | `http://<host>:4000/v1` — the data plane. **Not** the admin port |
-| **API key** | a key minted through the admin API or the UI, `sk-…` |
+| **API key**  | a key minted through the admin API or the UI, `sk-…`             |
 
 The admin port (4001) serves the management UI, `/admin/*` and `/snapshot`. No
 client should ever be pointed at it.
@@ -30,7 +30,10 @@ client.chat.completions.create(
 ```javascript
 import OpenAI from "openai";
 
-const client = new OpenAI({ baseURL: "http://gateway:4000/v1", apiKey: "sk-..." });
+const client = new OpenAI({
+  baseURL: "http://gateway:4000/v1",
+  apiKey: "sk-...",
+});
 await client.chat.completions.create({
   model: "my-model",
   messages: [{ role: "user", content: "hi" }],
@@ -70,12 +73,12 @@ These are the ones worth spelling out, because each expects its own file.
 ```
 
 List only the models that key may invoke. `/v1/models` is filtered by the
-caller's grants, but opencode builds its picker from *this file*, so a model
+caller's grants, but opencode builds its picker from _this file_, so a model
 listed here that the key cannot use fails when selected.
 
 ### Cursor
 
-Settings → Models → *Override OpenAI Base URL* with `http://gateway:4000/v1`,
+Settings → Models → _Override OpenAI Base URL_ with `http://gateway:4000/v1`,
 and paste the key as the OpenAI API key. Cursor verifies the key by calling
 `/v1/models`, so the key needs a grant on at least one model or verification
 fails.
@@ -264,4 +267,3 @@ expressed per backend rather than per model — and it is on the list.
 
 Until then, call those endpoints against the provider directly; everything
 your application does per request goes through here.
-

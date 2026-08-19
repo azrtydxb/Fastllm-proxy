@@ -69,7 +69,10 @@ export function mergeBackends(reports) {
       split: row.healthyOn.length > 0 && row.unhealthyOn.length > 0,
       errorRate: row.requests > 0 ? row.errors / row.requests : 0,
     }))
-    .sort((a, b) => a.api_base.localeCompare(b.api_base) || a.model.localeCompare(b.model));
+    .sort(
+      (a, b) =>
+        a.api_base.localeCompare(b.api_base) || a.model.localeCompare(b.model),
+    );
 }
 
 /** Fleet-wide facts that do not belong to any one backend. */
@@ -83,9 +86,13 @@ export function fleetSummary(reports) {
     // a version spread means one is serving an older configuration while
     // answering /health perfectly happily.
     snapshotVersion: versions.length ? Math.max(...versions) : null,
-    snapshotSpread: versions.length ? Math.max(...versions) - Math.min(...versions) : 0,
+    snapshotSpread: versions.length
+      ? Math.max(...versions) - Math.min(...versions)
+      : 0,
     laggards: list
-      .filter((r) => versions.length && r.snapshot_version < Math.max(...versions))
+      .filter(
+        (r) => versions.length && r.snapshot_version < Math.max(...versions),
+      )
       .map((r) => r.replica),
     backends,
     backendsUp: backends.filter((b) => b.healthy).length,

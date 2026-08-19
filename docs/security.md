@@ -32,11 +32,11 @@ flowchart TB
     U -.->|"never reaches"| AP
 ```
 
-| caller | credential | verified with |
-|---|---|---|
-| A client calling the gateway | API key, `sk-…` | SHA-256 |
-| A human using the admin UI | password → session cookie | Argon2id |
-| A proxy replica talking to its control plane | `--proxy-token` | constant-time compare |
+| caller                                       | credential                | verified with         |
+| -------------------------------------------- | ------------------------- | --------------------- |
+| A client calling the gateway                 | API key, `sk-…`           | SHA-256               |
+| A human using the admin UI                   | password → session cookie | Argon2id              |
+| A proxy replica talking to its control plane | `--proxy-token`           | constant-time compare |
 
 **Keys hash with SHA-256, passwords with Argon2id, and that difference is
 deliberate.** An API key is high-entropy random, so the only attack is
@@ -47,15 +47,15 @@ password cracking cheap. Do not unify them.
 
 ## Authorisation is not authentication
 
-A valid session establishes *who* is calling. Every `/admin/*` handler then
-checks *what* that principal may do:
+A valid session establishes _who_ is calling. Every `/admin/*` handler then
+checks _what_ that principal may do:
 
-| permission | |
-|---|---|
-| `config:write` | Models, backends, virtual models, principals, roles, limits |
-| `key:create` / `key:revoke` | API keys |
-| `usage:read` | Usage, spend, audit, metrics |
-| `model:invoke` | Per model, and the only one the data plane checks |
+| permission                  |                                                             |
+| --------------------------- | ----------------------------------------------------------- |
+| `config:write`              | Models, backends, virtual models, principals, roles, limits |
+| `key:create` / `key:revoke` | API keys                                                    |
+| `usage:read`                | Usage, spend, audit, metrics                                |
+| `model:invoke`              | Per model, and the only one the data plane checks           |
 
 A principal that can log in is not, by that fact, an administrator. This
 closed a real gap: any principal a password had ever been set for used to be a
@@ -71,12 +71,12 @@ configuration.
 
 ## What is stored, and in what form
 
-| | stored as | readable back? |
-|---|---|---|
-| API keys | SHA-256 hash + prefix | **No.** Plaintext shown once at creation |
-| User passwords | Argon2id | No |
-| Session tokens | random, server-side | No |
-| Upstream provider credentials | AES-256-GCM at rest | Not through the API — only whether one is set |
+|                               | stored as             | readable back?                                |
+| ----------------------------- | --------------------- | --------------------------------------------- |
+| API keys                      | SHA-256 hash + prefix | **No.** Plaintext shown once at creation      |
+| User passwords                | Argon2id              | No                                            |
+| Session tokens                | random, server-side   | No                                            |
+| Upstream provider credentials | AES-256-GCM at rest   | Not through the API — only whether one is set |
 
 **No route returns a credential.** `api_keys.hash` is a verifier, not a
 display value, and is in no response body.
@@ -128,17 +128,17 @@ the target. Three absences are deliberate:
   credentials, and an audit log is exactly the wrong place to put them.
 
 A failed audit write never fails the request. Losing a row is serious; losing
-the change *and* the record of it is worse.
+the change _and_ the record of it is worse.
 
 ## Defaults that are deliberately inconvenient
 
-| | |
-|---|---|
-| **No default password** | A fresh database has no login anyone can obtain. `set-password` is run once by whoever already holds cluster access |
-| **`--host` is loopback** | Binding `0.0.0.0` is an act |
-| **Keys expire in 90 days** | Not "never" |
-| **A new principal holds nothing** | Its key authenticates, then gets 403 on everything until it is given a role |
-| **`--role proxy` is the default** | The role that needs no database, no encryption key, and no admin surface |
+|                                   |                                                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **No default password**           | A fresh database has no login anyone can obtain. `set-password` is run once by whoever already holds cluster access |
+| **`--host` is loopback**          | Binding `0.0.0.0` is an act                                                                                         |
+| **Keys expire in 90 days**        | Not "never"                                                                                                         |
+| **A new principal holds nothing** | Its key authenticates, then gets 403 on everything until it is given a role                                         |
+| **`--role proxy` is the default** | The role that needs no database, no encryption key, and no admin surface                                            |
 
 ## Reporting something
 
@@ -149,8 +149,8 @@ they were, and it was review that caught it, not the author.
 
 ## Where next
 
-| | |
-|---|---|
+|                                                            |                                                       |
+| ---------------------------------------------------------- | ----------------------------------------------------- |
 | [API and administration](api/auth.md#admin-authentication) | Route-by-route detail, and the session cookie's flags |
-| [Operations](operations/shapes.md) | Which deployment shape puts what on the public port |
-| [Architecture](architecture.md) | Where each check happens, and why none of them is I/O |
+| [Operations](operations/shapes.md)                         | Which deployment shape puts what on the public port   |
+| [Architecture](architecture.md)                            | Where each check happens, and why none of them is I/O |

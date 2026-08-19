@@ -16,9 +16,9 @@ docker compose up -d
 That starts Postgres, applies the migrations, and runs `--role all` — control
 plane and gateway in one process. Two ports:
 
-| | |
-|---|---|
-| **:4000** | the gateway. Point clients here |
+|           |                                     |
+| --------- | ----------------------------------- |
+| **:4000** | the gateway. Point clients here     |
 | **:4001** | the admin API and the management UI |
 
 Nothing is configured yet: no models, no keys, and no way in. That is
@@ -32,7 +32,7 @@ docker compose exec fastllm fastllm-proxy set-password --name you --password 'ch
 
 The first login created this way gets the `admin` role automatically. Every
 later one has to be granted permissions explicitly, which is the point:
-a password proves *who* is calling, not *what* they may do.
+a password proves _who_ is calling, not _what_ they may do.
 
 Open **`https://localhost:4001/`** and sign in. Your browser will warn about
 the certificate — it is self-signed unless you supplied one.
@@ -128,8 +128,8 @@ against the same models they already had.
 
 ## Where next
 
-| | |
-|---|---|
-| [A tour of the UI](tour.md) | Every screen, what it answers, and the one thing on it worth knowing |
-| [Connecting a client](integrations.md) | SDKs, coding agents, frameworks, observability |
-| [Troubleshooting](troubleshooting.md) | The failures people actually hit |
+|                                        |                                                                      |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| [A tour of the UI](tour.md)            | Every screen, what it answers, and the one thing on it worth knowing |
+| [Connecting a client](integrations.md) | SDKs, coding agents, frameworks, observability                       |
+| [Troubleshooting](troubleshooting.md)  | The failures people actually hit                                     |

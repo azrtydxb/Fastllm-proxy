@@ -15,8 +15,9 @@ curl -X POST https://control/admin/prompt-classes -b "$SESSION" \
        "examples":["Why does this Rust code fail the borrow checker?",
                    "My unit test throws NullPointerException on line 42."]}'
 ```
+
 ```jsonc
-{"position": 0, "class": "coding", "targets": ["claude-sonnet"]}
+{ "position": 0, "class": "coding", "targets": ["claude-sonnet"] }
 ```
 
 `POST /admin/prompt-classes/evaluate` reports, per class, leave-one-out
@@ -49,7 +50,7 @@ screen calls it out rather than leaving you to infer it.
 
 ### Check the classes before you route on them
 
-**Run evaluation** scores every example against centroids that *exclude* it:
+**Run evaluation** scores every example against centroids that _exclude_ it:
 
 ![The leave-one-out evaluation: per class, precision and recall bars, the nearest other class with its similarity, and a verdict](../images/ui-prompt-class-eval.png)
 

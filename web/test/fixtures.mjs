@@ -218,10 +218,20 @@ const FIXTURES = {
           headers: { "x-fastllm-tier": "batch" },
           days: [],
           class: "coding",
-          targets: [{ id: 21, model_id: 5, model: "claude-sonnet", weight: 80, position: 0 }],
+          targets: [
+            {
+              id: 21,
+              model_id: 5,
+              model: "claude-sonnet",
+              weight: 80,
+              position: 0,
+            },
+          ],
         },
       ],
-      default_targets: [{ id: 22, model_id: 3, model: "local-qwen", weight: 100, position: 0 }],
+      default_targets: [
+        { id: 22, model_id: 3, model: "local-qwen", weight: 100, position: 0 },
+      ],
     },
   ],
   "/admin/principals": [
@@ -290,7 +300,12 @@ const FIXTURES = {
     },
   ],
   "/admin/limits": [
-    { principal_id: 2, principal: "batch-etl", requests_per_min: 600, tokens_per_min: 400000 },
+    {
+      principal_id: 2,
+      principal: "batch-etl",
+      requests_per_min: 600,
+      tokens_per_min: 400000,
+    },
   ],
   "/admin/budgets": [
     {
@@ -440,7 +455,6 @@ const USAGE = [
   },
 ];
 
-
 // `GET /admin/timeseries`, in the shape the handler serialises: one entry per
 // bucket across the whole range, **including empty ones**. The zeros are the
 // point — an aggregate that omitted them would let a chart draw a straight
@@ -489,6 +503,5 @@ function fixtureFor(path) {
   if (base in FIXTURES) return FIXTURES[base];
   return null;
 }
-
 
 export { FIXTURES, USAGE, TIMESERIES, fixtureFor };

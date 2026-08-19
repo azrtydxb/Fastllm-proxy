@@ -69,7 +69,8 @@ async function get(path) {
 /** Every key path in an object, so a renamed or moved field is visible. */
 function shape(value, prefix = "", depth = 0) {
   if (depth > 3 || value === null || typeof value !== "object") return [];
-  if (Array.isArray(value)) return value.length ? shape(value[0], `${prefix}[]`, depth + 1) : [];
+  if (Array.isArray(value))
+    return value.length ? shape(value[0], `${prefix}[]`, depth + 1) : [];
   return Object.entries(value).flatMap(([k, v]) => {
     const path = prefix ? `${prefix}.${k}` : k;
     const nested = shape(v, path, depth + 1);
@@ -95,9 +96,13 @@ function compare(path, live, fixture) {
   if (invented.length) {
     failures++;
     console.log(`  ✗ ${path}`);
-    for (const k of invented) console.log(`      fixture has ${k}, the API does not`);
-    const missing = [...liveKeys].filter((k) => !fixtureKeys.has(k)).slice(0, 6);
-    if (missing.length) console.log(`      (API also returns: ${missing.join(", ")})`);
+    for (const k of invented)
+      console.log(`      fixture has ${k}, the API does not`);
+    const missing = [...liveKeys]
+      .filter((k) => !fixtureKeys.has(k))
+      .slice(0, 6);
+    if (missing.length)
+      console.log(`      (API also returns: ${missing.join(", ")})`);
   } else {
     console.log(`  ✓ ${path}`);
   }
@@ -110,7 +115,9 @@ for (const path of Object.keys(FIXTURES)) {
   } catch (e) {
     if (e instanceof Absent) {
       stale++;
-      console.log(`  — ${path} (not on this control plane; it predates the route)`);
+      console.log(
+        `  — ${path} (not on this control plane; it predates the route)`,
+      );
     } else {
       failures++;
       console.log(`  ✗ ${path} — ${e.message}`);
@@ -134,7 +141,9 @@ const wildcard = roles
   .find((p) => p.verb === "model:invoke" && p.resource.includes("*"));
 if (wildcard && wildcard.resource !== "model/*") {
   failures++;
-  console.log(`  ✗ blanket model grant is ${wildcard.resource}, fixtures assume model/*`);
+  console.log(
+    `  ✗ blanket model grant is ${wildcard.resource}, fixtures assume model/*`,
+  );
 } else if (wildcard) {
   console.log("  ✓ blanket model grant is model/*");
 }
@@ -144,7 +153,9 @@ const rule = vms.flatMap((v) => v.rules)[0];
 if (rule) {
   if ("match_condition" in rule) {
     failures++;
-    console.log("  ✗ rule conditions are nested; fixtures and the UI assume flattened");
+    console.log(
+      "  ✗ rule conditions are nested; fixtures and the UI assume flattened",
+    );
   } else {
     console.log("  ✓ rule conditions are flattened onto the rule");
   }

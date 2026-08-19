@@ -1,0 +1,2 @@
+# Helm templates are Go-templated YAML, not parseable YAML.
+charts/*/templates/

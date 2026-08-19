@@ -14,23 +14,23 @@ head of a chain that failed over.
 carried token counts. `usage_reported` says which: `false` means the counts are
 unknown, not zero, and such a row has `cost_micros` NULL rather than 0. Any
 query that sums tokens or spend should filter on it — `WHERE usage_reported` —
-while any query counting *requests* must not, since the rows it would exclude
+while any query counting _requests_ must not, since the rows it would exclude
 are disproportionately the ones that failed.
 
 **Refusals are recorded too**, and `refusal` says which kind. It is NULL for
 every row describing a response a backend actually returned, and set for the
 four cases the gateway decides itself:
 
-| `refusal` | status | meaning |
-|---|---|---|
-| `authorisation` | 403 | authenticated, but not granted the model |
-| `rate_limit` | 429 | over a configured per-minute limit |
-| `budget` | 402 | budget window exhausted |
-| `no_backend` | 502 | nothing in the chain could be reached |
+| `refusal`       | status | meaning                                  |
+| --------------- | ------ | ---------------------------------------- |
+| `authorisation` | 403    | authenticated, but not granted the model |
+| `rate_limit`    | 429    | over a configured per-minute limit       |
+| `budget`        | 402    | budget window exhausted                  |
+| `no_backend`    | 502    | nothing in the chain could be reached    |
 
 `no_backend` is why the column exists. A refused request has no forwarded
 response body, and the body is what writes the row — so before this, a total
-backend outage produced *no rows at all* and an error rate computed here read
+backend outage produced _no rows at all_ and an error rate computed here read
 a flat zero at exactly the moment nothing worked.
 
 Keep the two apart when charting. `refusal IS NULL AND status >= 400` is
@@ -67,7 +67,7 @@ folds later.
 **Refusals with nobody to attribute them** — a 401 from an invalid key, a 404
 for a model that does not exist — are in `gateway_rejections` instead, and
 `/admin/timeseries` reports them as `refused_unattributed`. So a
-caller-visible error total *is* answerable from Postgres alone; it is simply
+caller-visible error total _is_ answerable from Postgres alone; it is simply
 two tables, because the two kinds of failure are shaped differently.
 
 They are counts bucketed to the minute per replica, not rows per request, and
@@ -75,7 +75,7 @@ that is deliberate: 401 is the one refusal an anonymous stranger can trigger
 at will, so a row apiece would let unauthenticated traffic drive unbounded
 writes. The counters ride the health report the proxies already send every
 ten seconds; the control plane holds each replica's previous report, so it
-stores the delta. A counter that went *down* means that replica restarted,
+stores the delta. A counter that went _down_ means that replica restarted,
 and the new value is taken as the delta rather than producing a negative. A
 replica's first report is skipped rather than counted from zero — its counter
 covers however long that process has been alive, and charging all of it to
@@ -106,8 +106,8 @@ them. A zero would be indistinguishable from a request that answered instantly.
 
 One limit worth knowing: a usage row exists only for principals whose
 consumption is tracked — those with a budget or a token rate limit — because
-nothing else parses the response body. Per-model *metrics* cover every request;
-per-caller *rows* cover those.
+nothing else parses the response body. Per-model _metrics_ cover every request;
+per-caller _rows_ cover those.
 
 ## Keeping prices current
 
@@ -116,7 +116,7 @@ price is unset, from OpenRouter's published list and the community catalogue.
 `--dry-run` first; the next snapshot rebuild picks the change up, with no
 restart.
 
-Worth running on a schedule, and worth knowing what it is *not*: where a
+Worth running on a schedule, and worth knowing what it is _not_: where a
 provider reports what it actually charged — OpenRouter returns `usage.cost`
 unasked — that figure is used instead and this table is never consulted. The
 sync matters for providers that publish a price but do not report one per

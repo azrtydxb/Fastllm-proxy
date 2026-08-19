@@ -57,7 +57,8 @@ export function Models({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const health = new Map(mergeBackends(data.fleet).map((b) => [b.key, b]));
   const draftFor = (id) => drafts[id] || {};
@@ -92,7 +93,9 @@ export function Models({ onUnauthorised }) {
           upstream_model: d.upstream_model?.trim() || undefined,
           upstream_api_key: d.upstream_api_key || undefined,
           protocol: d.protocol || undefined,
-          default_max_tokens: d.default_max_tokens ? Number(d.default_max_tokens) : undefined,
+          default_max_tokens: d.default_max_tokens
+            ? Number(d.default_max_tokens)
+            : undefined,
         }),
       setError,
       onUnauthorised,
@@ -104,7 +107,11 @@ export function Models({ onUnauthorised }) {
   };
 
   const savePrices = async (m, patch) => {
-    const ok = await attempt(() => api.patch(`/admin/models/${m.id}`, patch), setError, onUnauthorised);
+    const ok = await attempt(
+      () => api.patch(`/admin/models/${m.id}`, patch),
+      setError,
+      onUnauthorised,
+    );
     if (ok) {
       setEditing(null);
       reload();
@@ -137,10 +144,11 @@ export function Models({ onUnauthorised }) {
 
       <Row>
         <Muted>
-          Backend models: what requests are actually routed to. One name, one or more backends,
-          and how to load-balance between them. Prices are per million tokens; caching is opt-in
-          per model. A model with no price stores NULL rather than zero, so spend is reported as
-          unpriced instead of free.
+          Backend models: what requests are actually routed to. One name, one or
+          more backends, and how to load-balance between them. Prices are per
+          million tokens; caching is opt-in per model. A model with no price
+          stores NULL rather than zero, so spend is reported as unpriced instead
+          of free.
         </Muted>
         <Spacer />
         <Button onClick={() => runSync(true)} disabled={busy}>
@@ -149,12 +157,16 @@ export function Models({ onUnauthorised }) {
       </Row>
 
       {sync && (
-        <Card tone={sync.applied ? "accent" : undefined} title={sync.applied ? "Prices applied" : "Price sync — preview"}>
+        <Card
+          tone={sync.applied ? "accent" : undefined}
+          title={sync.applied ? "Prices applied" : "Price sync — preview"}
+        >
           <Stack gap={12}>
             <Muted>
-              {fmtInt(sync.updated)} model{sync.updated === 1 ? "" : "s"} would change ·{" "}
-              {fmtInt(sync.already_priced)} already priced and left alone ·{" "}
-              {fmtInt(sync.unmatched)} with no match in either catalogue.
+              {fmtInt(sync.updated)} model{sync.updated === 1 ? "" : "s"} would
+              change · {fmtInt(sync.already_priced)} already priced and left
+              alone · {fmtInt(sync.unmatched)} with no match in either
+              catalogue.
             </Muted>
             {(sync.changes || []).length > 0 && (
               <Table cols={SYNC_COLS}>
@@ -164,8 +176,12 @@ export function Models({ onUnauthorised }) {
                     cols={SYNC_COLS}
                     cells={[
                       <Mono key="m">{c.model}</Mono>,
-                      <Mono key="i">{fmtPrice(c.input_price_per_mtok)} / Mtok in</Mono>,
-                      <Mono key="o">{fmtPrice(c.output_price_per_mtok)} / Mtok out</Mono>,
+                      <Mono key="i">
+                        {fmtPrice(c.input_price_per_mtok)} / Mtok in
+                      </Mono>,
+                      <Mono key="o">
+                        {fmtPrice(c.output_price_per_mtok)} / Mtok out
+                      </Mono>,
                     ]}
                   />
                 ))}
@@ -186,15 +202,21 @@ export function Models({ onUnauthorised }) {
                   }}
                 />
                 <Muted>
-                  Replace prices that are already set. Off by default: a rate you negotiated must
-                  not be replaced by a list price. On, when a model is priced wrongly — a stale
-                  figure, or a 0 that reads as free.
+                  Replace prices that are already set. Off by default: a rate
+                  you negotiated must not be replaced by a list price. On, when
+                  a model is priced wrongly — a stale figure, or a 0 that reads
+                  as free.
                 </Muted>
               </label>
               <Spacer />
               {!sync.applied && sync.updated > 0 && (
-                <Button variant="primary" onClick={() => runSync(false)} disabled={busy}>
-                  Apply to {fmtInt(sync.updated)} model{sync.updated === 1 ? "" : "s"}
+                <Button
+                  variant="primary"
+                  onClick={() => runSync(false)}
+                  disabled={busy}
+                >
+                  Apply to {fmtInt(sync.updated)} model
+                  {sync.updated === 1 ? "" : "s"}
                 </Button>
               )}
               <Button variant="small" onClick={() => setSync(null)}>
@@ -212,17 +234,25 @@ export function Models({ onUnauthorised }) {
               <input
                 placeholder="local-qwen"
                 value={newModel.name}
-                onChange={(e) => setNewModel({ ...newModel, name: e.target.value })}
+                onChange={(e) =>
+                  setNewModel({ ...newModel, name: e.target.value })
+                }
               />
             </Field>
             <Field label="DESCRIPTION" style={{ flex: 2 }}>
               <input
                 placeholder="what callers should know about it"
                 value={newModel.description}
-                onChange={(e) => setNewModel({ ...newModel, description: e.target.value })}
+                onChange={(e) =>
+                  setNewModel({ ...newModel, description: e.target.value })
+                }
               />
             </Field>
-            <Button variant="primary" type="submit" style={{ alignSelf: "flex-end" }}>
+            <Button
+              variant="primary"
+              type="submit"
+              style={{ alignSelf: "flex-end" }}
+            >
               Create
             </Button>
           </Row>
@@ -231,7 +261,10 @@ export function Models({ onUnauthorised }) {
 
       {data.models.length === 0 && (
         <Card>
-          <Empty>No models yet. A model is a name; its backends are where it actually runs.</Empty>
+          <Empty>
+            No models yet. A model is a name; its backends are where it actually
+            runs.
+          </Empty>
         </Card>
       )}
 
@@ -267,17 +300,23 @@ export function Models({ onUnauthorised }) {
                   looking at an oversized-prompt problem needs to see which
                   models that applies to. */}
               <Pill tone={m.context_length ? "quiet" : "warn"} mono>
-                {m.context_length ? `${fmtCompact(m.context_length)} ctx` : "ctx undeclared"}
+                {m.context_length
+                  ? `${fmtCompact(m.context_length)} ctx`
+                  : "ctx undeclared"}
               </Pill>
               {m.description && <Muted>{m.description}</Muted>}
               <Spacer />
-              <Button variant="small" onClick={() => setEditing(edit ? null : m.id)}>
+              <Button
+                variant="small"
+                onClick={() => setEditing(edit ? null : m.id)}
+              >
                 {edit ? "cancel" : "edit"}
               </Button>
               <Button
                 variant="smallDanger"
                 onClick={async () => {
-                  if (!window.confirm(`Delete ${m.name} and all its backends?`)) return;
+                  if (!window.confirm(`Delete ${m.name} and all its backends?`))
+                    return;
                   const ok = await attempt(
                     () => api.del(`/admin/models/${m.id}`),
                     setError,
@@ -290,42 +329,84 @@ export function Models({ onUnauthorised }) {
               </Button>
             </Row>
 
-            {edit && <PriceEditor model={m} onSave={(patch) => savePrices(m, patch)} />}
+            {edit && (
+              <PriceEditor model={m} onSave={(patch) => savePrices(m, patch)} />
+            )}
 
             <div style={{ padding: "4px 16px 14px" }}>
               <Table cols={BACKEND_COLS}>
                 {m.backends.map((b) => {
-                  const h = health.get(backendKey(b.api_base, b.upstream_model || m.name));
+                  const h = health.get(
+                    backendKey(b.api_base, b.upstream_model || m.name),
+                  );
                   return (
                     <Tr
                       key={b.id}
                       cols={BACKEND_COLS}
                       cells={[
-                        <Row key="b" gap={8} style={{ flexWrap: "nowrap", minWidth: 0 }}>
-                          <Dot tone={!h ? "muted" : h.split ? "warn" : h.healthy ? "ok" : "bad"} />
+                        <Row
+                          key="b"
+                          gap={8}
+                          style={{ flexWrap: "nowrap", minWidth: 0 }}
+                        >
+                          <Dot
+                            tone={
+                              !h
+                                ? "muted"
+                                : h.split
+                                  ? "warn"
+                                  : h.healthy
+                                    ? "ok"
+                                    : "bad"
+                            }
+                          />
                           <Ellipsis
-                            title={h ? undefined : "no proxy has probed this backend yet"}
-                            style={{ font: "400 12px var(--mono)", color: "var(--fg-2)" }}
+                            title={
+                              h
+                                ? undefined
+                                : "no proxy has probed this backend yet"
+                            }
+                            style={{
+                              font: "400 12px var(--mono)",
+                              color: "var(--fg-2)",
+                            }}
                           >
                             {b.api_base}
                           </Ellipsis>
                         </Row>,
-                        <Ellipsis key="u" style={{ font: "400 12px var(--mono)" }}>
+                        <Ellipsis
+                          key="u"
+                          style={{ font: "400 12px var(--mono)" }}
+                        >
                           {b.upstream_model || "—"}
                         </Ellipsis>,
-                        <Mono key="p" style={{ font: "400 12px var(--mono)", color: "var(--fg-3)" }}>
+                        <Mono
+                          key="p"
+                          style={{
+                            font: "400 12px var(--mono)",
+                            color: "var(--fg-3)",
+                          }}
+                        >
                           {b.protocol}
                         </Mono>,
                         <Mono
                           key="c"
                           style={{
                             font: "400 12px var(--mono)",
-                            color: b.has_upstream_api_key ? "var(--ok-fg)" : "var(--fg-5)",
+                            color: b.has_upstream_api_key
+                              ? "var(--ok-fg)"
+                              : "var(--fg-5)",
                           }}
                         >
                           {b.has_upstream_api_key ? "set" : "—"}
                         </Mono>,
-                        <Mono key="t" style={{ font: "400 12px var(--mono)", color: "var(--fg-3)" }}>
+                        <Mono
+                          key="t"
+                          style={{
+                            font: "400 12px var(--mono)",
+                            color: "var(--fg-3)",
+                          }}
+                        >
                           {b.default_max_tokens ?? "—"}
                         </Mono>,
                         <Button
@@ -359,7 +440,9 @@ export function Models({ onUnauthorised }) {
                   placeholder="upstream_model"
                   style={{ flex: 1.1 }}
                   value={draftFor(m.id).upstream_model || ""}
-                  onChange={(e) => setDraft(m.id, { upstream_model: e.target.value })}
+                  onChange={(e) =>
+                    setDraft(m.id, { upstream_model: e.target.value })
+                  }
                 />
                 <select
                   style={{ flex: 0.7 }}
@@ -374,27 +457,33 @@ export function Models({ onUnauthorised }) {
                   placeholder="default_max_tokens"
                   style={{ flex: 0.8 }}
                   value={draftFor(m.id).default_max_tokens || ""}
-                  onChange={(e) => setDraft(m.id, { default_max_tokens: e.target.value })}
+                  onChange={(e) =>
+                    setDraft(m.id, { default_max_tokens: e.target.value })
+                  }
                 />
                 <input
                   type="password"
                   placeholder="api key"
                   style={{ flex: 0.8 }}
                   value={draftFor(m.id).upstream_api_key || ""}
-                  onChange={(e) => setDraft(m.id, { upstream_api_key: e.target.value })}
+                  onChange={(e) =>
+                    setDraft(m.id, { upstream_api_key: e.target.value })
+                  }
                 />
                 <Button variant="secondary" onClick={() => addBackend(m.id)}>
                   Add backend
                 </Button>
               </Row>
-              {draftFor(m.id).protocol === "anthropic" && !draftFor(m.id).default_max_tokens && (
-                <div style={{ marginTop: 8 }}>
-                  <Muted>
-                    An Anthropic backend rejects a request with no max_tokens, so this one needs a
-                    default — inventing one here would cap generation silently.
-                  </Muted>
-                </div>
-              )}
+              {draftFor(m.id).protocol === "anthropic" &&
+                !draftFor(m.id).default_max_tokens && (
+                  <div style={{ marginTop: 8 }}>
+                    <Muted>
+                      An Anthropic backend rejects a request with no max_tokens,
+                      so this one needs a default — inventing one here would cap
+                      generation silently.
+                    </Muted>
+                  </div>
+                )}
             </div>
           </Card>
         );
@@ -421,7 +510,10 @@ const SYNC_COLS = [
 // The same four the router implements and the CRD spells, in the same
 // vocabulary — a value chosen here is stored verbatim and read by `--policy`.
 const POLICIES = [
-  ["cache-affinity", "cache affinity — a shared prefix returns to the node holding its KV cache"],
+  [
+    "cache-affinity",
+    "cache affinity — a shared prefix returns to the node holding its KV cache",
+  ],
   ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
   ["lowest-latency", "lowest latency — for backends that are not equally fast"],
   ["round-robin", "round robin — strict rotation, cache-blind"],
@@ -429,10 +521,14 @@ const POLICIES = [
 
 function PriceEditor({ model, onSave }) {
   const [input, setInput] = useState(
-    model.input_price_per_mtok === null ? "" : String(model.input_price_per_mtok / 1e6),
+    model.input_price_per_mtok === null
+      ? ""
+      : String(model.input_price_per_mtok / 1e6),
   );
   const [output, setOutput] = useState(
-    model.output_price_per_mtok === null ? "" : String(model.output_price_per_mtok / 1e6),
+    model.output_price_per_mtok === null
+      ? ""
+      : String(model.output_price_per_mtok / 1e6),
   );
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [context, setContext] = useState(model.context_length ?? "");
@@ -471,16 +567,36 @@ function PriceEditor({ model, onSave }) {
   };
 
   return (
-    <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--line-mid)" }}>
+    <div
+      style={{
+        padding: "14px 16px",
+        borderBottom: "1px solid var(--line-mid)",
+      }}
+    >
       <Grid cols={4} gap={10}>
         <Field label="INPUT $ / MTOK">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="3.00" />
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="3.00"
+          />
         </Field>
         <Field label="OUTPUT $ / MTOK">
-          <input value={output} onChange={(e) => setOutput(e.target.value)} placeholder="15.00" />
+          <input
+            value={output}
+            onChange={(e) => setOutput(e.target.value)}
+            placeholder="15.00"
+          />
         </Field>
-        <Field label="CACHE TTL (s)" hint="0 or empty turns the response cache off for this model">
-          <input value={ttl} onChange={(e) => setTtl(e.target.value)} placeholder="300" />
+        <Field
+          label="CACHE TTL (s)"
+          hint="0 or empty turns the response cache off for this model"
+        >
+          <input
+            value={ttl}
+            onChange={(e) => setTtl(e.target.value)}
+            placeholder="300"
+          />
         </Field>
         <Field
           label="CONTEXT LENGTH"
@@ -510,7 +626,10 @@ function PriceEditor({ model, onSave }) {
           </select>
         </Field>
         <Field label="DESCRIPTION">
-          <input value={description} onChange={(e) => setDescription(e.target.value)} />
+          <input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
         </Field>
       </Grid>
       {bad && (
@@ -536,7 +655,8 @@ function PriceEditor({ model, onSave }) {
                 // as 0: the handler refuses a non-positive length, because a
                 // model that accepts no tokens is not a thing and coercing it
                 // would leave an operator believing they had set a limit.
-                context_length: context === "" ? null : positive(context, "context length"),
+                context_length:
+                  context === "" ? null : positive(context, "context length"),
                 // Empty is an explicit null: it clears the override so the
                 // model follows the deployment's --policy again.
                 policy: policy === "" ? null : policy,
@@ -561,8 +681,8 @@ function PriceEditor({ model, onSave }) {
           Clear prices
         </Button>
         <Muted>
-          A saved change rebuilds and republishes the snapshot immediately; running requests are
-          unaffected.
+          A saved change rebuilds and republishes the snapshot immediately;
+          running requests are unaffected.
         </Muted>
       </Row>
     </div>

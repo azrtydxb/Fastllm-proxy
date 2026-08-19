@@ -22,7 +22,7 @@ nothing, a field comment promising a live-swapped snapshot that was set once
 at startup. Every one of those was found by review, not by the author.
 
 If a change makes a security claim in the docs false, fixing the claim is the
-*minimum*; consider whether the code should be made to match the claim
+_minimum_; consider whether the code should be made to match the claim
 instead.
 
 ## Never edit a migration that has been applied
@@ -51,7 +51,7 @@ migration alone, or add a new migration.
 
 ## Conventions this codebase holds to
 
-- **Doc comments explain *why*, not *what*.** The reasoning is the valuable
+- **Doc comments explain _why_, not _what_.** The reasoning is the valuable
   part; the code already says what it does.
 - **The request path performs no I/O.** No database call, no network call, no
   file read while serving a request. `tests/no_io_on_hot_path.rs` guards this

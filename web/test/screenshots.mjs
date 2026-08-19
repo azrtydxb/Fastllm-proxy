@@ -18,13 +18,16 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(HERE, "../../docs/images");
 const CHROME =
-  process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  process.env.CHROME_PATH ||
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const URL = process.env.CONTROL_URL || "https://127.0.0.1:4001";
 const USER = process.env.ADMIN_USER || "bootstrap";
 const PASSWORD = process.env.ADMIN_PASSWORD;
 
 if (!PASSWORD) {
-  console.error("set ADMIN_PASSWORD (and CONTROL_URL) — this drives a real control plane");
+  console.error(
+    "set ADMIN_PASSWORD (and CONTROL_URL) — this drives a real control plane",
+  );
   process.exit(1);
 }
 mkdirSync(OUT, { recursive: true });

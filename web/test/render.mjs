@@ -19,10 +19,13 @@
 import { JSDOM } from "jsdom";
 import { FIXTURES, USAGE, fixtureFor } from "./fixtures.mjs";
 
-const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-  url: "http://localhost/",
-  pretendToBeVisual: true,
-});
+const dom = new JSDOM(
+  '<!doctype html><html><body><div id="root"></div></body></html>',
+  {
+    url: "http://localhost/",
+    pretendToBeVisual: true,
+  },
+);
 
 // Errors are collected, not forwarded: jsdom's console routes through a
 // VirtualConsole that calls back into this same function, and forwarding
@@ -97,7 +100,10 @@ const SCREENS = [
   // joining the health report onto the model configuration. That join is built
   // from a shared key function; when the two sides built it separately, one
   // disagreed about the separator and every cell silently read "—".
-  ["overview", ["serving an older snapshot", "Replicas disagree", "BACKENDS UP", "openai"]],
+  [
+    "overview",
+    ["serving an older snapshot", "Replicas disagree", "BACKENDS UP", "openai"],
+  ],
   ["metrics", ["Response cache", "Latency percentiles", "histogram_quantile"]],
   // The `mixed` row is partly unpriced and the `audit@kryton` row entirely so.
   ["usage", ["unpriced", "Spend by model", "COST / 1M TOKENS"]],
@@ -105,14 +111,30 @@ const SCREENS = [
   ["models", ["local-qwen", "claude-sonnet", "unpriced", "cache 300s"]],
   // "engineering" and "batch" only appear inside condition chips, so this
   // fails if the conditions are read from the wrong shape again.
-  ["routing", ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"]],
+  [
+    "routing",
+    ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"],
+  ],
   ["classes", ["coding", "no centroid", "cannot route"]],
   // A disabled server, one with no credential, and the namespacing note: the
   // three things this screen exists to make visible.
-  ["mcp", ["github", "internal-wiki", "disabled", "no credential", "server__tool"]],
+  [
+    "mcp",
+    ["github", "internal-wiki", "disabled", "no credential", "server__tool"],
+  ],
   // The pinned version and the card rewrite are the two things this screen
   // exists to make visible.
-  ["agents", ["planner", "deployer", "0.3", "1.0", "disabled", "rewritten to point at this gateway"]],
+  [
+    "agents",
+    [
+      "planner",
+      "deployer",
+      "0.3",
+      "1.0",
+      "disabled",
+      "rewritten to point at this gateway",
+    ],
+  ],
   ["keys", ["ci-runner", "revoked", "sk-abcd1234"]],
   ["rbac", ["ops@kryton", "batch-etl", "admin"]],
   // $155.00 of a $500.00 cap. Formatted money must keep its cents: dropping
@@ -122,7 +144,15 @@ const SCREENS = [
   ["audit", ["/admin/keys", "DELETE", "Reads are not recorded"]],
   // A snapshot version is epoch microseconds, so the banner reports how far
   // behind the laggard is rather than printing sixteen digits at somebody.
-  ["fleet", ["proxy-1", "proxy-2 (4m behind)", "stuck on an older snapshot", "USAGE DROPPED"]],
+  [
+    "fleet",
+    [
+      "proxy-1",
+      "proxy-2 (4m behind)",
+      "stuck on an older snapshot",
+      "USAGE DROPPED",
+    ],
+  ],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],
   // The operator screen: the held image, the phase, and the sentence
   // explaining why the two differ.
@@ -181,11 +211,14 @@ for (const [screen, expected] of SCREENS) {
     failures++;
     console.log(`  ${screen}: FAILED`);
     if (threw) console.log(`      threw: ${threw.message}`);
-    for (const p of real.slice(0, 3)) console.log(`      error: ${p.split("\n")[0]}`);
-    for (const m of missing) console.log(`      missing from the page: ${JSON.stringify(m)}`);
+    for (const p of real.slice(0, 3))
+      console.log(`      error: ${p.split("\n")[0]}`);
+    for (const m of missing)
+      console.log(`      missing from the page: ${JSON.stringify(m)}`);
   } else {
     console.log(`  ${screen}: ok (${text.length} chars)`);
-    if (process.env.DUMP === screen) console.log("\n----\n" + text + "\n----\n");
+    if (process.env.DUMP === screen)
+      console.log("\n----\n" + text + "\n----\n");
   }
 }
 
@@ -208,15 +241,26 @@ for (const [screen, expected] of SCREENS) {
 
   if (!managed.includes("deployment")) {
     failures++;
-    console.log("  nav/operator: FAILED (no Deployment entry under an operator)");
-  } else if (unmanaged.includes("deployment") || missing.includes("deployment")) {
+    console.log(
+      "  nav/operator: FAILED (no Deployment entry under an operator)",
+    );
+  } else if (
+    unmanaged.includes("deployment") ||
+    missing.includes("deployment")
+  ) {
     failures++;
-    console.log("  nav/operator: FAILED (Deployment entry shown without an operator)");
+    console.log(
+      "  nav/operator: FAILED (Deployment entry shown without an operator)",
+    );
   } else if (unmanaged.length !== managed.length - 1) {
     failures++;
-    console.log("  nav/operator: FAILED (the flag hid more than the one screen)");
+    console.log(
+      "  nav/operator: FAILED (the flag hid more than the one screen)",
+    );
   } else {
-    console.log(`  nav/operator: ok (${managed.length} screens managed, ${unmanaged.length} not)`);
+    console.log(
+      `  nav/operator: ok (${managed.length} screens managed, ${unmanaged.length} not)`,
+    );
   }
 }
 

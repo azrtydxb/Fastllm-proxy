@@ -42,11 +42,15 @@ class Handler(BaseHTTPRequestHandler):
         # One line per event rather than a dump, because the interesting part
         # of an alert is what changed and where.
         if kind in ("backend_down", "backend_recovered"):
-            print(f"[{event['at']}] {kind}: {event['model']} @ {event['api_base']} "
-                  f"(reported by {event['replica']})")
+            print(
+                f"[{event['at']}] {kind}: {event['model']} @ {event['api_base']} "
+                f"(reported by {event['replica']})"
+            )
         elif kind == "snapshot_rebuild_failed":
-            print(f"[{event['at']}] snapshot rebuild failed "
-                  f"({event['consecutive']} in a row): {event['error']}")
+            print(
+                f"[{event['at']}] snapshot rebuild failed "
+                f"({event['consecutive']} in a row): {event['error']}"
+            )
         else:
             print(f"[{event.get('at')}] {kind}: {event}")
 

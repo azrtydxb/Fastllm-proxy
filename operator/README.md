@@ -19,9 +19,9 @@ metadata:
   namespace: fastllm
 spec:
   image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
-  database:      { name: fastllm-database, key: uri }
-  proxyToken:    { name: fastllm-secrets,  key: proxy-token }
-  encryptionKey: { name: fastllm-secrets,  key: encryption-key }
+  database: { name: fastllm-database, key: uri }
+  proxyToken: { name: fastllm-secrets, key: proxy-token }
+  encryptionKey: { name: fastllm-secrets, key: encryption-key }
   proxy:
     replicas: 3
     policy: cacheAffinity
@@ -42,7 +42,7 @@ A full example, including TLS and the tuning block, is in
 ## Why this rather than the chart
 
 The chart and the [manifests](../deploy/kubernetes) describe a deployment
-once, at apply time. What neither can do is *keep* describing it. A Deployment
+once, at apply time. What neither can do is _keep_ describing it. A Deployment
 edited by hand stays edited. A proxy pinned to an older image than its control
 plane stays pinned — and that one is not cosmetic: the two share a database
 schema, so the older side reads a snapshot carrying fields it does not
@@ -52,7 +52,7 @@ Five properties fall out of a controller that a template cannot give you:
 
 - **Both planes always run the same image, in the right order.** `spec.image`
   is one field and becomes both Deployments, and the control plane rolls
-  *first*: the gateway is held at the image it is currently running until the
+  _first_: the gateway is held at the image it is currently running until the
   control plane is fully rolled and ready. An image that cannot be pulled
   therefore takes the control plane down and leaves the gateway serving from
   its cached snapshot, instead of breaking both at once.
@@ -60,7 +60,7 @@ Five properties fall out of a controller that a template cannot give you:
   is resolved once, at container start; rewriting the Secret afterwards
   changes nothing until something restarts the pod. Both pod templates carry
   a hash of the resolved material, so rotating the proxy token — or
-  cert-manager renewing the control-plane certificate — *is* the rollout.
+  cert-manager renewing the control-plane certificate — _is_ the rollout.
 - **A broken configuration is refused rather than deployed.** Every Secret is
   resolved and checked first. A missing key, or an encryption key that is not
   32 bytes of hex, becomes a condition naming the Secret and the key. Nothing
@@ -87,7 +87,7 @@ and upgrade concerns that belong to whoever operates it, and an operator that
 quietly owns one is an operator that can quietly lose one.
 
 **It cannot write Secrets.** It reads the ones a `FastllmProxy` names — it
-has to, to say *which* one is missing a key and to notice a rotation — and
+has to, to say _which_ one is missing a key and to notice a rotation — and
 the RBAC grants `get`/`list`/`watch` and nothing else. A controller that could
 mint credentials the cluster then trusts is a much larger blast radius for no
 gain. Resolved material is hashed, never logged and never echoed into the
@@ -104,7 +104,7 @@ same rows.
 Under an operator, the UI grows one screen — **Deployment** — and it is the
 only screen that edits a Kubernetes resource rather than a database row:
 image, replicas, policy, upstream timeout, workers, pool size and autoscaling,
-with the phase, the conditions, the config hash and what is *actually*
+with the phase, the conditions, the config hash and what is _actually_
 serving. Applying a change patches the `FastllmProxy`; the operator does the
 rest, so the page says the rollout is the operator's job rather than reporting
 "saved" and looking finished.
@@ -126,30 +126,30 @@ a page that password protects.
 
 ## The fields
 
-| | |
-|---|---|
-| `image` | The image **both** planes run |
-| `imagePullPolicy` / `imagePullSecrets` | For a private registry |
-| `database` / `proxyToken` / `encryptionKey` | `{name, key}` Secret references. All three required. `encryptionKey` is **immutable**, enforced by the API server |
-| `bootstrap.name` / `bootstrap.password` | The first admin login, created once by a Job |
-| `observability.logLevel` / `logFormat` | `FASTLLM_LOG`, and `text` or `json` |
-| `observability.otlpEndpoint` / `otlpSampleOneIn` | OTLP/gRPC tracing, for an image built with the `otel` feature |
-| `observability.serviceMonitor` | `enabled`, `interval`, `labels`. Skipped without complaint where the Prometheus operator is not installed |
-| `control.tlsSecretName` | Turns on TLS for the admin listener — and moves the probes and the gateway's `--ca-bundle` with it |
-| `control.resources` / `control.serviceAnnotations` | |
-| `control.serviceType` | `ClusterIP` by default. Anything else is **refused by the API server** without `tlsSecretName` — this Service fronts `/snapshot`, which returns decrypted upstream credentials |
-| `proxy.replicas` | Gateway replicas. Below 2, no PodDisruptionBudget is created |
-| `proxy.autoscaling` | `enabled`, `minReplicas`, `maxReplicas`, `targetCpuUtilizationPercentage`. While enabled, `replicas` is left to the HPA |
-| `proxy.policy` | `cacheAffinity` (default), `leastLoaded`, `roundRobin`, `lowestLatency` |
-| `proxy.upstreamTimeout` | Seconds to wait for response *headers* |
-| `proxy.workers` / `proxy.poolMaxIdle` | The two knobs that matter under load — see [docs/performance.md](../docs/performance.md) |
-| `proxy.serviceType` / `proxy.serviceAnnotations` | For the **gateway** only. The annotations are where a pinned load-balancer address goes |
-| `proxy.servicePorts` | Every address the gateway answers on — `:80` **and** `:4000` is the common pair. Empty means one port, 4000 |
-| `proxy.ingress` | `enabled`, `className`, `host`, `path`, `annotations`, `tlsSecretName` |
-| `proxy.classifier` | Tier-1 and tier-2 model directories for semantic routing |
-| `proxy.resources` | Compute resources for the gateway container |
-| `*.pod` | `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `annotations`, `labels`, `extraArgs`, `extraEnv` — on either plane |
-| `tuning` | The `fastllm:` block, verbatim. Editing it rolls the gateway |
+|                                                    |                                                                                                                                                                                |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `image`                                            | The image **both** planes run                                                                                                                                                  |
+| `imagePullPolicy` / `imagePullSecrets`             | For a private registry                                                                                                                                                         |
+| `database` / `proxyToken` / `encryptionKey`        | `{name, key}` Secret references. All three required. `encryptionKey` is **immutable**, enforced by the API server                                                              |
+| `bootstrap.name` / `bootstrap.password`            | The first admin login, created once by a Job                                                                                                                                   |
+| `observability.logLevel` / `logFormat`             | `FASTLLM_LOG`, and `text` or `json`                                                                                                                                            |
+| `observability.otlpEndpoint` / `otlpSampleOneIn`   | OTLP/gRPC tracing, for an image built with the `otel` feature                                                                                                                  |
+| `observability.serviceMonitor`                     | `enabled`, `interval`, `labels`. Skipped without complaint where the Prometheus operator is not installed                                                                      |
+| `control.tlsSecretName`                            | Turns on TLS for the admin listener — and moves the probes and the gateway's `--ca-bundle` with it                                                                             |
+| `control.resources` / `control.serviceAnnotations` |                                                                                                                                                                                |
+| `control.serviceType`                              | `ClusterIP` by default. Anything else is **refused by the API server** without `tlsSecretName` — this Service fronts `/snapshot`, which returns decrypted upstream credentials |
+| `proxy.replicas`                                   | Gateway replicas. Below 2, no PodDisruptionBudget is created                                                                                                                   |
+| `proxy.autoscaling`                                | `enabled`, `minReplicas`, `maxReplicas`, `targetCpuUtilizationPercentage`. While enabled, `replicas` is left to the HPA                                                        |
+| `proxy.policy`                                     | `cacheAffinity` (default), `leastLoaded`, `roundRobin`, `lowestLatency`                                                                                                        |
+| `proxy.upstreamTimeout`                            | Seconds to wait for response _headers_                                                                                                                                         |
+| `proxy.workers` / `proxy.poolMaxIdle`              | The two knobs that matter under load — see [docs/performance.md](../docs/performance.md)                                                                                       |
+| `proxy.serviceType` / `proxy.serviceAnnotations`   | For the **gateway** only. The annotations are where a pinned load-balancer address goes                                                                                        |
+| `proxy.servicePorts`                               | Every address the gateway answers on — `:80` **and** `:4000` is the common pair. Empty means one port, 4000                                                                    |
+| `proxy.ingress`                                    | `enabled`, `className`, `host`, `path`, `annotations`, `tlsSecretName`                                                                                                         |
+| `proxy.classifier`                                 | Tier-1 and tier-2 model directories for semantic routing                                                                                                                       |
+| `proxy.resources`                                  | Compute resources for the gateway container                                                                                                                                    |
+| `*.pod`                                            | `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `annotations`, `labels`, `extraArgs`, `extraEnv` — on either plane                                             |
+| `tuning`                                           | The `fastllm:` block, verbatim. Editing it rolls the gateway                                                                                                                   |
 
 `extraArgs` is appended after every flag the controller computes, so it is
 also the escape hatch for anything not modelled here: an unmodelled flag
@@ -157,20 +157,20 @@ should never mean abandoning the operator.
 
 ## Reading the status
 
-| | |
-|---|---|
-| `phase` | `Pending`, `Upgrading`, `Bootstrapping`, `Degraded`, `Ready` |
-| `observedImage` | What is actually serving |
-| `configHash` | The hash the pods were last rendered with — "did the rotation take?" without diffing pod templates |
-| `bootstrapped` | Whether the admin login exists. Never reset by the controller: re-running `set-password` is a password reset, and doing that on its own would lock an operator out |
-| `conditions` | `Ready`, `SecretsResolved`, `Upgrading`, `Bootstrapped` |
+|                 |                                                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `phase`         | `Pending`, `Upgrading`, `Bootstrapping`, `Degraded`, `Ready`                                                                                                       |
+| `observedImage` | What is actually serving                                                                                                                                           |
+| `configHash`    | The hash the pods were last rendered with — "did the rotation take?" without diffing pod templates                                                                 |
+| `bootstrapped`  | Whether the admin login exists. Never reset by the controller: re-running `set-password` is a password reset, and doing that on its own would lock an operator out |
+| `conditions`    | `Ready`, `SecretsResolved`, `Upgrading`, `Bootstrapped`                                                                                                            |
 
 A gateway reports unready until at least one model **backend** is healthy, so
 a brand-new install sits in `Degraded` until a model is added. The `Ready`
 condition says so rather than leaving you to find out.
 
 `control.replicas` is absent on purpose. The admin Service defaults to
-ClusterIP because it fronts `/snapshot`, which returns *decrypted* upstream
+ClusterIP because it fronts `/snapshot`, which returns _decrypted_ upstream
 credentials to anything holding the proxy token — but exposing it deliberately,
 TLS-only, on its own address is a real deployment
 ([deploy/README.md](../deploy/README.md) runs exactly that), so it is a field
@@ -221,7 +221,7 @@ against a live cluster, which is the only place that class of bug exists.
 
 **A derived `Default` is not the schema's default.** serde fills an omitted
 field from `#[serde(default = "...")]`, but `#[derive(Default)]` fills it with
-`0`/`false`/`""` — so `AutoscalingSpec::default()` meant a floor of *zero*
+`0`/`false`/`""` — so `AutoscalingSpec::default()` meant a floor of _zero_
 replicas, and the generated CRD advertised `minReplicas: 0` to anyone reading
 it. Both defaults are now written once and asserted equal by
 `spec_defaults_match_the_schema_defaults`.

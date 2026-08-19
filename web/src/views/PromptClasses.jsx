@@ -52,7 +52,8 @@ export function PromptClasses({ onUnauthorised, config }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const create = async (e) => {
     e.preventDefault();
@@ -98,8 +99,9 @@ export function PromptClasses({ onUnauthorised, config }) {
 
       <Row>
         <Muted>
-          A class is a name plus example prompts. No training step — the control plane averages the
-          examples into a centroid, and classification is nearest-centroid on the last user message.
+          A class is a name plus example prompts. No training step — the control
+          plane averages the examples into a centroid, and classification is
+          nearest-centroid on the last user message.
         </Muted>
         <Spacer />
         <Button onClick={evaluate} disabled={busy}>
@@ -110,19 +112,23 @@ export function PromptClasses({ onUnauthorised, config }) {
       {config && !config.classifier_tier1 && (
         <Card tone="warn" title="This build has no classifier">
           <Muted>
-            Classes can be defined and stored, but nothing embeds them, so every rule naming a
-            class will never match. The <Mono>classifier</Mono> feature and a{" "}
-            <Mono>--classifier-model</Mono> are both required.
+            Classes can be defined and stored, but nothing embeds them, so every
+            rule naming a class will never match. The <Mono>classifier</Mono>{" "}
+            feature and a <Mono>--classifier-model</Mono> are both required.
           </Muted>
         </Card>
       )}
 
       {unroutable.length > 0 && config?.classifier_tier1 && (
-        <Card tone="warn" title={`${unroutable.length} class${unroutable.length === 1 ? "" : "es"} cannot route`}>
+        <Card
+          tone="warn"
+          title={`${unroutable.length} class${unroutable.length === 1 ? "" : "es"} cannot route`}
+        >
           <Muted>
-            <Mono>{unroutable.map((c) => c.name).join(", ")}</Mono> have examples but no centroid.
-            A rule naming one of them silently never matches — which looks exactly like a rule that
-            is simply not being hit.
+            <Mono>{unroutable.map((c) => c.name).join(", ")}</Mono> have
+            examples but no centroid. A rule naming one of them silently never
+            matches — which looks exactly like a rule that is simply not being
+            hit.
           </Muted>
         </Card>
       )}
@@ -130,7 +136,10 @@ export function PromptClasses({ onUnauthorised, config }) {
       <Grid cols="minmax(0,1fr) 340px">
         <Card>
           {data.length === 0 ? (
-            <Empty>No classes defined. Without one, routing rules cannot mention a class.</Empty>
+            <Empty>
+              No classes defined. Without one, routing rules cannot mention a
+              class.
+            </Empty>
           ) : (
             <Table cols={COLS}>
               {data.map((c) => (
@@ -153,14 +162,22 @@ export function PromptClasses({ onUnauthorised, config }) {
                       <Mono key="m" style={{ color: "var(--fg-3)" }}>
                         {c.min_margin ?? "—"}
                       </Mono>,
-                      <Mono key="f" style={{ color: "var(--fg-4)", fontSize: 11 }}>
+                      <Mono
+                        key="f"
+                        style={{ color: "var(--fg-4)", fontSize: 11 }}
+                      >
                         {c.refines.length ? c.refines.join(", ") : "—"}
                       </Mono>,
                       <Button
                         key="x"
                         variant="smallDanger"
                         onClick={async () => {
-                          if (!window.confirm(`Delete class ${c.name} and its examples?`)) return;
+                          if (
+                            !window.confirm(
+                              `Delete class ${c.name} and its examples?`,
+                            )
+                          )
+                            return;
                           const ok = await attempt(
                             () => api.del(`/admin/prompt-classes/${c.id}`),
                             setError,
@@ -173,11 +190,16 @@ export function PromptClasses({ onUnauthorised, config }) {
                       </Button>,
                     ]}
                   />
-                  <Row gap={8} style={{ padding: "8px 0 14px", flexWrap: "nowrap" }}>
+                  <Row
+                    gap={8}
+                    style={{ padding: "8px 0 14px", flexWrap: "nowrap" }}
+                  >
                     <input
                       placeholder={`add an example prompt to ${c.name}`}
                       value={addTo[c.id] || ""}
-                      onChange={(e) => setAddTo({ ...addTo, [c.id]: e.target.value })}
+                      onChange={(e) =>
+                        setAddTo({ ...addTo, [c.id]: e.target.value })
+                      }
                       style={{ flex: 1, fontSize: 12 }}
                     />
                     <Button
@@ -186,7 +208,10 @@ export function PromptClasses({ onUnauthorised, config }) {
                         const prompt = (addTo[c.id] || "").trim();
                         if (!prompt) return;
                         const ok = await attempt(
-                          () => api.post(`/admin/prompt-classes/${c.id}/examples`, { prompt }),
+                          () =>
+                            api.post(`/admin/prompt-classes/${c.id}/examples`, {
+                              prompt,
+                            }),
                           setError,
                           onUnauthorised,
                         );
@@ -213,7 +238,9 @@ export function PromptClasses({ onUnauthorised, config }) {
                   <input
                     placeholder="coding"
                     value={draft.name}
-                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, name: e.target.value })
+                    }
                   />
                 </Field>
                 <Field
@@ -222,17 +249,24 @@ export function PromptClasses({ onUnauthorised, config }) {
                 >
                   <select
                     value={draft.tier}
-                    onChange={(e) => setDraft({ ...draft, tier: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, tier: e.target.value })
+                    }
                   >
                     <option value="fast">fast · static embedding</option>
                     <option value="refined">refined · transformer</option>
                   </select>
                 </Field>
-                <Field label="EXAMPLE PROMPTS" hint="one per line — bare prompts, as a caller would send them">
+                <Field
+                  label="EXAMPLE PROMPTS"
+                  hint="one per line — bare prompts, as a caller would send them"
+                >
                   <textarea
                     rows={6}
                     value={draft.examples}
-                    onChange={(e) => setDraft({ ...draft, examples: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, examples: e.target.value })
+                    }
                     style={{ resize: "vertical", fontFamily: "var(--sans)" }}
                   />
                 </Field>
@@ -260,16 +294,18 @@ export function PromptClasses({ onUnauthorised, config }) {
                 tone="violet"
               />
               <Muted>
-                Classification runs on the last user message, not the whole body: a system prompt
-                cost two thirds of recall, and by the fourth turn of a conversation the class was
-                undetectable.
+                Classification runs on the last user message, not the whole
+                body: a system prompt cost two thirds of recall, and by the
+                fourth turn of a conversation the class was undetectable.
               </Muted>
             </Stack>
           </Card>
         </Stack>
       </Grid>
 
-      {evaluation && <Evaluation report={evaluation} onDismiss={() => setEvaluation(null)} />}
+      {evaluation && (
+        <Evaluation report={evaluation} onDismiss={() => setEvaluation(null)} />
+      )}
     </Stack>
   );
 }
@@ -357,7 +393,13 @@ function Evaluation({ report, onDismiss }) {
                 </Mono>,
                 <Meter key="p" value={c.precision} />,
                 <Meter key="r" value={c.recall} />,
-                <Mono key="x" style={{ fontSize: 11, color: collides ? "var(--warn-fg)" : "var(--fg-4)" }}>
+                <Mono
+                  key="x"
+                  style={{
+                    fontSize: 11,
+                    color: collides ? "var(--warn-fg)" : "var(--fg-4)",
+                  }}
+                >
                   {c.nearest?.[0]
                     ? `${c.nearest[0][0]} ${c.nearest[0][1].toFixed(2)}`
                     : "—"}
@@ -381,15 +423,30 @@ function Evaluation({ report, onDismiss }) {
         })}
       </Table>
       {(report.confusions || []).length > 0 && (
-        <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-mid)" }}>
-          <Muted>Examples that went the wrong way — which prompt, not just that one did:</Muted>
+        <div
+          style={{
+            marginTop: 14,
+            paddingTop: 12,
+            borderTop: "1px solid var(--line-mid)",
+          }}
+        >
+          <Muted>
+            Examples that went the wrong way — which prompt, not just that one
+            did:
+          </Muted>
           <Stack gap={6} style={{ marginTop: 8 }}>
             {report.confusions.slice(0, 8).map((c, i) => (
-              <div key={i} style={{ font: "400 11px var(--sans)", color: "var(--fg-3)" }}>
+              <div
+                key={i}
+                style={{ font: "400 11px var(--sans)", color: "var(--fg-3)" }}
+              >
                 <Mono style={{ color: "var(--fg-2)" }}>{c.actual}</Mono>
                 <span style={{ color: "var(--fg-5)" }}> → </span>
                 <Mono style={{ color: "var(--warn-fg)" }}>{c.predicted}</Mono>
-                <span style={{ color: "var(--fg-4)" }}> · &ldquo;{c.example}&rdquo;</span>
+                <span style={{ color: "var(--fg-4)" }}>
+                  {" "}
+                  · &ldquo;{c.example}&rdquo;
+                </span>
               </div>
             ))}
           </Stack>
@@ -403,8 +460,20 @@ function Meter({ value }) {
   const pct = Math.round((value || 0) * 100);
   return (
     <Row gap={8} style={{ flexWrap: "nowrap" }}>
-      <Bar pct={pct} height={5} tone={pct >= 90 ? "ok" : pct >= 75 ? "accent" : "warn"} />
-      <Mono style={{ font: "400 11px var(--mono)", color: "var(--fg-2)", width: 34 }}>{pct}%</Mono>
+      <Bar
+        pct={pct}
+        height={5}
+        tone={pct >= 90 ? "ok" : pct >= 75 ? "accent" : "warn"}
+      />
+      <Mono
+        style={{
+          font: "400 11px var(--mono)",
+          color: "var(--fg-2)",
+          width: 34,
+        }}
+      >
+        {pct}%
+      </Mono>
     </Row>
   );
 }

@@ -64,7 +64,9 @@ def x_of(c):
     return PAD["l"] + (math.log2(c) / math.log2(64)) * (W - PAD["l"] - PAD["r"])
 
 
-def svg_chart(title, series, theme, log=False, ticks=5, fmt=str, marker=None, ylabel=""):
+def svg_chart(
+    title, series, theme, log=False, ticks=5, fmt=str, marker=None, ylabel=""
+):
     t = THEMES[theme]
     values = [p[1] for s in series for p in s["points"] if p[1] > 0]
     hi = max(values)
@@ -72,7 +74,9 @@ def svg_chart(title, series, theme, log=False, ticks=5, fmt=str, marker=None, yl
 
     def y_of(v):
         if log:
-            frac = (math.log10(max(v, lo)) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+            frac = (math.log10(max(v, lo)) - math.log10(lo)) / (
+                math.log10(hi) - math.log10(lo)
+            )
         else:
             frac = v / hi
         return H - PAD["b"] - frac * (H - PAD["t"] - PAD["b"])
@@ -86,43 +90,43 @@ def svg_chart(title, series, theme, log=False, ticks=5, fmt=str, marker=None, yl
         v = lo * (hi / lo) ** (i / ticks) if log else hi * i / ticks
         y = y_of(v)
         out.append(
-            f'<line x1="{PAD["l"]}" y1="{y:.1f}" x2="{W-PAD["r"]}" y2="{y:.1f}" '
+            f'<line x1="{PAD["l"]}" y1="{y:.1f}" x2="{W - PAD["r"]}" y2="{y:.1f}" '
             f'stroke="{t["grid"]}" stroke-width="1"/>'
         )
         out.append(
-            f'<text x="{PAD["l"]-9}" y="{y+3.5:.1f}" text-anchor="end" font-size="10" '
+            f'<text x="{PAD["l"] - 9}" y="{y + 3.5:.1f}" text-anchor="end" font-size="10" '
             f'fill="{t["text"]}">{fmt(v)}</text>'
         )
 
     for c in LEVELS:
         out.append(
-            f'<text x="{x_of(c):.1f}" y="{H-PAD["b"]+17}" text-anchor="middle" font-size="10" '
+            f'<text x="{x_of(c):.1f}" y="{H - PAD["b"] + 17}" text-anchor="middle" font-size="10" '
             f'fill="{t["text"]}">{c}</text>'
         )
     out.append(
-        f'<text x="{(W)/2:.0f}" y="{H-4}" text-anchor="middle" font-size="10" '
+        f'<text x="{(W) / 2:.0f}" y="{H - 4}" text-anchor="middle" font-size="10" '
         f'fill="{t["text"]}">concurrent streams</text>'
     )
     if ylabel:
         out.append(
-            f'<text x="12" y="{(H-PAD["b"])/2:.0f}" font-size="10" fill="{t["text"]}" '
-            f'transform="rotate(-90 12 {(H-PAD["b"])/2:.0f})" text-anchor="middle">{ylabel}</text>'
+            f'<text x="12" y="{(H - PAD["b"]) / 2:.0f}" font-size="10" fill="{t["text"]}" '
+            f'transform="rotate(-90 12 {(H - PAD["b"]) / 2:.0f})" text-anchor="middle">{ylabel}</text>'
         )
 
     if marker:
         mx = x_of(marker[0])
         out.append(
-            f'<line x1="{mx:.1f}" y1="{PAD["t"]}" x2="{mx:.1f}" y2="{H-PAD["b"]}" '
+            f'<line x1="{mx:.1f}" y1="{PAD["t"]}" x2="{mx:.1f}" y2="{H - PAD["b"]}" '
             f'stroke="{t["note"]}" stroke-width="1" stroke-dasharray="2 4"/>'
         )
         out.append(
-            f'<text x="{mx+6:.1f}" y="{PAD["t"]+11}" font-size="10" fill="{t["note"]}">{marker[1]}</text>'
+            f'<text x="{mx + 6:.1f}" y="{PAD["t"] + 11}" font-size="10" fill="{t["note"]}">{marker[1]}</text>'
         )
 
     for s in series:
         colour = t[s["colour"]]
         d = " ".join(
-            f'{"M" if i == 0 else "L"}{x_of(x):.1f},{y_of(y):.1f}'
+            f"{'M' if i == 0 else 'L'}{x_of(x):.1f},{y_of(y):.1f}"
             for i, (x, y) in enumerate(s["points"])
         )
         dash = ' stroke-dasharray="3 3" opacity="0.75"' if s.get("dashed") else ""
@@ -133,7 +137,9 @@ def svg_chart(title, series, theme, log=False, ticks=5, fmt=str, marker=None, yl
         )
         if not s.get("dashed"):
             for x, y in s["points"]:
-                out.append(f'<circle cx="{x_of(x):.1f}" cy="{y_of(y):.1f}" r="2.6" fill="{colour}"/>')
+                out.append(
+                    f'<circle cx="{x_of(x):.1f}" cy="{y_of(y):.1f}" r="2.6" fill="{colour}"/>'
+                )
 
     # Legend sits inside the frame so the chart is self-contained wherever it
     # is embedded.
@@ -141,10 +147,10 @@ def svg_chart(title, series, theme, log=False, ticks=5, fmt=str, marker=None, yl
     for i, s in enumerate(sr for sr in series if not sr.get("dashed")):
         colour = t[s["colour"]]
         out.append(
-            f'<rect x="{lx}" y="{ly + i*15 - 4}" width="14" height="3" rx="1.5" fill="{colour}"/>'
+            f'<rect x="{lx}" y="{ly + i * 15 - 4}" width="14" height="3" rx="1.5" fill="{colour}"/>'
         )
         out.append(
-            f'<text x="{lx+20}" y="{ly + i*15}" font-size="10" fill="{t["text"]}">{s["label"]}</text>'
+            f'<text x="{lx + 20}" y="{ly + i * 15}" font-size="10" fill="{t["text"]}">{s["label"]}</text>'
         )
 
     out.append("</svg>")
@@ -169,7 +175,11 @@ def main():
 
     def pair(rows, key):
         return [
-            {"label": "fastllm-proxy", "colour": "a", "points": pts(rows, "fastllm", key)},
+            {
+                "label": "fastllm-proxy",
+                "colour": "a",
+                "points": pts(rows, "fastllm", key),
+            },
             {"label": "LiteLLM", "colour": "b", "points": pts(rows, "litellm", key)},
         ]
 
@@ -200,11 +210,23 @@ def main():
     write(
         "bench-real-latency",
         "Time to first token against real vLLM, p50 solid and p99 dotted",
-        lambda: pair(real, "ttft_p50")
-        + [
-            {"label": "", "colour": "a", "dashed": True, "points": pts(real, "fastllm", "ttft_p99")},
-            {"label": "", "colour": "b", "dashed": True, "points": pts(real, "litellm", "ttft_p99")},
-        ],
+        lambda: (
+            pair(real, "ttft_p50")
+            + [
+                {
+                    "label": "",
+                    "colour": "a",
+                    "dashed": True,
+                    "points": pts(real, "fastllm", "ttft_p99"),
+                },
+                {
+                    "label": "",
+                    "colour": "b",
+                    "dashed": True,
+                    "points": pts(real, "litellm", "ttft_p99"),
+                },
+            ]
+        ),
         fmt=lambda v: f"{round(v):,}",
         ylabel="TTFT (ms)",
     )

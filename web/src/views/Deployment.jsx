@@ -35,10 +35,19 @@ import {
 const POLL_MS = 5000;
 
 const POLICIES = [
-  ["cacheAffinity", "cache affinity — a shared prefix returns to the node holding its KV cache"],
-  ["leastLoaded", "least loaded — cache-blind, for traffic with no prefix sharing"],
+  [
+    "cacheAffinity",
+    "cache affinity — a shared prefix returns to the node holding its KV cache",
+  ],
+  [
+    "leastLoaded",
+    "least loaded — cache-blind, for traffic with no prefix sharing",
+  ],
   ["roundRobin", "round robin — a baseline, cache-blind"],
-  ["lowestLatency", "lowest latency — for a pool whose members are not equivalent"],
+  [
+    "lowestLatency",
+    "lowest latency — for a pool whose members are not equivalent",
+  ],
 ];
 
 const PHASE_TONE = {
@@ -81,7 +90,8 @@ export function Deployment({ onUnauthorised }) {
   const proxy = data.proxy || {};
   const status = data.status || {};
   const autoscaling = proxy.autoscaling || {};
-  const field = (key, fallback) => (key in draft ? draft[key] : fallback ?? "");
+  const field = (key, fallback) =>
+    key in draft ? draft[key] : (fallback ?? "");
   const set = (key) => (e) => {
     const v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
     setDraft((d) => ({ ...d, [key]: v }));
@@ -96,21 +106,29 @@ export function Deployment({ onUnauthorised }) {
     if ("image" in draft && draft.image.trim()) body.image = draft.image.trim();
     if ("replicas" in draft) body.replicas = numeric(draft.replicas);
     if ("policy" in draft) body.policy = draft.policy;
-    if ("upstream_timeout" in draft) body.upstream_timeout = numeric(draft.upstream_timeout);
+    if ("upstream_timeout" in draft)
+      body.upstream_timeout = numeric(draft.upstream_timeout);
     if ("workers" in draft) body.workers = numeric(draft.workers);
-    if ("pool_max_idle" in draft) body.pool_max_idle = numeric(draft.pool_max_idle);
-    if ("autoscaling_enabled" in draft) body.autoscaling_enabled = draft.autoscaling_enabled;
+    if ("pool_max_idle" in draft)
+      body.pool_max_idle = numeric(draft.pool_max_idle);
+    if ("autoscaling_enabled" in draft)
+      body.autoscaling_enabled = draft.autoscaling_enabled;
     if ("autoscaling_min_replicas" in draft)
       body.autoscaling_min_replicas = numeric(draft.autoscaling_min_replicas);
     if ("autoscaling_max_replicas" in draft)
       body.autoscaling_max_replicas = numeric(draft.autoscaling_max_replicas);
     if ("autoscaling_target_cpu" in draft)
       body.autoscaling_target_cpu = numeric(draft.autoscaling_target_cpu);
-    for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
+    for (const k of Object.keys(body))
+      if (body[k] === undefined) delete body[k];
     if (Object.keys(body).length === 0) return;
 
     setBusy(true);
-    const ok = await attempt(() => api.patch("/admin/deployment", body), setError, onUnauthorised);
+    const ok = await attempt(
+      () => api.patch("/admin/deployment", body),
+      setError,
+      onUnauthorised,
+    );
     setBusy(false);
     if (ok) {
       setDraft({});
@@ -123,8 +141,12 @@ export function Deployment({ onUnauthorised }) {
   };
 
   const conditions = status.conditions || [];
-  const notReady = conditions.find((c) => c.type === "Ready" && c.status !== "True");
-  const upgrading = conditions.find((c) => c.type === "Upgrading" && c.status === "True");
+  const notReady = conditions.find(
+    (c) => c.type === "Ready" && c.status !== "True",
+  );
+  const upgrading = conditions.find(
+    (c) => c.type === "Upgrading" && c.status === "True",
+  );
 
   return (
     <Stack>
@@ -142,17 +164,24 @@ export function Deployment({ onUnauthorised }) {
       )}
 
       {upgrading && <Banner tone="warn">{upgrading.message}</Banner>}
-      {!upgrading && notReady && <Banner tone="warn">{notReady.message}</Banner>}
+      {!upgrading && notReady && (
+        <Banner tone="warn">{notReady.message}</Banner>
+      )}
 
       <Card
         title={`FastllmProxy ${data.namespace}/${data.name}`}
         subtitle="the desired state an operator reconciles — changes here are a rollout, not a snapshot"
         right={
-          <Pill tone={PHASE_TONE[status.phase] || "neutral"}>{status.phase || "unknown"}</Pill>
+          <Pill tone={PHASE_TONE[status.phase] || "neutral"}>
+            {status.phase || "unknown"}
+          </Pill>
         }
       >
         <Grid cols={4}>
-          <Stat label="SERVING" value={<Mono>{status.observedImage || "—"}</Mono>} />
+          <Stat
+            label="SERVING"
+            value={<Mono>{status.observedImage || "—"}</Mono>}
+          />
           <Stat label="GATEWAY" value={status.proxyReplicas || "—"} />
           <Stat
             label="CONTROL"
@@ -163,7 +192,10 @@ export function Deployment({ onUnauthorised }) {
               </Row>
             }
           />
-          <Stat label="CONFIG HASH" value={<Mono>{status.configHash || "—"}</Mono>} />
+          <Stat
+            label="CONFIG HASH"
+            value={<Mono>{status.configHash || "—"}</Mono>}
+          />
         </Grid>
       </Card>
 
@@ -184,7 +216,10 @@ export function Deployment({ onUnauthorised }) {
             />
           </Field>
           <Field label="POLICY" hint="backend selection for the gateway">
-            <select value={field("policy", proxy.policy)} onChange={set("policy")}>
+            <select
+              value={field("policy", proxy.policy)}
+              onChange={set("policy")}
+            >
               {POLICIES.map(([value, label]) => (
                 <option key={value} value={value}>
                   {label}
@@ -208,7 +243,10 @@ export function Deployment({ onUnauthorised }) {
               onChange={set("replicas")}
             />
           </Field>
-          <Field label="UPSTREAM HEADER TIMEOUT (s)" hint="bounds time to first byte, not generation">
+          <Field
+            label="UPSTREAM HEADER TIMEOUT (s)"
+            hint="bounds time to first byte, not generation"
+          >
             <input
               type="number"
               min="1"
@@ -285,7 +323,11 @@ export function Deployment({ onUnauthorised }) {
         <Button variant="primary" disabled={!dirty || busy} onClick={save}>
           {busy ? "Applying…" : "Apply to the cluster"}
         </Button>
-        <Button variant="ghost" disabled={!dirty || busy} onClick={() => setDraft({})}>
+        <Button
+          variant="ghost"
+          disabled={!dirty || busy}
+          onClick={() => setDraft({})}
+        >
           Discard
         </Button>
         <Spacer />
@@ -311,7 +353,9 @@ export function Deployment({ onUnauthorised }) {
 
 function Stat({ label, value }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+    <div
+      style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
+    >
       <span
         style={{
           font: "500 10px/1 var(--sans)",
@@ -321,7 +365,13 @@ function Stat({ label, value }) {
       >
         {label}
       </span>
-      <div style={{ font: "400 13px/1.4 var(--sans)", color: "var(--fg)", minWidth: 0 }}>
+      <div
+        style={{
+          font: "400 13px/1.4 var(--sans)",
+          color: "var(--fg)",
+          minWidth: 0,
+        }}
+      >
         {value}
       </div>
     </div>

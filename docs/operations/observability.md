@@ -10,8 +10,15 @@ fields at the top level rather than nested, which is what a collector indexes
 without a transform step:
 
 ```json
-{"timestamp":"2026-08-08T08:29:54.896902Z","level":"INFO","message":"starting",
- "models":1,"backends":1,"policy":"CacheAffinity","role":"Proxy"}
+{
+  "timestamp": "2026-08-08T08:29:54.896902Z",
+  "level": "INFO",
+  "message": "starting",
+  "models": 1,
+  "backends": 1,
+  "policy": "CacheAffinity",
+  "role": "Proxy"
+}
 ```
 
 `--log` (`FASTLLM_LOG`) takes an `EnvFilter` directive, so
@@ -23,8 +30,8 @@ classification detail without the rest.
 Most are self-describing from their `# HELP` text. Four are not obvious:
 
 - **`fastllm_classify_escalations_total` is not `fastllm_classified_refined_total`.**
-  The second counts prompts the transformer *decided*; the first counts prompts
-  it was *asked about*. When it declines, the fast tier's answer stands and is
+  The second counts prompts the transformer _decided_; the first counts prompts
+  it was _asked about_. When it declines, the fast tier's answer stands and is
   counted as `classified_fast`. The gap between them is how often the expensive
   tier ran and changed nothing, and the escalation rate itself is the number the
   two-tier design is justified on.
@@ -92,15 +99,15 @@ Everything this gateway knows is already published — `/metrics` to scrape,
 to be looking. `--webhook-url` is the other direction, for the conditions
 worth telling someone about at 3am:
 
-| event | when |
-|---|---|
-| `backend_down` | a replica newly reports a backend unhealthy |
-| `backend_recovered` | the same backend reporting healthy again |
-| `snapshot_rebuild_failed` | a rebuild failed *after* a write committed, so the database and the published snapshot have diverged |
+| event                     | when                                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `backend_down`            | a replica newly reports a backend unhealthy                                                          |
+| `backend_recovered`       | the same backend reporting healthy again                                                             |
+| `snapshot_rebuild_failed` | a rebuild failed _after_ a write committed, so the database and the published snapshot have diverged |
 
 **Transitions, not states.** A backend that is down stays down, and a health
 report every ten seconds would otherwise become six alerts a minute for one
-incident. A replica's *first* report emits nothing at all — there is no
+incident. A replica's _first_ report emits nothing at all — there is no
 previous state to have changed from, and a control-plane restart would
 otherwise announce every already-down backend as though it had just failed.
 
@@ -111,7 +118,7 @@ the distinction before anyone saw it, which is the same reason
 
 `--webhook-secret` signs each body with HMAC-SHA256 in `x-fastllm-signature`,
 in the `sha256=<hex>` form most receivers already know. A webhook endpoint is
-reachable by anyone who learns its address, so a receiver that *acts* on
+reachable by anyone who learns its address, so a receiver that _acts_ on
 notifications wants to know where they came from.
 
 Delivery is one attempt with a five-second timeout and no retry, from a small
@@ -138,7 +145,7 @@ One span per request, `chat_completion`, carrying the requested model, the
 model that actually served it, the backend, whether it streamed, the prompt
 class if one matched, the upstream status, and how many attempts it took. That
 last pair is the reason to reach for a trace rather than a metric: a histogram
-says the 99th percentile moved, a span says *this* request failed over twice
+says the 99th percentile moved, a span says _this_ request failed over twice
 and landed on the fallback.
 
 Deliberately not recorded as span attributes: the request body, the caller's

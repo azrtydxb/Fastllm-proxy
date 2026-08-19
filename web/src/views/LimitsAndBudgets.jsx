@@ -59,7 +59,8 @@ export function LimitsAndBudgets({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   // Both routes are `PUT`: they replace the row, so a field left out is set
   // to NULL rather than left alone. That is coherent for a PUT and surprising
@@ -67,7 +68,9 @@ export function LimitsAndBudgets({ onUnauthorised }) {
   // operator adding a request limit to a principal that already had a token
   // limit was silently removing the token limit.
   const loadLimit = (id) => {
-    const existing = (data?.limits || []).find((l) => String(l.principal_id) === String(id));
+    const existing = (data?.limits || []).find(
+      (l) => String(l.principal_id) === String(id),
+    );
     setLimitDraft({
       principal_id: id,
       requests_per_min: existing?.requests_per_min ?? "",
@@ -75,27 +78,34 @@ export function LimitsAndBudgets({ onUnauthorised }) {
     });
   };
   const loadBudget = (id) => {
-    const existing = (data?.budgets || []).find((b) => String(b.principal_id) === String(id));
+    const existing = (data?.budgets || []).find(
+      (b) => String(b.principal_id) === String(id),
+    );
     setBudgetDraft({
       principal_id: id,
       window: existing?.window || "daily",
       tokens_total: existing?.tokens_total ?? "",
-      cost_total: existing?.cost_total_micros == null ? "" : existing.cost_total_micros / 1e6,
+      cost_total:
+        existing?.cost_total_micros == null
+          ? ""
+          : existing.cost_total_micros / 1e6,
     });
   };
-
 
   const setLimit = async () => {
     if (!limitDraft.principal_id) return;
     const body = {};
-    if (limitDraft.requests_per_min) body.requests_per_min = Number(limitDraft.requests_per_min);
-    if (limitDraft.tokens_per_min) body.tokens_per_min = Number(limitDraft.tokens_per_min);
+    if (limitDraft.requests_per_min)
+      body.requests_per_min = Number(limitDraft.requests_per_min);
+    if (limitDraft.tokens_per_min)
+      body.tokens_per_min = Number(limitDraft.tokens_per_min);
     if (!Object.keys(body).length) {
       setError("A limit needs a request rate, a token rate, or both.");
       return;
     }
     const ok = await attempt(
-      () => api.put(`/admin/principals/${limitDraft.principal_id}/limits`, body),
+      () =>
+        api.put(`/admin/principals/${limitDraft.principal_id}/limits`, body),
       setError,
       onUnauthorised,
     );
@@ -108,14 +118,17 @@ export function LimitsAndBudgets({ onUnauthorised }) {
   const setBudget = async () => {
     if (!budgetDraft.principal_id) return;
     const body = { window: budgetDraft.window };
-    if (budgetDraft.tokens_total) body.tokens_total = Number(budgetDraft.tokens_total);
-    if (budgetDraft.cost_total) body.cost_total_micros = Math.round(Number(budgetDraft.cost_total) * 1e6);
+    if (budgetDraft.tokens_total)
+      body.tokens_total = Number(budgetDraft.tokens_total);
+    if (budgetDraft.cost_total)
+      body.cost_total_micros = Math.round(Number(budgetDraft.cost_total) * 1e6);
     if (!body.tokens_total && !body.cost_total_micros) {
       setError("A budget needs tokens, money, or both.");
       return;
     }
     const ok = await attempt(
-      () => api.put(`/admin/principals/${budgetDraft.principal_id}/budget`, body),
+      () =>
+        api.put(`/admin/principals/${budgetDraft.principal_id}/budget`, body),
       setError,
       onUnauthorised,
     );
@@ -167,20 +180,26 @@ export function LimitsAndBudgets({ onUnauthorised }) {
             <input
               placeholder="optional"
               value={budgetDraft.tokens_total || ""}
-              onChange={(e) => setBudgetDraft({ ...budgetDraft, tokens_total: e.target.value })}
+              onChange={(e) =>
+                setBudgetDraft({ ...budgetDraft, tokens_total: e.target.value })
+              }
             />
           </Field>
           <Field label="SPEND CAP ($)" style={{ flex: 1 }}>
             <input
               placeholder="optional"
               value={budgetDraft.cost_total || ""}
-              onChange={(e) => setBudgetDraft({ ...budgetDraft, cost_total: e.target.value })}
+              onChange={(e) =>
+                setBudgetDraft({ ...budgetDraft, cost_total: e.target.value })
+              }
             />
           </Field>
           <Field label="WINDOW" style={{ width: 130 }}>
             <select
               value={budgetDraft.window}
-              onChange={(e) => setBudgetDraft({ ...budgetDraft, window: e.target.value })}
+              onChange={(e) =>
+                setBudgetDraft({ ...budgetDraft, window: e.target.value })
+              }
             >
               <option value="daily">daily</option>
               <option value="weekly">weekly</option>
@@ -193,13 +212,15 @@ export function LimitsAndBudgets({ onUnauthorised }) {
         </Row>
         <div style={{ marginTop: 10 }}>
           <Muted>
-            A budget needs tokens, money, or both. A request is refused when either cap is reached,
-            and the 402 names which one. Windows are fixed-length — 1 / 7 / 30 days, not calendar
-            months. Updating a budget leaves consumption and the window start alone, but{" "}
+            A budget needs tokens, money, or both. A request is refused when
+            either cap is reached, and the 402 names which one. Windows are
+            fixed-length — 1 / 7 / 30 days, not calendar months. Updating a
+            budget leaves consumption and the window start alone, but{" "}
             <strong style={{ fontWeight: 500, color: "var(--fg-3)" }}>
               replaces both caps with what is in these boxes
             </strong>{" "}
-            — selecting a principal loads its current values so an empty box means you meant it.
+            — selecting a principal loads its current values so an empty box
+            means you meant it.
           </Muted>
         </div>
       </Card>
@@ -210,7 +231,9 @@ export function LimitsAndBudgets({ onUnauthorised }) {
           subtitle="enforced without a database call on the request path — each replica enforces its reconciled share"
         >
           {data.limits.length === 0 ? (
-            <Empty>No principal has a rate limit. Absent means unlimited, not zero.</Empty>
+            <Empty>
+              No principal has a rate limit. Absent means unlimited, not zero.
+            </Empty>
           ) : (
             <Table cols={LIMIT_COLS}>
               {data.limits.map((l) => (
@@ -225,17 +248,25 @@ export function LimitsAndBudgets({ onUnauthorised }) {
                       {l.requests_per_min ?? "—"}
                     </Mono>,
                     <Mono key="t" style={{ color: "var(--fg-2)" }}>
-                      {l.tokens_per_min === null ? "—" : fmtCompact(l.tokens_per_min)}
+                      {l.tokens_per_min === null
+                        ? "—"
+                        : fmtCompact(l.tokens_per_min)}
                     </Mono>,
                     <Row key="x" gap={6} style={{ justifyContent: "flex-end" }}>
-                      <Button variant="small" onClick={() => loadLimit(String(l.principal_id))}>
+                      <Button
+                        variant="small"
+                        onClick={() => loadLimit(String(l.principal_id))}
+                      >
                         edit
                       </Button>
                       <Button
                         variant="smallDanger"
                         onClick={async () => {
                           const ok = await attempt(
-                            () => api.del(`/admin/principals/${l.principal_id}/limits`),
+                            () =>
+                              api.del(
+                                `/admin/principals/${l.principal_id}/limits`,
+                              ),
                             setError,
                             onUnauthorised,
                           );
@@ -267,13 +298,20 @@ export function LimitsAndBudgets({ onUnauthorised }) {
               placeholder="req/min"
               style={{ flex: 0.8 }}
               value={limitDraft.requests_per_min || ""}
-              onChange={(e) => setLimitDraft({ ...limitDraft, requests_per_min: e.target.value })}
+              onChange={(e) =>
+                setLimitDraft({
+                  ...limitDraft,
+                  requests_per_min: e.target.value,
+                })
+              }
             />
             <input
               placeholder="tok/min"
               style={{ flex: 0.8 }}
               value={limitDraft.tokens_per_min || ""}
-              onChange={(e) => setLimitDraft({ ...limitDraft, tokens_per_min: e.target.value })}
+              onChange={(e) =>
+                setLimitDraft({ ...limitDraft, tokens_per_min: e.target.value })
+              }
             />
             <Button variant="secondary" onClick={setLimit}>
               Set
@@ -285,12 +323,16 @@ export function LimitsAndBudgets({ onUnauthorised }) {
               <NotAvailable why="Rejections are counted in the limiter and exposed on each proxy's /metrics as fastllm_rejections_total. The admin API stores configuration, not counters.">
                 not stored here
               </NotAvailable>{" "}
-              — <Mono>fastllm_rejections_total</Mono> on a proxy&rsquo;s /metrics has it.
+              — <Mono>fastllm_rejections_total</Mono> on a proxy&rsquo;s
+              /metrics has it.
             </Muted>
           </div>
         </Card>
 
-        <Card title="429 and 402 are different answers" subtitle="and a caller should react to them differently">
+        <Card
+          title="429 and 402 are different answers"
+          subtitle="and a caller should react to them differently"
+        >
           <Stack gap={12}>
             <Step
               at="429"
@@ -311,8 +353,9 @@ export function LimitsAndBudgets({ onUnauthorised }) {
               desc="min_budget_used_percent is a routing condition like any other, so a rule can move a nearly-exhausted principal to a cheaper model instead of refusing it."
             />
             <Muted>
-              Degradation is a routing rule, not a special case — which is why there is no switch
-              for it here. It lives on the frontend model whose traffic should degrade.
+              Degradation is a routing rule, not a special case — which is why
+              there is no switch for it here. It lives on the frontend model
+              whose traffic should degrade.
             </Muted>
           </Stack>
         </Card>
@@ -323,15 +366,29 @@ export function LimitsAndBudgets({ onUnauthorised }) {
 
 function Step({ at, title, desc, tone }) {
   return (
-    <Row gap={12} style={{ alignItems: "flex-start", flexWrap: "nowrap", paddingBottom: 12, borderBottom: "1px solid var(--line-soft)" }}>
+    <Row
+      gap={12}
+      style={{
+        alignItems: "flex-start",
+        flexWrap: "nowrap",
+        paddingBottom: 12,
+        borderBottom: "1px solid var(--line-soft)",
+      }}
+    >
       {/* Fixed width: "429" and "≥80%" are different sizes, and letting the
           pill size itself left the three descriptions starting at three
           different x positions. */}
-      <Pill tone={tone} mono style={{ width: 46, textAlign: "center", flex: "none" }}>
+      <Pill
+        tone={tone}
+        mono
+        style={{ width: 46, textAlign: "center", flex: "none" }}
+      >
         {at}
       </Pill>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ font: "500 12px var(--sans)", color: "var(--fg)" }}>{title}</div>
+        <div style={{ font: "500 12px var(--sans)", color: "var(--fg)" }}>
+          {title}
+        </div>
         <Muted>{desc}</Muted>
       </div>
     </Row>
@@ -348,22 +405,33 @@ function Step({ at, title, desc, tone }) {
  */
 function BudgetCard({ budget, onClear }) {
   const tokPct =
-    budget.tokens_total > 0 ? Math.min(100, (budget.tokens_used / budget.tokens_total) * 100) : null;
+    budget.tokens_total > 0
+      ? Math.min(100, (budget.tokens_used / budget.tokens_total) * 100)
+      : null;
   const costPct =
     budget.cost_total_micros > 0
-      ? Math.min(100, (budget.cost_used_micros / budget.cost_total_micros) * 100)
+      ? Math.min(
+          100,
+          (budget.cost_used_micros / budget.cost_total_micros) * 100,
+        )
       : null;
   const caps = [tokPct, costPct].filter((x) => x !== null);
   const binding = caps.length ? Math.max(...caps) : 0;
   const tone = binding >= 80 ? "warn" : binding >= 60 ? "accent" : "ok";
   const color =
-    tone === "warn" ? "var(--warn-fg)" : tone === "accent" ? "var(--accent)" : "var(--ok-fg)";
+    tone === "warn"
+      ? "var(--warn-fg)"
+      : tone === "accent"
+        ? "var(--accent)"
+        : "var(--ok-fg)";
 
   return (
     <Card>
       <Stack gap={12}>
         <Row style={{ flexWrap: "nowrap" }}>
-          <Mono style={{ font: "500 13px var(--mono)" }}>{budget.principal}</Mono>
+          <Mono style={{ font: "500 13px var(--mono)" }}>
+            {budget.principal}
+          </Mono>
           <Spacer />
           <Pill tone="quiet">{budget.window}</Pill>
         </Row>
@@ -373,7 +441,11 @@ function BudgetCard({ budget, onClear }) {
         <BudgetRow
           label="TOKENS"
           used={fmtCompact(budget.tokens_used)}
-          total={budget.tokens_total === null ? "no token cap" : fmtCompact(budget.tokens_total)}
+          total={
+            budget.tokens_total === null
+              ? "no token cap"
+              : fmtCompact(budget.tokens_total)
+          }
           pct={tokPct}
           binding={tokPct !== null && tokPct === binding}
           tone={tone}
@@ -382,13 +454,21 @@ function BudgetCard({ budget, onClear }) {
           label="SPEND"
           used={fmtMoney(budget.cost_used_micros)}
           total={
-            budget.cost_total_micros === null ? "no spend cap" : fmtMoney(budget.cost_total_micros)
+            budget.cost_total_micros === null
+              ? "no spend cap"
+              : fmtMoney(budget.cost_total_micros)
           }
           pct={costPct}
           binding={costPct !== null && costPct === binding}
           tone={tone}
         />
-        <Row style={{ paddingTop: 4, borderTop: "1px solid var(--line-mid)", flexWrap: "nowrap" }}>
+        <Row
+          style={{
+            paddingTop: 4,
+            borderTop: "1px solid var(--line-mid)",
+            flexWrap: "nowrap",
+          }}
+        >
           <span style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>
             window opened {new Date(budget.window_start).toLocaleDateString()}
           </span>

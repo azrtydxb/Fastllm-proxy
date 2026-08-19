@@ -83,15 +83,15 @@ allocation beyond what the body already needed.
 The dotted branch above is the whole of multi-provider support, and it is
 drawn dotted on purpose: it is not on the default path.
 
-| | passthrough (`protocol = openai`) | translated (`anthropic`, `gemini`) |
-|---|---|---|
-| request body | forwarded as-is, or one splice for a model alias | parsed and re-serialised into the native shape |
-| response body | never parsed; forwarded byte for byte | parsed, re-framed into OpenAI chunks |
-| usage | bounded tail buffer, one parse at end of stream | already parsed, exactly, during translation |
-| endpoints | all seven proxied suffixes | `/chat/completions` only; the rest are `501` |
-| tool calling | passthrough, untouched | translated both directions, streaming included |
-| image/audio input | passthrough, untouched | `data:` URLs translated inline; never fetched |
-| overhead | zero measured against a real vLLM | one parse per frame |
+|                   | passthrough (`protocol = openai`)                | translated (`anthropic`, `gemini`)             |
+| ----------------- | ------------------------------------------------ | ---------------------------------------------- |
+| request body      | forwarded as-is, or one splice for a model alias | parsed and re-serialised into the native shape |
+| response body     | never parsed; forwarded byte for byte            | parsed, re-framed into OpenAI chunks           |
+| usage             | bounded tail buffer, one parse at end of stream  | already parsed, exactly, during translation    |
+| endpoints         | all seven proxied suffixes                       | `/chat/completions` only; the rest are `501`   |
+| tool calling      | passthrough, untouched                           | translated both directions, streaming included |
+| image/audio input | passthrough, untouched                           | `data:` URLs translated inline; never fetched  |
+| overhead          | zero measured against a real vLLM                | one parse per frame                            |
 
 Most providers are the left column, including OpenRouter — which is why
 "support every provider `genai` supports" is mostly a configuration exercise
@@ -138,7 +138,7 @@ Two decisions in that flow are load-bearing:
   rule edit or a weighted split could hand a caller a model they were never
   granted. With a fallback chain this becomes a filter: ungranted candidates
   are dropped from the chain, so failover only ever moves to a model the caller
-  already had. The "served here" check runs *before* it, so an unknown model is
+  already had. The "served here" check runs _before_ it, so an unknown model is
   a 404 for everyone and 403-vs-404 cannot be used to probe what exists.
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
   never per frame. The response is still forwarded as opaque bytes. A
@@ -147,7 +147,7 @@ Two decisions in that flow are load-bearing:
 
 ## Administrative permissions
 
-Admin routes are gated by a session *and* a per-route permission, drawn from
+Admin routes are gated by a session _and_ a per-route permission, drawn from
 the same `roles → permissions` model the inference side uses: `usage:read` for
 reads, `key:create` and `key:revoke` for key lifecycle, `config:write` for
 everything else.
@@ -156,7 +156,7 @@ Two things an operator should know rather than discover:
 
 - `config:write` is effectively administrative. A principal holding it can
   grant itself roles through `POST /admin/principals/{id}/roles`, so
-  `key:create`/`key:revoke` are a separation of *duties*, not a security
+  `key:create`/`key:revoke` are a separation of _duties_, not a security
   boundary against it.
 - The `/admin/*` 404 for an unknown path is served outside the session gate,
   so an anonymous caller can tell which admin paths are not routes. It
@@ -164,21 +164,21 @@ Two things an operator should know rather than discover:
 
 ## Failure modes
 
-| event | behaviour |
-|---|---|
-| control plane down, proxy warm | serves from memory; policy stops changing |
-| control plane down, proxy cold | loads last-known-good from disk |
-| cold start, no cache | starts, `/health` unhealthy, never crash-loops |
-| snapshot invalid | keeps the previous one, logs once |
-| key revoked | effective within the poll interval, ~1s |
-| a model in a chain returns 429/5xx | the next model in the same rule serves it; nothing reached the client yet |
-| every model in the chain refuses | the last upstream's own status and body are forwarded, not a synthetic 502 |
-| Postgres down | control plane serves its last built snapshot; proxies unaffected |
-| SIGTERM (a rollout) | stops accepting, lets in-flight generations finish, exits — up to `--shutdown-grace` (25s, under Kubernetes' 30s default) |
-| usage report fails | dropped; never blocks a request |
-| health report fails | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s |
-| upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion |
-| snapshot names an unknown protocol | that backend is dropped with a logged reason, never silently treated as OpenAI |
+| event                               | behaviour                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| control plane down, proxy warm      | serves from memory; policy stops changing                                                                                 |
+| control plane down, proxy cold      | loads last-known-good from disk                                                                                           |
+| cold start, no cache                | starts, `/health` unhealthy, never crash-loops                                                                            |
+| snapshot invalid                    | keeps the previous one, logs once                                                                                         |
+| key revoked                         | effective within the poll interval, ~1s                                                                                   |
+| a model in a chain returns 429/5xx  | the next model in the same rule serves it; nothing reached the client yet                                                 |
+| every model in the chain refuses    | the last upstream's own status and body are forwarded, not a synthetic 502                                                |
+| Postgres down                       | control plane serves its last built snapshot; proxies unaffected                                                          |
+| SIGTERM (a rollout)                 | stops accepting, lets in-flight generations finish, exits — up to `--shutdown-grace` (25s, under Kubernetes' 30s default) |
+| usage report fails                  | dropped; never blocks a request                                                                                           |
+| health report fails                 | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s                                              |
+| upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion                               |
+| snapshot names an unknown protocol  | that backend is dropped with a logged reason, never silently treated as OpenAI                                            |
 
 Never crash-looping on a cold start is deliberate: under Kubernetes that would
 turn a control-plane outage into a data-plane outage, which is the failure this

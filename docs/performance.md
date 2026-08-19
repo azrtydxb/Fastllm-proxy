@@ -1,5 +1,6 @@
 <!-- Measured numbers and their conditions. The README carries only the
 headline comparison; everything that needs a paragraph of caveat lives here. -->
+
 # Performance
 
 Every number below was measured, on the hardware named, on the date named.
@@ -21,7 +22,7 @@ measured.
 <picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-mock-throughput-dark.svg"><img alt="Requests per second against a mock upstream. fastllm-proxy climbs to roughly 500-635 per second; LiteLLM plateaus near 36." src="images/bench-mock-throughput-light.svg" width="49%"></picture> <picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-mock-latency-dark.svg"><img alt="Median time to first token against a mock upstream, log scale. fastllm-proxy stays between 8 and 46 milliseconds; LiteLLM rises from 87 to 1313." src="images/bench-mock-latency-light.svg" width="49%"></picture>
 
 **~15x the throughput and 10-28x lower latency**, and the gap widens with
-concurrency rather than narrowing. This is the *ceiling* on what the choice can
+concurrency rather than narrowing. This is the _ceiling_ on what the choice can
 be worth, and you collect it only when the GPU is not your bottleneck — which
 is the next section, and the more honest one.
 
@@ -39,7 +40,7 @@ GPU, the gateway barely moves your token rate.
 
 What differs is steadiness. At 32 streams, p99 time-to-first-token is
 **766 ms against 2921 ms**, and the gap between consecutive tokens is 15-25%
-less variable at *every* concurrency level:
+less variable at _every_ concurrency level:
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="images/bench-real-jitter-dark.svg"><img alt="Standard deviation of the gap between tokens against real vLLM. fastllm-proxy is consistently 15 to 25 percent lower than LiteLLM at every concurrency level." src="images/bench-real-jitter-light.svg" width="49%"></picture>
 
@@ -52,15 +53,15 @@ Two runs against the live spark2 replica (arm64, `qwen3-6-35b-a3b-nvfp4`),
 2026-08-06. "Direct" is the same client against the same vLLM with no proxy in
 the path:
 
-| | through the proxy | direct | delta |
-|---|---|---|---|
-| TTFT, run 1 | **83.2 ms** | 83.8 ms | −0.6 ms |
-| TTFT, run 2 | **90 ms** | 93 ms | −3 ms |
-| inter-token | **27.51 ms** | 27.46 ms | +0.05 ms |
-| 8 concurrent streams, aggregate | **121.8 tok/s** | 118.7 tok/s | +3.1 tok/s |
-| 8 concurrent, inter-token | 63.4 ms | 62.2 ms | +1.2 ms |
+|                                 | through the proxy | direct      | delta      |
+| ------------------------------- | ----------------- | ----------- | ---------- |
+| TTFT, run 1                     | **83.2 ms**       | 83.8 ms     | −0.6 ms    |
+| TTFT, run 2                     | **90 ms**         | 93 ms       | −3 ms      |
+| inter-token                     | **27.51 ms**      | 27.46 ms    | +0.05 ms   |
+| 8 concurrent streams, aggregate | **121.8 tok/s**   | 118.7 tok/s | +3.1 tok/s |
+| 8 concurrent, inter-token       | 63.4 ms           | 62.2 ms     | +1.2 ms    |
 
-The proxy comes out marginally *ahead* on two of these, which is not a claim
+The proxy comes out marginally _ahead_ on two of these, which is not a claim
 that a proxy makes inference faster — it is run-to-run noise on a live GPU, and
 that is the point: the overhead is below the noise floor of the thing it sits
 in front of.
@@ -71,14 +72,14 @@ The proxy's own per-request work totals **~0.76 µs**, against ~38 µs of core
 time per request. Roughly 2%; the rest is kernel, socket and HTTP protocol work
 that any process doing this job would pay.
 
-| step | cost |
-|---|---|
-| URL format + `Uri` parse | 156 ns |
+| step                          | cost   |
+| ----------------------------- | ------ |
+| URL format + `Uri` parse      | 156 ns |
 | `BodyPeek` parse (1 KiB body) | 229 ns |
-| prefix hash for affinity | 108 ns |
-| header copy | 97 ns |
-| bearer header build | 92 ns |
-| path allocations | 41 ns |
+| prefix hash for affinity      | 108 ns |
+| header copy                   | 97 ns  |
+| bearer header build           | 92 ns  |
+| path allocations              | 41 ns  |
 
 Authorisation, rate limiting and budget checks are not in that table because
 they are set lookups against a pre-flattened in-memory snapshot — no database
@@ -92,12 +93,12 @@ every frame with no think time. That is the **worst case** for framing
 overhead — a real vLLM emits one SSE event per HTTP frame tens of milliseconds
 apart, so production numbers are better than these.
 
-| | measured |
-|---|---|
-| streaming | **7,921 req/s**, 471 MiB/s |
-| non-streaming, 64 KiB bodies | **67,200 req/s** |
-| frame ceiling (any frame size) | ~650,000 frames/s |
-| raw byte pump | ~3 GB/s |
+|                                | measured                   |
+| ------------------------------ | -------------------------- |
+| streaming                      | **7,921 req/s**, 471 MiB/s |
+| non-streaming, 64 KiB bodies   | **67,200 req/s**           |
+| frame ceiling (any frame size) | ~650,000 frames/s          |
+| raw byte pump                  | ~3 GB/s                    |
 
 ### What one architectural decision was worth
 
@@ -105,11 +106,11 @@ The upstream client used to be a pooled `hyper_util` client, which cost one
 cross-task wakeup per frame. Replacing it with a connection this process owns
 and drives from inside the response body ([src/upstream.rs](../src/upstream.rs)):
 
-| | before | after |
-|---|---|---|
-| streaming | 1,314 req/s | **7,921 req/s** |
-| throughput | 78 MiB/s | **471 MiB/s** |
-| non-streaming | unchanged | unchanged |
+|               | before      | after           |
+| ------------- | ----------- | --------------- |
+| streaming     | 1,314 req/s | **7,921 req/s** |
+| throughput    | 78 MiB/s    | **471 MiB/s**   |
+| non-streaming | unchanged   | unchanged       |
 
 A little over **6x**, and it is why response bodies are never parsed: the win
 came from deleting a wakeup, not from batching. Coalescing already-arrived
@@ -121,11 +122,11 @@ settings — there is never a second frame waiting.
 A dumb bidirectional TCP relay — parsing nothing, framing nothing, the hard
 floor for any proxy — was measured on the same path:
 
-| | throughput |
-|---|---|
-| direct hop, no proxy | 951 MiB/s |
-| dumb TCP relay | 694 MiB/s |
-| **fastllm-proxy** | **524 MiB/s** |
+|                      | throughput    |
+| -------------------- | ------------- |
+| direct hop, no proxy | 951 MiB/s     |
+| dumb TCP relay       | 694 MiB/s     |
+| **fastllm-proxy**    | **524 MiB/s** |
 
 So the entire remaining prize over a proxy that understands nothing is
 **1.32x**, and only if detecting end-of-response were free — it is not, since
@@ -164,9 +165,9 @@ parsed **every** `data:` line in the 8 KiB tail into a full `serde_json::Value`
 — around sixty allocated trees — to find the usage chunk, which sits at the
 very end.
 
-| | before | after |
-|---|---|---|
-| usage present | 22.0 µs | 0.6 µs |
+|                      | before  | after  |
+| -------------------- | ------- | ------ |
+| usage present        | 22.0 µs | 0.6 µs |
 | no usage in the tail | 32.4 µs | 2.8 µs |
 
 Against roughly 38 µs of core time per request, the old figures were most of a
@@ -180,14 +181,14 @@ vectorises, rather than `windows(n)` comparing at every offset.
 Measured on this machine with `bench/micro`, because "no performance impact" is
 a claim and claims here need numbers.
 
-| instrument | cost |
-|---|---|
-| `Instant::now()` | 14 ns |
+| instrument                           | cost  |
+| ------------------------------------ | ----- |
+| `Instant::now()`                     | 14 ns |
 | `Instant::elapsed()` to microseconds | 19 ns |
-| `AtomicU64` increment, uncontended | 2 ns |
-| `Histogram::record_us`, uncontended | 2 ns |
-| `Histogram::record_us`, 2 threads | 29 ns |
-| `Histogram::record_us`, 8 threads | 57 ns |
+| `AtomicU64` increment, uncontended   | 2 ns  |
+| `Histogram::record_us`, uncontended  | 2 ns  |
+| `Histogram::record_us`, 2 threads    | 29 ns |
+| `Histogram::record_us`, 8 threads    | 57 ns |
 
 A request pays one clock read on arrival, one per-model lookup, and on
 completion one elapsed plus two histogram records and a couple of counter
@@ -208,33 +209,33 @@ Semantic routing costs what it measures. Same machine, `--release` — see
 [what the classifier costs](classifier/measurements.md) for the data and the
 method:
 
-| tier | model | p50 per prompt | what it separates |
-|---|---|---|---|
-| 1 | potion-base-8M | 103 µs | subject-matter classes |
-| 1 | **potion-code-16M** | **115 µs** | best on coding (98.7%) |
-| 1 | potion-retrieval-32M | 137 µs | best all-round (90.0%) |
-| 2 | all-MiniLM-L6-v2 | 1.66 ms | modest gain over tier 1 |
-| 2 | **bge-small-en-v1.5** | **3.27 ms** | same-subject/different-intent |
+| tier | model                 | p50 per prompt | what it separates             |
+| ---- | --------------------- | -------------- | ----------------------------- |
+| 1    | potion-base-8M        | 103 µs         | subject-matter classes        |
+| 1    | **potion-code-16M**   | **115 µs**     | best on coding (98.7%)        |
+| 1    | potion-retrieval-32M  | 137 µs         | best all-round (90.0%)        |
+| 2    | all-MiniLM-L6-v2      | 1.66 ms        | modest gain over tier 1       |
+| 2    | **bge-small-en-v1.5** | **3.27 ms**    | same-subject/different-intent |
 
 Tier 1 is a token-vector lookup and a mean — no transformer, no matmul. Cost
-also *plateaus* rather than growing with the prompt, because the encoder stops
+also _plateaus_ rather than growing with the prompt, because the encoder stops
 at its token cap: a 64 KB paste costs exactly what a 4 KB one does.
 
 Measured accuracy, held out over ~21k human-labelled prompts
 (`HuggingFaceH4/no_robots`, `openai/gsm8k`, eleven StackExchange communities):
 
-| class | tier 1 precision | recall |
-|---|---|---|
-| coding | 97.6% | 92.6% |
-| chat | 95.8% | 98.0% |
-| generation | 96.8% | 69.6% |
-| math | 88.0% | 97.6% |
-| devops | 86.8% | 90.5% |
-| finance | 86.2% | 91.6% |
-| legal | 85.9% | 75.0% |
-| security | 84.8% | 82.3% |
-| factual-qa | 83.7% | 50.4% |
-| databases | 82.3% | 91.1% |
+| class      | tier 1 precision | recall |
+| ---------- | ---------------- | ------ |
+| coding     | 97.6%            | 92.6%  |
+| chat       | 95.8%            | 98.0%  |
+| generation | 96.8%            | 69.6%  |
+| math       | 88.0%            | 97.6%  |
+| devops     | 86.8%            | 90.5%  |
+| finance    | 86.2%            | 91.6%  |
+| legal      | 85.9%            | 75.0%  |
+| security   | 84.8%            | 82.3%  |
+| factual-qa | 83.7%            | 50.4%  |
+| databases  | 82.3%            | 91.1%  |
 
 Tier 2 is consulted **only** when a routing rule names a class that needs it.
 If no rule does, the transformer is never loaded and no request can pay for it.
@@ -245,13 +246,13 @@ Two findings worth knowing before configuring classes:
 
 - **Classify by subject, not by verb.** Subject-matter classes (legal, finance,
   security, coding) reach 82-98% precision on tier 1. Task-shaped classes
-  (summarise, rewrite, extract) fail on *both* tiers — under bge-small,
+  (summarise, rewrite, extract) fail on _both_ tiers — under bge-small,
   Summarize scores 46.6% and Extract 35.6%, worse than tier 1. Telling
   "summarise this" from "extract the dates" needs instruction understanding,
   not better embeddings.
 - **Margins are not comparable across models.** bge-small reports higher raw
   cosine similarities than the static model while classifying better, because
-  its space is anisotropic. Confidence floors are calibrated per class *and*
+  its space is anisotropic. Confidence floors are calibrated per class _and_
   per tier.
 
 ### Against LiteLLM
@@ -266,19 +267,19 @@ intrinsic to it is turned off, because a comparison that misconfigures the
 other side proves nothing. Manifests are in [bench/compare/](../bench/compare/).
 
 **With a real GPU in the path**, 7-8 interleaved A/B pairs per concurrency
-level. Ratios are computed *within* each pair, because absolute throughput on a
+level. Ratios are computed _within_ each pair, because absolute throughput on a
 shared GPU drifts between sessions and only the paired comparison cancels it.
 Backend attribution was verified from each vLLM replica's
 `vllm:request_success_total`: both gateways spread across both replicas
 (fastllm-proxy 13/14, LiteLLM 15/11 over one run), so neither was accidentally
 running against half the hardware.
 
-| | fastllm-proxy | LiteLLM | median ratio |
-|---|---|---|---|
-| TTFT p50, 4 streams | **161 ms** (134-277) | 189 ms (160-544) | **1.28x** |
-| TTFT p50, 8 streams | **173 ms** (165-184) | 201 ms (186-469) | **1.14x** |
-| throughput, 4 streams | 74 tok/s | 69 tok/s | 1.09x |
-| throughput, 8 streams | 133 tok/s | 122 tok/s | 1.03x |
+|                       | fastllm-proxy        | LiteLLM          | median ratio |
+| --------------------- | -------------------- | ---------------- | ------------ |
+| TTFT p50, 4 streams   | **161 ms** (134-277) | 189 ms (160-544) | **1.28x**    |
+| TTFT p50, 8 streams   | **173 ms** (165-184) | 201 ms (186-469) | **1.14x**    |
+| throughput, 4 streams | 74 tok/s             | 69 tok/s         | 1.09x        |
+| throughput, 8 streams | 133 tok/s            | 122 tok/s        | 1.03x        |
 
 **Throughput is close to a wash.** At 8 concurrent streams the median advantage
 is 3%, which is inside the run-to-run noise of a shared GPU. At concurrency 1
@@ -296,13 +297,13 @@ by 280 ms are different products even when their medians are close.
 so the gateway is the only thing left to measure:
 
 | concurrency | TTFT p50, fastllm-proxy | TTFT p50, LiteLLM | ratio |
-|---|---|---|---|
-| 1 | **9.7 ms** | 70.4 ms | 7.3x |
-| 8 | **14.3 ms** | 224.8 ms | 15.7x |
-| 32 | **37.4 ms** | 705.5 ms | 18.9x |
+| ----------- | ----------------------- | ----------------- | ----- |
+| 1           | **9.7 ms**              | 70.4 ms           | 7.3x  |
+| 8           | **14.3 ms**             | 224.8 ms          | 15.7x |
+| 32          | **37.4 ms**             | 705.5 ms          | 18.9x |
 
 This is what the gateway itself costs, and it is where the architecture shows:
-the gap *widens* with concurrency rather than narrowing. It also sets the
+the gap _widens_ with concurrency rather than narrowing. It also sets the
 ceiling on what the choice can ever be worth to you — you only get it back when
 the GPU is not the bottleneck, which means many backends, short generations, or
 high concurrency.
@@ -338,14 +339,14 @@ tokens-per-minute limit, so this cost fell on a minority of traffic. It is
 now paid on every request that has a principal, which makes it a per-request
 cost this file owes a number for.
 
-| what | per request | when |
-|---|---|---|
-| `TailBuffer::push`, one SSE frame | **68 ns** | per frame forwarded |
-| `TailBuffer::push`, a 60-frame stream | **661 ns** | whole stream |
-| `extract_usage`, small non-streaming body | **2.55 µs** | once, at end |
-| `extract_usage`, SSE tail (60 frames) | **1.33 µs** | once, at end |
-| `extract_usage`, 22 KB body (tail is a fragment) | **8.40 µs** | once, at end |
-| `extract_usage`, tail carrying no usage | **0.21 µs** | once, at end |
+| what                                             | per request | when                |
+| ------------------------------------------------ | ----------- | ------------------- |
+| `TailBuffer::push`, one SSE frame                | **68 ns**   | per frame forwarded |
+| `TailBuffer::push`, a 60-frame stream            | **661 ns**  | whole stream        |
+| `extract_usage`, small non-streaming body        | **2.55 µs** | once, at end        |
+| `extract_usage`, SSE tail (60 frames)            | **1.33 µs** | once, at end        |
+| `extract_usage`, 22 KB body (tail is a fragment) | **8.40 µs** | once, at end        |
+| `extract_usage`, tail carrying no usage          | **0.21 µs** | once, at end        |
 
 Against a request whose core proxy cost is ~38 µs (`bench/micro`), the
 common cases add roughly 3–7%. The expensive row is the one the tail-buffer

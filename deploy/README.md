@@ -6,13 +6,12 @@ Not on Kubernetes? [`docker-compose.split.yml`](docker-compose.split.yml) in thi
 two-plane split on a single host, and [docs/operations.md](../docs/operations.md#choosing-a-shape)
 walks through all five shapes from a bare binary up to this one.
 
-| | |
-|---|---|
-| Namespace | `fastllm` |
-| Image | `192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main` (zot, anonymous pull) |
-| VIP | `192.168.10.126` via kube-vip — proxy traffic only, see below |
-| Backends | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
-
+|           |                                                                                                             |
+| --------- | ----------------------------------------------------------------------------------------------------------- |
+| Namespace | `fastllm`                                                                                                   |
+| Image     | `192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main` (zot, anonymous pull)                               |
+| VIP       | `192.168.10.126` via kube-vip — proxy traffic only, see below                                               |
+| Backends  | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
 > **These are one cluster's manifests, not a template.** They carry concrete
 > values for the cluster they run on — a private registry at `192.168.10.123`,
@@ -25,12 +24,12 @@ walks through all five shapes from a bare binary up to this one.
 > which takes all of the above as values. If you would rather adapt these
 > directly, the cluster-specific values are:
 >
-> | where | what to change |
-> |---|---|
-> | `control.yaml`, `deployment.yaml` | `image:` — registry host and pinned digest |
-> | `service.yaml`, `control.yaml` | `kube-vip.io/loadbalancerIPs` — or drop the annotation and let your LB assign |
-> | `control.yaml` | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN |
-> | `control.yaml` | the CNPG `Cluster` — or point `FASTLLM_DATABASE_URL` at your own Postgres |
+> | where                             | what to change                                                                |
+> | --------------------------------- | ----------------------------------------------------------------------------- |
+> | `control.yaml`, `deployment.yaml` | `image:` — registry host and pinned digest                                    |
+> | `service.yaml`, `control.yaml`    | `kube-vip.io/loadbalancerIPs` — or drop the annotation and let your LB assign |
+> | `control.yaml`                    | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                     |
+> | `control.yaml`                    | the CNPG `Cluster` — or point `FASTLLM_DATABASE_URL` at your own Postgres     |
 
 ## The gateway's two addresses
 
@@ -54,7 +53,6 @@ Two Service objects rather than one with a comma-separated
 only the first address of such a list. It was tried, and it silently assigned
 one address while the annotation claimed two.
 
-
 ## Split deployment
 
 Two Deployments, one Postgres, since Task 12:
@@ -64,7 +62,7 @@ Two Deployments, one Postgres, since Task 12:
 
 ### TLS on `/snapshot` and `/usage`
 
-`/snapshot` carries `model_backends.upstream_api_key` in usable plaintext form — encrypted at rest in Postgres, but the proxy has to present it to the backend, so the *transport* has to be trusted wherever a backend has a real credential. This cluster's do, so `fastllm-control` terminates TLS on its admin listener (both `/admin/*` and `/snapshot`/`/usage` share the one listener — there is no way to TLS one route and not the others on the same port).
+`/snapshot` carries `model_backends.upstream_api_key` in usable plaintext form — encrypted at rest in Postgres, but the proxy has to present it to the backend, so the _transport_ has to be trusted wherever a backend has a real credential. This cluster's do, so `fastllm-control` terminates TLS on its admin listener (both `/admin/*` and `/snapshot`/`/usage` share the one listener — there is no way to TLS one route and not the others on the same port).
 
 The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `novamail` and others use) via the `fastllm-control-tls` `Certificate` in `control.yaml`. cert-manager writes `tls.crt`/`tls.key` (mounted into `fastllm-control` at `/etc/fastllm/tls`, passed to `--tls-cert`/`--tls-key`) and `ca.crt` (mounted into `fastllm-proxy` at `/etc/fastllm/ca`, passed to `--ca-bundle`) into that one Secret — `cluster-ca` is a private CA no public root store trusts, so without `--ca-bundle` the proxy's TLS handshake to `fastllm-control` fails closed. `FASTLLM_CONTROL_URL` in `deployment.yaml` points at `https://fastllm-control.fastllm.svc:4001/snapshot` accordingly.
 
@@ -74,7 +72,7 @@ If `--tls-cert`/`--tls-key` are ever both removed (a dev cluster with no real ba
 
 `fastllm-control`'s `/admin/*` requires a session cookie (`POST /login`, checked against `principals.password_hash` with Argon2id — see README.md's "Admin authentication" section and `src/control/auth.rs`). `/snapshot` and `/usage` are unchanged: they check `--proxy-token`, a separate shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not a human login.
 
-**A password is no longer the same thing as being an admin.** A valid session only proves *who* is calling; each route additionally requires a permission (`usage:read`, `key:create`, `key:revoke`, or `config:write` — see README.md's table) that the principal must hold through a granted role. Giving a service account a password so it can view the UI (`PUT /admin/principals/{id}/password`) no longer silently hands it full administrative reach — it can log in, but every route still 403s until a role granting the permission it needs is granted with `POST /admin/principals/{id}/roles`. The `admin` role (granted automatically to the very first login by `set-password`, see below) is still the one that can do everything.
+**A password is no longer the same thing as being an admin.** A valid session only proves _who_ is calling; each route additionally requires a permission (`usage:read`, `key:create`, `key:revoke`, or `config:write` — see README.md's table) that the principal must hold through a granted role. Giving a service account a password so it can view the UI (`PUT /admin/principals/{id}/password`) no longer silently hands it full administrative reach — it can log in, but every route still 403s until a role granting the permission it needs is granted with `POST /admin/principals/{id}/roles`. The `admin` role (granted automatically to the very first login by `set-password`, see below) is still the one that can do everything.
 
 **A session cookie is necessary, not sufficient.** It stops an anonymous request; it does not make brute-forcing a weak password, a leaked cookie, or a compromised pod on the same segment a non-issue. Treat the login the way you would any internal admin tool's login.
 
@@ -86,7 +84,7 @@ The exposure rests on three things, and if any stops being true this goes back t
 2. `/admin/*` and the UI require a session cookie, Argon2id-checked;
 3. `/snapshot` requires `--proxy-token` — which is now the credential whose leak costs the most, since it returns **decrypted upstream credentials**. Rotate `fastllm-proxy-token` if you suspect it, and restart both Deployments.
 
-**It still must never be merged into `fastllm-proxy`'s `LoadBalancer` Service.** Those are the *gateway's* addresses, held by callers with data-plane API keys and no business reaching the admin plane; one Service carrying both would put the admin port behind whatever gets opened up for the gateway next. Separate Services, separate addresses.
+**It still must never be merged into `fastllm-proxy`'s `LoadBalancer` Service.** Those are the _gateway's_ addresses, held by callers with data-plane API keys and no business reaching the admin plane; one Service carrying both would put the admin port behind whatever gets opened up for the gateway next. Separate Services, separate addresses.
 
 The certificate carries `192.168.10.129` as an IP SAN, so clients given the cluster CA verify it fully by address:
 
@@ -107,7 +105,7 @@ kubectl -n fastllm exec deploy/fastllm-control -- \
   --database-url "$FASTLLM_DATABASE_URL"
 ```
 
-(`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role unless it already holds one granting `config:write`. The condition is the *permission*, not "has any role": the seeded `bootstrap` principal already holds `inference` so keys minted against it can invoke models, and an earlier "has no role at all" check silently skipped the grant for it — producing an account that logged in and then got 403 everywhere, including from the routes needed to repair it. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
+(`FASTLLM_DATABASE_URL` is already set in `fastllm-control`'s own environment — `kubectl exec` inherits it.) This creates the `admin` principal if it does not exist (as `kind = 'user'`), sets its password, and grants it the `admin` role unless it already holds one granting `config:write`. The condition is the _permission_, not "has any role": the seeded `bootstrap` principal already holds `inference` so keys minted against it can invoke models, and an earlier "has no role at all" check silently skipped the grant for it — producing an account that logged in and then got 403 everywhere, including from the routes needed to repair it. Save the password somewhere real (a password manager, not this terminal's scrollback) — `set-password` never prints it back. Safe to run again later to reset it.
 
 ## Managed by the operator
 
@@ -186,7 +184,7 @@ principals=7 rules=2 vmodels=1` on both sides of the cutover.
 Two things worth knowing before doing this again:
 
 - **Pre-label the running pods** with the operator's selector labels
-  (`app.kubernetes.io/name`, `instance`, `component`) *before* applying the
+  (`app.kubernetes.io/name`, `instance`, `component`) _before_ applying the
   resource. The Service selector flips to those labels the moment the
   operator reconciles, and without them the VIP has no endpoints until the
   new pods pass readiness.
@@ -364,10 +362,10 @@ E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin
 Both classifier models ship in the image, and the process that loads them needs
 room for them:
 
-| | without classes | fast tier | both tiers |
-|---|---|---|---|
-| proxy | 85 Mi | ~150 Mi | 268 Mi |
-| control plane | ~90 Mi | 272 Mi | 275 Mi |
+|               | without classes | fast tier | both tiers |
+| ------------- | --------------- | --------- | ---------- |
+| proxy         | 85 Mi           | ~150 Mi   | 268 Mi     |
+| control plane | ~90 Mi          | 272 Mi    | 275 Mi     |
 
 Measured on this cluster. The manifests request 384 Mi and limit 1 Gi for the
 control plane, 128 Mi / 1 Gi for a proxy. A limit below ~350 Mi will OOM-kill

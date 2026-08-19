@@ -66,7 +66,9 @@ def fetch_rows(dataset, config, split, limit, start=0):
                 if attempt == 7:
                     print(f"\n  giving up at offset {offset}: {e}", file=sys.stderr)
                     return out
-                print(f"\n  {e.code} at offset {offset}, waiting {wait}s", file=sys.stderr)
+                print(
+                    f"\n  {e.code} at offset {offset}, waiting {wait}s", file=sys.stderr
+                )
                 time.sleep(wait)
             except Exception as e:  # noqa: BLE001 - a retry loop wants them all
                 if attempt == 7:
@@ -170,7 +172,9 @@ def main():
     if len(existing) < target:
         rows = fetch_rows("openai/gsm8k", "main", "train", target, start=len(existing))
         existing.extend(
-            {"prompt": r["question"], "category": "Math"} for r in rows if r.get("question")
+            {"prompt": r["question"], "category": "Math"}
+            for r in rows
+            if r.get("question")
         )
         write("gsm8k.json", existing)
     else:

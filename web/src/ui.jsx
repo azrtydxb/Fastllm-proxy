@@ -19,7 +19,15 @@ import React, { useEffect, useRef } from "react";
 
 // --- layout -----------------------------------------------------------------
 
-export function Card({ title, subtitle, right, children, tone, style, ...rest }) {
+export function Card({
+  title,
+  subtitle,
+  right,
+  children,
+  tone,
+  style,
+  ...rest
+}) {
   const border =
     tone === "warn"
       ? "var(--warn-line)"
@@ -52,14 +60,27 @@ export function Card({ title, subtitle, right, children, tone, style, ...rest })
         >
           <div style={{ minWidth: 0 }}>
             {title && (
-              <div style={{ font: "600 13px var(--sans)", letterSpacing: "-.01em" }}>{title}</div>
+              <div
+                style={{
+                  font: "600 13px var(--sans)",
+                  letterSpacing: "-.01em",
+                }}
+              >
+                {title}
+              </div>
             )}
           </div>
           {right}
         </header>
       )}
       {subtitle && (
-        <div style={{ font: "400 11px/1.5 var(--sans)", color: "var(--fg-4)", marginBottom: 14 }}>
+        <div
+          style={{
+            font: "400 11px/1.5 var(--sans)",
+            color: "var(--fg-4)",
+            marginBottom: 14,
+          }}
+        >
           {subtitle}
         </div>
       )}
@@ -73,7 +94,8 @@ export function Grid({ cols, gap = 14, children, style }) {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: typeof cols === "number" ? `repeat(${cols},minmax(0,1fr))` : cols,
+        gridTemplateColumns:
+          typeof cols === "number" ? `repeat(${cols},minmax(0,1fr))` : cols,
         gap,
         alignItems: "start",
         ...style,
@@ -85,12 +107,24 @@ export function Grid({ cols, gap = 14, children, style }) {
 }
 
 export function Stack({ gap = 16, children, style }) {
-  return <div style={{ display: "flex", flexDirection: "column", gap, ...style }}>{children}</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap, ...style }}>
+      {children}
+    </div>
+  );
 }
 
 export function Row({ gap = 10, align = "center", children, style }) {
   return (
-    <div style={{ display: "flex", alignItems: align, gap, flexWrap: "wrap", ...style }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: align,
+        gap,
+        flexWrap: "wrap",
+        ...style,
+      }}
+    >
       {children}
     </div>
   );
@@ -211,14 +245,22 @@ export function Label({ children, style }) {
 
 export function Muted({ children, style }) {
   return (
-    <span style={{ font: "400 11px/1.6 var(--sans)", color: "var(--fg-4)", ...style }}>
+    <span
+      style={{
+        font: "400 11px/1.6 var(--sans)",
+        color: "var(--fg-4)",
+        ...style,
+      }}
+    >
       {children}
     </span>
   );
 }
 
 export function Mono({ children, style }) {
-  return <span style={{ fontFamily: "var(--mono)", ...style }}>{children}</span>;
+  return (
+    <span style={{ fontFamily: "var(--mono)", ...style }}>{children}</span>
+  );
 }
 
 export function Button({ variant = "ghost", children, style, ...rest }) {
@@ -240,7 +282,11 @@ export function Button({ variant = "ghost", children, style, ...rest }) {
     secondary: { border: "1px solid #39404b", color: "var(--fg)" },
     ghost: {},
     danger: { border: "1px solid var(--bad-line)", color: "var(--bad-fg)" },
-    small: { padding: "3px 9px", font: "400 11px var(--sans)", color: "var(--fg-3)" },
+    small: {
+      padding: "3px 9px",
+      font: "400 11px var(--sans)",
+      color: "var(--fg-3)",
+    },
     smallDanger: {
       padding: "3px 9px",
       font: "400 11px var(--sans)",
@@ -256,7 +302,10 @@ export function Button({ variant = "ghost", children, style, ...rest }) {
     ? { opacity: 0.45, cursor: "not-allowed" }
     : { cursor: "pointer" };
   return (
-    <button style={{ ...base, ...(variants[variant] || {}), ...state, ...style }} {...rest}>
+    <button
+      style={{ ...base, ...(variants[variant] || {}), ...state, ...style }}
+      {...rest}
+    >
       {children}
     </button>
   );
@@ -282,11 +331,23 @@ export function Chip({ active, children, ...rest }) {
 
 export function Field({ label, hint, children, style }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, ...style }}>
+    <label
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        minWidth: 0,
+        ...style,
+      }}
+    >
       <Label>{label}</Label>
       {children}
       {hint && (
-        <span style={{ font: "400 10px/1.5 var(--sans)", color: "var(--fg-5)" }}>{hint}</span>
+        <span
+          style={{ font: "400 10px/1.5 var(--sans)", color: "var(--fg-5)" }}
+        >
+          {hint}
+        </span>
       )}
     </label>
   );
@@ -399,7 +460,9 @@ export function Unmeasured({ title, why, how }) {
         gap: 6,
       }}
     >
-      <div style={{ font: "500 12px var(--sans)", color: "var(--fg-3)" }}>{title}</div>
+      <div style={{ font: "500 12px var(--sans)", color: "var(--fg-3)" }}>
+        {title}
+      </div>
       <Muted>{why}</Muted>
       {how && (
         <div
@@ -423,7 +486,13 @@ export function Unmeasured({ title, why, how }) {
 
 export function Empty({ children }) {
   return (
-    <div style={{ padding: "18px 0", font: "400 12px var(--sans)", color: "var(--fg-5)" }}>
+    <div
+      style={{
+        padding: "18px 0",
+        font: "400 12px var(--sans)",
+        color: "var(--fg-5)",
+      }}
+    >
       {children}
     </div>
   );
@@ -453,7 +522,8 @@ export function ErrorNote({ children, onDismiss }) {
         display: "flex",
         alignItems: "center",
         gap: 12,
-        background: "linear-gradient(90deg,rgba(229,72,77,.10),rgba(229,72,77,0))",
+        background:
+          "linear-gradient(90deg,rgba(229,72,77,.10),rgba(229,72,77,0))",
         border: "1px solid var(--bad-line)",
         borderLeft: "3px solid var(--bad)",
         borderRadius: 10,
@@ -569,7 +639,13 @@ export function Spark({ values, tone = "accent", height = 38, fill = true }) {
       style={{ width: "100%", height, display: "block" }}
       aria-hidden="true"
     >
-      {fill && <polyline points={`0,${h} ${pts} ${w},${h}`} fill={rgba} stroke="none" />}
+      {fill && (
+        <polyline
+          points={`0,${h} ${pts} ${w},${h}`}
+          fill={rgba}
+          stroke="none"
+        />
+      )}
       <polyline
         points={pts}
         fill="none"
@@ -583,7 +659,11 @@ export function Spark({ values, tone = "accent", height = 38, fill = true }) {
 
 export function Donut({ pct, label, sub, tone = "accent" }) {
   const color =
-    tone === "ok" ? "var(--ok)" : tone === "warn" ? "var(--warn)" : "var(--accent)";
+    tone === "ok"
+      ? "var(--ok)"
+      : tone === "warn"
+        ? "var(--warn)"
+        : "var(--accent)";
   const turn = Math.max(0, Math.min(1, pct / 100));
   return (
     <div
@@ -611,7 +691,13 @@ export function Donut({ pct, label, sub, tone = "accent" }) {
         }}
       >
         <span style={{ font: "500 20px/1 var(--mono)" }}>{label}</span>
-        <span style={{ font: "400 9px/1 var(--sans)", color: "var(--fg-4)", marginTop: 3 }}>
+        <span
+          style={{
+            font: "400 9px/1 var(--sans)",
+            color: "var(--fg-4)",
+            marginTop: 3,
+          }}
+        >
           {sub}
         </span>
       </div>
@@ -735,7 +821,11 @@ export function fmtSnapshot(version) {
   // from some other scheme and is shown as-is rather than mangled into 1970.
   if (n < 1e14) return `v${n}`;
   const d = new Date(n / 1000);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 /** How far behind one snapshot is from another, in plain words. */
@@ -762,7 +852,10 @@ export function fmtWhen(iso) {
 
 export function fmtTime(iso) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** The host part of an api_base, which is what identifies a backend on sight. */

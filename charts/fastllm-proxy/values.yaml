@@ -10,7 +10,7 @@ image:
   # is how a control plane silently downgraded itself into a crash loop here:
   # sqlx refuses to run against a schema newer than the binary, correctly, and
   # the failure arrives at startup rather than at deploy time.
-  tag: ""              # defaults to .Chart.AppVersion
+  tag: "" # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -21,7 +21,7 @@ control:
   enabled: true
   replicas: 1
   service:
-    type: ClusterIP    # LoadBalancer exposes the admin UI — read the note below
+    type: ClusterIP # LoadBalancer exposes the admin UI — read the note below
     port: 4001
     annotations: {}
   # The admin listener also serves /snapshot, which returns *decrypted*
@@ -30,10 +30,10 @@ control:
   # docs/operations.md before changing `type`.
   tls:
     enabled: false
-    secretName: ""     # must contain tls.crt and tls.key
+    secretName: "" # must contain tls.crt and tls.key
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {memory: 512Mi}
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
 
 # The data plane. Scale this; it is the part that serves traffic.
 proxy:
@@ -53,17 +53,17 @@ proxy:
   # generation — a long completion is not a hung request.
   upstreamTimeout: 120
   shutdownGrace: 25
-  caBundle: ""         # secret name holding ca.crt, when control.tls is on
+  caBundle: "" # secret name holding ca.crt, when control.tls is on
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {cpu: "2", memory: 1Gi}
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "2", memory: 1Gi }
 
 database:
   # Point at your own Postgres. The chart does not run one: a database is a
   # stateful service with backup and upgrade concerns that belong to whoever
   # operates it, not to an application chart.
-  url: ""                    # postgres://user:pass@host:5432/db
-  existingSecret: ""         # or a Secret with the key below
+  url: "" # postgres://user:pass@host:5432/db
+  existingSecret: "" # or a Secret with the key below
   existingSecretKey: uri
   maxConnections: 8
 

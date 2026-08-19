@@ -57,7 +57,8 @@ export function Agents({ onUnauthorised, go }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const servers = data.data || [];
 
@@ -96,7 +97,12 @@ export function Agents({ onUnauthorised, go }) {
   };
 
   const remove = async (s) => {
-    if (!window.confirm(`Delete agent ${s.name}? It stops being reachable through this gateway.`)) return;
+    if (
+      !window.confirm(
+        `Delete agent ${s.name}? It stops being reachable through this gateway.`,
+      )
+    )
+      return;
     const ok = await attempt(
       () => api.del(`/admin/a2a-agents/${s.id}`),
       setError,
@@ -123,9 +129,8 @@ export function Agents({ onUnauthorised, go }) {
           <Card>
             {servers.length === 0 ? (
               <Empty>
-                No agents. Add one and any key granted{" "}
-                <Mono>agent:invoke</Mono> can reach it at{" "}
-                <Mono>/v1/agents/&lt;name&gt;</Mono>.
+                No agents. Add one and any key granted <Mono>agent:invoke</Mono>{" "}
+                can reach it at <Mono>/v1/agents/&lt;name&gt;</Mono>.
               </Empty>
             ) : (
               <Table cols={COLS}>
@@ -137,17 +142,25 @@ export function Agents({ onUnauthorised, go }) {
                       <Mono key="n" style={{ font: "500 12px var(--mono)" }}>
                         {s.name}
                       </Mono>,
-                      <Mono key="u" style={{ color: "var(--fg-3)", fontSize: 11 }}>
+                      <Mono
+                        key="u"
+                        style={{ color: "var(--fg-3)", fontSize: 11 }}
+                      >
                         {s.url}
                       </Mono>,
-                      <Pill key="t" tone={s.protocol_version === "1.0" ? "violet" : "ok"}>
+                      <Pill
+                        key="t"
+                        tone={s.protocol_version === "1.0" ? "violet" : "ok"}
+                      >
                         {s.protocol_version}
                       </Pill>,
                       <span key="c" style={{ color: "var(--fg-3)" }}>
                         {s.credential_set ? (
                           <>
                             credential set{" "}
-                            <Mono style={{ fontSize: 11, color: "var(--fg-4)" }}>
+                            <Mono
+                              style={{ fontSize: 11, color: "var(--fg-4)" }}
+                            >
                               {s.auth_header}
                               {s.auth_scheme ? ` ${s.auth_scheme} …` : " …"}
                             </Mono>
@@ -159,7 +172,11 @@ export function Agents({ onUnauthorised, go }) {
                       <Pill key="e" tone={s.enabled ? "ok" : "warn"}>
                         {s.enabled ? "enabled" : "disabled"}
                       </Pill>,
-                      <Row key="a" gap={6} style={{ justifyContent: "flex-end" }}>
+                      <Row
+                        key="a"
+                        gap={6}
+                        style={{ justifyContent: "flex-end" }}
+                      >
                         <Button variant="small" onClick={() => toggle(s)}>
                           {s.enabled ? "disable" : "enable"}
                         </Button>
@@ -178,8 +195,8 @@ export function Agents({ onUnauthorised, go }) {
             <Card title="Who can reach these" tone="warn">
               <Muted>
                 An agent existing is not a key being able to run it. Access is{" "}
-                <Mono>agent:invoke</Mono> on <Mono>agent/&lt;name&gt;</Mono>, granted
-                on{" "}
+                <Mono>agent:invoke</Mono> on <Mono>agent/&lt;name&gt;</Mono>,
+                granted on{" "}
                 <Button variant="small" onClick={() => go && go("rbac")}>
                   Principals &amp; roles
                 </Button>
@@ -195,18 +212,25 @@ export function Agents({ onUnauthorised, go }) {
           <Card title="Add an agent">
             <form onSubmit={create}>
               <Stack gap={10}>
-                <Field label="NAME" hint="how clients address it: /v1/agents/&lt;name&gt;">
+                <Field
+                  label="NAME"
+                  hint="how clients address it: /v1/agents/&lt;name&gt;"
+                >
                   <input
                     placeholder="planner"
                     value={draft.name}
-                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, name: e.target.value })
+                    }
                   />
                 </Field>
                 <Field label="URL">
                   <input
                     placeholder="https://agent.example.com/a2a"
                     value={draft.url}
-                    onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, url: e.target.value })
+                    }
                   />
                 </Field>
                 <Field
@@ -215,7 +239,9 @@ export function Agents({ onUnauthorised, go }) {
                 >
                   <select
                     value={draft.protocol_version}
-                    onChange={(e) => setDraft({ ...draft, protocol_version: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, protocol_version: e.target.value })
+                    }
                   >
                     <option value="0.3">0.3 · kind-discriminated</option>
                     <option value="1.0">1.0 · protobuf JSON</option>
@@ -224,7 +250,9 @@ export function Agents({ onUnauthorised, go }) {
                 <Field label="DESCRIPTION">
                   <input
                     value={draft.description}
-                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, description: e.target.value })
+                    }
                   />
                 </Field>
                 <Field
@@ -235,20 +263,26 @@ export function Agents({ onUnauthorised, go }) {
                     type="password"
                     placeholder="optional"
                     value={draft.upstream_api_key}
-                    onChange={(e) => setDraft({ ...draft, upstream_api_key: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, upstream_api_key: e.target.value })
+                    }
                   />
                 </Field>
                 <Grid cols="1fr 1fr" gap={10}>
                   <Field label="AUTH HEADER">
                     <input
                       value={draft.auth_header}
-                      onChange={(e) => setDraft({ ...draft, auth_header: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, auth_header: e.target.value })
+                      }
                     />
                   </Field>
                   <Field label="SCHEME" hint="empty sends the key raw">
                     <input
                       value={draft.auth_scheme}
-                      onChange={(e) => setDraft({ ...draft, auth_scheme: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, auth_scheme: e.target.value })
+                      }
                     />
                   </Field>
                 </Grid>
@@ -265,7 +299,9 @@ export function Agents({ onUnauthorised, go }) {
                 One address, one key. The card comes back rewritten to point
                 here, so the call it names is still authorised:
               </Muted>
-              <Mono style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6 }}>
+              <Mono
+                style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6 }}
+              >
                 GET /v1/agents
                 <br />
                 GET /v1/agents/&lt;name&gt;/.well-known/agent-card.json
@@ -273,9 +309,9 @@ export function Agents({ onUnauthorised, go }) {
                 POST /v1/agents/&lt;name&gt;
               </Mono>
               <Muted>
-                Only the JSON-RPC methods this gateway forwards are accepted.
-                An unknown one is refused rather than passed through blind, on
-                a credential the caller never sees.
+                Only the JSON-RPC methods this gateway forwards are accepted. An
+                unknown one is refused rather than passed through blind, on a
+                credential the caller never sees.
               </Muted>
             </Stack>
           </Card>

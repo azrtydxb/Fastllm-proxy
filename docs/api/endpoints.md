@@ -3,18 +3,18 @@
 What the gateway serves on `:4000`, what it deliberately does not, and
 the headers and retry behaviour that come with each.
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /v1/chat/completions` | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations` |
-| `GET /v1/models` | Aggregated across every pool, **filtered to what the calling key may invoke**. A virtual model is listed when the caller can invoke any model it routes to. Clients build model pickers from this, and offering names that 403 on selection is a defect the authorisation being correct does not excuse |
-| `GET /health` | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface |
-| `GET /metrics` | Prometheus text, including `fastllm_snapshot_version`. No auth required |
-| `/admin/*` | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it |
-| `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires |
-| `/`, `/ui/*` (management UI) | `--role all`/`control` only. The embedded SPA — see "Management UI" below |
-| `GET /snapshot` | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token` |
-| `POST /usage` | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot` |
-| `POST /limits/reconcile` | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token` |
+| Endpoint                       | Purpose                                                                                                                                                                                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/chat/completions`    | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations`                                                                                   |
+| `GET /v1/models`               | Aggregated across every pool, **filtered to what the calling key may invoke**. A virtual model is listed when the caller can invoke any model it routes to. Clients build model pickers from this, and offering names that 403 on selection is a defect the authorisation being correct does not excuse |
+| `GET /health`                  | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface                                                                        |
+| `GET /metrics`                 | Prometheus text, including `fastllm_snapshot_version`. No auth required                                                                                                                                                                                                                                 |
+| `/admin/*`                     | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it                                                                                                                                              |
+| `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires                                                                                                                                                                    |
+| `/`, `/ui/*` (management UI)   | `--role all`/`control` only. The embedded SPA — see "Management UI" below                                                                                                                                                                                                                               |
+| `GET /snapshot`                | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token`                                                                                                                                                                                                         |
+| `POST /usage`                  | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot`                                                                                                                                    |
+| `POST /limits/reconcile`       | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token`                                                                                                                                                                |
 
 ## Endpoints, and what is not one
 
@@ -31,7 +31,7 @@ instead of being handed a body it cannot read.
 **What is deliberately absent, and why it is not a line of config.** The
 stateful job APIs — `/batches`, `/files`, `/fine_tuning` — are not endpoints so
 much as small databases. Creating a job is a `POST` with a `model` in it, which
-would work; *retrieving* one is a `GET /v1/batches/{id}` with no model and no
+would work; _retrieving_ one is a `GET /v1/batches/{id}` with no model and no
 body, so there is nothing to route on. Serving them means remembering which
 backend owns which job id, which is durable state on the request path — the one
 thing this proxy is built not to have. They need a design, not a suffix.
@@ -57,7 +57,7 @@ computed once a model is known to have caching on.
 **Non-streaming 2xx responses only.** Caching a stream would mean buffering the
 whole response before any of it reached the client, turning the one path this
 proxy exists to keep incremental into a batch operation. Errors are never
-cached: a 429 is a statement about *now*, and serving it from cache would keep
+cached: a 429 is a statement about _now_, and serving it from cache would keep
 a provider's bad minute alive long after it ended. The natural fit is
 embeddings and short completions, which are the requests that repeat.
 

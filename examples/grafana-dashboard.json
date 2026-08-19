@@ -10,10 +10,7 @@
   ],
   "title": "fastllm-proxy",
   "description": "Gateway health from /metrics. Per-caller detail is deliberately absent \u2014 that cardinality is how a metrics endpoint becomes an outage \u2014 and lives in usage_events instead.",
-  "tags": [
-    "fastllm-proxy",
-    "llm"
-  ],
+  "tags": ["fastllm-proxy", "llm"],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,

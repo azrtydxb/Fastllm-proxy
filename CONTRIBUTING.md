@@ -45,7 +45,7 @@ doc claiming credentials were encrypted before they were, a manifest comment
 claiming the admin API was token-gated when it was gated on nothing. Every one
 was found by review, not by the author.
 
-## Comments explain *why*
+## Comments explain _why_
 
 The code already says what it does. The reasoning is the part that cannot be
 recovered from a later reading, so that is what a comment is for — especially

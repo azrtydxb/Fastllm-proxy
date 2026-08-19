@@ -21,14 +21,14 @@ rather than by us.
 
 ## Why two tiers
 
-| model | p50 per prompt | separates |
-|---|---|---|
-| potion-base-2M | 8.4 µs | weakest of the static set |
-| potion-base-8M | 103 µs | general subject matter |
-| **potion-code-16M** | **115 µs** | best on coding (98.7%) |
-| potion-retrieval-32M | 137 µs | best all-round on synthetic data |
-| all-MiniLM-L6-v2 | 1.66 ms | modest gain over the static tier |
-| **bge-small-en-v1.5** | **3.27 ms** | same-subject / different-intent |
+| model                 | p50 per prompt | separates                        |
+| --------------------- | -------------- | -------------------------------- |
+| potion-base-2M        | 8.4 µs         | weakest of the static set        |
+| potion-base-8M        | 103 µs         | general subject matter           |
+| **potion-code-16M**   | **115 µs**     | best on coding (98.7%)           |
+| potion-retrieval-32M  | 137 µs         | best all-round on synthetic data |
+| all-MiniLM-L6-v2      | 1.66 ms        | modest gain over the static tier |
+| **bge-small-en-v1.5** | **3.27 ms**    | same-subject / different-intent  |
 
 Those are laptop numbers — a 10-core arm64 macOS host, the conditions stated at
 the top of [performance.md](../performance.md). **In the deployed container the
@@ -38,18 +38,18 @@ See "What escalation actually costs in production" below; the fast tier's ~115 �
 holds, since it is a memory lookup rather than a matmul.
 
 Tier 1 is a token-vector lookup and a mean — no transformer, no matmul. Cost
-also *plateaus* rather than growing with the prompt, because the encoder stops
+also _plateaus_ rather than growing with the prompt, because the encoder stops
 at its token cap: a 64 KB paste costs what a 4 KB one does.
 
 Measured token-cap sweep, `potion-code-16M`:
 
-| max_length | p50 | accuracy |
-|---|---|---|
-| 32 | 32 µs | 76.7% |
-| 128 | 115 µs | 80.0% |
-| 512 | 460 µs | 80.0% |
+| max_length | p50    | accuracy |
+| ---------- | ------ | -------- |
+| 32         | 32 µs  | 76.7%    |
+| 128        | 115 µs | 80.0%    |
+| 512        | 460 µs | 80.0%    |
 
-128 is the chosen default: on *real* prompts it beat 32 for coding (98.7% vs
+128 is the chosen default: on _real_ prompts it beat 32 for coding (98.7% vs
 98.2%), because a coding question's giveaway is often the pasted code below the
 first line rather than the first line itself.
 
@@ -57,20 +57,20 @@ first line rather than the first line itself.
 
 Held out over real labelled prompts at a 0.05 margin floor:
 
-| class | precision | recall |
-|---|---|---|
-| coding | 97.6% | 92.6% |
-| chat | 95.8% | 98.0% |
-| generation (creative, long-form) | 96.8% | 69.6% |
-| math | 88.0% | 97.6% |
-| devops | 86.8% | 90.5% |
-| finance | 86.2% | 91.6% |
-| legal | 85.9% | 75.0% |
-| security | 84.8% | 82.3% |
-| factual-qa | 83.7% | 50.4% |
-| databases | 82.3% | 91.1% |
-| ux-design | 75.6% | 79.8% |
-| statistics | 74.0% | 66.5% |
+| class                            | precision | recall |
+| -------------------------------- | --------- | ------ |
+| coding                           | 97.6%     | 92.6%  |
+| chat                             | 95.8%     | 98.0%  |
+| generation (creative, long-form) | 96.8%     | 69.6%  |
+| math                             | 88.0%     | 97.6%  |
+| devops                           | 86.8%     | 90.5%  |
+| finance                          | 86.2%     | 91.6%  |
+| legal                            | 85.9%     | 75.0%  |
+| security                         | 84.8%     | 82.3%  |
+| factual-qa                       | 83.7%     | 50.4%  |
+| databases                        | 82.3%     | 91.1%  |
+| ux-design                        | 75.6%     | 79.8%  |
+| statistics                       | 74.0%     | 66.5%  |
 
 Twelve viable classes on the 115 µs tier. Escalated to tier 2, writing-craft
 goes 78.8% → 93.5%, statistics 74.0% → 85.3%, legal 85.9% → 93.2% — tier 2
@@ -87,24 +87,24 @@ it compares against are built from bare example prompts an operator typed. Two
 different text distributions, and nearest-centroid classification cannot notice.
 Measured over 4,750 held-out prompts:
 
-| query shape | accuracy | coding precision | coding recall | mean margin |
-|---|---|---|---|---|
-| bare prompt | 98.6% | 71.7% | 91.3% | 0.198 |
-| minimal JSON body | 98.6% | 72.3% | 92.0% | 0.173 |
-| body with a system prompt | 97.8% | 97.8% | **30.0%** | 0.220 |
-| turn 4 of a conversation | 96.8% | **0.0%** | **0.0%** | 0.225 |
-| **any of the above, after the fix** | **98.6%** | **71.7%** | **91.3%** | **0.198** |
+| query shape                         | accuracy  | coding precision | coding recall | mean margin |
+| ----------------------------------- | --------- | ---------------- | ------------- | ----------- |
+| bare prompt                         | 98.6%     | 71.7%            | 91.3%         | 0.198       |
+| minimal JSON body                   | 98.6%     | 72.3%            | 92.0%         | 0.173       |
+| body with a system prompt           | 97.8%     | 97.8%            | **30.0%**     | 0.220       |
+| turn 4 of a conversation            | 96.8%     | **0.0%**         | **0.0%**      | 0.225       |
+| **any of the above, after the fix** | **98.6%** | **71.7%**        | **91.3%**     | **0.198**   |
 
 Three things in that table are worth sitting with:
 
 - **The JSON wrapping was harmless.** A minimal body scores the same as bare
-  text. The damage comes from what fills the window *before* the user's words.
+  text. The damage comes from what fills the window _before_ the user's words.
 - **A system prompt cost two thirds of recall**, and by the fourth turn the
   class was undetectable — the question being asked sits at the end of the body,
   where a 128-token window never reaches.
 - **Accuracy never moved below 96.8%**, because coding is a small share of
   traffic. That is exactly the base-rate trap described further down this page,
-  hiding a total failure. And the mean margin *rose* as accuracy collapsed, so
+  hiding a total failure. And the mean margin _rose_ as accuracy collapsed, so
   a `min_margin` floor is no defence: the classifier was confidently wrong, and
   no threshold an operator could set would have filtered it.
 
@@ -115,8 +115,8 @@ and it is only paid when prompt classes are configured.
 ## Three findings that shaped the design
 
 **Classify by subject, not by verb.** Subject-matter classes work. Task-shaped
-classes — summarise, rewrite, extract, classify — fail on *both* tiers. Under
-bge-small, Summarize scores 46.6% precision and Extract 35.6%, *worse* than the
+classes — summarise, rewrite, extract, classify — fail on _both_ tiers. Under
+bge-small, Summarize scores 46.6% precision and Extract 35.6%, _worse_ than the
 static model's 63.6% and 58.2%. Telling "summarise this" from "extract the
 dates from this" needs instruction understanding, not better sentence
 embedding, so no embedding tier fixes it. The same shape explains architecture
@@ -135,7 +135,7 @@ cannot share a threshold.
 architecture/code-review centroid similarity of 0.943 against the static
 model's 0.621, while classifying the same data considerably better — its
 embedding space is anisotropic, packing everything into a narrow cone. A floor
-tuned on one tier is meaningless on the other. Floors are per class *and* per
+tuned on one tier is meaningless on the other. Floors are per class _and_ per
 tier.
 
 ## The confidence floor is structural
@@ -146,10 +146,10 @@ Measured coverage against accuracy, `potion-code-16M`, coding vs everything
 else:
 
 | floor | traffic classified | accuracy on it |
-|---|---|---|
-| 0.00 | 100% | 98.7% |
-| 0.05 | 96% | 99.4% |
-| 0.10 | 88% | 99.9% |
+| ----- | ------------------ | -------------- |
+| 0.00  | 100%               | 98.7%          |
+| 0.05  | 96%                | 99.4%          |
+| 0.10  | 88%                | 99.9%          |
 
 Below the floor a rule simply does not match and the next rule catches it —
 first-match-wins semantics, not a special case, not an error.
@@ -169,7 +169,7 @@ measurably an easier one.
 On realistic traffic mixes escalation touches well under a tenth of requests.
 On the laptop figure that puts the average added cost near 0.2 ms; on the
 measured container figure it is nearer 2-3 ms, which is still modest against a
-165 ms time to first token — but a request that *does* escalate pays the full
+165 ms time to first token — but a request that _does_ escalate pays the full
 21-29 ms, and that is the number to weigh when a rule sends real traffic
 through tier 2.
 
@@ -190,12 +190,12 @@ kubectl -n fastllm run classbench --image=<the deployed image> --restart=Never \
 
 Measured, arm64 k3s node, per prompt:
 
-| intra_threads | 2-core pod | 7-core pod |
-|---|---|---|
-| 1 | 49.9 ms | 49.6 ms |
-| **2** | **28.9 ms** | 32.1 ms |
-| **4** | 28.7 ms | **21.3 ms** |
-| 8 | 53.2 ms | 31.2 ms |
+| intra_threads | 2-core pod  | 7-core pod  |
+| ------------- | ----------- | ----------- |
+| 1             | 49.9 ms     | 49.6 ms     |
+| **2**         | **28.9 ms** | 32.1 ms     |
+| **4**         | 28.7 ms     | **21.3 ms** |
+| 8             | 53.2 ms     | 31.2 ms     |
 
 Tier 1 measures 150-180 µs in the same pod, which matches its documented
 ~115 µs closely enough. The refined tier is **21-29 ms**, not 3.3 ms.
@@ -217,14 +217,14 @@ Three things that ruled themselves out, each of which looked plausible first:
 No configuration changes that, so the model did: the image now bakes the
 **int8** build of bge-small rather than the fp32 one.
 
-| | fp32 | int8 |
-|---|---|---|
+|                                   | fp32    | int8             |
+| --------------------------------- | ------- | ---------------- |
 | per prompt, 2-core pod, 4 threads | 28.7 ms | **13.4-15.3 ms** |
-| model size | 133 MB | **34 MB** |
-| load | ~410 ms | ~265 ms |
-| architecture precision @ 0.05 | 93.3% | **93.2%** |
-| code-review precision @ 0.05 | 91.0% | 90.8% |
-| centroid similarity arch <-> code | 0.943 | 0.944 |
+| model size                        | 133 MB  | **34 MB**        |
+| load                              | ~410 ms | ~265 ms          |
+| architecture precision @ 0.05     | 93.3%   | **93.2%**        |
+| code-review precision @ 0.05      | 91.0%   | 90.8%            |
+| centroid similarity arch <-> code | 0.943   | 0.944            |
 
 Roughly 2x, for a tenth of a point of precision. It was gated on the accuracy
 rather than the latency because accuracy is the only reason this tier costs
@@ -236,7 +236,7 @@ The centroid similarity barely moving matters as much as the precision: the
 embedding geometry is unchanged, so a `min_margin` tuned against the fp32 model
 stays valid and nobody has to re-tune a deployment to take this.
 
-Worth noting what did *not* transfer: on an M-series laptop int8 measured no
+Worth noting what did _not_ transfer: on an M-series laptop int8 measured no
 faster than fp32 at all (3.63 ms against 3.58 ms). The win is specific to the
 arm64 container this actually runs in, which is the argument for
 `classify-bench` existing.
@@ -298,7 +298,7 @@ in this deployment are busy serving the model. Both tiers stay on CPU.
 
 A refined class only takes effect when at least **two** of them refine the same
 fast-tier class. That is not a limitation, it is the shape of the question: the
-measurement behind this feature is binary — architecture *against* coding, at
+measurement behind this feature is binary — architecture _against_ coding, at
 93.3% — and a lone refined class has nothing to be compared against.
 
 With one contender there is no runner-up, so the margin degenerates to a raw
@@ -308,19 +308,19 @@ every request the fast tier assigned to the class it refines. Escalation with
 fewer than two contenders is therefore skipped and the fast tier's answer
 stands.
 
-So to split coding into architecture and debugging, define *both* as refined
+So to split coding into architecture and debugging, define _both_ as refined
 classes, both refining `coding`.
 
 A refined answer still satisfies a rule naming the class it refines. `debugging`
 is a kind of `coding`, so an existing `{"class": "coding"}` rule keeps matching
-after you add the refinement — put the more specific rule *earlier* in the chain
+after you add the refinement — put the more specific rule _earlier_ in the chain
 to separate them. Without that, defining a refined class would silently stop
 every rule on its parent from firing, which is a change nobody asked for and
 nobody would see.
 
 ## What is not built
 
-One thing deliberately out of scope: routing on *difficulty*. GSM8K separates
+One thing deliberately out of scope: routing on _difficulty_. GSM8K separates
 from factual lookup at 96%, but GSM8K has a very distinctive narrative-maths
 genre, so that number most likely measures genre rather than difficulty. It
 would need an experiment against hard prompts that read like easy ones before

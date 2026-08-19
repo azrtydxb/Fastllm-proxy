@@ -32,12 +32,12 @@ a proxy token and a non-regenerable encryption key in git.
 
 ## What you get
 
-| | |
-|---|---|
-| `fastllm-control` | 1 replica. Database, admin API, management UI, `/snapshot`. ClusterIP on `:4001` |
-| `fastllm-proxy` | 2 replicas, spread across nodes. The gateway. ClusterIP on `:4000` |
-| `fastllm-proxy-config` | The `fastllm:` tuning block. Reloaded without a rollout |
-| PodDisruptionBudget | `minAvailable: 1`, so a rolling node drain cannot take the whole gateway |
+|                        |                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| `fastllm-control`      | 1 replica. Database, admin API, management UI, `/snapshot`. ClusterIP on `:4001` |
+| `fastllm-proxy`        | 2 replicas, spread across nodes. The gateway. ClusterIP on `:4000`               |
+| `fastllm-proxy-config` | The `fastllm:` tuning block. Reloaded without a rollout                          |
+| PodDisruptionBudget    | `minAvailable: 1`, so a rolling node drain cannot take the whole gateway         |
 
 Reach the UI without exposing it:
 
@@ -53,7 +53,7 @@ kubectl apply -k deploy/kubernetes/overlays/loadbalancer/   # gateway on an exte
 ```
 
 **Run the TLS overlay wherever a backend has a real credential.** `/snapshot`
-returns *decrypted* upstream credentials to anything holding the proxy token,
+returns _decrypted_ upstream credentials to anything holding the proxy token,
 so plain HTTP means every provider key you hold crosses the cluster network in
 the clear. It needs cert-manager and a `ClusterIssuer` — rename it in
 `overlays/tls/certificate.yaml` if yours is not called `cluster-ca`.
@@ -76,9 +76,9 @@ control plane reads a snapshot with fields it does not understand.
 
 ## Which of these should I use?
 
-| | |
-|---|---|
-| **These manifests** | You want to read exactly what is applied, and edit it |
-| [Helm chart](../../charts/fastllm-proxy) | You want values, not patches — and templating for many environments |
-| [Operator](../../operator) | You want the deployment *kept* that shape: upgrades ordered across the two planes, a rotated Secret actually rolling the pods, and the admin login created for you |
-| [`../`](../README.md) | You are looking at how one real cluster actually runs it |
+|                                          |                                                                                                                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **These manifests**                      | You want to read exactly what is applied, and edit it                                                                                                              |
+| [Helm chart](../../charts/fastllm-proxy) | You want values, not patches — and templating for many environments                                                                                                |
+| [Operator](../../operator)               | You want the deployment _kept_ that shape: upgrades ordered across the two planes, a rotated Secret actually rolling the pods, and the admin login created for you |
+| [`../`](../README.md)                    | You are looking at how one real cluster actually runs it                                                                                                           |

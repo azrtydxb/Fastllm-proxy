@@ -27,7 +27,11 @@ export function Login({ onLoggedIn, error: outerError }) {
       // Deliberately not "no such user" versus "wrong password": the API does
       // not distinguish them either, and a login form that does is a user
       // enumeration oracle.
-      setError(err.status === 401 ? "That name and password do not match." : err.message);
+      setError(
+        err.status === 401
+          ? "That name and password do not match."
+          : err.message,
+      );
     } finally {
       setBusy(false);
     }
@@ -66,8 +70,19 @@ export function Login({ onLoggedIn, error: outerError }) {
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span style={{ font: "600 22px/1 var(--mono)", letterSpacing: "-.02em" }}>fastllm</span>
-            <span style={{ font: "400 22px/1 var(--mono)", color: "var(--fg-3)" }}>proxy</span>
+            <span
+              style={{
+                font: "600 22px/1 var(--mono)",
+                letterSpacing: "-.02em",
+              }}
+            >
+              fastllm
+            </span>
+            <span
+              style={{ font: "400 22px/1 var(--mono)", color: "var(--fg-3)" }}
+            >
+              proxy
+            </span>
           </div>
           <div
             style={{
@@ -87,8 +102,9 @@ export function Login({ onLoggedIn, error: outerError }) {
               textWrap: "pretty",
             }}
           >
-            Cache-affinity routing, opaque response bodies, RBAC with real keys. Sessions are
-            cookie-based; there is no token for the browser to hold.
+            Cache-affinity routing, opaque response bodies, RBAC with real keys.
+            Sessions are cookie-based; there is no token for the browser to
+            hold.
           </div>
         </div>
 
@@ -101,8 +117,16 @@ export function Login({ onLoggedIn, error: outerError }) {
             padding: 28,
           }}
         >
-          <div style={{ font: "600 15px/1 var(--sans)", marginBottom: 4 }}>Sign in</div>
-          <div style={{ font: "400 12px/1.5 var(--sans)", color: "var(--fg-3)", marginBottom: 20 }}>
+          <div style={{ font: "600 15px/1 var(--sans)", marginBottom: 4 }}>
+            Sign in
+          </div>
+          <div
+            style={{
+              font: "400 12px/1.5 var(--sans)",
+              color: "var(--fg-3)",
+              marginBottom: 20,
+            }}
+          >
             Control plane
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -122,8 +146,15 @@ export function Login({ onLoggedIn, error: outerError }) {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </Field>
-            {(error || outerError) && <ErrorNote>{error || outerError}</ErrorNote>}
-            <Button variant="primary" type="submit" disabled={busy} style={{ marginTop: 6 }}>
+            {(error || outerError) && (
+              <ErrorNote>{error || outerError}</ErrorNote>
+            )}
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={busy}
+              style={{ marginTop: 6 }}
+            >
               {busy ? "Signing in…" : "Sign in"}
             </Button>
           </div>

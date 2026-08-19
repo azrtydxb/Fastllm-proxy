@@ -57,7 +57,9 @@ export function Usage({ onUnauthorised }) {
     async () => {
       const [rows, byModel] = await Promise.all([
         api.get("/admin/usage" + query({ group_by: group, since, limit: 100 })),
-        api.get("/admin/usage" + query({ group_by: "model", since, limit: 12 })),
+        api.get(
+          "/admin/usage" + query({ group_by: "model", since, limit: 12 }),
+        ),
       ]);
       return { rows, byModel };
     },
@@ -65,7 +67,8 @@ export function Usage({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const rows = data.rows || [];
   const totals = rows.reduce(
@@ -81,11 +84,20 @@ export function Usage({ onUnauthorised }) {
   const tokens = totals.prompt + totals.completion;
   // Not "some are unpriced" but "none are priced": the difference between a
   // total that is missing a part and a total that does not exist.
-  const allUnpriced = totals.requests > 0 && totals.unpriced === totals.requests;
-  const maxCost = Math.max(1, ...(data.byModel || []).map((r) => r.cost_micros));
+  const allUnpriced =
+    totals.requests > 0 && totals.unpriced === totals.requests;
+  const maxCost = Math.max(
+    1,
+    ...(data.byModel || []).map((r) => r.cost_micros),
+  );
 
   const cols = [
-    { label: GROUPS.find(([g]) => g === group)[1].replace("By ", "").toUpperCase(), width: "1.3fr" },
+    {
+      label: GROUPS.find(([g]) => g === group)[1]
+        .replace("By ", "")
+        .toUpperCase(),
+      width: "1.3fr",
+    },
     { label: "REQUESTS", width: ".8fr", align: "right" },
     { label: "PROMPT", width: ".9fr", align: "right" },
     { label: "COMPLETION", width: ".9fr", align: "right" },
@@ -112,7 +124,11 @@ export function Usage({ onUnauthorised }) {
 
       <Grid cols={4}>
         <Kpi label="REQUESTS" value={fmtCompact(totals.requests)} />
-        <Kpi label="TOKENS" value={fmtCompact(tokens)} sub={`${fmtCompact(totals.prompt)} prompt`} />
+        <Kpi
+          label="TOKENS"
+          value={fmtCompact(tokens)}
+          sub={`${fmtCompact(totals.prompt)} prompt`}
+        />
         {/* When every request is unpriced there is no spend figure to give,
             and "$0.00" would answer "we spent nothing" to a question whose
             real answer is "we do not know". Only a mix has a total worth
@@ -131,8 +147,16 @@ export function Usage({ onUnauthorised }) {
         />
         <Kpi
           label="COST / 1M TOKENS"
-          value={allUnpriced || tokens === 0 ? "—" : fmtMoney((totals.cost / tokens) * 1e6)}
-          sub={allUnpriced ? "needs at least one priced model" : "over priced traffic only"}
+          value={
+            allUnpriced || tokens === 0
+              ? "—"
+              : fmtMoney((totals.cost / tokens) * 1e6)
+          }
+          sub={
+            allUnpriced
+              ? "needs at least one priced model"
+              : "over priced traffic only"
+          }
           tone={allUnpriced ? "warn" : undefined}
         />
       </Grid>
@@ -140,12 +164,19 @@ export function Usage({ onUnauthorised }) {
       <Grid cols="1.4fr minmax(0,1fr)">
         <Card
           title={GROUPS.find(([g]) => g === group)[1]}
-          right={<Muted>{days ? `last ${days} day${days === "1" ? "" : "s"}` : "all recorded usage"}</Muted>}
+          right={
+            <Muted>
+              {days
+                ? `last ${days} day${days === "1" ? "" : "s"}`
+                : "all recorded usage"}
+            </Muted>
+          }
         >
           {rows.length === 0 ? (
             <Empty>
-              No usage recorded for this window. Rows exist only for principals whose consumption is
-              tracked — those with a budget or a token rate limit.
+              No usage recorded for this window. Rows exist only for principals
+              whose consumption is tracked — those with a budget or a token rate
+              limit.
             </Empty>
           ) : (
             <Table cols={cols}>
@@ -174,7 +205,10 @@ export function Usage({ onUnauthorised }) {
                       <Mono key="s" style={{ color: "var(--fg)" }}>
                         {fmtMoney(r.cost_micros)}
                         {r.unpriced_requests > 0 && (
-                          <span style={{ color: "var(--warn-fg)" }} title={`${r.unpriced_requests} of these requests had no price and contribute nothing to this figure`}>
+                          <span
+                            style={{ color: "var(--warn-fg)" }}
+                            title={`${r.unpriced_requests} of these requests had no price and contribute nothing to this figure`}
+                          >
                             {" "}
                             +{fmtInt(r.unpriced_requests)}?
                           </span>
@@ -196,13 +230,20 @@ export function Usage({ onUnauthorised }) {
               (data.byModel || []).map((r, i) => (
                 <div
                   key={(r.key || "—") + i}
-                  style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                    marginBottom: 14,
+                  }}
                 >
                   <Row style={{ flexWrap: "nowrap" }}>
                     <Mono style={{ fontSize: 12 }}>{r.key || "—"}</Mono>
                     <Spacer />
                     <Muted>
-                      {r.unpriced_requests === r.requests ? "unpriced" : fmtMoney(r.cost_micros)}
+                      {r.unpriced_requests === r.requests
+                        ? "unpriced"
+                        : fmtMoney(r.cost_micros)}
                     </Muted>
                   </Row>
                   <Bar
@@ -216,23 +257,32 @@ export function Usage({ onUnauthorised }) {
                 </div>
               ))
             )}
-            <div style={{ marginTop: 6, paddingTop: 14, borderTop: "1px solid var(--line-mid)" }}>
+            <div
+              style={{
+                marginTop: 6,
+                paddingTop: 14,
+                borderTop: "1px solid var(--line-mid)",
+              }}
+            >
               <Muted>
-                A self-hosted model priced at 0 shows a real $0.00; a model with no price at all
-                shows <span style={{ color: "var(--warn-fg)" }}>unpriced</span>. They are different
-                facts, and only the first one is free.
+                A self-hosted model priced at 0 shows a real $0.00; a model with
+                no price at all shows{" "}
+                <span style={{ color: "var(--warn-fg)" }}>unpriced</span>. They
+                are different facts, and only the first one is free.
               </Muted>
             </div>
           </Card>
 
           <Card title="Where these numbers come from">
             <Muted>
-              Folded from <Mono style={{ color: "var(--fg-2)" }}>usage_events</Mono>, which the data
-              plane writes from the tail of each response — one parse at the end of a stream, never
-              on the request path. A row exists only for principals whose consumption is tracked,
-              because nothing else parses the response body. Per-model metrics on{" "}
-              <Mono style={{ color: "var(--fg-2)" }}>/metrics</Mono> cover every request; per-caller
-              rows cover those.
+              Folded from{" "}
+              <Mono style={{ color: "var(--fg-2)" }}>usage_events</Mono>, which
+              the data plane writes from the tail of each response — one parse
+              at the end of a stream, never on the request path. A row exists
+              only for principals whose consumption is tracked, because nothing
+              else parses the response body. Per-model metrics on{" "}
+              <Mono style={{ color: "var(--fg-2)" }}>/metrics</Mono> cover every
+              request; per-caller rows cover those.
             </Muted>
           </Card>
         </Stack>
@@ -254,7 +304,9 @@ function Kpi({ label, value, sub, tone }) {
       >
         {label}
       </div>
-      <div style={{ font: "500 24px/1 var(--mono)", letterSpacing: "-.02em" }}>{value}</div>
+      <div style={{ font: "500 24px/1 var(--mono)", letterSpacing: "-.02em" }}>
+        {value}
+      </div>
       {sub && (
         <div
           style={{

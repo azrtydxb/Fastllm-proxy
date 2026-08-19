@@ -15,7 +15,13 @@
 // dependencies today. A chart library would be the largest thing in the
 // bundle and would bring its own upgrade treadmill for that.
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api, query } from "./api.js";
 import { Button, Chip, Muted, Row, Spacer } from "./ui.jsx";
 
@@ -45,7 +51,13 @@ export const RANGES = [
  * re-fetching a fixed historical window every few seconds would be pure
  * load for a result that cannot change.
  */
-export function useTimeseries({ range, offset = 0, model, principalId, live = true }) {
+export function useTimeseries({
+  range,
+  offset = 0,
+  model,
+  principalId,
+  live = true,
+}) {
   const [points, setPoints] = useState(null);
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);
@@ -103,7 +115,8 @@ function niceTicks(max, count = 3) {
   if (!(max > 0)) return [0, 1];
   const raw = max / count;
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || mag * 10;
+  const step =
+    [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || mag * 10;
   const top = Math.ceil(max / step) * step;
   const out = [];
   for (let v = 0; v <= top + 1e-9; v += step) out.push(v);
@@ -373,7 +386,11 @@ export function TimeChart({
 
 function ChartTooltip({ point, series, lines, left }) {
   const rows = [
-    ...series.map((s) => [s.label, Number(point[s.key] || 0), TONE[s.tone] || TONE.accent]),
+    ...series.map((s) => [
+      s.label,
+      Number(point[s.key] || 0),
+      TONE[s.tone] || TONE.accent,
+    ]),
     ...lines
       .filter((l) => point[l.key] != null)
       .map((l) => [l.label, `${point[l.key]} ms`, TONE[l.tone] || TONE.violet]),
@@ -396,7 +413,13 @@ function ChartTooltip({ point, series, lines, left }) {
         boxShadow: "0 6px 18px rgba(0,0,0,.35)",
       }}
     >
-      <div style={{ font: "500 10px var(--mono)", color: "var(--fg-3)", marginBottom: 4 }}>
+      <div
+        style={{
+          font: "500 10px var(--mono)",
+          color: "var(--fg-3)",
+          marginBottom: 4,
+        }}
+      >
         {new Date(point.at).toLocaleString([], {
           month: "short",
           day: "numeric",
@@ -405,7 +428,9 @@ function ChartTooltip({ point, series, lines, left }) {
         })}
       </div>
       {rows.length === 0 ? (
-        <div style={{ font: "400 11px var(--sans)", color: "var(--fg-5)" }}>nothing served</div>
+        <div style={{ font: "400 11px var(--sans)", color: "var(--fg-5)" }}>
+          nothing served
+        </div>
       ) : (
         rows.map(([label, value, color]) => (
           <div
@@ -419,7 +444,13 @@ function ChartTooltip({ point, series, lines, left }) {
             }}
           >
             <span
-              style={{ width: 7, height: 7, borderRadius: 2, background: color, flex: "none" }}
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 2,
+                background: color,
+                flex: "none",
+              }}
             />
             <span style={{ flex: 1 }}>{label}</span>
             <span style={{ font: "500 11px var(--mono)" }}>{value}</span>
@@ -445,7 +476,11 @@ export function Legend({ series = [], lines = [] }) {
               flex: "none",
             }}
           />
-          <span style={{ font: "400 10.5px var(--sans)", color: "var(--fg-4)" }}>{s.label}</span>
+          <span
+            style={{ font: "400 10.5px var(--sans)", color: "var(--fg-4)" }}
+          >
+            {s.label}
+          </span>
         </Row>
       ))}
     </Row>

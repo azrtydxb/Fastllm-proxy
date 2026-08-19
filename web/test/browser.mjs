@@ -44,7 +44,8 @@ if (!password) {
 }
 
 const CHROME =
-  process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  process.env.CHROME_PATH ||
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const SHOTS = new URL("../.screenshots/", import.meta.url).pathname;
 rmSync(SHOTS, { recursive: true, force: true });
 mkdirSync(SHOTS, { recursive: true });
@@ -78,7 +79,11 @@ const browser = await launch({
   // Its own profile directory: the developer's Chrome stays untouched, which
   // is the whole reason this can run at all.
   userDataDir: `${SHOTS}.profile`,
-  args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
+  args: [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--ignore-certificate-errors",
+  ],
 });
 
 let failures = 0;
@@ -96,7 +101,9 @@ page.on("console", (m) => {
   if (m.type() === "error") consoleErrors.push(m.text());
 });
 page.on("pageerror", (e) => consoleErrors.push(`uncaught: ${e.message}`));
-page.on("requestfailed", (r) => failedRequests.push(`${r.method()} ${r.url()}`));
+page.on("requestfailed", (r) =>
+  failedRequests.push(`${r.method()} ${r.url()}`),
+);
 page.on("response", (r) => {
   if (r.status() >= 500) failedRequests.push(`${r.status()} ${r.url()}`);
 });
@@ -112,8 +119,12 @@ note(inputs.length >= 2, "login form renders two fields");
 await inputs[0].type(user);
 await inputs[1].type(password);
 await Promise.all([
-  page.$$eval("button", (bs) => bs.find((b) => b.textContent.includes("Sign in")).click()),
-  page.waitForFunction(() => !document.body.textContent.includes("Sign in"), { timeout: 15000 }),
+  page.$$eval("button", (bs) =>
+    bs.find((b) => b.textContent.includes("Sign in")).click(),
+  ),
+  page.waitForFunction(() => !document.body.textContent.includes("Sign in"), {
+    timeout: 15000,
+  }),
 ]);
 note(true, "signed in against the real control plane");
 
@@ -123,20 +134,28 @@ async function inspect() {
     const problems = [];
     const de = document.documentElement;
     if (de.scrollWidth > de.clientWidth + 1) {
-      problems.push(`page scrolls sideways: ${de.scrollWidth} > ${de.clientWidth}`);
+      problems.push(
+        `page scrolls sideways: ${de.scrollWidth} > ${de.clientWidth}`,
+      );
     }
     const visible = (el) => {
       const s = getComputedStyle(el);
-      return s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
+      return (
+        s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0"
+      );
     };
     // Controls a person has to hit. Anything with no area is unclickable, and
     // anything under ~16px tall in a dense admin UI is a mis-render.
     for (const el of document.querySelectorAll("button, input, select")) {
       if (!visible(el)) continue;
       const r = el.getBoundingClientRect();
-      const label = (el.textContent || el.placeholder || el.tagName).trim().slice(0, 30);
-      if (r.width === 0 || r.height === 0) problems.push(`zero-size control: "${label}"`);
-      else if (r.height < 12) problems.push(`control ${r.height.toFixed(0)}px tall: "${label}"`);
+      const label = (el.textContent || el.placeholder || el.tagName)
+        .trim()
+        .slice(0, 30);
+      if (r.width === 0 || r.height === 0)
+        problems.push(`zero-size control: "${label}"`);
+      else if (r.height < 12)
+        problems.push(`control ${r.height.toFixed(0)}px tall: "${label}"`);
     }
     // Text wider than the box that holds it, without the box being told to
     // scroll or ellipsise it.
@@ -145,7 +164,9 @@ async function inspect() {
       const s = getComputedStyle(el);
       if (s.overflow !== "visible" || s.textOverflow === "ellipsis") continue;
       if (el.scrollWidth > el.clientWidth + 2 && el.clientWidth > 0) {
-        problems.push(`text overflows: "${(el.textContent || "").trim().slice(0, 40)}"`);
+        problems.push(
+          `text overflows: "${(el.textContent || "").trim().slice(0, 40)}"`,
+        );
       }
     }
     return problems;
@@ -171,7 +192,11 @@ for (const [i, screen] of SCREENS.entries()) {
         b.textContent.includes("Deployment"),
       ),
     );
-    note(!offered, "deployment screen hidden without an operator", offered && "nav offers it");
+    note(
+      !offered,
+      "deployment screen hidden without an operator",
+      offered && "nav offers it",
+    );
     continue;
   }
   consoleErrors.length = 0;
@@ -179,17 +204,29 @@ for (const [i, screen] of SCREENS.entries()) {
   await page.goto(`${url}/#/${screen}`, { waitUntil: "networkidle2" });
   // Polling screens settle a beat after the first paint.
   await new Promise((r) => setTimeout(r, 900));
-  await page.screenshot({ path: `${SHOTS}${String(i + 1).padStart(2, "0")}-${screen}.png` });
+  await page.screenshot({
+    path: `${SHOTS}${String(i + 1).padStart(2, "0")}-${screen}.png`,
+  });
 
-  const text = await page.evaluate(() => document.querySelector("main")?.innerText || "");
+  const text = await page.evaluate(
+    () => document.querySelector("main")?.innerText || "",
+  );
   const problems = await inspect();
   const errs = consoleErrors.filter((e) => !/favicon/i.test(e));
   const fails = failedRequests.filter((r) => !/favicon/i.test(r));
 
   note(
-    errs.length === 0 && fails.length === 0 && problems.length === 0 && text.length > 50,
+    errs.length === 0 &&
+      fails.length === 0 &&
+      problems.length === 0 &&
+      text.length > 50,
     `${screen} (${text.length} chars of copy)`,
-    [errs[0], fails[0], problems.slice(0, 3).join("; "), text.length <= 50 && "almost no content"]
+    [
+      errs[0],
+      fails[0],
+      problems.slice(0, 3).join("; "),
+      text.length <= 50 && "almost no content",
+    ]
       .filter(Boolean)
       .join(" | ") || undefined,
   );
@@ -202,12 +239,18 @@ for (const [i, screen] of SCREENS.entries()) {
 await page.goto(`${url}/#/routing`, { waitUntil: "networkidle2" });
 await new Promise((r) => setTimeout(r, 600));
 const hasVm = await page.evaluate(() =>
-  [...document.querySelectorAll("button")].some((b) => b.textContent.includes("Dry-run")),
+  [...document.querySelectorAll("button")].some((b) =>
+    b.textContent.includes("Dry-run"),
+  ),
 );
 if (hasVm) {
-  await page.$$eval("button", (bs) => bs.find((b) => b.textContent.includes("Dry-run")).click());
+  await page.$$eval("button", (bs) =>
+    bs.find((b) => b.textContent.includes("Dry-run")).click(),
+  );
   await new Promise((r) => setTimeout(r, 300));
-  await page.$$eval("button", (bs) => bs.find((b) => b.textContent.trim() === "Evaluate").click());
+  await page.$$eval("button", (bs) =>
+    bs.find((b) => b.textContent.trim() === "Evaluate").click(),
+  );
   await new Promise((r) => setTimeout(r, 1200));
   const answered = await page.evaluate(() => {
     const t = document.querySelector("main").innerText;
@@ -226,7 +269,9 @@ if (managed) {
   await new Promise((r) => setTimeout(r, 900));
   const state = await page.evaluate(() => {
     const t = document.querySelector("main").innerText;
-    const inputs = [...document.querySelectorAll("input")].filter((i) => i.type !== "checkbox");
+    const inputs = [...document.querySelectorAll("input")].filter(
+      (i) => i.type !== "checkbox",
+    );
     return {
       text: t,
       filled: inputs.filter((i) => i.value && i.value.length).length,
@@ -235,13 +280,19 @@ if (managed) {
       )?.disabled,
     };
   });
-  note(state.filled >= 3, "the form is populated from the live resource", `${state.filled} fields`);
+  note(
+    state.filled >= 3,
+    "the form is populated from the live resource",
+    `${state.filled} fields`,
+  );
   note(state.text.includes("SERVING"), "it reports what is actually serving");
   note(state.apply === true, "Apply is disabled until something is edited");
 
   // A nav entry that exists, and reaches the screen.
   const inNav = await page.evaluate(() =>
-    [...document.querySelectorAll("nav button")].some((b) => b.textContent.includes("Deployment")),
+    [...document.querySelectorAll("nav button")].some((b) =>
+      b.textContent.includes("Deployment"),
+    ),
   );
   note(inNav, "the Deployment entry is in the nav under an operator");
 
@@ -273,7 +324,9 @@ if (managed) {
   );
   note(armed && afterEdit === false, "editing a field arms Apply");
 
-  await page.$$eval("button", (bs) => bs.find((b) => b.textContent.trim() === "Discard")?.click());
+  await page.$$eval("button", (bs) =>
+    bs.find((b) => b.textContent.trim() === "Discard")?.click(),
+  );
   await new Promise((r) => setTimeout(r, 400));
   const afterDiscard = await page.evaluate(
     () =>
@@ -293,7 +346,11 @@ for (const screen of ["overview", "models", "rbac", "limits"]) {
   await page.goto(`${url}/#/${screen}`, { waitUntil: "networkidle2" });
   await new Promise((r) => setTimeout(r, 700));
   const problems = await inspect();
-  note(problems.length === 0, `${screen} at 1280px`, problems.slice(0, 2).join("; "));
+  note(
+    problems.length === 0,
+    `${screen} at 1280px`,
+    problems.slice(0, 2).join("; "),
+  );
   await page.screenshot({ path: `${SHOTS}narrow-${screen}.png` });
 }
 

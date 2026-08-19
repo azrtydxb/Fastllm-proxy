@@ -50,14 +50,19 @@ export function Settings({ onUnauthorised, config }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const c = data.cfg || config || {};
-  const selected = fallbackDraft ?? (data.fallback?.id ? String(data.fallback.id) : "");
+  const selected =
+    fallbackDraft ?? (data.fallback?.id ? String(data.fallback.id) : "");
 
   const saveFallback = async () => {
     const ok = await attempt(
-      () => api.put("/admin/fallback-model", { model_id: selected ? Number(selected) : null }),
+      () =>
+        api.put("/admin/fallback-model", {
+          model_id: selected ? Number(selected) : null,
+        }),
       setError,
       onUnauthorised,
     );
@@ -190,7 +195,13 @@ export function Settings({ onUnauthorised, config }) {
                   : "on · unsigned"
                 : "off"
             }
-            tone={c.webhook_configured ? (c.webhook_signed ? "ok" : "warn") : "quiet"}
+            tone={
+              c.webhook_configured
+                ? c.webhook_signed
+                  ? "ok"
+                  : "warn"
+                : "quiet"
+            }
           />
         </Card>
 
@@ -286,9 +297,9 @@ export function Settings({ onUnauthorised, config }) {
             Revoke all sessions
           </Button>
           <Muted>
-            Revoking sessions does not spare the caller — a route that kept its own session alive
-            would be one an attacker holding a session could use to lock everyone else out. You
-            will be signed out.
+            Revoking sessions does not spare the caller — a route that kept its
+            own session alive would be one an attacker holding a session could
+            use to lock everyone else out. You will be signed out.
           </Muted>
         </Row>
       </Card>
@@ -308,7 +319,9 @@ function Setting({ label, hint, value, tone }) {
       }}
     >
       <div style={{ minWidth: 0 }}>
-        <div style={{ font: "500 12px var(--sans)", color: "var(--fg)" }}>{label}</div>
+        <div style={{ font: "500 12px var(--sans)", color: "var(--fg)" }}>
+          {label}
+        </div>
         <div
           style={{
             font: "400 10px/1.5 var(--sans)",

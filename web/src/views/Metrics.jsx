@@ -69,12 +69,22 @@ export function Metrics({ onUnauthorised, config }) {
   }, POLL_MS);
 
   const reports = data || [];
-  const scoped = scope === "fleet" ? reports : reports.filter((r) => r.replica === scope);
+  const scoped =
+    scope === "fleet" ? reports : reports.filter((r) => r.replica === scope);
   const summary = fleetSummary(scoped);
 
-  const cacheHits = scoped.reduce((a, r) => a + (r.process?.cache_hits || 0), 0);
-  const cacheMisses = scoped.reduce((a, r) => a + (r.process?.cache_misses || 0), 0);
-  const dropped = scoped.reduce((a, r) => a + (r.process?.usage_dropped || 0), 0);
+  const cacheHits = scoped.reduce(
+    (a, r) => a + (r.process?.cache_hits || 0),
+    0,
+  );
+  const cacheMisses = scoped.reduce(
+    (a, r) => a + (r.process?.cache_misses || 0),
+    0,
+  );
+  const dropped = scoped.reduce(
+    (a, r) => a + (r.process?.usage_dropped || 0),
+    0,
+  );
 
   // Rates, sampled once per poll. Reset when the scope changes: splicing one
   // replica's rate onto the fleet's line would draw a cliff that never
@@ -86,7 +96,11 @@ export function Metrics({ onUnauthorised, config }) {
   }, [key]);
 
   const totals = data
-    ? { requests: summary.requests, errors: summary.errors, cache: cacheHits + cacheMisses }
+    ? {
+        requests: summary.requests,
+        errors: summary.errors,
+        cache: cacheHits + cacheMisses,
+      }
     : null;
   useEffect(() => {
     if (!totals) return;
@@ -95,7 +109,8 @@ export function Metrics({ onUnauthorised, config }) {
     last.current = { at: now, ...totals };
     if (!prev) return;
     const secs = (now - prev.at) / 1000;
-    const push = (from, to) => rateBetween({ value: from }, { value: to }, secs);
+    const push = (from, to) =>
+      rateBetween({ value: from }, { value: to }, secs);
     const rps = push(prev.requests, totals.requests);
     const eps = push(prev.errors, totals.errors);
     const cps = push(prev.cache, totals.cache);
@@ -114,9 +129,13 @@ export function Metrics({ onUnauthorised, config }) {
   // The scope survives in state after the replica it names stops reporting and
   // drops out of the fleet. Rendering the empty selection would print zeros
   // under that replica's name as though they had been measured.
-  const goneScope = scope !== "fleet" && reports.length > 0 && scoped.length === 0;
+  const goneScope =
+    scope !== "fleet" && reports.length > 0 && scoped.length === 0;
 
-  const hitRate = cacheHits + cacheMisses > 0 ? (cacheHits / (cacheHits + cacheMisses)) * 100 : null;
+  const hitRate =
+    cacheHits + cacheMisses > 0
+      ? (cacheHits / (cacheHits + cacheMisses)) * 100
+      : null;
   const now = (arr) => (arr.length ? arr[arr.length - 1] : null);
 
   const worstBackends = [...summary.backends]
@@ -134,7 +153,11 @@ export function Metrics({ onUnauthorised, config }) {
           Fleet
         </ScopeTab>
         {reports.map((r) => (
-          <ScopeTab key={r.replica} active={scope === r.replica} onClick={() => setScope(r.replica)}>
+          <ScopeTab
+            key={r.replica}
+            active={scope === r.replica}
+            onClick={() => setScope(r.replica)}
+          >
             {r.replica}
           </ScopeTab>
         ))}
@@ -143,15 +166,17 @@ export function Metrics({ onUnauthorised, config }) {
           {scope === "fleet"
             ? `Counters summed across ${summary.replicas} reporting replica${summary.replicas === 1 ? "" : "s"}.`
             : `${scope} alone.`}{" "}
-          Rates are measured by this page, every {POLL_MS / 1000}s since it loaded.
+          Rates are measured by this page, every {POLL_MS / 1000}s since it
+          loaded.
         </Muted>
       </Row>
 
       {goneScope && (
         <Card tone="warn" title={`${scope} is no longer reporting`}>
           <Muted>
-            It aged out of the fleet — a replica that stops reporting is dropped after 30 seconds
-            rather than shown stale. Nothing below is measured for it.{" "}
+            It aged out of the fleet — a replica that stops reporting is dropped
+            after 30 seconds rather than shown stale. Nothing below is measured
+            for it.{" "}
             <Button variant="small" onClick={() => setScope("fleet")}>
               back to the fleet
             </Button>
@@ -201,7 +226,10 @@ export function Metrics({ onUnauthorised, config }) {
           }
         >
           {hitRate === null ? (
-            <Empty>No cache lookups yet. The cache is opt-in per model, via cache_ttl_seconds.</Empty>
+            <Empty>
+              No cache lookups yet. The cache is opt-in per model, via
+              cache_ttl_seconds.
+            </Empty>
           ) : (
             <Row gap={22} style={{ flexWrap: "nowrap" }}>
               <Donut
@@ -216,16 +244,27 @@ export function Metrics({ onUnauthorised, config }) {
                 <Stat
                   label="Held"
                   value={`${fmtInt(scoped.reduce((a, r) => a + (r.process?.cache_entries || 0), 0))} entries`}
-                  hint={fmtBytes(scoped.reduce((a, r) => a + (r.process?.cache_bytes || 0), 0))}
+                  hint={fmtBytes(
+                    scoped.reduce(
+                      (a, r) => a + (r.process?.cache_bytes || 0),
+                      0,
+                    ),
+                  )}
                 />
               </Stack>
             </Row>
           )}
           {scope === "fleet" && reports.length > 1 && (
-            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-mid)" }}>
+            <div
+              style={{
+                marginTop: 14,
+                paddingTop: 12,
+                borderTop: "1px solid var(--line-mid)",
+              }}
+            >
               <Muted>
-                Per replica, because the cache is per process — a worker restarted minutes ago has a
-                cold one and nothing is wrong:
+                Per replica, because the cache is per process — a worker
+                restarted minutes ago has a cold one and nothing is wrong:
               </Muted>
               <Row gap={8} style={{ marginTop: 8 }}>
                 {reports.map((r) => {
@@ -266,16 +305,35 @@ export function Metrics({ onUnauthorised, config }) {
                   key={b.key}
                   cols={ERR_COLS}
                   cells={[
-                    <Row key="n" gap={8} style={{ flexWrap: "nowrap", minWidth: 0 }}>
+                    <Row
+                      key="n"
+                      gap={8}
+                      style={{ flexWrap: "nowrap", minWidth: 0 }}
+                    >
                       <Dot tone={b.split ? "warn" : b.healthy ? "ok" : "bad"} />
-                      <Ellipsis title={b.api_base} style={{ font: "400 12px var(--mono)" }}>
+                      <Ellipsis
+                        title={b.api_base}
+                        style={{ font: "400 12px var(--mono)" }}
+                      >
                         {b.model}
                       </Ellipsis>
                     </Row>,
-                    <Mono key="h" style={{ color: "var(--fg-4)", font: "400 11px var(--mono)" }}>
+                    <Mono
+                      key="h"
+                      style={{
+                        color: "var(--fg-4)",
+                        font: "400 11px var(--mono)",
+                      }}
+                    >
                       {hostOf(b.api_base)}
                     </Mono>,
-                    <Mono key="r" style={{ font: "400 12px var(--mono)", color: "var(--fg-2)" }}>
+                    <Mono
+                      key="r"
+                      style={{
+                        font: "400 12px var(--mono)",
+                        color: "var(--fg-2)",
+                      }}
+                    >
                       {fmtCompact(b.requests)}
                     </Mono>,
                     <Mono
@@ -293,7 +351,12 @@ export function Metrics({ onUnauthorised, config }) {
                         height={5}
                         tone={b.errorRate > 0.01 ? "warn" : "ok"}
                       />
-                      <Mono style={{ font: "400 11px var(--mono)", color: "var(--fg-3)" }}>
+                      <Mono
+                        style={{
+                          font: "400 11px var(--mono)",
+                          color: "var(--fg-3)",
+                        }}
+                      >
                         {(b.errorRate * 100).toFixed(2)}%
                       </Mono>
                     </Row>,
@@ -308,9 +371,10 @@ export function Metrics({ onUnauthorised, config }) {
       {dropped > 0 && (
         <Card tone="warn" title="Usage events dropped">
           <Muted>
-            {fmtInt(dropped)} event{dropped === 1 ? "" : "s"} were dropped rather than made to wait.
-            A full queue means the control plane is not keeping up; the design's stated trade is to
-            drop usage rather than block inference, so budgets are undercounted by that many
+            {fmtInt(dropped)} event{dropped === 1 ? "" : "s"} were dropped
+            rather than made to wait. A full queue means the control plane is
+            not keeping up; the design's stated trade is to drop usage rather
+            than block inference, so budgets are undercounted by that many
             requests until it catches up.
           </Muted>
         </Card>
@@ -324,7 +388,9 @@ export function Metrics({ onUnauthorised, config }) {
           <Unmeasured
             title="Latency percentiles"
             why="TTFT and duration histograms are per process, on each proxy's own /metrics. Merging them needs the buckets — an average of four p99s is not a p99, and it hides exactly the outlier you are looking for."
-            how={'histogram_quantile(0.99, sum by (le)\n  (rate(fastllm_ttft_seconds_bucket[5m])))'}
+            how={
+              "histogram_quantile(0.99, sum by (le)\n  (rate(fastllm_ttft_seconds_bucket[5m])))"
+            }
           />
           <Unmeasured
             title="Counter rates before this page loaded"
@@ -334,19 +400,22 @@ export function Metrics({ onUnauthorised, config }) {
               "counts requests, tokens and latency, not these process counters, which no " +
               "one stores over time. Scrape /metrics if you want those historically."
             }
-            how={'rate(fastllm_requests_total[5m])'}
+            how={"rate(fastllm_requests_total[5m])"}
           />
           <Unmeasured
             title="Per-caller latency"
             why="Per-principal detail is deliberately in usage_events, not in Prometheus: a label with that cardinality is how a metrics endpoint becomes an outage."
-            how={"SELECT p.name, percentile_cont(0.95)\n  WITHIN GROUP (ORDER BY u.ttft_ms)\nFROM usage_events u …"}
+            how={
+              "SELECT p.name, percentile_cont(0.95)\n  WITHIN GROUP (ORDER BY u.ttft_ms)\nFROM usage_events u …"
+            }
           />
         </Grid>
         {config && !config.otel_endpoint && (
           <div style={{ marginTop: 12 }}>
             <Muted>
-              This process has no OTLP endpoint configured, so there are no traces to correlate
-              either. <Mono>--otel-endpoint</Mono> turns them on in an <Mono>otel</Mono> build.
+              This process has no OTLP endpoint configured, so there are no
+              traces to correlate either. <Mono>--otel-endpoint</Mono> turns
+              them on in an <Mono>otel</Mono> build.
             </Muted>
           </div>
         )}
@@ -384,17 +453,29 @@ function ScopeTab({ active, children, ...rest }) {
 function RateCard({ title, sub, value, unit, series, tone, digits = 2 }) {
   return (
     <Card>
-      <Row style={{ alignItems: "flex-start", flexWrap: "nowrap", marginBottom: 12 }}>
+      <Row
+        style={{
+          alignItems: "flex-start",
+          flexWrap: "nowrap",
+          marginBottom: 12,
+        }}
+      >
         <div style={{ minWidth: 0 }}>
           <div style={{ font: "600 12px/1.3 var(--sans)" }}>{title}</div>
-          <div style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-4)" }}>{sub}</div>
+          <div
+            style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-4)" }}
+          >
+            {sub}
+          </div>
         </div>
         <div style={{ flex: 1 }} />
         <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
           <div style={{ font: "500 16px/1 var(--mono)" }}>
             {value === null ? "—" : value.toFixed(digits)}
           </div>
-          <div style={{ font: "400 10px var(--mono)", color: "var(--fg-4)" }}>{unit}</div>
+          <div style={{ font: "400 10px var(--mono)", color: "var(--fg-4)" }}>
+            {unit}
+          </div>
         </div>
       </Row>
       <Spark values={series} tone={tone} height={80} />
@@ -413,7 +494,9 @@ function Stat({ label, value, hint }) {
         borderBottom: "1px solid var(--line-soft)",
       }}
     >
-      <span style={{ font: "400 12px var(--sans)", color: "var(--fg-3)" }}>{label}</span>
+      <span style={{ font: "400 12px var(--sans)", color: "var(--fg-3)" }}>
+        {label}
+      </span>
       <span style={{ font: "400 12px var(--mono)", color: "var(--fg)" }}>
         {value}
         {hint && <span style={{ color: "var(--fg-4)" }}> · {hint}</span>}
@@ -483,15 +566,18 @@ function MetricsHistory() {
       >
         {error ? (
           <NotAvailable why={error}>
-            History comes from <Mono>GET /admin/timeseries</Mono>. The live rates below are
-            unaffected — they are measured by this page and need no database.
+            History comes from <Mono>GET /admin/timeseries</Mono>. The live
+            rates below are unaffected — they are measured by this page and need
+            no database.
           </NotAvailable>
         ) : (
           <div
             onClick={() => setOpen(true)}
             role="button"
             tabIndex={0}
-            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
+            onKeyDown={(e) =>
+              (e.key === "Enter" || e.key === " ") && setOpen(true)
+            }
             style={{ cursor: "pointer" }}
             aria-label="Open traffic history"
           >

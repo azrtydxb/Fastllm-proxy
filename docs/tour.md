@@ -39,7 +39,7 @@ four p99s is not a p99, and the screen says so rather than quietly averaging.
 ![The Usage and spend screen: totals for requests, tokens and spend, grouped by principal, model, frontend model or day](images/ui-usage.png)
 
 Folded from `usage_events`, one row per request. A model with no price
-contributes nothing to spend and is counted as *unpriced* rather than as zero,
+contributes nothing to spend and is counted as _unpriced_ rather than as zero,
 so a spend figure never quietly understates.
 
 ## Virtual models — one name, many targets
@@ -47,7 +47,7 @@ so a spend figure never quietly understates.
 ![The Virtual models screen: rules with their conditions and weighted targets, and a dry-run panel](images/ui-virtual-models.png)
 
 A client-facing name with ordered rules. The first rule whose conditions match
-wins; targets are weighted *and* ordered, so one rule is both a split and a
+wins; targets are weighted _and_ ordered, so one rule is both a split and a
 failover chain. Conditions can be principal, role, prompt size, requested
 generation, streaming, headers, budget consumption, time of day, or semantic
 class.
@@ -82,7 +82,7 @@ Failover can never widen a caller's reach.
 Rate limits are per minute, budgets are per window. Both are resolved into the
 snapshot, so enforcing them costs an integer comparison on the request path
 rather than a query. A request that pushes a principal over budget completes;
-the *next* one is refused with **402**, not 429 — waiting does not help until
+the _next_ one is refused with **402**, not 429 — waiting does not help until
 the window rolls over.
 
 ## Fleet — what each replica can see
@@ -112,12 +112,12 @@ session including your own.
 
 ## Where next
 
-| | |
-|---|---|
-| [Connecting a client](integrations.md) | SDKs, coding agents, frameworks, observability |
-| [Troubleshooting](troubleshooting.md) | The failures people actually hit |
-| [Operations](operations.md) | The three roles, deployment shapes, configuration |
-| [API and administration](api.md) | Every endpoint, and `openapi.json` |
+|                                        |                                                   |
+| -------------------------------------- | ------------------------------------------------- |
+| [Connecting a client](integrations.md) | SDKs, coding agents, frameworks, observability    |
+| [Troubleshooting](troubleshooting.md)  | The failures people actually hit                  |
+| [Operations](operations.md)            | The three roles, deployment shapes, configuration |
+| [API and administration](api.md)       | Every endpoint, and `openapi.json`                |
 
 ## Deployment
 
@@ -125,7 +125,7 @@ session including your own.
 Postgres; this one edits the `FastllmProxy` resource that describes the
 deployment itself — image, gateway replicas, selection policy, upstream
 timeout, worker count, connection pool, and autoscaling — alongside the phase,
-the conditions, the config hash and the image that is *actually* serving,
+the conditions, the config hash and the image that is _actually_ serving,
 which during an ordered upgrade is not the one in the spec.
 
 Applying a change patches the resource and hands it to the operator. The page

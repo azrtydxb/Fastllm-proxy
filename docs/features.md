@@ -25,7 +25,7 @@ users read. This one pays none of it.
 
 **Routing that knows what your engine knows.** vLLM and SGLang keep a
 radix/prefix KV cache, so two requests sharing a system prompt are far cheaper
-on the *same* node — the second reuses the first's cached prefix instead of
+on the _same_ node — the second reuses the first's cached prefix instead of
 prefilling it again. Cache-affinity routing sends them there, unless that node
 is meaningfully hotter than the least-loaded one. Round-robin alternates them
 by construction, so every request pays full prefill: nodes look evenly loaded
@@ -37,18 +37,18 @@ than one.
 Against LiteLLM, same cluster, same backends, interleaved A/B runs
 ([full conditions](performance.md)):
 
-| | fastllm-proxy | LiteLLM |
-|---|---|---|
-| Throughput, mock upstream | **~500–635 req/s** | ~36 req/s |
-| TTFT, mock upstream | **8–46 ms** | 87–1313 ms |
-| Aggregate tok/s, real GPUs | 305–332 | 305–332 |
-| p99 TTFT at 32 streams | **766 ms** | 2921 ms |
-| Inter-token jitter | **15–25% lower** | — |
+|                            | fastllm-proxy      | LiteLLM    |
+| -------------------------- | ------------------ | ---------- |
+| Throughput, mock upstream  | **~500–635 req/s** | ~36 req/s  |
+| TTFT, mock upstream        | **8–46 ms**        | 87–1313 ms |
+| Aggregate tok/s, real GPUs | 305–332            | 305–332    |
+| p99 TTFT at 32 streams     | **766 ms**         | 2921 ms    |
+| Inter-token jitter         | **15–25% lower**   | —          |
 
 Read the third row before the first two. **With real GPUs, aggregate
 throughput is a wash** — both saturate the same hardware, and at a single
 stream LiteLLM won several rounds outright. The 15× figure is what the gateway
-costs *when the GPU is not your bottleneck*, which is a ceiling on the value,
+costs _when the GPU is not your bottleneck_, which is a ceiling on the value,
 not a promise of it.
 
 What survives contact with real GPUs is **steadiness**: p99 time-to-first-token
@@ -57,7 +57,7 @@ are different products even when their medians match.
 
 Against a real vLLM the proxy's own overhead is **below the noise floor** —
 0.76 µs of per-request work against ~38 µs of core cost, and two runs put it
-marginally *ahead* of no-proxy, which is measurement noise and reported as such.
+marginally _ahead_ of no-proxy, which is measurement noise and reported as such.
 
 ## The features, and why each exists
 
@@ -101,7 +101,7 @@ affordable per request.
 
 ### Virtual models: routing as configuration, not code
 
-One client-facing name, ordered rules, weighted *and* ordered targets — so a
+One client-facing name, ordered rules, weighted _and_ ordered targets — so a
 rule is both a traffic split and a failover chain. Rules match on principal,
 role, prompt size, requested generation, streaming, headers, budget
 consumption, in-flight count, time of day, or the prompt's semantic class.
@@ -112,7 +112,7 @@ dropped from the chain, including the deployment-wide fallback.
 ### Semantic routing, at a cost you can afford
 
 A ~115 µs static-embedding tier decides most prompts; an int8 ONNX transformer
-loads only if a rule names a refined class. Classify by *subject*, not by verb
+loads only if a rule names a refined class. Classify by _subject_, not by verb
 — the measurements behind that are in [the classifier doc](classifier.md),
 including which class pairs collide.
 
@@ -166,20 +166,20 @@ Twelve `POST` endpoints, not one. Anything OpenAI-shaped that carries a
 `model` is forwarded byte-for-byte, authorised by the same per-model grants
 and counted in the same usage accounting:
 
-| | |
-|---|---|
-| **Chat & completions** | `/chat/completions`, `/completions`, `/responses` |
-| **Images** | `/images/generations`, `/images/edits` |
-| **Speech** | `/audio/speech` (TTS), `/audio/transcriptions`, `/audio/translations` |
-| **Embeddings & ranking** | `/embeddings`, `/rerank`, `/score` |
-| **Safety** | `/moderations` |
+|                          |                                                                       |
+| ------------------------ | --------------------------------------------------------------------- |
+| **Chat & completions**   | `/chat/completions`, `/completions`, `/responses`                     |
+| **Images**               | `/images/generations`, `/images/edits`                                |
+| **Speech**               | `/audio/speech` (TTS), `/audio/transcriptions`, `/audio/translations` |
+| **Embeddings & ranking** | `/embeddings`, `/rerank`, `/score`                                    |
+| **Safety**               | `/moderations`                                                        |
 
 So an image or speech provider is the same one-row configuration as a chat
 model — OpenAI, Azure OpenAI, or any self-hosted server exposing those paths.
 The multipart audio uploads are forwarded without the boundary being touched,
 and binary responses pass through the same byte pump as a token stream.
 
-One thing this does *not* do is translate a provider's bespoke, non-OpenAI
+One thing this does _not_ do is translate a provider's bespoke, non-OpenAI
 image API into OpenAI's shape. A provider that speaks its own wire format for
 images needs a translator, the same way Anthropic and Gemini needed one for
 chat.
@@ -189,17 +189,17 @@ chat.
 Named because they are wanted, not because they are excuses. Each is a real
 piece of work rather than a flag away:
 
-| | |
-|---|---|
-| **Guardrails and PII masking** | Content filtering and redaction in the gateway. Needs a hook point on the request path that does not cost the latency the rest of the design protects — the interesting engineering is doing it without buffering the body |
-| **SSO / SAML** | Sessions are Argon2id passwords today. The RBAC underneath — principals, roles, per-model grants — is already the right shape to hang an identity provider off |
-| **Teams and organisations** | A layer above principals, so a grant can be made once for a group |
-| **Native image and speech providers** | The wire-format translators for providers that do not speak OpenAI's shape |
-| **Usage-based routing** | Route by a deployment's remaining TPM/RPM. Wanted, but honest cross-replica accounting needs shared state, which is the trade being weighed |
+|                                       |                                                                                                                                                                                                                            |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Guardrails and PII masking**        | Content filtering and redaction in the gateway. Needs a hook point on the request path that does not cost the latency the rest of the design protects — the interesting engineering is doing it without buffering the body |
+| **SSO / SAML**                        | Sessions are Argon2id passwords today. The RBAC underneath — principals, roles, per-model grants — is already the right shape to hang an identity provider off                                                             |
+| **Teams and organisations**           | A layer above principals, so a grant can be made once for a group                                                                                                                                                          |
+| **Native image and speech providers** | The wire-format translators for providers that do not speak OpenAI's shape                                                                                                                                                 |
+| **Usage-based routing**               | Route by a deployment's remaining TPM/RPM. Wanted, but honest cross-replica accounting needs shared state, which is the trade being weighed                                                                                |
 
 ## Where it is a poorer fit
 
-Two, and both are about *your* situation rather than a missing feature:
+Two, and both are about _your_ situation rather than a missing feature:
 
 **Your bottleneck is the GPU and your current gateway works.** The honest
 reading of the benchmarks above is that you would gain steadier tails and
@@ -213,8 +213,8 @@ behind the same endpoint, a broader tool fits better.
 
 ## Where next
 
-| | |
-|---|---|
-| [Getting started](getting-started.md) | Install, first request, and a tour of the UI |
-| [Performance](performance.md) | Every number, its conditions, and what was *not* measured |
-| [Architecture](architecture.md) | How the pieces fit and how they fail |
+|                                       |                                                           |
+| ------------------------------------- | --------------------------------------------------------- |
+| [Getting started](getting-started.md) | Install, first request, and a tour of the UI              |
+| [Performance](performance.md)         | Every number, its conditions, and what was _not_ measured |
+| [Architecture](architecture.md)       | How the pieces fit and how they fail                      |

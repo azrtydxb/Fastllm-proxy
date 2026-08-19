@@ -34,13 +34,21 @@ import { Settings } from "./views/Settings.jsx";
 import { Deployment } from "./views/Deployment.jsx";
 
 const SCREENS = {
-  overview: { title: "Overview", subtitle: "control plane, fleet and backends", view: Overview },
+  overview: {
+    title: "Overview",
+    subtitle: "control plane, fleet and backends",
+    view: Overview,
+  },
   metrics: {
     title: "Metrics",
     subtitle: "watched live, since this page loaded",
     view: Metrics,
   },
-  usage: { title: "Usage & spend", subtitle: "folded from usage_events", view: Usage },
+  usage: {
+    title: "Usage & spend",
+    subtitle: "folded from usage_events",
+    view: Usage,
+  },
   providers: {
     title: "Providers",
     subtitle: "grouped by api_base — adding one is a row in a table",
@@ -56,7 +64,11 @@ const SCREENS = {
     subtitle: "what clients ask for — rules, weights and failover chains",
     view: VirtualModels,
   },
-  classes: { title: "Prompt classes", subtitle: "semantic routing · two tiers", view: PromptClasses },
+  classes: {
+    title: "Prompt classes",
+    subtitle: "semantic routing · two tiers",
+    view: PromptClasses,
+  },
   agents: {
     title: "Agents",
     subtitle: "A2A, with the card rewritten to point here",
@@ -67,12 +79,36 @@ const SCREENS = {
     subtitle: "one endpoint in front of every tool server",
     view: McpServers,
   },
-  keys: { title: "API keys", subtitle: "SHA-256 hashed · prefix stored in the clear", view: Keys },
-  rbac: { title: "Principals & roles", subtitle: "RBAC and per-model grants", view: Principals },
-  limits: { title: "Limits & budgets", subtitle: "tokens, money, or both", view: LimitsAndBudgets },
-  audit: { title: "Audit log", subtitle: "append-only · every /admin/* mutation", view: Audit },
-  fleet: { title: "Fleet", subtitle: "what each proxy replica can see", view: Fleet },
-  settings: { title: "Settings", subtitle: "fallback, and what this process was started with", view: Settings },
+  keys: {
+    title: "API keys",
+    subtitle: "SHA-256 hashed · prefix stored in the clear",
+    view: Keys,
+  },
+  rbac: {
+    title: "Principals & roles",
+    subtitle: "RBAC and per-model grants",
+    view: Principals,
+  },
+  limits: {
+    title: "Limits & budgets",
+    subtitle: "tokens, money, or both",
+    view: LimitsAndBudgets,
+  },
+  audit: {
+    title: "Audit log",
+    subtitle: "append-only · every /admin/* mutation",
+    view: Audit,
+  },
+  fleet: {
+    title: "Fleet",
+    subtitle: "what each proxy replica can see",
+    view: Fleet,
+  },
+  settings: {
+    title: "Settings",
+    subtitle: "fallback, and what this process was started with",
+    view: Settings,
+  },
   // Only reachable under an operator — see NAV below and `operator_managed`.
   deployment: {
     title: "Deployment",
@@ -128,7 +164,9 @@ const NAV = [
 export function visibleNav(config) {
   return NAV.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.needs || Boolean(config?.[item.needs])),
+    items: group.items.filter(
+      (item) => !item.needs || Boolean(config?.[item.needs]),
+    ),
   })).filter((group) => group.items.length > 0);
 }
 
@@ -217,7 +255,14 @@ export function App() {
   const onUnauthorised = () => setAuthed(false);
 
   return (
-    <div style={{ display: "flex", height: "100%", background: "var(--bg)", color: "var(--fg)" }}>
+    <div
+      style={{
+        display: "flex",
+        height: "100%",
+        background: "var(--bg)",
+        color: "var(--fg)",
+      }}
+    >
       <aside
         style={{
           width: 228,
@@ -237,8 +282,16 @@ export function App() {
             gap: 8,
           }}
         >
-          <span style={{ font: "600 15px/1 var(--mono)", letterSpacing: "-.02em" }}>fastllm</span>
-          <span style={{ font: "400 15px/1 var(--mono)", color: "var(--fg-4)" }}>proxy</span>
+          <span
+            style={{ font: "600 15px/1 var(--mono)", letterSpacing: "-.02em" }}
+          >
+            fastllm
+          </span>
+          <span
+            style={{ font: "400 15px/1 var(--mono)", color: "var(--fg-4)" }}
+          >
+            proxy
+          </span>
         </div>
         <nav
           style={{
@@ -251,7 +304,10 @@ export function App() {
           }}
         >
           {visibleNav(config).map((group) => (
-            <div key={group.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div
+              key={group.label}
+              style={{ display: "flex", flexDirection: "column", gap: 2 }}
+            >
               <div
                 style={{
                   font: "500 10px/1 var(--sans)",
@@ -340,7 +396,9 @@ export function App() {
                   forever after. */}
               {config?.you || who || "signed in"}
             </div>
-            <div style={{ font: "400 10px/1.3 var(--sans)", color: "var(--fg-4)" }}>
+            <div
+              style={{ font: "400 10px/1.3 var(--sans)", color: "var(--fg-4)" }}
+            >
               session cookie
             </div>
           </div>
@@ -350,7 +408,14 @@ export function App() {
         </div>
       </aside>
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          minWidth: 0,
+        }}
+      >
         <header
           style={{
             height: 56,
@@ -363,7 +428,9 @@ export function App() {
             background: "var(--panel-2)",
           }}
         >
-          <div style={{ font: "600 14px/1 var(--sans)", letterSpacing: "-.01em" }}>
+          <div
+            style={{ font: "600 14px/1 var(--sans)", letterSpacing: "-.01em" }}
+          >
             {active.title}
           </div>
           <div style={{ font: "400 12px/1 var(--sans)", color: "var(--fg-4)" }}>

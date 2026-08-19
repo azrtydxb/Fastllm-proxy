@@ -8,14 +8,13 @@ complete, working configuration — pick the one that matches where you are.
 Five, in the order deployments actually grow through them. Each is a complete,
 working configuration — pick the row that matches where you are.
 
-| | Planes | Good for |
-|---|---|---|
-| [1. A binary](#1-a-binary) | one process | a laptop, a single box, a VM |
-| [2. Docker](#2-docker) | one process | the same, without a toolchain |
-| [3. Compose, split](#3-compose-with-the-planes-split) | two containers | one host, admin API off the public port |
-| [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments | a cluster, one gateway replica per node |
-| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out) | control + N proxies | production traffic — manifests, Helm chart, or the operator |
-
+|                                                             | Planes              | Good for                                                    |
+| ----------------------------------------------------------- | ------------------- | ----------------------------------------------------------- |
+| [1. A binary](#1-a-binary)                                  | one process         | a laptop, a single box, a VM                                |
+| [2. Docker](#2-docker)                                      | one process         | the same, without a toolchain                               |
+| [3. Compose, split](#3-compose-with-the-planes-split)       | two containers      | one host, admin API off the public port                     |
+| [4. Kubernetes, split](#4-kubernetes-with-the-planes-split) | two Deployments     | a cluster, one gateway replica per node                     |
+| [5. Kubernetes, scaled out](#5-kubernetes-scaled-out)       | control + N proxies | production traffic — manifests, Helm chart, or the operator |
 
 The dividing line between the first two and the rest is `--role`. One binary
 runs in three shapes, and everything below is that one flag plus what each
@@ -64,7 +63,7 @@ Three things about this shape worth knowing before you rely on it:
 - **`--host` defaults to loopback.** Binding `0.0.0.0` is a deliberate act,
   which is why it is not the default.
 - **:4001 is not a public port.** It serves the admin API, the UI and
-  `/snapshot` — and `/snapshot` returns *decrypted* upstream credentials to
+  `/snapshot` — and `/snapshot` returns _decrypted_ upstream credentials to
   anything holding the proxy token. On one box, leave it on loopback and reach
   it over SSH.
 
@@ -171,13 +170,13 @@ kubectl apply -f deploy/service.yaml      # the gateway's LoadBalancer
 
 Two Deployments, and the shape of each follows from what it does:
 
-| | `fastllm-control` | `fastllm-proxy` |
-|---|---|---|
-| Replicas | 1 | 2+, spread across nodes |
-| Holds | database URL, encryption key, proxy token | proxy token, control URL |
-| Serves | :4001 admin | :4000 gateway |
-| Service | ClusterIP by default | LoadBalancer |
-| Storage | the Postgres cluster | an `emptyDir` snapshot cache |
+|          | `fastllm-control`                         | `fastllm-proxy`              |
+| -------- | ----------------------------------------- | ---------------------------- |
+| Replicas | 1                                         | 2+, spread across nodes      |
+| Holds    | database URL, encryption key, proxy token | proxy token, control URL     |
+| Serves   | :4001 admin                               | :4000 gateway                |
+| Service  | ClusterIP by default                      | LoadBalancer                 |
+| Storage  | the Postgres cluster                      | an `emptyDir` snapshot cache |
 
 The control plane is one replica deliberately: it is not on the request path,
 and a second would race the first rebuilding snapshots for no gain.
@@ -196,13 +195,13 @@ one of those three and it should go back to ClusterIP.
 ### 5. Kubernetes, scaled out
 
 Three ways to express the same two Deployments. The first two differ in how
-they are written; the third differs in what happens *after* the write.
+they are written; the third differs in what happens _after_ the write.
 
-| | |
-|---|---|
-| [Manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes) | `kubectl apply -k deploy/kubernetes/base/`. Read exactly what is applied, and edit it. Overlays for TLS and a LoadBalancer |
-| [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy) | Values rather than patches, and templating across many environments |
-| [Operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator) | A `FastllmProxy` resource, reconciled continuously |
+|                                                                                        |                                                                                                                            |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [Manifests](https://github.com/azrtydxb/Fastllm-proxy/tree/main/deploy/kubernetes)     | `kubectl apply -k deploy/kubernetes/base/`. Read exactly what is applied, and edit it. Overlays for TLS and a LoadBalancer |
+| [Helm chart](https://github.com/azrtydxb/Fastllm-proxy/tree/main/charts/fastllm-proxy) | Values rather than patches, and templating across many environments                                                        |
+| [Operator](https://github.com/azrtydxb/Fastllm-proxy/tree/main/operator)               | A `FastllmProxy` resource, reconciled continuously                                                                         |
 
 ```bash
 # Manifests
@@ -224,12 +223,12 @@ kubectl apply -f operator/deploy/example.yaml
 deployment once, at apply time, and four things it cannot describe are the
 reason to run a controller:
 
-| | |
-|---|---|
-| **Upgrades are ordered** | The two planes share a database schema. `spec.image` rolls the *control plane first*, and the gateway is held at the image it is running until that has finished. An image that cannot be pulled therefore takes the control plane down and leaves the gateway serving |
-| **A rotated Secret rolls the pods that read it** | `secretKeyRef` env is resolved once, at container start. The pod templates carry a hash of the resolved material, so rotating the proxy token — or cert-manager renewing the control-plane certificate — is a rollout instead of a change that quietly does nothing |
-| **A bad configuration is refused, not deployed** | Every referenced Secret is resolved and checked before anything is applied. A missing key or a 31-byte encryption key becomes a condition naming the Secret and the key, rather than pods in `CreateContainerConfigError` |
-| **The install finishes** | `bootstrap` runs `set-password` as a Job once the control plane is ready, so the deployment ends with a UI somebody can log into rather than one nobody can |
+|                                                  |                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Upgrades are ordered**                         | The two planes share a database schema. `spec.image` rolls the _control plane first_, and the gateway is held at the image it is running until that has finished. An image that cannot be pulled therefore takes the control plane down and leaves the gateway serving |
+| **A rotated Secret rolls the pods that read it** | `secretKeyRef` env is resolved once, at container start. The pod templates carry a hash of the resolved material, so rotating the proxy token — or cert-manager renewing the control-plane certificate — is a rollout instead of a change that quietly does nothing    |
+| **A bad configuration is refused, not deployed** | Every referenced Secret is resolved and checked before anything is applied. A missing key or a 31-byte encryption key becomes a condition naming the Secret and the key, rather than pods in `CreateContainerConfigError`                                              |
+| **The install finishes**                         | `bootstrap` runs `set-password` as a Job once the control plane is ready, so the deployment ends with a UI somebody can log into rather than one nobody can                                                                                                            |
 
 ```console
 $ kubectl -n fastllm get fllm
@@ -248,12 +247,12 @@ exposes a replica count for it.
 
 What changes as the data plane grows:
 
-| | |
-|---|---|
-| **Prefix affinity dilutes** | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct |
-| **Health is per replica** | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom |
-| **Rate limits are per replica** | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property |
-| **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows |
+|                                  |                                                                                                                                                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Prefix affinity dilutes**      | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct                                   |
+| **Health is per replica**        | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom                       |
+| **Rate limits are per replica**  | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property |
+| **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows           |
 
 For the request path itself, `--workers` and `--pool-max-idle` are the knobs
 that matter, and [the performance chapter](../performance.md) has the

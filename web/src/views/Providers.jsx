@@ -52,7 +52,8 @@ export function Providers({ onUnauthorised, go }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const health = new Map(mergeBackends(data.fleet).map((b) => [b.key, b]));
 
@@ -96,10 +97,13 @@ export function Providers({ onUnauthorised, go }) {
     .filter((g) => {
       if (filter === "Hosted") return g.credentialled > 0;
       if (filter === "Self-hosted") return g.credentialled === 0;
-      if (filter === "Native protocol") return [...g.protocols].some((p) => p !== "openai");
+      if (filter === "Native protocol")
+        return [...g.protocols].some((p) => p !== "openai");
       return true;
     })
-    .filter((g) => !search || g.host.toLowerCase().includes(search.toLowerCase()));
+    .filter(
+      (g) => !search || g.host.toLowerCase().includes(search.toLowerCase()),
+    );
 
   return (
     <Stack>
@@ -123,7 +127,12 @@ export function Providers({ onUnauthorised, go }) {
             placeholder="filter by host"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ background: "none", border: "none", padding: 0, width: "100%" }}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              width: "100%",
+            }}
           />
         </div>
         {FILTERS.map((f) => (
@@ -134,8 +143,8 @@ export function Providers({ onUnauthorised, go }) {
       </Row>
 
       <Muted>
-        A provider is a row in a table, not a code change — anything speaking the OpenAI API is
-        already supported. Backends are added on the{" "}
+        A provider is a row in a table, not a code change — anything speaking
+        the OpenAI API is already supported. Backends are added on the{" "}
         <a href="#/models" onClick={() => go("models")}>
           Models
         </a>{" "}
@@ -174,15 +183,28 @@ export function Providers({ onUnauthorised, go }) {
                           color: "var(--accent-soft)",
                         }}
                       >
-                        {g.host.replace(/^www\./, "").slice(0, 2).toUpperCase()}
+                        {g.host
+                          .replace(/^www\./, "")
+                          .slice(0, 2)
+                          .toUpperCase()}
                       </div>
                       <div style={{ minWidth: 0 }}>
-                        <Ellipsis style={{ font: "600 13px/1.2 var(--sans)" }} title={g.host}>
+                        <Ellipsis
+                          style={{ font: "600 13px/1.2 var(--sans)" }}
+                          title={g.host}
+                        >
                           {g.host}
                         </Ellipsis>
-                        <div style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-4)" }}>
-                          {fmtInt(g.models.size)} model{g.models.size === 1 ? "" : "s"} ·{" "}
-                          {fmtInt(g.backends)} backend{g.backends === 1 ? "" : "s"}
+                        <div
+                          style={{
+                            font: "400 10px/1.4 var(--sans)",
+                            color: "var(--fg-4)",
+                          }}
+                        >
+                          {fmtInt(g.models.size)} model
+                          {g.models.size === 1 ? "" : "s"} ·{" "}
+                          {fmtInt(g.backends)} backend
+                          {g.backends === 1 ? "" : "s"}
                         </div>
                       </div>
                     </Row>
@@ -208,7 +230,9 @@ export function Providers({ onUnauthorised, go }) {
                       {base}
                     </Ellipsis>
                   ))}
-                  {g.bases.size > 2 && <Muted>and {g.bases.size - 2} more paths</Muted>}
+                  {g.bases.size > 2 && (
+                    <Muted>and {g.bases.size - 2} more paths</Muted>
+                  )}
 
                   <Row
                     style={{
@@ -231,7 +255,15 @@ export function Providers({ onUnauthorised, go }) {
                     {g.reported === 0 ? (
                       <Muted>not yet probed</Muted>
                     ) : (
-                      <Pill tone={g.up === g.reported ? "ok" : g.up === 0 ? "bad" : "warn"}>
+                      <Pill
+                        tone={
+                          g.up === g.reported
+                            ? "ok"
+                            : g.up === 0
+                              ? "bad"
+                              : "warn"
+                        }
+                      >
                         {g.up} of {g.reported} up
                       </Pill>
                     )}

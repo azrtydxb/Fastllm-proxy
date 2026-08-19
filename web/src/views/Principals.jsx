@@ -39,7 +39,11 @@ const P_COLS = [
 
 export function Principals({ onUnauthorised }) {
   const [tab, setTab] = useState("principals");
-  const [draft, setDraft] = useState({ name: "", email: "", kind: "service_account" });
+  const [draft, setDraft] = useState({
+    name: "",
+    email: "",
+    kind: "service_account",
+  });
   const [roleDrafts, setRoleDrafts] = useState({});
   const [passwords, setPasswords] = useState({});
 
@@ -56,7 +60,8 @@ export function Principals({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const create = async (e) => {
     e.preventDefault();
@@ -82,8 +87,14 @@ export function Principals({ onUnauthorised }) {
     const ok = await attempt(
       () =>
         granted
-          ? api.del(`/admin/roles/${encodeURIComponent(role)}/permissions`, body)
-          : api.post(`/admin/roles/${encodeURIComponent(role)}/permissions`, body),
+          ? api.del(
+              `/admin/roles/${encodeURIComponent(role)}/permissions`,
+              body,
+            )
+          : api.post(
+              `/admin/roles/${encodeURIComponent(role)}/permissions`,
+              body,
+            ),
       setError,
       onUnauthorised,
     );
@@ -94,7 +105,16 @@ export function Principals({ onUnauthorised }) {
     <Stack>
       <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>
 
-      <Row gap={6} style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 9, padding: 3, width: "fit-content" }}>
+      <Row
+        gap={6}
+        style={{
+          background: "var(--panel)",
+          border: "1px solid var(--line)",
+          borderRadius: 9,
+          padding: 3,
+          width: "fit-content",
+        }}
+      >
         {[
           ["principals", "Principals"],
           ["matrix", "Permission matrix"],
@@ -129,7 +149,11 @@ export function Principals({ onUnauthorised }) {
                     key={p.id}
                     cols={P_COLS}
                     cells={[
-                      <Row key="n" gap={9} style={{ flexWrap: "nowrap", minWidth: 0 }}>
+                      <Row
+                        key="n"
+                        gap={9}
+                        style={{ flexWrap: "nowrap", minWidth: 0 }}
+                      >
                         <div
                           style={{
                             width: 26,
@@ -148,31 +172,59 @@ export function Principals({ onUnauthorised }) {
                           {p.name.slice(0, 2).toUpperCase()}
                         </div>
                         <div style={{ minWidth: 0 }}>
-                          <div style={{ font: "500 12px var(--sans)" }}>{p.name}</div>
+                          <div style={{ font: "500 12px var(--sans)" }}>
+                            {p.name}
+                          </div>
                           {p.email && (
-                            <div style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>
+                            <div
+                              style={{
+                                font: "400 10px var(--sans)",
+                                color: "var(--fg-5)",
+                              }}
+                            >
                               {p.email}
                             </div>
                           )}
                         </div>
                       </Row>,
-                      <Mono key="k" style={{ font: "400 11px var(--mono)", color: "var(--fg-3)" }}>
+                      <Mono
+                        key="k"
+                        style={{
+                          font: "400 11px var(--mono)",
+                          color: "var(--fg-3)",
+                        }}
+                      >
                         {p.kind}
                       </Mono>,
                       <Row key="r" gap={5}>
                         {p.roles.map((r) => (
                           <span
                             key={r}
-                            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 4,
+                            }}
                           >
-                            <Pill tone={r === "admin" ? "bad" : r === "inference" ? "ok" : "accent"}>
+                            <Pill
+                              tone={
+                                r === "admin"
+                                  ? "bad"
+                                  : r === "inference"
+                                    ? "ok"
+                                    : "accent"
+                              }
+                            >
                               {r}
                             </Pill>
                             <button
                               title={`revoke ${r}`}
                               onClick={async () => {
                                 const ok = await attempt(
-                                  () => api.del(`/admin/principals/${p.id}/roles/${r}`),
+                                  () =>
+                                    api.del(
+                                      `/admin/principals/${p.id}/roles/${r}`,
+                                    ),
                                   setError,
                                   onUnauthorised,
                                 );
@@ -197,7 +249,10 @@ export function Principals({ onUnauthorised }) {
                             setRoleDrafts({ ...roleDrafts, [p.id]: "" });
                             if (!role) return;
                             const ok = await attempt(
-                              () => api.post(`/admin/principals/${p.id}/roles`, { role }),
+                              () =>
+                                api.post(`/admin/principals/${p.id}/roles`, {
+                                  role,
+                                }),
                               setError,
                               onUnauthorised,
                             );
@@ -224,26 +279,46 @@ export function Principals({ onUnauthorised }) {
                             ))}
                         </select>
                       </Row>,
-                      <Row key="a" gap={6} style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
+                      <Row
+                        key="a"
+                        gap={6}
+                        style={{
+                          justifyContent: "flex-end",
+                          flexWrap: "nowrap",
+                        }}
+                      >
                         {p.kind === "user" && (
                           <input
                             type="password"
                             placeholder="set password"
                             value={passwords[p.id] || ""}
-                            onChange={(e) => setPasswords({ ...passwords, [p.id]: e.target.value })}
+                            onChange={(e) =>
+                              setPasswords({
+                                ...passwords,
+                                [p.id]: e.target.value,
+                              })
+                            }
                             onKeyDown={async (e) => {
                               if (e.key !== "Enter" || !passwords[p.id]) return;
                               const ok = await attempt(
                                 () =>
-                                  api.put(`/admin/principals/${p.id}/password`, {
-                                    password: passwords[p.id],
-                                  }),
+                                  api.put(
+                                    `/admin/principals/${p.id}/password`,
+                                    {
+                                      password: passwords[p.id],
+                                    },
+                                  ),
                                 setError,
                                 onUnauthorised,
                               );
-                              if (ok) setPasswords({ ...passwords, [p.id]: "" });
+                              if (ok)
+                                setPasswords({ ...passwords, [p.id]: "" });
                             }}
-                            style={{ width: 96, fontSize: 11, padding: "4px 8px" }}
+                            style={{
+                              width: 96,
+                              fontSize: 11,
+                              padding: "4px 8px",
+                            }}
                           />
                         )}
                         <Button
@@ -280,13 +355,17 @@ export function Principals({ onUnauthorised }) {
                   <Field label="NAME">
                     <input
                       value={draft.name}
-                      onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, name: e.target.value })
+                      }
                     />
                   </Field>
                   <Field label="EMAIL (OPTIONAL)">
                     <input
                       value={draft.email}
-                      onChange={(e) => setDraft({ ...draft, email: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, email: e.target.value })
+                      }
                     />
                   </Field>
                   <Field
@@ -295,7 +374,9 @@ export function Principals({ onUnauthorised }) {
                   >
                     <select
                       value={draft.kind}
-                      onChange={(e) => setDraft({ ...draft, kind: e.target.value })}
+                      onChange={(e) =>
+                        setDraft({ ...draft, kind: e.target.value })
+                      }
                     >
                       <option value="service_account">service_account</option>
                       <option value="user">user</option>
@@ -311,11 +392,18 @@ export function Principals({ onUnauthorised }) {
               <Stack gap={8}>
                 {data.roles.map((r) => (
                   <Row key={r.id} style={{ flexWrap: "nowrap" }}>
-                    <Mono style={{ font: "500 12px var(--mono)" }}>{r.name}</Mono>
+                    <Mono style={{ font: "500 12px var(--mono)" }}>
+                      {r.name}
+                    </Mono>
                     <Spacer />
                     <Muted>
-                      {data.principals.filter((p) => p.roles.includes(r.name)).length} holder
-                      {data.principals.filter((p) => p.roles.includes(r.name)).length === 1
+                      {
+                        data.principals.filter((p) => p.roles.includes(r.name))
+                          .length
+                      }{" "}
+                      holder
+                      {data.principals.filter((p) => p.roles.includes(r.name))
+                        .length === 1
                         ? ""
                         : "s"}
                     </Muted>
@@ -336,8 +424,9 @@ export function Principals({ onUnauthorised }) {
                   {/* Counted, not asserted: the copy said "four" while this
                       deployment seeds three, and a number written into a
                       sentence is one nobody re-checks. */}
-                  A role exists because something checks it. A new one starts with no permissions —
-                  grant it some on the matrix, or it authorises nothing.
+                  A role exists because something checks it. A new one starts
+                  with no permissions — grant it some on the matrix, or it
+                  authorises nothing.
                 </Muted>
               </Stack>
             </Card>
@@ -351,7 +440,11 @@ export function Principals({ onUnauthorised }) {
           subtitle="the four admin permissions · click a cell to grant or revoke"
           right={
             <Row gap={10}>
-              <Legend color="var(--accent-bg)" border="var(--accent-line)" label="granted" />
+              <Legend
+                color="var(--accent-bg)"
+                border="var(--accent-line)"
+                label="granted"
+              />
               <Legend color="#141922" border="var(--line)" label="denied" />
             </Row>
           }
@@ -377,11 +470,12 @@ export function Principals({ onUnauthorised }) {
           >
             <Muted>
               There is no finer-grained permission than{" "}
-              <Mono style={{ color: "var(--fg-2)" }}>config:write</Mono> for managing principals or
-              frontend models — a permission per table would multiply roles for no operator-visible
-              benefit. A session alone is not authority: every{" "}
-              <Mono style={{ color: "var(--fg-2)" }}>/admin/*</Mono> handler checks a permission and
-              answers 403 without one.
+              <Mono style={{ color: "var(--fg-2)" }}>config:write</Mono> for
+              managing principals or frontend models — a permission per table
+              would multiply roles for no operator-visible benefit. A session
+              alone is not authority: every{" "}
+              <Mono style={{ color: "var(--fg-2)" }}>/admin/*</Mono> handler
+              checks a permission and answers 403 without one.
             </Muted>
           </div>
         </Card>
@@ -391,7 +485,9 @@ export function Principals({ onUnauthorised }) {
         <Card
           title={
             <>
-              Per-model <Mono style={{ color: "var(--accent-soft)" }}>model:invoke</Mono> grants
+              Per-model{" "}
+              <Mono style={{ color: "var(--accent-soft)" }}>model:invoke</Mono>{" "}
+              grants
             </>
           }
           subtitle="failover never widens reach — a candidate the caller lacks model:invoke on is dropped from the chain, including the deployment-wide fallback"
@@ -415,10 +511,13 @@ export function Principals({ onUnauthorised }) {
                   : undefined,
                 cells: data.models.map((m) => {
                   const all = r.permissions.some(
-                    (p) => p.verb === "model:invoke" && p.resource === "model/*",
+                    (p) =>
+                      p.verb === "model:invoke" && p.resource === "model/*",
                   );
                   const one = r.permissions.some(
-                    (p) => p.verb === "model:invoke" && p.resource === `model/${m.name}`,
+                    (p) =>
+                      p.verb === "model:invoke" &&
+                      p.resource === `model/${m.name}`,
                   );
                   return {
                     on: one,
@@ -427,7 +526,8 @@ export function Principals({ onUnauthorised }) {
                     // write a per-model row that changes nothing would be
                     // worse — it would read as a narrowing that did not happen.
                     implied: all && !one,
-                    onToggle: (on) => toggle(r.name, "model:invoke", `model/${m.name}`, on),
+                    onToggle: (on) =>
+                      toggle(r.name, "model:invoke", `model/${m.name}`, on),
                   };
                 }),
               }))}
@@ -482,7 +582,13 @@ function Legend({ color, border, label }) {
       }}
     >
       <span
-        style={{ width: 11, height: 11, borderRadius: 3, background: color, border: `1px solid ${border}` }}
+        style={{
+          width: 11,
+          height: 11,
+          borderRadius: 3,
+          background: color,
+          border: `1px solid ${border}`,
+        }}
       />
       {label}
     </span>
@@ -532,7 +638,11 @@ function Matrix({ cols, rows }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <Mono style={{ font: "500 12px var(--mono)" }}>{row.label}</Mono>
               {row.sub && (
-                <span style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>{row.sub}</span>
+                <span
+                  style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}
+                >
+                  {row.sub}
+                </span>
               )}
             </div>
             {row.cells.map((cell, i) => (
@@ -548,7 +658,11 @@ function Matrix({ cols, rows }) {
                 }
                 style={{
                   height: 34,
-                  background: cell.on ? "#1d3a63" : cell.implied ? "var(--warn-bg)" : "#141922",
+                  background: cell.on
+                    ? "#1d3a63"
+                    : cell.implied
+                      ? "var(--warn-bg)"
+                      : "#141922",
                   border: `1px solid ${cell.on ? "var(--accent-line)" : cell.implied ? "var(--warn-line)" : "var(--line)"}`,
                   borderRadius: 7,
                   color: cell.on

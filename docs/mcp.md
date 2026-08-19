@@ -25,14 +25,14 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/mcp-servers \
   }'
 ```
 
-| field | |
-|---|---|
-| `name` | What callers address it by, **and the namespace its tools appear under**. Alphanumeric with `-` or `_` |
-| `url` | The server's endpoint |
-| `transport` | `http` (MCP's streamable HTTP) or `sse` |
-| `auth_header` | Defaults to `authorization` |
-| `auth_scheme` | Defaults to `Bearer`; `""` sends the credential raw, which several MCP hosts want |
-| `upstream_api_key` | Encrypted with `FASTLLM_ENCRYPTION_KEY` before it reaches Postgres, and never readable back |
+| field              |                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `name`             | What callers address it by, **and the namespace its tools appear under**. Alphanumeric with `-` or `_` |
+| `url`              | The server's endpoint                                                                                  |
+| `transport`        | `http` (MCP's streamable HTTP) or `sse`                                                                |
+| `auth_header`      | Defaults to `authorization`                                                                            |
+| `auth_scheme`      | Defaults to `Bearer`; `""` sends the credential raw, which several MCP hosts want                      |
+| `upstream_api_key` | Encrypted with `FASTLLM_ENCRYPTION_KEY` before it reaches Postgres, and never readable back            |
 
 **Adding a server grants nobody anything.** It is reachable only by a
 principal holding `mcp:invoke` on `mcp/<name>` or `mcp/*` — see
@@ -163,8 +163,8 @@ them rather than shipping as surface nobody calls.
 
 ## Where next
 
-| | |
-|---|---|
-| [Security](security.md) | Where the credential lives, and what `/snapshot` carries |
-| [Interactive API reference](api/swagger.md) | The three endpoints and their responses |
-| [Providers](providers.md) | The same idea for models |
+|                                             |                                                          |
+| ------------------------------------------- | -------------------------------------------------------- |
+| [Security](security.md)                     | Where the credential lives, and what `/snapshot` carries |
+| [Interactive API reference](api/swagger.md) | The three endpoints and their responses                  |
+| [Providers](providers.md)                   | The same idea for models                                 |

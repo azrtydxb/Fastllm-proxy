@@ -35,14 +35,14 @@ way a hand-written endpoint list does.
 
 The control plane serves the same two routes, and there `Try it out` works:
 
-| | |
-|---|---|
-| `GET /openapi.json` | The spec |
-| `GET /docs` | Swagger UI |
+|                     |            |
+| ------------------- | ---------- |
+| `GET /openapi.json` | The spec   |
+| `GET /docs`         | Swagger UI |
 
 Both sit on the **admin** listener (`:4001`) alongside `/healthz`, and both
 are outside the session gate — a spec is not a secret and a probe target
-cannot hold a cookie. Everything they *describe* under `/admin/*` still
+cannot hold a cookie. Everything they _describe_ under `/admin/*` still
 requires a session and a per-route permission.
 
 ```bash

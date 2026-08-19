@@ -43,9 +43,7 @@
       "get": {
         "summary": "List A2A agents. Reports whether a credential is set, never what it is",
         "operationId": "get_admin_a2a_agents",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -66,9 +64,7 @@
       "post": {
         "summary": "Register an A2A agent",
         "operationId": "post_admin_a2a_agents",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -97,9 +93,7 @@
       "patch": {
         "summary": "Update an A2A agent",
         "operationId": "patch_admin_a2a_agents_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -126,9 +120,7 @@
       "delete": {
         "summary": "Delete an A2A agent",
         "operationId": "delete_admin_a2a_agents_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -157,9 +149,7 @@
       "get": {
         "summary": "The change log, newest first, keyset-paginated",
         "operationId": "get_admin_audit",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -182,9 +172,7 @@
       "delete": {
         "summary": "Delete backends id",
         "operationId": "delete_admin_backends_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -217,9 +205,7 @@
       "get": {
         "summary": "Read budgets",
         "operationId": "get_admin_budgets",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -242,9 +228,7 @@
       "get": {
         "summary": "What this process was started with, and who is asking",
         "operationId": "get_admin_config",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -268,9 +252,7 @@
         "summary": "The FastllmProxy resource running this deployment, and its status",
         "description": "404 when no operator manages this deployment, which is also how the management UI decides whether to show the screen at all.",
         "operationId": "get_admin_deployment",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -298,9 +280,7 @@
         "summary": "Change the shape of this deployment: image, replicas, policy, autoscaling",
         "description": "A merge patch against the FastllmProxy spec, restricted to fields the operator can roll out safely. Secret references, service type and bootstrap are deliberately not editable here.",
         "operationId": "patch_admin_deployment",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "requestBody": {
           "required": true,
           "content": {
@@ -381,9 +361,7 @@
       "get": {
         "summary": "Read fallback-model",
         "operationId": "get_admin_fallback_model",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -404,9 +382,7 @@
       "put": {
         "summary": "Set fallback-model",
         "operationId": "put_admin_fallback_model",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -429,9 +405,7 @@
       "get": {
         "summary": "What each proxy replica reports, kept per replica and never merged",
         "operationId": "get_admin_fleet",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -454,9 +428,7 @@
       "get": {
         "summary": "Read health",
         "operationId": "get_admin_health",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -479,9 +451,7 @@
       "get": {
         "summary": "Read keys",
         "operationId": "get_admin_keys",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -502,9 +472,7 @@
       "post": {
         "summary": "Mint a key. The plaintext is returned once and never again",
         "operationId": "post_admin_keys",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -527,9 +495,7 @@
       "delete": {
         "summary": "Revoke a key. The row stays for audit",
         "operationId": "delete_admin_keys_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -562,9 +528,7 @@
       "get": {
         "summary": "Read limits",
         "operationId": "get_admin_limits",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -587,9 +551,7 @@
       "get": {
         "summary": "List MCP servers. Reports whether a credential is set, never what it is",
         "operationId": "get_admin_mcp_servers",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -610,9 +572,7 @@
       "post": {
         "summary": "Register an MCP server",
         "operationId": "post_admin_mcp_servers",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -641,9 +601,7 @@
       "patch": {
         "summary": "Update an MCP server. An absent upstream_api_key leaves the stored credential alone; \"\" clears it",
         "operationId": "patch_admin_mcp_servers_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -670,9 +628,7 @@
       "delete": {
         "summary": "Delete an MCP server",
         "operationId": "delete_admin_mcp_servers_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -701,9 +657,7 @@
       "get": {
         "summary": "Read models",
         "operationId": "get_admin_models",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -724,9 +678,7 @@
       "post": {
         "summary": "Create models",
         "operationId": "post_admin_models",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -749,9 +701,7 @@
       "delete": {
         "summary": "Delete models id",
         "operationId": "delete_admin_models_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -782,9 +732,7 @@
       "patch": {
         "summary": "Correct a model in place. An explicit null clears a field; an absent field is left alone",
         "operationId": "patch_admin_models_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -817,9 +765,7 @@
       "post": {
         "summary": "Create models id backends",
         "operationId": "post_admin_models_id_backends",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -852,9 +798,7 @@
       "post": {
         "summary": "Create prices sync",
         "operationId": "post_admin_prices_sync",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -877,9 +821,7 @@
       "get": {
         "summary": "Read principals",
         "operationId": "get_admin_principals",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -900,9 +842,7 @@
       "post": {
         "summary": "Create principals",
         "operationId": "post_admin_principals",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -925,9 +865,7 @@
       "delete": {
         "summary": "Delete principals id",
         "operationId": "delete_admin_principals_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -960,9 +898,7 @@
       "delete": {
         "summary": "Delete principals id budget",
         "operationId": "delete_admin_principals_id_budget",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -993,9 +929,7 @@
       "put": {
         "summary": "Set principals id budget",
         "operationId": "put_admin_principals_id_budget",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1028,9 +962,7 @@
       "delete": {
         "summary": "Delete principals id limits",
         "operationId": "delete_admin_principals_id_limits",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1061,9 +993,7 @@
       "put": {
         "summary": "Set principals id limits",
         "operationId": "put_admin_principals_id_limits",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1096,9 +1026,7 @@
       "put": {
         "summary": "Set principals id password",
         "operationId": "put_admin_principals_id_password",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1131,9 +1059,7 @@
       "post": {
         "summary": "Create principals id roles",
         "operationId": "post_admin_principals_id_roles",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1166,9 +1092,7 @@
       "delete": {
         "summary": "Delete principals id roles role",
         "operationId": "delete_admin_principals_id_roles_role",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1209,9 +1133,7 @@
       "get": {
         "summary": "Read prompt-classes",
         "operationId": "get_admin_prompt_classes",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1232,9 +1154,7 @@
       "post": {
         "summary": "Create prompt-classes",
         "operationId": "post_admin_prompt_classes",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1257,9 +1177,7 @@
       "post": {
         "summary": "Leave-one-out precision and recall over your own class examples",
         "operationId": "post_admin_prompt_classes_evaluate",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1282,9 +1200,7 @@
       "delete": {
         "summary": "Delete prompt-classes id",
         "operationId": "delete_admin_prompt_classes_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1317,9 +1233,7 @@
       "post": {
         "summary": "Create prompt-classes id examples",
         "operationId": "post_admin_prompt_classes_id_examples",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1352,9 +1266,7 @@
       "get": {
         "summary": "Read roles",
         "operationId": "get_admin_roles",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1375,9 +1287,7 @@
       "post": {
         "summary": "Create roles",
         "operationId": "post_admin_roles",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1400,9 +1310,7 @@
       "delete": {
         "summary": "Delete roles name",
         "operationId": "delete_admin_roles_name",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1435,9 +1343,7 @@
       "delete": {
         "summary": "Delete roles name permissions",
         "operationId": "delete_admin_roles_name_permissions",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1468,9 +1374,7 @@
       "post": {
         "summary": "Create roles name permissions",
         "operationId": "post_admin_roles_name_permissions",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1503,9 +1407,7 @@
       "post": {
         "summary": "Which rule would decide, and what the chain resolves to, without dispatching",
         "operationId": "post_admin_routing_dry_run",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1528,9 +1430,7 @@
       "delete": {
         "summary": "Delete rule-targets id",
         "operationId": "delete_admin_rule_targets_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1563,9 +1463,7 @@
       "delete": {
         "summary": "Delete rules id",
         "operationId": "delete_admin_rules_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1598,9 +1496,7 @@
       "post": {
         "summary": "Create rules id targets",
         "operationId": "post_admin_rules_id_targets",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1633,9 +1529,7 @@
       "post": {
         "summary": "Invalidate every session, including the caller's",
         "operationId": "post_admin_sessions_revoke_all",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1658,9 +1552,7 @@
       "post": {
         "summary": "Rebuild and republish the snapshot now",
         "operationId": "post_admin_snapshot_rebuild",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1683,9 +1575,7 @@
       "get": {
         "summary": "Bucketed traffic, latency and spend. Empty buckets come back as explicit zeros; latency is null where there was nothing to measure",
         "operationId": "get_admin_timeseries",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1708,9 +1598,7 @@
       "get": {
         "summary": "Aggregate usage and spend, grouped by model, principal, virtual model or day",
         "operationId": "get_admin_usage",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1733,9 +1621,7 @@
       "delete": {
         "summary": "Delete virtual-model-defaults id",
         "operationId": "delete_admin_virtual_model_defaults_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1768,9 +1654,7 @@
       "get": {
         "summary": "Read virtual-models",
         "operationId": "get_admin_virtual_models",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1791,9 +1675,7 @@
       "post": {
         "summary": "Create virtual-models",
         "operationId": "post_admin_virtual_models",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1816,9 +1698,7 @@
       "delete": {
         "summary": "Delete virtual-models id",
         "operationId": "delete_admin_virtual_models_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1851,9 +1731,7 @@
       "post": {
         "summary": "Create virtual-models id defaults",
         "operationId": "post_admin_virtual_models_id_defaults",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1886,9 +1764,7 @@
       "post": {
         "summary": "Create virtual-models id rules",
         "operationId": "post_admin_virtual_models_id_rules",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1921,9 +1797,7 @@
       "get": {
         "summary": "Swagger UI over the spec. The page pulls its bundle from a CDN, so an air-gapped deployment gets an empty page while /openapi.json still works",
         "operationId": "get_docs",
-        "tags": [
-          "session"
-        ],
+        "tags": ["session"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1938,9 +1812,7 @@
       "get": {
         "summary": "Per-backend health, in-flight and error counts. Unauthenticated - exposes backend addresses",
         "operationId": "get_health",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1952,9 +1824,7 @@
       "post": {
         "summary": "Per-replica backend health. Proxy token only",
         "operationId": "post_health_report",
-        "tags": [
-          "control-plane protocol"
-        ],
+        "tags": ["control-plane protocol"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1974,9 +1844,7 @@
       "get": {
         "summary": "Liveness. Unauthenticated and does no database work, so probing it often costs nothing",
         "operationId": "get_healthz",
-        "tags": [
-          "session"
-        ],
+        "tags": ["session"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1991,9 +1859,7 @@
       "post": {
         "summary": "Exchange locally observed counts for a fresh rate-limit allowance. Proxy token only",
         "operationId": "post_limits_reconcile",
-        "tags": [
-          "control-plane protocol"
-        ],
+        "tags": ["control-plane protocol"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2013,9 +1879,7 @@
       "post": {
         "summary": "Exchange a name and password for a session cookie",
         "operationId": "post_login",
-        "tags": [
-          "session"
-        ],
+        "tags": ["session"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2030,9 +1894,7 @@
       "post": {
         "summary": "Clear the session cookie",
         "operationId": "post_logout",
-        "tags": [
-          "session"
-        ],
+        "tags": ["session"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2047,9 +1909,7 @@
       "get": {
         "summary": "Prometheus text. Unauthenticated",
         "operationId": "get_metrics",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2061,9 +1921,7 @@
       "get": {
         "summary": "This document. Unauthenticated: a spec you need a session to read is one nobody generates a client from",
         "operationId": "get_openapi_json",
-        "tags": [
-          "session"
-        ],
+        "tags": ["session"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2078,9 +1936,7 @@
       "get": {
         "summary": "The flattened routing table a proxy replica polls. Proxy token only - returns decrypted upstream credentials",
         "operationId": "get_snapshot",
-        "tags": [
-          "control-plane protocol"
-        ],
+        "tags": ["control-plane protocol"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2100,9 +1956,7 @@
       "post": {
         "summary": "Batched usage reporting from a proxy replica. Proxy token only",
         "operationId": "post_usage",
-        "tags": [
-          "control-plane protocol"
-        ],
+        "tags": ["control-plane protocol"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2122,9 +1976,7 @@
       "get": {
         "summary": "A2A agents this key may invoke",
         "operationId": "get_v1_agents",
-        "tags": [
-          "agents"
-        ],
+        "tags": ["agents"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2144,9 +1996,7 @@
       "post": {
         "summary": "Every A2A JSON-RPC method on one path. Only the methods this gateway forwards are accepted",
         "operationId": "post_v1_agent_rpc",
-        "tags": [
-          "agents"
-        ],
+        "tags": ["agents"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2175,9 +2025,7 @@
       "get": {
         "summary": "The agent's card, with `url` rewritten to this gateway so the next call is still authorised and attributed",
         "operationId": "get_v1_agent_card",
-        "tags": [
-          "agents"
-        ],
+        "tags": ["agents"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2203,9 +2051,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_audio_speech",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2237,9 +2083,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_audio_transcriptions",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2271,9 +2115,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_audio_translations",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2305,9 +2147,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_chat_completions",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2339,9 +2179,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_completions",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2373,9 +2211,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_embeddings",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2407,9 +2243,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_images_edits",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2441,9 +2275,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_images_generations",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2475,9 +2307,7 @@
       "get": {
         "summary": "MCP servers this key may invoke",
         "operationId": "get_v1_mcp_servers",
-        "tags": [
-          "mcp"
-        ],
+        "tags": ["mcp"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2497,9 +2327,7 @@
       "post": {
         "summary": "Invoke one namespaced tool. {\"name\": \"<server>__<tool>\", \"arguments\": {}}",
         "operationId": "post_v1_mcp_tools_call",
-        "tags": [
-          "mcp"
-        ],
+        "tags": ["mcp"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2528,9 +2356,7 @@
       "post": {
         "summary": "Every tool across every server this key may invoke, namespaced <server>__<tool>. `unreachable` names servers that did not answer, so a missing tool is diagnosable",
         "operationId": "post_v1_mcp_tools_list",
-        "tags": [
-          "mcp"
-        ],
+        "tags": ["mcp"],
         "responses": {
           "200": {
             "description": "OK"
@@ -2550,9 +2376,7 @@
       "get": {
         "summary": "Models this key may invoke. Filtered by the caller's grants",
         "operationId": "list_models",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2569,9 +2393,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_moderations",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2603,9 +2425,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_rerank",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2637,9 +2457,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_responses",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []
@@ -2671,9 +2489,7 @@
       "post": {
         "summary": "Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend",
         "operationId": "proxy_score",
-        "tags": [
-          "data plane"
-        ],
+        "tags": ["data plane"],
         "security": [
           {
             "apiKey": []

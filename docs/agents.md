@@ -1,7 +1,7 @@
 # A2A agents
 
 **One address in front of every agent.** The same argument as the
-[MCP gateway](mcp.md), one step further out: an agent *acts* — it runs, it
+[MCP gateway](mcp.md), one step further out: an agent _acts_ — it runs, it
 calls tools, it spends money — so "which of our keys may set which agent
 running" is a question somebody eventually has to answer.
 
@@ -19,13 +19,13 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/a2a-agents \
   }'
 ```
 
-| field | |
-|---|---|
-| `name` | Addressed as `/v1/agents/<name>` |
-| `url` | The agent's A2A endpoint |
-| `protocol_version` | `0.3` or `1.0`, **pinned** — see below |
+| field                         |                                                    |
+| ----------------------------- | -------------------------------------------------- |
+| `name`                        | Addressed as `/v1/agents/<name>`                   |
+| `url`                         | The agent's A2A endpoint                           |
+| `protocol_version`            | `0.3` or `1.0`, **pinned** — see below             |
 | `auth_header` / `auth_scheme` | As for any upstream; `""` sends the credential raw |
-| `upstream_api_key` | Encrypted at rest, never readable back |
+| `upstream_api_key`            | Encrypted at rest, never readable back             |
 
 ## Calling one
 
@@ -47,7 +47,7 @@ curl -XPOST http://gateway:4000/v1/agents/planner \
 ### The card is rewritten, and that is the point
 
 A client fetches an agent card and then talks to whatever `url` it names.
-Served unchanged, that URL is *the agent* — so the client's next request goes
+Served unchanged, that URL is _the agent_ — so the client's next request goes
 straight past the key check and the spend attribution, and this becomes a
 discovery service rather than a gateway.
 
@@ -63,7 +63,7 @@ three of those.
 ### Versions are pinned, never inferred
 
 A2A 0.3 discriminates objects by `kind`. 1.0 uses protobuf JSON envelopes with
-PascalCase method names. A gateway *can* infer which one a client wants from
+PascalCase method names. A gateway _can_ infer which one a client wants from
 the method it called, and LiteLLM does — but an inference means the agent card
 can say one thing while the response is the other, and a client that has
 already branched on the card is then wrong in a way that looks like the agent
@@ -76,11 +76,11 @@ that silently half-does it is worse than one that does not.
 
 ### Only known methods are forwarded
 
-| 0.3 | 1.0 |
-|---|---|
-| `message/send`, `message/stream` | `SendMessage`, `SendStreamingMessage` |
+| 0.3                                                            | 1.0                                                      |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| `message/send`, `message/stream`                               | `SendMessage`, `SendStreamingMessage`                    |
 | `tasks/get`, `tasks/list`, `tasks/cancel`, `tasks/resubscribe` | `GetTask`, `ListTasks`, `CancelTask`, `TaskSubscription` |
-| `agent/getAuthenticatedExtendedCard` | `GetAgentCard` |
+| `agent/getAuthenticatedExtendedCard`                           | `GetAgentCard`                                           |
 
 Anything else is a `400`. An unknown method forwarded blind is a request whose
 effects nobody here can describe, made with a credential the caller never
@@ -106,8 +106,8 @@ exist.
 
 ## Where next
 
-| | |
-|---|---|
-| [MCP gateway](mcp.md) | The same idea for tool servers |
-| [Security](security.md) | Where the credential lives, and what `/snapshot` carries |
-| [Interactive API reference](api/swagger.md) | The three routes and their responses |
+|                                             |                                                          |
+| ------------------------------------------- | -------------------------------------------------------- |
+| [MCP gateway](mcp.md)                       | The same idea for tool servers                           |
+| [Security](security.md)                     | Where the credential lives, and what `/snapshot` carries |
+| [Interactive API reference](api/swagger.md) | The three routes and their responses                     |

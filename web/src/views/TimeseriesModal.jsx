@@ -8,16 +8,34 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "./../api.js";
 import { Legend, RANGES, TimeChart, useTimeseries } from "./../charts.jsx";
-import { Button, Chip, Empty, Label, Muted, Row, Spacer, fmtInt, fmtMoney } from "./../ui.jsx";
+import {
+  Button,
+  Chip,
+  Empty,
+  Label,
+  Muted,
+  Row,
+  Spacer,
+  fmtInt,
+  fmtMoney,
+} from "./../ui.jsx";
 
 const COUNT_SERIES = [
   { key: "requests_ok", label: "served", tone: "accent" },
   { key: "upstream_errors", label: "upstream errors", tone: "bad" },
-  { key: "refused_authorisation", label: "refused: authorisation", tone: "warn" },
+  {
+    key: "refused_authorisation",
+    label: "refused: authorisation",
+    tone: "warn",
+  },
   { key: "refused_rate_limit", label: "refused: rate limit", tone: "warn" },
   { key: "refused_budget", label: "refused: budget", tone: "violet" },
   { key: "refused_no_backend", label: "refused: no backend", tone: "bad" },
-  { key: "refused_unattributed", label: "refused: bad key / unknown model", tone: "warn" },
+  {
+    key: "refused_unattributed",
+    label: "refused: bad key / unknown model",
+    tone: "warn",
+  },
 ];
 
 const LATENCY_LINES = [
@@ -65,12 +83,23 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
   const [principals, setPrincipals] = useState([]);
 
   const range = RANGES.find((r) => r.id === rangeId) || RANGES[2];
-  const { points: raw, error } = useTimeseries({ range, offset, model, principalId });
+  const { points: raw, error } = useTimeseries({
+    range,
+    offset,
+    model,
+    principalId,
+  });
   const points = useMemo(() => withDerived(raw), [raw]);
 
   useEffect(() => {
-    api.get("/admin/models").then(setModels).catch(() => {});
-    api.get("/admin/principals").then(setPrincipals).catch(() => {});
+    api
+      .get("/admin/models")
+      .then(setModels)
+      .catch(() => {});
+    api
+      .get("/admin/principals")
+      .then(setPrincipals)
+      .catch(() => {});
   }, []);
 
   // Escape closes, which is the one keyboard affordance a modal owes you.
@@ -102,7 +131,15 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
         cost: a.cost + p.cost_micros,
         unpriced: a.unpriced + p.unpriced_requests,
       }),
-      { requests: 0, errors: 0, refused: 0, prompt: 0, completion: 0, cost: 0, unpriced: 0 },
+      {
+        requests: 0,
+        errors: 0,
+        refused: 0,
+        prompt: 0,
+        completion: 0,
+        cost: 0,
+        unpriced: 0,
+      },
     );
   }, [points]);
 
@@ -202,7 +239,13 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
         </Row>
 
         {error && (
-          <div style={{ marginTop: 12, font: "400 12px var(--sans)", color: "var(--bad)" }}>
+          <div
+            style={{
+              marginTop: 12,
+              font: "400 12px var(--sans)",
+              color: "var(--bad)",
+            }}
+          >
             {error}
           </div>
         )}
@@ -212,8 +255,16 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
             <div style={{ height: 16 }} />
             <Row gap={22} style={{ flexWrap: "wrap" }}>
               <Stat label="REQUESTS" value={fmtInt(totals.requests)} />
-              <Stat label="UPSTREAM ERRORS" value={fmtInt(totals.errors)} tone="bad" />
-              <Stat label="REFUSED" value={fmtInt(totals.refused)} tone="warn" />
+              <Stat
+                label="UPSTREAM ERRORS"
+                value={fmtInt(totals.errors)}
+                tone="bad"
+              />
+              <Stat
+                label="REFUSED"
+                value={fmtInt(totals.refused)}
+                tone="warn"
+              />
               <Stat
                 label="TOKENS"
                 value={fmtInt(totals.prompt + totals.completion)}
@@ -234,7 +285,10 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
           </>
         )}
 
-        <Section title="Requests" hint="served, upstream errors and gateway refusals, stacked">
+        <Section
+          title="Requests"
+          hint="served, upstream errors and gateway refusals, stacked"
+        >
           <TimeChart
             points={points}
             series={COUNT_SERIES}
@@ -248,7 +302,12 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
           title="Latency"
           hint="over the responses a backend returned · a gap is a bucket with nothing to measure, not zero"
         >
-          <TimeChart points={points} lines={LATENCY_LINES} height={150} spanSeconds={range.seconds} />
+          <TimeChart
+            points={points}
+            lines={LATENCY_LINES}
+            height={150}
+            spanSeconds={range.seconds}
+          />
           <Legend lines={LATENCY_LINES} />
         </Section>
 
@@ -265,9 +324,10 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
         {points && points.every((p) => p.requests === 0) && (
           <div style={{ marginTop: 12 }}>
             <Empty>
-              Nothing was served in this window. Usage has only been recorded for every caller
-              since the accounting change — older windows may be empty because nothing was
-              written, not because nothing happened.
+              Nothing was served in this window. Usage has only been recorded
+              for every caller since the accounting change — older windows may
+              be empty because nothing was written, not because nothing
+              happened.
             </Empty>
           </div>
         )}
@@ -288,18 +348,33 @@ const selectStyle = {
 function Stat({ label, value, sub, tone }) {
   return (
     <div>
-      <div style={{ font: "500 9.5px var(--sans)", color: "var(--fg-5)", letterSpacing: ".1em" }}>
+      <div
+        style={{
+          font: "500 9.5px var(--sans)",
+          color: "var(--fg-5)",
+          letterSpacing: ".1em",
+        }}
+      >
         {label}
       </div>
       <div
         style={{
           font: "500 19px var(--mono)",
-          color: tone === "bad" ? "var(--bad)" : tone === "warn" ? "var(--warn)" : "var(--fg)",
+          color:
+            tone === "bad"
+              ? "var(--bad)"
+              : tone === "warn"
+                ? "var(--warn)"
+                : "var(--fg)",
         }}
       >
         {value}
       </div>
-      {sub && <div style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>{sub}</div>}
+      {sub && (
+        <div style={{ font: "400 10px var(--sans)", color: "var(--fg-5)" }}>
+          {sub}
+        </div>
+      )}
     </div>
   );
 }

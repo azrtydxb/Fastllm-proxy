@@ -19,13 +19,13 @@ Run with no subcommand, it is the gateway. The five subcommands are operator
 tools, and each takes its own `--database-url` so none of them has to be issued
 alongside `--role`.
 
-| | |
-|---|---|
-| [`import`](#import) | Seed models, backends and keys from a LiteLLM config |
-| [`set-password`](#set-password) | Create or reset an admin login |
-| [`sync-prices`](#sync-prices) | Fill in model prices from a published catalogue |
-| [`reencrypt-backends`](#reencrypt-backends) | One-shot migration of pre-encryption credentials |
-| [`classify-bench`](#classify-bench) | Measure the classifier where it actually runs |
+|                                             |                                                      |
+| ------------------------------------------- | ---------------------------------------------------- |
+| [`import`](#import)                         | Seed models, backends and keys from a LiteLLM config |
+| [`set-password`](#set-password)             | Create or reset an admin login                       |
+| [`sync-prices`](#sync-prices)               | Fill in model prices from a published catalogue      |
+| [`reencrypt-backends`](#reencrypt-backends) | One-shot migration of pre-encryption credentials     |
+| [`classify-bench`](#classify-bench)         | Measure the classifier where it actually runs        |
 
 ### `import`
 
@@ -74,17 +74,17 @@ somewhere you would rather a password was not.
 fastllm-proxy sync-prices --database-url postgres://... --dry-run
 ```
 
-| | |
-|---|---|
-| `--source` | `open-router`, `catalogue`, or `both` (default) |
+|               |                                                          |
+| ------------- | -------------------------------------------------------- |
+| `--source`    | `open-router`, `catalogue`, or `both` (default)          |
 | `--overwrite` | Replace prices already set, not only fill in the missing |
-| `--dry-run` | Report what would change and write nothing |
+| `--dry-run`   | Report what would change and write nothing               |
 
 Only touches models whose price is unset unless `--overwrite`: an operator who
 entered a negotiated rate should not have it replaced by a list price on the
 next run.
 
-This is the *fallback* source. Where a provider reports what it actually
+This is the _fallback_ source. Where a provider reports what it actually
 charged — OpenRouter returns `usage.cost` unasked — that figure wins and
 nothing here competes with it.
 
@@ -105,9 +105,9 @@ is left alone. Needed once, by deployments that predate
 kubectl exec deploy/fastllm-proxy -- fastllm-proxy classify-bench --concurrency 8
 ```
 
-| | |
-|---|---|
-| `--iterations` | Default 20 |
+|                 |                                                                                 |
+| --------------- | ------------------------------------------------------------------------------- |
+| `--iterations`  | Default 20                                                                      |
 | `--concurrency` | Default 4 — so the refined tier's session mutex is visible rather than inferred |
 
 It ships inside the image on purpose. The refined-tier cost in
@@ -121,48 +121,48 @@ machine.
 
 ### Roles and planes
 
-| flag | default | |
-|---|---|---|
-| `--role` | `proxy` | `all`, `control`, or `proxy`. See [Roles](operations/configuration.md#roles) |
-| `--database-url` | — | Required by `all` and `control`; unused by `proxy` |
-| `--control-url` | — | Control plane to poll in `proxy` mode. Absent means `File` mode |
-| `--proxy-token` | — | Presented to a control plane by `proxy`; required of callers by `all`/`control` |
-| `--snapshot-cache` | `/var/lib/fastllm/snapshot.json` | Last-known-good snapshot, so a control-plane outage degrades to "stops learning about changes" rather than "stops serving" |
-| `--admin-port` | `4001` | Admin API bind port (`all`/`control`) |
-| `--snapshot-rebuild-interval` | `5` | Seconds between control-plane rebuilds independent of admin writes |
-| `--rate-limit-reconcile-interval` | `5` | `Http`-mode `proxy` only. `0` disables |
+| flag                              | default                          |                                                                                                                            |
+| --------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `--role`                          | `proxy`                          | `all`, `control`, or `proxy`. See [Roles](operations/configuration.md#roles)                                               |
+| `--database-url`                  | —                                | Required by `all` and `control`; unused by `proxy`                                                                         |
+| `--control-url`                   | —                                | Control plane to poll in `proxy` mode. Absent means `File` mode                                                            |
+| `--proxy-token`                   | —                                | Presented to a control plane by `proxy`; required of callers by `all`/`control`                                            |
+| `--snapshot-cache`                | `/var/lib/fastllm/snapshot.json` | Last-known-good snapshot, so a control-plane outage degrades to "stops learning about changes" rather than "stops serving" |
+| `--admin-port`                    | `4001`                           | Admin API bind port (`all`/`control`)                                                                                      |
+| `--snapshot-rebuild-interval`     | `5`                              | Seconds between control-plane rebuilds independent of admin writes                                                         |
+| `--rate-limit-reconcile-interval` | `5`                              | `Http`-mode `proxy` only. `0` disables                                                                                     |
 
 ### Listener
 
-| flag | default | |
-|---|---|---|
-| `--host` | `127.0.0.1` | Loopback deliberately — binding `0.0.0.0` is an act, not an accident. The Docker image sets it |
-| `--port` | `4000` | The gateway |
-| `--config` | — | LiteLLM-format config. Required in `File` mode; elsewhere only for the `fastllm:` tuning block |
-| `--max-body-mb` | `64` | Largest request body accepted |
-| `--workers` | core count | Worker threads |
-| `--tls-cert` / `--tls-key` | — | PEM chain and key for the admin listener. Absent means plain HTTP — legitimate for a dev deployment with no real backend credentials, and not otherwise, because `/snapshot` carries usable ones |
-| `--ca-bundle` | — | Extra CAs trusted alongside the system roots. The normal case for an in-cluster cert-manager certificate |
+| flag                       | default     |                                                                                                                                                                                                  |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--host`                   | `127.0.0.1` | Loopback deliberately — binding `0.0.0.0` is an act, not an accident. The Docker image sets it                                                                                                   |
+| `--port`                   | `4000`      | The gateway                                                                                                                                                                                      |
+| `--config`                 | —           | LiteLLM-format config. Required in `File` mode; elsewhere only for the `fastllm:` tuning block                                                                                                   |
+| `--max-body-mb`            | `64`        | Largest request body accepted                                                                                                                                                                    |
+| `--workers`                | core count  | Worker threads                                                                                                                                                                                   |
+| `--tls-cert` / `--tls-key` | —           | PEM chain and key for the admin listener. Absent means plain HTTP — legitimate for a dev deployment with no real backend credentials, and not otherwise, because `/snapshot` carries usable ones |
+| `--ca-bundle`              | —           | Extra CAs trusted alongside the system roots. The normal case for an in-cluster cert-manager certificate                                                                                         |
 
 ### Routing and upstreams
 
-| flag | default | |
-|---|---|---|
-| `--policy` | `cache-affinity` | Also `least-loaded`, `round-robin`, `lowest-latency`. See [tuning affinity](operations/configuration.md#tuning-affinity) |
-| `--upstream-timeout` | `120` | Seconds to wait for response **headers**. Does not bound generation — a long completion is not a hung request |
-| `--max-retries` | `2` | Alternate backends tried when one fails **before any bytes are sent**. After the first byte there is nothing to retry onto without lying to the client |
-| `--pool-max-idle` | `256` | Idle upstream connections kept per backend |
-| `--health-interval` | `10` | Seconds between health sweeps |
-| `--health-timeout` | `3` | Seconds a probe may take before it counts as a failure |
-| `--health-report-interval` | `10` | Seconds between health reports to the control plane. Backend health exists only in the data plane, so this is the only way the UI can see it |
-| `--config-poll` | `5` | Seconds between snapshot refreshes. `0` disables the watch; in `File` mode `SIGHUP` is then the only reload |
+| flag                       | default          |                                                                                                                                                        |
+| -------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--policy`                 | `cache-affinity` | Also `least-loaded`, `round-robin`, `lowest-latency`. See [tuning affinity](operations/configuration.md#tuning-affinity)                               |
+| `--upstream-timeout`       | `120`            | Seconds to wait for response **headers**. Does not bound generation — a long completion is not a hung request                                          |
+| `--max-retries`            | `2`              | Alternate backends tried when one fails **before any bytes are sent**. After the first byte there is nothing to retry onto without lying to the client |
+| `--pool-max-idle`          | `256`            | Idle upstream connections kept per backend                                                                                                             |
+| `--health-interval`        | `10`             | Seconds between health sweeps                                                                                                                          |
+| `--health-timeout`         | `3`              | Seconds a probe may take before it counts as a failure                                                                                                 |
+| `--health-report-interval` | `10`             | Seconds between health reports to the control plane. Backend health exists only in the data plane, so this is the only way the UI can see it           |
+| `--config-poll`            | `5`              | Seconds between snapshot refreshes. `0` disables the watch; in `File` mode `SIGHUP` is then the only reload                                            |
 
 ### Cache
 
-| flag | default | |
-|---|---|---|
-| `--cache-max-entries` | `4096` | |
-| `--cache-max-bytes` | `67108864` | |
+| flag                  | default    |     |
+| --------------------- | ---------- | --- |
+| `--cache-max-entries` | `4096`     |     |
+| `--cache-max-bytes`   | `67108864` |     |
 
 Both matter, and neither alone is enough: a thousand embedding responses is
 nothing and a thousand completions is hundreds of megabytes, so a single
@@ -171,43 +171,43 @@ ever reach them.
 
 ### Observability
 
-| flag | default | |
-|---|---|---|
-| `--log` | `info` | |
-| `--log-format` | `text` | `json` for a log collector |
-| `--webhook-url` | — | POSTs JSON when a backend goes down or recovers, or a snapshot rebuild fails. `all`/`control` only — these are things the control plane learns |
-| `--webhook-secret` | — | Signs each body with HMAC-SHA256 in `x-fastllm-signature` |
-| `--otel-endpoint` | — | Requires `--features otel` |
-| `--otel-sample-one-in` | `100` | Tracing every request on a hot path is its own performance problem |
+| flag                   | default |                                                                                                                                                |
+| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--log`                | `info`  |                                                                                                                                                |
+| `--log-format`         | `text`  | `json` for a log collector                                                                                                                     |
+| `--webhook-url`        | —       | POSTs JSON when a backend goes down or recovers, or a snapshot rebuild fails. `all`/`control` only — these are things the control plane learns |
+| `--webhook-secret`     | —       | Signs each body with HMAC-SHA256 in `x-fastllm-signature`                                                                                      |
+| `--otel-endpoint`      | —       | Requires `--features otel`                                                                                                                     |
+| `--otel-sample-one-in` | `100`   | Tracing every request on a hot path is its own performance problem                                                                             |
 
 ### Classifier
 
-| flag | default | |
-|---|---|---|
-| `--classifier-model` | image path | Fast tier. Requires `--features classifier` |
+| flag                       | default    |                                                      |
+| -------------------------- | ---------- | ---------------------------------------------------- |
+| `--classifier-model`       | image path | Fast tier. Requires `--features classifier`          |
 | `--classifier-tier2-model` | image path | Refined tier. Requires `--features classifier-tier2` |
 
 ### Shutdown
 
-| flag | default | |
-|---|---|---|
-| `--shutdown-grace` | `25` | Seconds to let in-flight requests finish after `SIGTERM`. Kubernetes `SIGKILL`s at `terminationGracePeriodSeconds` (30 by default), so this sits under it. `0` exits immediately |
+| flag               | default |                                                                                                                                                                                  |
+| ------------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--shutdown-grace` | `25`    | Seconds to let in-flight requests finish after `SIGTERM`. Kubernetes `SIGKILL`s at `terminationGracePeriodSeconds` (30 by default), so this sits under it. `0` exits immediately |
 
 ## Secrets that are not flags
 
 Three values are environment-only, because a flag ends up in a process listing
 and these should not:
 
-| | |
-|---|---|
-| `FASTLLM_ENCRYPTION_KEY` | Encrypts `model_backends.upstream_api_key` at rest. **Not regenerable** — lose it and those credentials are unrecoverable; change it without running `reencrypt-backends` and the process will not start |
-| `FASTLLM_PROXY_TOKEN` | Also a flag, but the variable is the form to use |
-| `FASTLLM_BOOTSTRAP_PASSWORD` | `set-password`'s `--password` |
+|                              |                                                                                                                                                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FASTLLM_ENCRYPTION_KEY`     | Encrypts `model_backends.upstream_api_key` at rest. **Not regenerable** — lose it and those credentials are unrecoverable; change it without running `reencrypt-backends` and the process will not start |
+| `FASTLLM_PROXY_TOKEN`        | Also a flag, but the variable is the form to use                                                                                                                                                         |
+| `FASTLLM_BOOTSTRAP_PASSWORD` | `set-password`'s `--password`                                                                                                                                                                            |
 
 ## Where next
 
-| | |
-|---|---|
-| [Operations](operations.md) | The five deployment shapes, and where each flag lands |
-| [API and administration](api.md) | Every HTTP endpoint |
-| [Architecture](architecture.md) | What the roles actually do |
+|                                  |                                                       |
+| -------------------------------- | ----------------------------------------------------- |
+| [Operations](operations.md)      | The five deployment shapes, and where each flag lands |
+| [API and administration](api.md) | Every HTTP endpoint                                   |
+| [Architecture](architecture.md)  | What the roles actually do                            |

@@ -59,7 +59,7 @@ produces `target/release/{upstream,load,realbench,micro,proto,tcprelay}`.
   candidate tier-2 (contextual) model against the splits a static embedding
   cannot do, on real labelled data: `python3 bench/fetch-prompts.py` first,
   then `cargo run -p bench --release --bin minilm <model-dir>`. The
-  model-*selection* experiments that chose `potion-code-16M` are gone; what
+  model-_selection_ experiments that chose `potion-code-16M` are gone; what
   they concluded is written down in `docs/classifier/measurements.md`, which
   is the part worth keeping.
 

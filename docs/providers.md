@@ -28,37 +28,37 @@ cluster are marked ✓. The rest carry the base URL their vendor documents —
 check it against their docs before pasting it into production, because vendors
 move them and this file cannot notice.
 
-| reached as-is (OpenAI-compatible) | |
-|---|---|
-| **OpenRouter** ✓ (fronts ~400 models) | `https://openrouter.ai/api/v1` |
-| OpenAI · Groq · DeepSeek · xAI | `api.openai.com` · `api.groq.com` · `api.deepseek.com` · `api.x.ai` |
-| Together · Fireworks · Nebius · AtlasCloud | four endpoints, four rows |
-| Mistral · Perplexity · Cerebras · SambaNova | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1` |
-| DeepInfra · Novita · Hyperbolic · Lambda | four endpoints, four rows |
-| Z.ai · BigModel · Aliyun DashScope · Qwen Cloud | |
-| Moonshot / Kimi · Baidu Qianfan · AIHubMix | |
-| MiniMax · Volcengine Ark · Tencent Hunyuan · Sarvam | Chinese and Indian clouds, same row shape |
-| Baseten · Featherless · FriendliAI · Chutes | |
-| Nscale · GMI Cloud · Scaleway · OVHcloud | |
-| Cloudflare Workers AI · Vercel AI Gateway · v0 · Poe | |
-| NanoGPT · CometAPI · Inception · Morph | |
-| Clarifai · Weights & Biases · GradientAI · AI21 | |
-| Snowflake Cortex · Anyscale · Heroku · CompactifAI | |
-| GitHub Models · GitHub Copilot | |
-| **Amazon Bedrock** | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token |
-| **Cohere** | `https://api.cohere.ai/compatibility/v1` |
-| **Google Vertex AI** | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [the API reference](providers.md#verified-base-urls) for the service-account credential |
-| **Azure OpenAI** · Azure AI | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix |
-| NVIDIA NIM · Databricks · HuggingFace TGI | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1` |
-| vLLM ✓ · SGLang · llama.cpp ✓ · Ollama | self-hosted, same row shape |
-| LM Studio · KoboldCpp · TabbyAPI · text-generation-webui | local servers, same row shape |
-| Xinference · Llamafile · Docker Model Runner · Lemonade | local servers, same row shape |
-| **Voyage AI** · **Jina AI** · Infinity · TEI | embeddings and rerank — `/v1/embeddings`, `/v1/rerank` |
+| reached as-is (OpenAI-compatible)                        |                                                                                                                                                                                                       |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **OpenRouter** ✓ (fronts ~400 models)                    | `https://openrouter.ai/api/v1`                                                                                                                                                                        |
+| OpenAI · Groq · DeepSeek · xAI                           | `api.openai.com` · `api.groq.com` · `api.deepseek.com` · `api.x.ai`                                                                                                                                   |
+| Together · Fireworks · Nebius · AtlasCloud               | four endpoints, four rows                                                                                                                                                                             |
+| Mistral · Perplexity · Cerebras · SambaNova              | `api.mistral.ai/v1` · `api.perplexity.ai` · `api.cerebras.ai/v1` · `api.sambanova.ai/v1`                                                                                                              |
+| DeepInfra · Novita · Hyperbolic · Lambda                 | four endpoints, four rows                                                                                                                                                                             |
+| Z.ai · BigModel · Aliyun DashScope · Qwen Cloud          |                                                                                                                                                                                                       |
+| Moonshot / Kimi · Baidu Qianfan · AIHubMix               |                                                                                                                                                                                                       |
+| MiniMax · Volcengine Ark · Tencent Hunyuan · Sarvam      | Chinese and Indian clouds, same row shape                                                                                                                                                             |
+| Baseten · Featherless · FriendliAI · Chutes              |                                                                                                                                                                                                       |
+| Nscale · GMI Cloud · Scaleway · OVHcloud                 |                                                                                                                                                                                                       |
+| Cloudflare Workers AI · Vercel AI Gateway · v0 · Poe     |                                                                                                                                                                                                       |
+| NanoGPT · CometAPI · Inception · Morph                   |                                                                                                                                                                                                       |
+| Clarifai · Weights & Biases · GradientAI · AI21          |                                                                                                                                                                                                       |
+| Snowflake Cortex · Anyscale · Heroku · CompactifAI       |                                                                                                                                                                                                       |
+| GitHub Models · GitHub Copilot                           |                                                                                                                                                                                                       |
+| **Amazon Bedrock**                                       | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, Bedrock API key as a bearer token                                                                                                         |
+| **Cohere**                                               | `https://api.cohere.ai/compatibility/v1`                                                                                                                                                              |
+| **Google Vertex AI**                                     | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` — see [the API reference](providers.md#verified-base-urls) for the service-account credential |
+| **Azure OpenAI** · Azure AI                              | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` with `auth_header: api-key` and `auth_scheme: ""` — the key goes in its own header with no `Bearer` prefix                      |
+| NVIDIA NIM · Databricks · HuggingFace TGI                | `integrate.api.nvidia.com/v1` · a serving endpoint · any TGI `/v1`                                                                                                                                    |
+| vLLM ✓ · SGLang · llama.cpp ✓ · Ollama                   | self-hosted, same row shape                                                                                                                                                                           |
+| LM Studio · KoboldCpp · TabbyAPI · text-generation-webui | local servers, same row shape                                                                                                                                                                         |
+| Xinference · Llamafile · Docker Model Runner · Lemonade  | local servers, same row shape                                                                                                                                                                         |
+| **Voyage AI** · **Jina AI** · Infinity · TEI             | embeddings and rerank — `/v1/embeddings`, `/v1/rerank`                                                                                                                                                |
 
-| reached through their own wire format | |
-|---|---|
-| **Anthropic** | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
-| **Gemini** | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key` |
+| reached through their own wire format |                                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
+| **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`        |
 
 ## Adding one
 
@@ -88,20 +88,20 @@ sharing a `model_name` in a LiteLLM config
 [import](operations/configuration.md#migrating-a-file-mode-deployment-onto-a-database)
 to exactly that. It is the whole mechanism behind failover and traffic splitting — see
 [virtual models](features.md#virtual-models-routing-as-configuration-not-code)
-for routing between *different* models.
+for routing between _different_ models.
 
 ## Credentials
 
 `upstream_api_key` is encrypted at rest with `FASTLLM_ENCRYPTION_KEY` before it
 reaches Postgres, and the admin API never reads one back — the UI shows
-*whether* a credential is set, never what it is.
+_whether_ a credential is set, never what it is.
 
 Two knobs exist because not every vendor puts the key in `authorization:
 Bearer`:
 
-| | |
-|---|---|
-| `auth_header` | the header name. Default `authorization` |
+|               |                                                       |
+| ------------- | ----------------------------------------------------- |
+| `auth_header` | the header name. Default `authorization`              |
 | `auth_scheme` | the prefix. Default `Bearer`; `""` sends the key bare |
 
 Azure OpenAI is the case that needs both: `auth_header: api-key` and
@@ -152,28 +152,28 @@ curl -X POST https://control/admin/models/$MODEL_ID/backends \
 
 Verified base URLs for the OpenAI-compatible set:
 
-| provider | `api_base` |
-|---|---|
-| OpenRouter | `https://openrouter.ai/api/v1` |
-| OpenAI | `https://api.openai.com/v1` |
-| Groq | `https://api.groq.com/openai/v1` |
-| DeepSeek | `https://api.deepseek.com/v1` |
-| xAI | `https://api.x.ai/v1` |
-| Together | `https://api.together.xyz/v1` |
-| Fireworks | `https://api.fireworks.ai/inference/v1` |
-| Nebius | `https://api.studio.nebius.ai/v1` |
-| AtlasCloud | `https://api.atlascloud.ai/v1` |
-| AIHubMix | `https://aihubmix.com/v1` |
-| Z.ai | `https://api.z.ai/api/paas/v4` |
-| BigModel | `https://open.bigmodel.cn/api/paas/v4` |
-| Aliyun DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| Qwen Cloud | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
-| Moonshot / Kimi | `https://api.moonshot.cn/v1`, `https://api.moonshot.ai/v1` |
-| Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
-| GitHub Models | `https://models.github.ai/inference` |
-| Ollama | `http://localhost:11434` |
-| Cohere | `https://api.cohere.ai/compatibility/v1` |
-| Amazon Bedrock | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` |
+| provider         | `api_base`                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| OpenRouter       | `https://openrouter.ai/api/v1`                                                                          |
+| OpenAI           | `https://api.openai.com/v1`                                                                             |
+| Groq             | `https://api.groq.com/openai/v1`                                                                        |
+| DeepSeek         | `https://api.deepseek.com/v1`                                                                           |
+| xAI              | `https://api.x.ai/v1`                                                                                   |
+| Together         | `https://api.together.xyz/v1`                                                                           |
+| Fireworks        | `https://api.fireworks.ai/inference/v1`                                                                 |
+| Nebius           | `https://api.studio.nebius.ai/v1`                                                                       |
+| AtlasCloud       | `https://api.atlascloud.ai/v1`                                                                          |
+| AIHubMix         | `https://aihubmix.com/v1`                                                                               |
+| Z.ai             | `https://api.z.ai/api/paas/v4`                                                                          |
+| BigModel         | `https://open.bigmodel.cn/api/paas/v4`                                                                  |
+| Aliyun DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1`                                                     |
+| Qwen Cloud       | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`                                                |
+| Moonshot / Kimi  | `https://api.moonshot.cn/v1`, `https://api.moonshot.ai/v1`                                              |
+| Baidu Qianfan    | `https://qianfan.baidubce.com/v2`                                                                       |
+| GitHub Models    | `https://models.github.ai/inference`                                                                    |
+| Ollama           | `http://localhost:11434`                                                                                |
+| Cohere           | `https://api.cohere.ai/compatibility/v1`                                                                |
+| Amazon Bedrock   | `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`                                              |
 | Google Vertex AI | `https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi` |
 
 **Bedrock** needs no request signing. Its OpenAI-compatible endpoint takes a
@@ -187,8 +187,8 @@ any other — create the key in the Bedrock console and put it in
 
 ## Where next
 
-| | |
-|---|---|
-| [API and administration](providers.md#verified-base-urls) | Verified base URLs, and the per-field translation limits |
-| [What it can do](features.md) | Routing between providers, not just to them |
-| [Operations](operations.md) | Where the encryption key lives, and why it cannot be regenerated |
+|                                                           |                                                                  |
+| --------------------------------------------------------- | ---------------------------------------------------------------- |
+| [API and administration](providers.md#verified-base-urls) | Verified base URLs, and the per-field translation limits         |
+| [What it can do](features.md)                             | Routing between providers, not just to them                      |
+| [Operations](operations.md)                               | Where the encryption key lives, and why it cannot be regenerated |

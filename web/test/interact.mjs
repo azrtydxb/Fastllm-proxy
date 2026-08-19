@@ -27,13 +27,17 @@
 import { JSDOM } from "jsdom";
 import { FIXTURES, USAGE, fixtureFor } from "./fixtures.mjs";
 
-const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-  url: "http://localhost/",
-  pretendToBeVisual: true,
-});
+const dom = new JSDOM(
+  '<!doctype html><html><body><div id="root"></div></body></html>',
+  {
+    url: "http://localhost/",
+    pretendToBeVisual: true,
+  },
+);
 
 const problems = [];
-dom.window.console.error = (...args) => problems.push(args.map(String).join(" "));
+dom.window.console.error = (...args) =>
+  problems.push(args.map(String).join(" "));
 // Every destructive control asks first; a harness that answered "no" would
 // exercise none of them.
 dom.window.confirm = () => true;
@@ -77,9 +81,19 @@ globalThis.fetch = async (path, init = {}) => {
         : method === "POST" && path.includes("/rules")
           ? { id: 88 }
           : method === "POST" && path === "/admin/prices/sync"
-            ? { updated: 1, already_priced: 2, unmatched: 0, dry_run: true, changes: [] }
+            ? {
+                updated: 1,
+                already_priced: 2,
+                unmatched: 0,
+                dry_run: true,
+                changes: [],
+              }
             : method === "POST" && path === "/admin/routing/dry-run"
-              ? { candidates: ["claude-sonnet", "local-qwen"], matched_rule: 0, virtual_model: true }
+              ? {
+                  candidates: ["claude-sonnet", "local-qwen"],
+                  matched_rule: 0,
+                  virtual_model: true,
+                }
               : method === "POST" && path === "/admin/prompt-classes/evaluate"
                 ? { classes: [], note: "no classifier" }
                 : fixture;
@@ -171,7 +185,9 @@ const $ = (sel) => [...document.querySelectorAll(sel)];
 const byText = (text, sel = "button") =>
   $(sel).find((e) => e.textContent.trim().toLowerCase() === text.toLowerCase());
 const containing = (text, sel = "button") =>
-  $(sel).find((e) => e.textContent.trim().toLowerCase().includes(text.toLowerCase()));
+  $(sel).find((e) =>
+    e.textContent.trim().toLowerCase().includes(text.toLowerCase()),
+  );
 
 function lastCall(method, pathIncludes) {
   return [...sent]
@@ -217,7 +233,9 @@ for (const screen of SCREENS) {
   if (process.env.DEBUG_BUTTONS === screen) {
     console.log(
       "      buttons:",
-      $("button").map((b) => JSON.stringify(b.textContent.trim())).join(" "),
+      $("button")
+        .map((b) => JSON.stringify(b.textContent.trim()))
+        .join(" "),
     );
   }
   let guard = 0;
@@ -227,7 +245,9 @@ for (const screen of SCREENS) {
     // which is how the first run of this harness reported "1 control" on
     // twelve screens and passed. It gets its own check below instead.
     const next = $("button").find(
-      (b) => b.textContent.trim() !== "exit" && !seen.has(b.textContent.trim() + b.className),
+      (b) =>
+        b.textContent.trim() !== "exit" &&
+        !seen.has(b.textContent.trim() + b.className),
     );
     if (!next) break;
     seen.add(next.textContent.trim() + next.className);
@@ -242,7 +262,9 @@ for (const screen of SCREENS) {
     // controls are still reachable.
     if (!dom.window.location.hash.includes(screen)) await goto(screen);
   }
-  const real = problems.filter((p) => !/not wrapped in act|Not implemented/i.test(p));
+  const real = problems.filter(
+    (p) => !/not wrapped in act|Not implemented/i.test(p),
+  );
   check(
     `${screen}: ${seen.size} controls`,
     !threw && real.length === 0,
@@ -270,7 +292,11 @@ await click(byText("+ Add rule"));
   await fill(labelled("PROMPT TOKENS ≥"), "256");
   await click(byText("Create rule"));
   const call = lastCall("POST", "/rules");
-  check("rule POST reaches /admin/virtual-models/{id}/rules", !!call, "no request was sent");
+  check(
+    "rule POST reaches /admin/virtual-models/{id}/rules",
+    !!call,
+    "no request was sent",
+  );
   if (call) {
     check(
       "conditions are flattened, not nested",
@@ -295,8 +321,14 @@ await click(byText("Dry-run a request"));
 await click(byText("Evaluate"));
 {
   const call = lastCall("POST", "/admin/routing/dry-run");
-  check("dry-run posts the virtual model's name", call?.body?.model === "gpt-router");
-  check("dry-run sends streaming as a boolean", typeof call?.body?.streaming === "boolean");
+  check(
+    "dry-run posts the virtual model's name",
+    call?.body?.model === "gpt-router",
+  );
+  check(
+    "dry-run sends streaming as a boolean",
+    typeof call?.body?.streaming === "boolean",
+  );
   check(
     "dry-run result renders the matched rule",
     document.getElementById("root").textContent.includes("RULE 0"),
@@ -396,7 +428,11 @@ await goto("models");
       `sent ${JSON.stringify(lastCall("POST", "/admin/prices/sync")?.body)}`,
     );
   } else {
-    check("the replace-prices toggle exists", false, "no checkbox in the preview");
+    check(
+      "the replace-prices toggle exists",
+      false,
+      "no checkbox in the preview",
+    );
   }
 
   // Context length: empty must clear it to null rather than send 0. The
@@ -409,7 +445,11 @@ await goto("models");
   const ctx = $("label")
     .find((l) => l.textContent.includes("CONTEXT LENGTH"))
     ?.querySelector("input");
-  check("the edit form offers a context length", !!ctx, "no CONTEXT LENGTH field");
+  check(
+    "the edit form offers a context length",
+    !!ctx,
+    "no CONTEXT LENGTH field",
+  );
   if (ctx) {
     await fill(ctx, "");
     await click(byText("Save"));
@@ -463,14 +503,26 @@ await goto("keys");
   const principal = $("select").find((s) =>
     [...s.options].some((o) => o.textContent.includes("batch-etl")),
   );
-  await fill(principal, [...principal.options].find((o) => o.textContent.includes("batch-etl")).value);
+  await fill(
+    principal,
+    [...principal.options].find((o) => o.textContent.includes("batch-etl"))
+      .value,
+  );
   await click(byText("Create key"));
   const call = lastCall("POST", "/admin/keys");
-  check("key POST sends a numeric principal_id", typeof call?.body?.principal_id === "number");
-  check("key POST sends an ISO expiry", typeof call?.body?.expires_at === "string");
+  check(
+    "key POST sends a numeric principal_id",
+    typeof call?.body?.principal_id === "number",
+  );
+  check(
+    "key POST sends an ISO expiry",
+    typeof call?.body?.expires_at === "string",
+  );
   check(
     "the plaintext is shown once",
-    document.getElementById("root").textContent.includes("sk-plaintext-shown-once"),
+    document
+      .getElementById("root")
+      .textContent.includes("sk-plaintext-shown-once"),
   );
 }
 
@@ -496,7 +548,8 @@ await goto("rbac");
     const call = lastCall("POST", "/permissions");
     check(
       "a model grant is namespaced model/<name>",
-      call?.body?.verb === "model:invoke" && call?.body?.resource?.startsWith("model/"),
+      call?.body?.verb === "model:invoke" &&
+        call?.body?.resource?.startsWith("model/"),
       `resource was ${JSON.stringify(call?.body?.resource)}`,
     );
   }
@@ -515,11 +568,15 @@ await goto("limits");
   // select too, and picking the first match filled that one instead — the
   // harness then clicked "Set" with nothing selected and reported the UI
   // broken.
-  const limitCard = $("section").find((el) => el.textContent.includes("Rate limits"));
+  const limitCard = $("section").find((el) =>
+    el.textContent.includes("Rate limits"),
+  );
   const principal = [...limitCard.querySelectorAll("select")].find((s) =>
     [...s.options].some((o) => o.textContent.includes("batch-etl")),
   );
-  const opt = [...principal.options].find((o) => o.textContent.includes("batch-etl"));
+  const opt = [...principal.options].find((o) =>
+    o.textContent.includes("batch-etl"),
+  );
   await fill(principal, opt.value, "the rate-limit principal select");
   const reqBox = [...limitCard.querySelectorAll("input")].find(
     (i) => i.placeholder === "req/min",
@@ -530,13 +587,16 @@ await goto("limits");
     `req/min box held ${JSON.stringify(reqBox?.value)} instead of the configured 600`,
   );
   await click(
-    [...limitCard.querySelectorAll("button")].find((b) => b.textContent.trim() === "Set"),
+    [...limitCard.querySelectorAll("button")].find(
+      (b) => b.textContent.trim() === "Set",
+    ),
     "the rate-limit Set button",
   );
   const call = lastCall("PUT", "/limits");
   check(
     "the PUT carries both caps, not just the edited one",
-    call?.body?.requests_per_min === 600 && call?.body?.tokens_per_min === 400000,
+    call?.body?.requests_per_min === 600 &&
+      call?.body?.tokens_per_min === 400000,
     `body was ${JSON.stringify(call?.body)}`,
   );
 }
@@ -545,9 +605,15 @@ await goto("limits");
 await goto("settings");
 {
   await click(byText("Force snapshot rebuild"));
-  check("rebuild POSTs the right path", !!lastCall("POST", "/admin/snapshot/rebuild"));
+  check(
+    "rebuild POSTs the right path",
+    !!lastCall("POST", "/admin/snapshot/rebuild"),
+  );
   await click(byText("Revoke all sessions"));
-  check("revoke-all POSTs the right path", !!lastCall("POST", "/admin/sessions/revoke-all"));
+  check(
+    "revoke-all POSTs the right path",
+    !!lastCall("POST", "/admin/sessions/revoke-all"),
+  );
 }
 
 // Overview's history chart, and the modal behind it. The chart itself is a
@@ -557,7 +623,11 @@ await goto("settings");
 await goto("overview");
 {
   const call = lastCall("GET", "/admin/timeseries");
-  check("the history chart asks for a bucketed window", !!call, "no /admin/timeseries request");
+  check(
+    "the history chart asks for a bucketed window",
+    !!call,
+    "no /admin/timeseries request",
+  );
   check(
     "and bounds it with since and until rather than fetching everything",
     /since=/.test(call?.path || "") && /until=/.test(call?.path || ""),
@@ -589,7 +659,8 @@ await goto("overview");
   const spanOf = (p) => Date.parse(p.get("until")) - Date.parse(p.get("since"));
   check(
     "panning back keeps the span and moves the window",
-    spanOf(after) === spanOf(before) && Date.parse(after.get("until")) < Date.parse(before.get("until")),
+    spanOf(after) === spanOf(before) &&
+      Date.parse(after.get("until")) < Date.parse(before.get("until")),
     `span ${spanOf(before)} -> ${spanOf(after)}`,
   );
 
@@ -608,7 +679,11 @@ await goto("metrics");
     "no Last 24 hours card on Metrics",
   );
   const before = lastCall("GET", "/admin/timeseries");
-  check("and it asks for a bucketed window", !!before, "no /admin/timeseries request");
+  check(
+    "and it asks for a bucketed window",
+    !!before,
+    "no /admin/timeseries request",
+  );
   await click(byText("expand"));
   check(
     "expand opens the drill-down from Metrics too",
@@ -623,7 +698,11 @@ await goto("usage");
 {
   await click(byText("By model"));
   const call = lastCall("GET", "group_by=model");
-  check("a grouping chip changes group_by", !!call, "no request used group_by=model");
+  check(
+    "a grouping chip changes group_by",
+    !!call,
+    "no request used group_by=model",
+  );
   await click(byText("24h"));
   check("a range chip sends since=", !!lastCall("GET", "since="));
 }
@@ -650,7 +729,11 @@ await goto("deployment");
   await fill(fieldNamed("GATEWAY REPLICAS"), "6");
   await click(byText("Apply to the cluster"));
   const call = lastCall("PATCH", "/admin/deployment");
-  check("scaling sends a PATCH to /admin/deployment", !!call, "no PATCH was sent");
+  check(
+    "scaling sends a PATCH to /admin/deployment",
+    !!call,
+    "no PATCH was sent",
+  );
   check(
     "replicas is sent as a number",
     call?.body?.replicas === 6,

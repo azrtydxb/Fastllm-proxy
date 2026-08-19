@@ -4,7 +4,7 @@ Notable changes, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Commit bodies carry the reasoning and the measurements and remain the better
-source for *why* anything is the way it is; this file is the summary.
+source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
@@ -20,7 +20,7 @@ source for *why* anything is the way it is; this file is the summary.
   default, so an existing database behaves exactly as it did.
 - **The price sync can replace a price that is already set.** It never
   overwrote by design — a negotiated rate must not be replaced by a list
-  price — but that left a model priced *wrongly* unreachable from the UI,
+  price — but that left a model priced _wrongly_ unreachable from the UI,
   including one sitting at `0`, which reads as free. The preview now has a
   "replace prices that are already set" toggle, off by default, that
   re-previews as it changes.
@@ -28,8 +28,8 @@ source for *why* anything is the way it is; this file is the summary.
 ### Changed
 
 - **Two words for two things: backend model and frontend model.** A backend
-  model is what a request is routed *to* (one name, its backends, its
-  load-balancing policy); a frontend model is what a client asks *for* (rules
+  model is what a request is routed _to_ (one name, its backends, its
+  load-balancing policy); a frontend model is what a client asks _for_ (rules
   and weights resolving to a chain of backend models). The UI, the navigation
   and the documentation use them consistently; the admin API still spells them
   `models` and `virtual-models` in its paths, so every existing script and the
@@ -50,7 +50,7 @@ source for *why* anything is the way it is; this file is the summary.
   because the four things a chart genuinely cannot do are now implemented and
   verified against a live cluster:
   - **Ordered upgrades.** The two planes share a database schema, so
-    `spec.image` rolls the control plane *first* and holds the gateway at the
+    `spec.image` rolls the control plane _first_ and holds the gateway at the
     image it is running until that has finished. Verified with a deliberately
     unpullable tag: the control plane went down, the gateway kept serving on
     the old image, and the `Upgrading` condition said which and why.
@@ -71,7 +71,7 @@ source for *why* anything is the way it is; this file is the summary.
 - **The management UI knows when an operator runs it.** A **Deployment**
   screen — image, replicas, policy, timeouts, workers, pool size, autoscaling,
   plus phase, conditions and what is actually serving — that patches the
-  `FastllmProxy` and lets the operator roll it out. It appears *only* under an
+  `FastllmProxy` and lets the operator roll it out. It appears _only_ under an
   operator: the control plane learns it is managed from an environment
   variable only this controller sets, so a Helm or manifest install has no
   such screen and `GET /admin/deployment` answers 404. The control plane
@@ -91,7 +91,7 @@ source for *why* anything is the way it is; this file is the summary.
   `potion-classes`, `potion-arch`, `potion-wide`, `classcheck`, `wrapskew`).
   They answered "which model, which classes, which token cap" once; the
   answers are in `docs/classifier/measurements.md`, which is the artefact
-  worth keeping. `bench/minilm` stays — measuring a *candidate* model is a
+  worth keeping. `bench/minilm` stays — measuring a _candidate_ model is a
   question that recurs.
 - **`docs/superpowers/`** — pre-build design notes and task lists for work
   that shipped, unpublished by the book and already contradicted by the code
@@ -177,7 +177,7 @@ QEMU and `rustc` segfaulted before compiling anything.
 ## [0.1.0] — 2026-08-13
 
 First tagged release. Everything below was built before it, so this entry is
-a description of what 0.1.0 *is* rather than a diff against something
+a description of what 0.1.0 _is_ rather than a diff against something
 earlier — grouped by capability, because there is no previous version to
 compare against.
 
@@ -204,7 +204,7 @@ Published as `ghcr.io/azrtydxb/fastllm-proxy:v0.1.0` (linux/arm64).
 ### Routing
 
 - Virtual models: ordered rules, weighted and ordered targets, and a failover
-  chain across *models*, not just replicas.
+  chain across _models_, not just replicas.
 - Rule conditions on principal, role, prompt and generation length, streaming,
   request headers, budget consumption, per-backend in-flight count, and time of
   day with weekday and UTC offset.

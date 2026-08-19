@@ -29,7 +29,7 @@ curl -sk -b /tmp/ck https://host:4001/admin/roles        # what those roles gran
 ```
 
 Grants are per model: `model:invoke` on `model/<name>`, or `model/*` for all.
-A grant on a *virtual* model does not unlock the concrete models it routes to —
+A grant on a _virtual_ model does not unlock the concrete models it routes to —
 that is deliberate, so a failover chain can never widen someone's reach.
 
 ### `403` for a virtual model that works sometimes
@@ -71,7 +71,7 @@ reasoning first, so a tight ceiling looks exactly like a model that ignores
 tools. Raise `max_tokens`, or disable thinking:
 
 ```json
-{"chat_template_kwargs": {"enable_thinking": false}}
+{ "chat_template_kwargs": { "enable_thinking": false } }
 ```
 
 ## Usage, spend and charts
@@ -99,7 +99,7 @@ has no price; a hosted one should have.
 ### The chart says "a control plane older than the accounting change does not serve this"
 
 Take that message with suspicion — it asserts a cause it has not checked.
-It appears whenever `GET /admin/timeseries` fails for *any* reason, including
+It appears whenever `GET /admin/timeseries` fails for _any_ reason, including
 a 500. Check the endpoint directly before believing it:
 
 ```bash
@@ -142,7 +142,7 @@ failure. Deploy the newer image.
 ### A write succeeded but nothing changed
 
 `GET /admin/health` reports `snapshot_rebuild_failures`. A write commits and
-*then* the snapshot is rebuilt; if the rebuild fails, the database and the
+_then_ the snapshot is rebuilt; if the rebuild fails, the database and the
 published configuration have diverged and will stay that way until a later
 rebuild succeeds. This is also a webhook event, if one is configured.
 

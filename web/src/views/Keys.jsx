@@ -37,7 +37,11 @@ const EXPIRY_CHOICES = [
 ];
 
 export function Keys({ onUnauthorised }) {
-  const [draft, setDraft] = useState({ name: "", principal_id: "", days: "90" });
+  const [draft, setDraft] = useState({
+    name: "",
+    principal_id: "",
+    days: "90",
+  });
   const [created, setCreated] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -53,7 +57,8 @@ export function Keys({ onUnauthorised }) {
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const create = async (e) => {
     e.preventDefault();
@@ -84,8 +89,17 @@ export function Keys({ onUnauthorised }) {
       <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>
 
       {created && (
-        <Card tone="accent" style={{ background: "#0e1a15", borderColor: "var(--ok-line)" }}>
-          <div style={{ font: "600 12px var(--sans)", color: "var(--ok-fg)", marginBottom: 8 }}>
+        <Card
+          tone="accent"
+          style={{ background: "#0e1a15", borderColor: "var(--ok-line)" }}
+        >
+          <div
+            style={{
+              font: "600 12px var(--sans)",
+              color: "var(--ok-fg)",
+              marginBottom: 8,
+            }}
+          >
             Key created — copy it now, it is never shown again
           </div>
           <Row gap={8} style={{ flexWrap: "nowrap" }}>
@@ -115,7 +129,9 @@ export function Keys({ onUnauthorised }) {
                   // permissions policy). Say so rather than showing "Copied"
                   // for a copy that did not happen — the key is on screen and
                   // selectable either way.
-                  setError("The browser refused clipboard access — select and copy manually.");
+                  setError(
+                    "The browser refused clipboard access — select and copy manually.",
+                  );
                 }
               }}
             >
@@ -139,7 +155,9 @@ export function Keys({ onUnauthorised }) {
             <Field label="PRINCIPAL" style={{ flex: 1 }}>
               <select
                 value={draft.principal_id}
-                onChange={(e) => setDraft({ ...draft, principal_id: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, principal_id: e.target.value })
+                }
               >
                 <option value="">principal…</option>
                 {data.principals.map((p) => (
@@ -174,7 +192,8 @@ export function Keys({ onUnauthorised }) {
         ) : (
           <Table cols={COLS}>
             {data.keys.map((k) => {
-              const expired = k.expires_at && new Date(k.expires_at) < new Date();
+              const expired =
+                k.expires_at && new Date(k.expires_at) < new Date();
               return (
                 <Tr
                   key={k.id}
@@ -190,12 +209,20 @@ export function Keys({ onUnauthorised }) {
                       {k.prefix}
                     </Mono>,
                     <span key="e" style={{ color: "var(--fg-3)" }}>
-                      {k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "never"}
+                      {k.expires_at
+                        ? new Date(k.expires_at).toLocaleDateString()
+                        : "never"}
                     </span>,
-                    <Pill key="s" tone={k.disabled ? "bad" : expired ? "warn" : "ok"}>
+                    <Pill
+                      key="s"
+                      tone={k.disabled ? "bad" : expired ? "warn" : "ok"}
+                    >
                       {k.disabled ? "revoked" : expired ? "expired" : "active"}
                     </Pill>,
-                    <Mono key="u" style={{ color: "var(--fg-3)", fontSize: 11 }}>
+                    <Mono
+                      key="u"
+                      style={{ color: "var(--fg-3)", fontSize: 11 }}
+                    >
                       {fmtWhen(k.last_used_at)}
                     </Mono>,
                     !k.disabled ? (
@@ -203,7 +230,11 @@ export function Keys({ onUnauthorised }) {
                         key="r"
                         variant="smallDanger"
                         onClick={async () => {
-                          if (!window.confirm(`Revoke ${k.name}? Callers using it fail immediately.`))
+                          if (
+                            !window.confirm(
+                              `Revoke ${k.name}? Callers using it fail immediately.`,
+                            )
+                          )
                             return;
                           const ok = await attempt(
                             () => api.del(`/admin/keys/${k.id}`),
@@ -228,13 +259,15 @@ export function Keys({ onUnauthorised }) {
 
       <Row>
         <Muted>
-          Keys are hashed with SHA-256 and only the prefix is stored in the clear; passwords use
-          Argon2id. The two are deliberately different — a key is high-entropy random, a password
-          is low-entropy and human-chosen.
+          Keys are hashed with SHA-256 and only the prefix is stored in the
+          clear; passwords use Argon2id. The two are deliberately different — a
+          key is high-entropy random, a password is low-entropy and
+          human-chosen.
         </Muted>
         <Spacer />
         <Muted>
-          Revocation reaches a running proxy within one snapshot poll, not instantly.
+          Revocation reaches a running proxy within one snapshot poll, not
+          instantly.
         </Muted>
       </Row>
     </Stack>

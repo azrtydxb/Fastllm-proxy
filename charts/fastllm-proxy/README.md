@@ -17,7 +17,7 @@ concerns that belong to whoever operates it. Point `database.url` at your own,
 or at an operator-managed cluster (CloudNativePG, CrunchyData, RDS).
 
 **It does not create Ingress.** The two listeners want different exposure —
-the gateway is for callers, the admin port serves the management UI *and*
+the gateway is for callers, the admin port serves the management UI _and_
 `/snapshot`, which returns decrypted upstream credentials to anything holding
 the proxy token. Bundling them behind one Ingress is the mistake this chart
 declines to make for you. Set `service.type` per component and route them

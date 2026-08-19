@@ -93,7 +93,6 @@ retrieval is a `GET` with no model and no body, so routing them means durable
 state on the request path — a design, not a suffix. Guardrails and A2A are real
 gaps but product decisions rather than defects.
 
-
 ### Graceful shutdown and translator fuzzing — done (2026-08-12)
 
 Two items from an external review that survived checking against the code.
@@ -143,7 +142,7 @@ drifted from what an operator actually needs to see. Closed in two commits:
 - `GET /admin/usage` — aggregates by model, principal or day, reporting
   `unpriced_requests` next to every total. A request whose model has no price
   contributes nothing to `cost`; summing those as zero understates spend with
-  no symptom. (Found by the test: `sum()` over a bigint returns *numeric* in
+  no symptom. (Found by the test: `sum()` over a bigint returns _numeric_ in
   Postgres, so every total failed to decode at runtime with nothing wrong in
   the SQL.)
 - `PATCH /admin/models/{id}` — a price could be set at creation and never
@@ -154,8 +153,8 @@ drifted from what an operator actually needs to see. Closed in two commits:
   never merged: one proxy that cannot reach a backend the others can is a
   partition, and averaging it away hides the only symptom. In memory, aged out
   after 30s — "up, 40 minutes ago" is not health.
-- `POST /admin/routing/dry-run` — returns the candidate chain *and the rule
-  index that decided*, because "my second rule matched instead of my first" and
+- `POST /admin/routing/dry-run` — returns the candidate chain _and the rule
+  index that decided_, because "my second rule matched instead of my first" and
   "my first rule matched and points somewhere unexpected" are different bugs
   with one symptom.
 - `POST /admin/prices/sync` — the same work the CLI does, sharing one
@@ -195,7 +194,7 @@ headroom all fit that shape, and the control plane is already the authority
 for them — which is why an external store would add a second source of truth
 beside Postgres without adding a capability.
 
-**What is not.** A cache *read* has to return before the upstream call can be
+**What is not.** A cache _read_ has to return before the upstream call can be
 skipped, so a shared cache costs latency on every request including every
 miss. That is the one case where no amount of background machinery helps.
 
@@ -206,11 +205,11 @@ replicas and round-robin, roughly half the time.
 **Why Redis is the wrong question.** Embedded stores (redb, sled, RocksDB) do
 not share anything: they are per process, so they buy persistence across a
 restart, not a shared cache. Anything genuinely shared lives in another process,
-which puts a round trip on the *read* path — the one thing
+which puts a round trip on the _read_ path — the one thing
 `tests/no_io_on_hot_path.rs` exists to prevent, and what the zero-overhead
 figure against vLLM rests on. A LAN Redis GET is 0.2-1 ms against a 26 ms
-(embeddings) to 40 ms (chat) time-to-first-token: 1-4% added to *every* request
-to make *some* of them much faster. Possibly a good trade, but a trade.
+(embeddings) to 40 ms (chat) time-to-first-token: 1-4% added to _every_ request
+to make _some_ of them much faster. Possibly a good trade, but a trade.
 
 **The design that avoids it.** Replicate asynchronously and keep reads local.
 On a store, publish the entry to the other replicas off the request path; a
@@ -223,7 +222,7 @@ store.
 
 **The trap, if it is built.** The cache is dropped wholesale on a snapshot
 change, because a reconfiguration can repoint a model at a different provider —
-and replicas can be on *different* snapshot versions, which is why fleet drift
+and replicas can be on _different_ snapshot versions, which is why fleet drift
 detection exists. A replicated entry must therefore carry the snapshot version
 it was produced under, and a receiving replica must refuse one from a version it
 is not serving. Otherwise a replica on v418 serves a response generated under
@@ -243,7 +242,7 @@ Argon2id password against the `sessions` table, bootstrapped by
 `fastllm-proxy set-password`, and holds an HttpOnly cookie. That is sufficient
 for one operator and thin for an organisation.
 
-Parked rather than rejected because the work is real but the *shape* is a
+Parked rather than rejected because the work is real but the _shape_ is a
 product decision that cannot be guessed: which provider, whether group claims
 map onto roles, and whether logout has to propagate. It also overlaps with teams
 and org scoping directly below — an OIDC integration that maps group claims to
@@ -260,13 +259,12 @@ above that changes what `authorize`, budgets, limits, usage aggregation and the
 snapshot's flattened `allowed_models` all mean. Doing it as a UI convenience
 would produce a `team_id` column nothing enforces.
 
-The honest interim: a principal *is* the unit of tenancy, and roles already
+The honest interim: a principal _is_ the unit of tenancy, and roles already
 group them. A team-shaped view over `GET /admin/usage?group_by=principal` plus
 a naming convention covers the reporting case without a schema that lies.
 
 Worth building when there are real tenants who must not see each other's usage
 — at which point it should start from the snapshot's shape, not from the UI's.
-
 
 ### Embedded management and monitoring UI — done (P4)
 
@@ -347,13 +345,13 @@ Three parts were not the rename they looked like:
 
 - **Conversation history.** OpenAI puts a call on the assistant message and
   its result in a separate `role:"tool"` message keyed by id; both native
-  protocols nest the result *inside* the following user message. So
+  protocols nest the result _inside_ the following user message. So
   `split_system` became a real message mapper (`Turn`, `ToolResult`), and it
   carries an id→name map because Gemini pairs a result to its call by function
   **name** and never sees the id. Consecutive results fold into one message,
   which is what a model that called three tools in parallel gets back.
 - **Streaming.** Anthropic sends `content_block_start`, then `input_json_delta`
-  fragments of *partial* JSON, then `content_block_stop`. Those fragments are
+  fragments of _partial_ JSON, then `content_block_stop`. Those fragments are
   forwarded to the client unparsed — mid-call they are not valid JSON, and
   buffering until they were would defeat streaming. Anthropic's block index
   counts text blocks too, so it cannot be reused as OpenAI's `tool_calls[]`
@@ -491,12 +489,12 @@ operator typed. Two different text distributions compared by cosine similarity,
 with nothing able to notice. Measured over 4,750 held-out
 prompts, centroids from bare text throughout:
 
-  query shape                 accuracy  coding prec  coding rec  mean margin
-  bare prompt                    98.6%        71.7%       91.3%        0.198
-  minimal JSON body              98.6%        72.3%       92.0%        0.173
-  body with a system prompt      97.8%        97.8%       30.0%        0.220
-  turn 4 of a conversation       96.8%         0.0%        0.0%        0.225
-  any shape, after the fix       98.6%        71.7%       91.3%        0.198
+query shape accuracy coding prec coding rec mean margin
+bare prompt 98.6% 71.7% 91.3% 0.198
+minimal JSON body 98.6% 72.3% 92.0% 0.173
+body with a system prompt 97.8% 97.8% 30.0% 0.220
+turn 4 of a conversation 96.8% 0.0% 0.0% 0.225
+any shape, after the fix 98.6% 71.7% 91.3% 0.198
 
 The JSON wrapping was harmless — a minimal body matches bare text. The damage
 is what fills the window before the user's words: a system prompt cost two
@@ -504,7 +502,7 @@ thirds of recall, and by turn four the class was undetectable.
 
 Two things made it invisible. Accuracy never dropped below 96.8%, because the
 class is a small share of traffic — the base-rate trap this repo's own
-classifier doc warns about. And the mean margin *rose* as accuracy collapsed,
+classifier doc warns about. And the mean margin _rose_ as accuracy collapsed,
 so `min_margin` was no defence: confidently wrong, and no threshold an operator
 could set would filter it.
 
@@ -546,8 +544,8 @@ Settled, so nobody re-runs the same experiments:
   mutex's fault: the same measurements show this model barely uses two cores,
   so extra sessions would contend rather than scale. The ceiling is the model.
 
-One thing worth carrying forward beyond this entry: int8 measured *no faster
-than fp32* on an M-series laptop (3.63 ms against 3.58 ms). Measuring only
+One thing worth carrying forward beyond this entry: int8 measured _no faster
+than fp32_ on an M-series laptop (3.63 ms against 3.58 ms). Measuring only
 locally would have rejected the change that turned out to be worth 2x in the
 container. That is the argument for `classify-bench` existing.
 
@@ -556,7 +554,7 @@ container. That is the argument for `classify-bench` existing.
 A full `--include-ignored` run exhausted the dev cluster's connections twice,
 presenting as every end-to-end test failing at once with `PoolTimedOut` — which
 reads as a code failure and is not. The cause was pool arithmetic nobody had
-done: every process that talks to Postgres takes a whole *pool*, not a
+done: every process that talks to Postgres takes a whole _pool_, not a
 connection, and `control::db::connect` hardcoded 8. Fourteen concurrent tests
 each spawning a proxy is 112 against a limit of 100.
 
@@ -627,7 +625,7 @@ Measured, not assumed — every number is in docs/classifier.md, with the
 benchmark harness in bench/. The findings that shaped it: classify by subject
 rather than by verb (task-shaped classes fail on both tiers); class count is
 not the problem, class definition is; and margins are not comparable across
-models, so confidence floors are per class *and* per tier.
+models, so confidence floors are per class _and_ per tier.
 
 `POST /admin/prompt-classes/evaluate` reports leave-one-out precision, recall,
 mean and worst margin, nearest neighbours, the misclassified examples
@@ -635,13 +633,13 @@ themselves, and a verdict per class. Both classifier models are baked into the
 image; nothing loads the refined one unless a rule names a refined class.
 
 One bug found while finishing this, and worth recording because the shape
-recurs: escalation with a *single* refined contender had no runner-up, so the
+recurs: escalation with a _single_ refined contender had no runner-up, so the
 margin degenerated to a raw similarity score. A margin-shaped floor like 0.10
 is met by almost any prompt's raw similarity to almost any centroid, so one
 refined class would have silently captured every request the fast tier assigned
 to the class it refines — the exact opposite of what a refinement is for.
 Escalation now requires at least two contenders, which is also the
-configuration the measurements were taken on (architecture *against* coding, a
+configuration the measurements were taken on (architecture _against_ coding, a
 binary question).
 
 Two more bugs, both found by running it on the cluster rather than by any
@@ -659,7 +657,7 @@ test, and both worth recording for their shape:
 - **Refining a class silently broke every rule on its parent.** Once
   `debugging` refined `coding`, a request the refined tier called `debugging`
   no longer matched a rule saying `{"class": "coding"}`. Refinement is a
-  *sub*-classification, so a refined answer now carries what it refines and
+  _sub_-classification, so a refined answer now carries what it refines and
   satisfies rules on either; a more specific rule placed earlier separates them.
 
 Verified live on kw with both tiers: a coding prompt escalates to the refined

@@ -59,14 +59,18 @@ export function Overview({ onUnauthorised, config, go }) {
         // Asked for wide and ranked here: the route orders by spend, so a
         // free self-hosted model carrying most of the traffic sorts last and a
         // limit of 6 would drop it out of a panel about *traffic*.
-        api.get("/admin/usage" + query({ group_by: "virtual_model", limit: 100 })),
+        api.get(
+          "/admin/usage" + query({ group_by: "virtual_model", limit: 100 }),
+        ),
         api.get("/admin/audit" + query({ limit: 6 })),
       ]);
       return {
         fleet,
         models,
         events,
-        traffic: [...traffic].sort((a, b) => b.requests - a.requests).slice(0, 6),
+        traffic: [...traffic]
+          .sort((a, b) => b.requests - a.requests)
+          .slice(0, 6),
       };
     },
     { onUnauthorised },
@@ -88,13 +92,18 @@ export function Overview({ onUnauthorised, config, go }) {
     const now = Date.now();
     const prev = sample.current;
     sample.current = { at: now, value: requestsTotal };
-    const rps = rateBetween(prev, sample.current, prev ? (now - prev.at) / 1000 : 0);
+    const rps = rateBetween(
+      prev,
+      sample.current,
+      prev ? (now - prev.at) / 1000 : 0,
+    );
     if (rps !== null) setSeries((s) => [...s, rps].slice(-40));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [polls, requestsTotal === null]);
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const summary = fleetSummary(data.fleet);
 
@@ -104,7 +113,10 @@ export function Overview({ onUnauthorised, config, go }) {
   const protocolOf = new Map();
   for (const m of data.models || []) {
     for (const b of m.backends || []) {
-      protocolOf.set(backendKey(b.api_base, b.upstream_model || m.name), b.protocol);
+      protocolOf.set(
+        backendKey(b.api_base, b.upstream_model || m.name),
+        b.protocol,
+      );
     }
   }
 
@@ -112,7 +124,10 @@ export function Overview({ onUnauthorised, config, go }) {
 
   const totalTraffic = (data.traffic || []).reduce((a, r) => a + r.requests, 0);
   const spend = (data.traffic || []).reduce((a, r) => a + r.cost_micros, 0);
-  const unpriced = (data.traffic || []).reduce((a, r) => a + r.unpriced_requests, 0);
+  const unpriced = (data.traffic || []).reduce(
+    (a, r) => a + r.unpriced_requests,
+    0,
+  );
 
   return (
     <Stack>
@@ -124,8 +139,8 @@ export function Overview({ onUnauthorised, config, go }) {
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
             Health lives in the data plane; a replica publishes it every{" "}
-            {config?.health_report_interval_seconds ?? 10}s over the proxy token. Nothing here is
-            stale — there is nothing yet.
+            {config?.health_report_interval_seconds ?? 10}s over the proxy
+            token. Nothing here is stale — there is nothing yet.
           </span>
         </Banner>
       )}
@@ -140,11 +155,12 @@ export function Overview({ onUnauthorised, config, go }) {
           }
         >
           {summary.laggards.join(", ")}{" "}
-          {summary.laggards.length === 1 ? "is" : "are"} serving an older snapshot
+          {summary.laggards.length === 1 ? "is" : "are"} serving an older
+          snapshot
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
-            — a lagging replica answers /health with ok and misbehaves only on whatever changed,
-            most often a key it has never seen.
+            — a lagging replica answers /health with ok and misbehaves only on
+            whatever changed, most often a key it has never seen.
           </span>
         </Banner>
       )}
@@ -162,8 +178,8 @@ export function Overview({ onUnauthorised, config, go }) {
           {summary.backendsSplit.length === 1 ? "" : "s"}
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
-            — one proxy cannot reach what the others can, which is a partition rather than a dead
-            backend.
+            — one proxy cannot reach what the others can, which is a partition
+            rather than a dead backend.
           </span>
         </Banner>
       )}
@@ -190,7 +206,9 @@ export function Overview({ onUnauthorised, config, go }) {
         <Kpi
           label="ERROR RATE"
           value={
-            summary.requests > 0 ? ((summary.errors / summary.requests) * 100).toFixed(2) : "—"
+            summary.requests > 0
+              ? ((summary.errors / summary.requests) * 100).toFixed(2)
+              : "—"
           }
           unit="%"
           tone={summary.errors > 0 ? "warn" : "ok"}
@@ -231,7 +249,8 @@ export function Overview({ onUnauthorised, config, go }) {
         >
           {summary.backends.length === 0 ? (
             <Empty>
-              Nothing reported yet. Backends appear here once a proxy replica has probed them.
+              Nothing reported yet. Backends appear here once a proxy replica
+              has probed them.
             </Empty>
           ) : (
             <Table cols={BACKEND_COLS}>
@@ -240,21 +259,37 @@ export function Overview({ onUnauthorised, config, go }) {
                   key={b.key}
                   cols={BACKEND_COLS}
                   cells={[
-                    <Row gap={8} key="n" style={{ flexWrap: "nowrap", minWidth: 0 }}>
+                    <Row
+                      gap={8}
+                      key="n"
+                      style={{ flexWrap: "nowrap", minWidth: 0 }}
+                    >
                       <Dot tone={b.split ? "warn" : b.healthy ? "ok" : "bad"} />
                       <div style={{ minWidth: 0 }}>
-                        <Ellipsis style={{ font: "500 12px/1.2 var(--sans)" }} title={b.model}>
+                        <Ellipsis
+                          style={{ font: "500 12px/1.2 var(--sans)" }}
+                          title={b.model}
+                        >
                           {b.model}
                         </Ellipsis>
                         <Ellipsis
-                          style={{ font: "400 10px/1.3 var(--mono)", color: "var(--fg-4)" }}
+                          style={{
+                            font: "400 10px/1.3 var(--mono)",
+                            color: "var(--fg-4)",
+                          }}
                           title={b.api_base}
                         >
                           {hostOf(b.api_base)}
                         </Ellipsis>
                       </div>
                     </Row>,
-                    <Mono key="p" style={{ font: "400 11px var(--mono)", color: "var(--fg-3)" }}>
+                    <Mono
+                      key="p"
+                      style={{
+                        font: "400 11px var(--mono)",
+                        color: "var(--fg-3)",
+                      }}
+                    >
                       {protocolOf.get(b.key) || "—"}
                     </Mono>,
                     <Row key="i" gap={8} style={{ flexWrap: "nowrap" }}>
@@ -263,11 +298,22 @@ export function Overview({ onUnauthorised, config, go }) {
                         height={5}
                         tone={b.healthy ? "accent" : "bad"}
                       />
-                      <Mono style={{ font: "400 11px var(--mono)", color: "var(--fg-2)" }}>
+                      <Mono
+                        style={{
+                          font: "400 11px var(--mono)",
+                          color: "var(--fg-2)",
+                        }}
+                      >
                         {b.inflight}
                       </Mono>
                     </Row>,
-                    <Mono key="r" style={{ font: "400 11px var(--mono)", color: "var(--fg-2)" }}>
+                    <Mono
+                      key="r"
+                      style={{
+                        font: "400 11px var(--mono)",
+                        color: "var(--fg-2)",
+                      }}
+                    >
                       {fmtCompact(b.requests)}
                     </Mono>,
                     <Mono
@@ -304,11 +350,18 @@ export function Overview({ onUnauthorised, config, go }) {
               <Empty>No usage recorded yet.</Empty>
             ) : (
               (data.traffic || []).map((row, i) => {
-                const share = totalTraffic ? (row.requests / totalTraffic) * 100 : 0;
+                const share = totalTraffic
+                  ? (row.requests / totalTraffic) * 100
+                  : 0;
                 return (
                   <div
                     key={row.key || i}
-                    style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      marginBottom: 12,
+                    }}
                   >
                     <Row gap={8} style={{ flexWrap: "nowrap" }}>
                       <Ellipsis style={{ font: "400 12px var(--mono)" }}>
@@ -319,21 +372,31 @@ export function Overview({ onUnauthorised, config, go }) {
                     </Row>
                     <Bar
                       pct={share}
-                      tone={["accent", "ok", "violet", "warn", "muted", "muted"][i] || "muted"}
+                      tone={
+                        ["accent", "ok", "violet", "warn", "muted", "muted"][
+                          i
+                        ] || "muted"
+                      }
                     />
                   </div>
                 );
               })
             )}
             {spend > 0 || unpriced > 0 ? (
-              <div style={{ paddingTop: 10, borderTop: "1px solid var(--line-mid)" }}>
+              <div
+                style={{
+                  paddingTop: 10,
+                  borderTop: "1px solid var(--line-mid)",
+                }}
+              >
                 <Muted>
                   {fmtMoney(spend)} across these
                   {unpriced > 0 && (
                     <>
                       {" · "}
                       <span style={{ color: "var(--warn-fg)" }}>
-                        {fmtInt(unpriced)} unpriced request{unpriced === 1 ? "" : "s"}
+                        {fmtInt(unpriced)} unpriced request
+                        {unpriced === 1 ? "" : "s"}
                       </span>{" "}
                       contribute nothing to that total
                     </>
@@ -367,18 +430,31 @@ export function Overview({ onUnauthorised, config, go }) {
                 >
                   <Dot
                     tone={
-                      e.action === "DELETE" ? "bad" : e.action === "POST" ? "ok" : "accent"
+                      e.action === "DELETE"
+                        ? "bad"
+                        : e.action === "POST"
+                          ? "ok"
+                          : "accent"
                     }
                     style={{ marginTop: 5 }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <Ellipsis
-                      style={{ font: "400 12px/1.4 var(--sans)", color: "var(--fg-2)" }}
+                      style={{
+                        font: "400 12px/1.4 var(--sans)",
+                        color: "var(--fg-2)",
+                      }}
                       title={`${e.action} ${e.target}`}
                     >
-                      <Mono style={{ color: "var(--fg-3)" }}>{e.action}</Mono> {e.target}
+                      <Mono style={{ color: "var(--fg-3)" }}>{e.action}</Mono>{" "}
+                      {e.target}
                     </Ellipsis>
-                    <div style={{ font: "400 10px/1.4 var(--mono)", color: "var(--fg-5)" }}>
+                    <div
+                      style={{
+                        font: "400 10px/1.4 var(--mono)",
+                        color: "var(--fg-5)",
+                      }}
+                    >
                       {fmtWhen(e.at)} · {e.actor_name}
                     </div>
                   </div>
@@ -397,20 +473,34 @@ function Kpi({ label, value, unit, series, foot, tone = "accent" }) {
     <Card style={{ padding: "16px 16px 12px" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <span
-          style={{ font: "400 11px/1 var(--sans)", color: "var(--fg-3)", letterSpacing: ".06em" }}
+          style={{
+            font: "400 11px/1 var(--sans)",
+            color: "var(--fg-3)",
+            letterSpacing: ".06em",
+          }}
         >
           {label}
         </span>
         <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-          <span style={{ font: "500 26px/1 var(--mono)", letterSpacing: "-.02em" }}>{value}</span>
-          <span style={{ font: "400 12px/1 var(--mono)", color: "var(--fg-4)" }}>{unit}</span>
+          <span
+            style={{ font: "500 26px/1 var(--mono)", letterSpacing: "-.02em" }}
+          >
+            {value}
+          </span>
+          <span
+            style={{ font: "400 12px/1 var(--mono)", color: "var(--fg-4)" }}
+          >
+            {unit}
+          </span>
         </div>
         {series ? (
           <Spark values={series} tone={tone} />
         ) : (
           <div style={{ height: 38 }} />
         )}
-        <div style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-5)" }}>{foot}</div>
+        <div style={{ font: "400 10px/1.4 var(--sans)", color: "var(--fg-5)" }}>
+          {foot}
+        </div>
       </div>
     </Card>
   );
@@ -480,18 +570,26 @@ function TrafficHistory() {
           style={{ cursor: "pointer" }}
           role="button"
           tabIndex={0}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
+          onKeyDown={(e) =>
+            (e.key === "Enter" || e.key === " ") && setOpen(true)
+          }
           aria-label="Open traffic history"
         >
           {error ? (
             <NotAvailable why={error}>
-              History comes from <Mono>GET /admin/timeseries</Mono>. The message above is what
-              the request actually returned — a 404 means this control plane predates the
-              endpoint, anything else is a live failure worth reading the server logs for.
+              History comes from <Mono>GET /admin/timeseries</Mono>. The message
+              above is what the request actually returned — a 404 means this
+              control plane predates the endpoint, anything else is a live
+              failure worth reading the server logs for.
             </NotAvailable>
           ) : (
             <>
-              <TimeChart points={shaped} series={series} height={120} spanSeconds={range.seconds} />
+              <TimeChart
+                points={shaped}
+                series={series}
+                height={120}
+                spanSeconds={range.seconds}
+              />
               <div style={{ height: 8 }} />
               <Row gap={12}>
                 <Legend series={series} />

@@ -51,12 +51,17 @@ export function Audit({ onUnauthorised }) {
   const before = pages.length ? pages[pages.length - 1] : undefined;
 
   const { data, error, loading, setError } = useLoader(
-    () => api.get("/admin/audit" + query({ limit: 50, target: target || undefined, before })),
+    () =>
+      api.get(
+        "/admin/audit" +
+          query({ limit: 50, target: target || undefined, before }),
+      ),
     { onUnauthorised, deps: [target, before] },
   );
 
   if (loading && !data) return <Loading />;
-  if (!data) return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+  if (!data)
+    return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const rows = data.filter(
     (r) =>
@@ -87,7 +92,12 @@ export function Audit({ onUnauthorised }) {
             placeholder="actor or target"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ background: "none", border: "none", padding: 0, width: "100%" }}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              width: "100%",
+            }}
           />
         </div>
         {TARGET_FILTERS.map(([v, l]) => (
@@ -128,9 +138,16 @@ export function Audit({ onUnauthorised }) {
                       minute: "2-digit",
                     })}
                   </Mono>,
-                  <Row key="a" gap={8} style={{ flexWrap: "nowrap", minWidth: 0 }}>
+                  <Row
+                    key="a"
+                    gap={8}
+                    style={{ flexWrap: "nowrap", minWidth: 0 }}
+                  >
                     <Dot tone={r.actor_id === null ? "muted" : "accent"} />
-                    <Ellipsis style={{ font: "400 12px var(--mono)" }} title={r.actor_name}>
+                    <Ellipsis
+                      style={{ font: "400 12px var(--mono)" }}
+                      title={r.actor_name}
+                    >
                       {r.actor_name}
                     </Ellipsis>
                   </Row>,
@@ -148,7 +165,14 @@ export function Audit({ onUnauthorised }) {
                   >
                     {r.action}
                   </Mono>,
-                  <Ellipsis key="g" style={{ font: "400 12px var(--mono)", color: "var(--fg-2)" }} title={r.target}>
+                  <Ellipsis
+                    key="g"
+                    style={{
+                      font: "400 12px var(--mono)",
+                      color: "var(--fg-2)",
+                    }}
+                    title={r.target}
+                  >
                     {r.target}
                   </Ellipsis>,
                   <Mono key="d" style={{ fontSize: 11, color: "var(--fg-4)" }}>
@@ -161,7 +185,10 @@ export function Audit({ onUnauthorised }) {
         )}
         <Row gap={8} style={{ marginTop: 12 }}>
           {pages.length > 0 && (
-            <Button variant="small" onClick={() => setPages(pages.slice(0, -1))}>
+            <Button
+              variant="small"
+              onClick={() => setPages(pages.slice(0, -1))}
+            >
               ← newer
             </Button>
           )}
@@ -180,22 +207,24 @@ export function Audit({ onUnauthorised }) {
       <Grid cols={3}>
         <Card title="Reads are not recorded">
           <Muted>
-            Auditing every list call would bury the changes in noise. The same goes for the handful
-            of routes that are POST only because they take a body — a dry-run changes nothing, and
-            recording it would dilute a log whose value is that every row is a change.
+            Auditing every list call would bury the changes in noise. The same
+            goes for the handful of routes that are POST only because they take
+            a body — a dry-run changes nothing, and recording it would dilute a
+            log whose value is that every row is a change.
           </Muted>
         </Card>
         <Card title="A 403 is an attempt, not a change">
           <Muted>
-            Rejected calls are kept out of the trail so it cannot lie in the direction that matters
-            most: everything here actually happened.
+            Rejected calls are kept out of the trail so it cannot lie in the
+            direction that matters most: everything here actually happened.
           </Muted>
         </Card>
         <Card title="Coarse on purpose">
           <Muted>
-            A row says a principal&rsquo;s roles were changed and by whom, never which role — and
-            never the request body, which carries passwords and upstream credentials. Complete and
-            coarse beats detailed and full of holes; the application log carries the rest.
+            A row says a principal&rsquo;s roles were changed and by whom, never
+            which role — and never the request body, which carries passwords and
+            upstream credentials. Complete and coarse beats detailed and full of
+            holes; the application log carries the rest.
           </Muted>
         </Card>
       </Grid>
