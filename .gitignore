@@ -21,3 +21,6 @@
 book/
 mermaid.min.js
 mermaid-init.js
+
+# The procoder code index is generated per machine, not source.
+/.procoder/index/
