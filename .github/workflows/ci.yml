@@ -7,6 +7,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push supersedes an older run of the same ref — but only for PRs.
+# On main and tags every commit publishes an image, so those runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: 192.168.10.123:5000
   IMAGE: 192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy
@@ -14,6 +20,7 @@ env:
 jobs:
   test:
     runs-on: arc-azrtydxb
+    timeout-minutes: 60
     # The runner image ships no Rust, so the toolchain comes from a container —
     # same base as the Dockerfile, so CI and the image agree on the compiler.
     container:
@@ -31,7 +38,7 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Toolchain
         run: rustup component add rustfmt clippy
       - name: Format
@@ -73,10 +80,11 @@ jobs:
   # than shelling out to npm from a build.rs.
   ui:
     runs-on: arc-azrtydxb
+    timeout-minutes: 15
     container:
       image: node:22-bookworm-slim
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install
         working-directory: web
         run: npm install
@@ -98,8 +106,9 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: [test, ui]
     runs-on: arc-azrtydxb-publish
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -142,7 +151,7 @@ jobs:
 
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -156,7 +165,7 @@ jobs:
           echo "tags=ghcr.io/${GITHUB_REPOSITORY,,}:${v},ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_OUTPUT"
 
       - name: Build & push (arm64 → zot)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           builder: fastllm
@@ -172,7 +181,7 @@ jobs:
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
       - name: Build & push the operator (arm64 → zot)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: operator/Dockerfile
@@ -198,13 +207,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
     runs-on: arc-azrtydxb-publish
+    timeout-minutes: 60
     permissions: { contents: read, packages: write }
     outputs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -216,7 +226,7 @@ jobs:
           docker buildx inspect --bootstrap local-arm64
       - name: Proxy (arm64, digest only)
         id: proxy
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           builder: local-arm64
@@ -224,7 +234,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (arm64, digest only)
         id: operator
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: operator/Dockerfile
@@ -236,13 +246,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
     runs-on: arc-azrtydxb-amd64-publish
+    timeout-minutes: 60
     permissions: { contents: read, packages: write }
     outputs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -259,7 +270,7 @@ jobs:
           docker buildx inspect --bootstrap local-amd64
       - name: Proxy (amd64, digest only)
         id: proxy
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           builder: local-amd64
@@ -267,7 +278,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (amd64, digest only)
         id: operator
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: operator/Dockerfile
@@ -279,9 +290,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-arm64, release-amd64]
     runs-on: arc-azrtydxb-publish
+    timeout-minutes: 15
     permissions: { contents: read, packages: write }
     steps:
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
