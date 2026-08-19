@@ -1,0 +1,17 @@
+# Keep the default rules; only teach directory scans what git already knows:
+# build artifacts are not source. Without this, a dir-mode scan (which does
+# not honour .gitignore) reads ~3.5 GB of target/ and node_modules/ and
+# times out instead of answering.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''(^|/)target/''',
+  '''(^|/)node_modules/''',
+  '''^web/dist/''',
+  '''^web/\.screenshots/''',
+  '''^\.superpowers/''',
+  '''^book/''',
+  '''^\.procoder/index/''',
+]
