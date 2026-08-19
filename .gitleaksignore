@@ -6,3 +6,8 @@ src/control/testdata/rsa_test_key.pem:private-key:1
 # Placeholder bearer tokens ("sk-allowed"/"sk-denied") in a curl example
 # inside a since-deleted planning doc. Not credentials.
 c49d68bc852c973369faf940300bb28564c3617e:docs/superpowers/plans/2026-08-06-p0-control-plane-and-rbac.md:curl-auth-header:720
+
+# The same waivers with absolute paths: the audit sweep invokes gitleaks in
+# directory mode, whose fingerprints carry the path as given.
+/Users/pascal/Development/Fastllm-proxy/src/control/testdata/rsa_test_key.pem:private-key:1
+/Users/pascal/Development/Fastllm-proxy/.superpowers/sdd/2026-08-06-p0-control-plane-and-rbac/task-3-brief.md:curl-auth-header:185
