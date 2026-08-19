@@ -1,8 +1,22 @@
 # fastllm-proxy
 
+[![CI](https://github.com/azrtydxb/Fastllm-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/azrtydxb/Fastllm-proxy/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **The lowest-overhead LLM router.** Production-ready, highly available, and one OpenAI-compatible endpoint in front of everything you serve — written in Rust.
 
 It fronts any number of inference backends (vLLM, SGLang, llama.cpp, or any of [80 providers](docs/providers.md)) behind one address: **0.76 µs of work per request**, no I/O on the request path, and response bodies that are never parsed. It reads LiteLLM-format config files unchanged, so it drops into an existing setup without rewriting anything.
+
+## Quick start
+
+```bash
+git clone https://github.com/azrtydxb/Fastllm-proxy && cd Fastllm-proxy
+docker compose up -d
+docker compose exec fastllm fastllm-proxy set-password --name you --password 'change-me'
+```
+
+Clients point at `:4000`; the management UI is at `https://localhost:4001/`.
+[Getting started](docs/getting-started.md) walks from here to a served request.
 
 ## Why it is fast, and stays fast
 

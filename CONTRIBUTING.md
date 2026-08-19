@@ -25,6 +25,33 @@ CI runs all of these plus a classifier-feature pass, so a green local run is a
 good predictor. `DATABASE_URL` points at any Postgres; the database tests are
 `#[ignore]`d by default so `cargo test` stays runnable with nothing installed.
 
+## The quality gate
+
+The repository is governed by [procoder](https://github.com/anthropics/claude-code):
+a formatting-and-hygiene gate that runs on every write and every commit. The
+policy files live under `.procoder/`. The commands you will actually reach for:
+
+- `procoder doctor` — which formatters this repo needs and which are installed;
+  `procoder init` installs the missing ones.
+- `procoder check` — the commit gate over your changed files; `procoder format`
+  prints a file's formatted result so you can review it.
+- `procoder audit` — every check over the whole tree, the way this repo was
+  first onboarded.
+- `procoder lint`, `procoder security`, `procoder ci`, `procoder infra`,
+  `procoder docs`, `procoder git`, `procoder maintain` — the per-domain
+  reports: canonical linters, secrets/SAST/dependency vulns, workflow hygiene,
+  Dockerfile/Kubernetes/Helm checks, documentation drift, pre-finish git
+  status, and dead-code/complexity judgment calls.
+- `procoder index` — the ctags/SCIP code index behind find/refs/impact;
+  `procoder debt` harvests `debt:` markers into a ledger.
+- `procoder spec`, `procoder plan`, `procoder todo` — the spec-first workflow:
+  interview to a spec, spec to a plan, plan to a quality-gated task list.
+- `procoder agents`, `procoder templates`, `procoder principles`,
+  `procoder lessons`, `procoder scrub`, `procoder hook`, `procoder version` —
+  plumbing: per-host agent rule files, the default policy files, the
+  engineering principles text, recorded lessons, transcript scrubbing, the
+  write-hook entry point, and the version.
+
 ## Documentation is part of the change
 
 Not a follow-up, not a separate tidy-up commit — the same commit as the code.

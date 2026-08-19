@@ -54,8 +54,9 @@ fn count_providers(page: &str) -> (usize, usize) {
         if !line.starts_with('|') {
             continue;
         }
-        // The `|---|---|` separator.
-        if line.replace('|', "").trim().chars().all(|c| c == '-') {
+        // The separator row — `|---|---|`, or `| --- | --- |` as prettier
+        // writes it, with `:` for alignment markers.
+        if line.chars().all(|c| matches!(c, '|' | '-' | ' ' | ':')) {
             continue;
         }
         let first = line.split('|').nth(1).unwrap_or("").trim();
