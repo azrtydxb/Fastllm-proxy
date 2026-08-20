@@ -207,6 +207,13 @@
  * override: the template drifts with every mdBook release, one CSS rule
  * does not. The url is relative to this stylesheet, which mdBook copies to
  * theme/ in the site output — one level above images/. */
+/* The menu bar's text title says what the sidebar logo already shows.
+ * Hidden, not removed from book.toml: the title still names the browser
+ * tab and the search index. */
+.menu-title {
+  visibility: hidden;
+}
+
 .sidebar-scrollbox::before {
   content: "";
   display: block;
