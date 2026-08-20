@@ -37,5 +37,6 @@
 - [Semantic routing](classifier.md)
   - [Setting it up](classifier/setup.md)
   - [What it costs](classifier/measurements.md)
+- [Brand and UI guide](brandguide.md)
 - [The quality gate](quality-gate.md)
 - [Changelog](changelog.md)

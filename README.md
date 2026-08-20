@@ -1,3 +1,5 @@
+![FastLLM Proxy](docs/images/banner.png)
+
 # fastllm-proxy
 
 [![CI](https://github.com/azrtydxb/Fastllm-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/azrtydxb/Fastllm-proxy/actions/workflows/ci.yml)

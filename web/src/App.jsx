@@ -278,10 +278,17 @@ export function App() {
             padding: "18px 18px 16px",
             borderBottom: "1px solid var(--line-mid)",
             display: "flex",
-            alignItems: "baseline",
+            alignItems: "center",
             gap: 8,
           }}
         >
+          {/* The icon, not the full logo: the brand guide reserves the
+              horizontal logo for spaces where its tagline stays legible. */}
+          <img
+            src="/favicon.png"
+            alt=""
+            style={{ width: 20, height: 20, display: "block" }}
+          />
           <span
             style={{ font: "600 15px/1 var(--mono)", letterSpacing: "-.02em" }}
           >

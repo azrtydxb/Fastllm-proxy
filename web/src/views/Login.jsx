@@ -69,21 +69,11 @@ export function Login({ onLoggedIn, error: outerError }) {
         }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span
-              style={{
-                font: "600 22px/1 var(--mono)",
-                letterSpacing: "-.02em",
-              }}
-            >
-              fastllm
-            </span>
-            <span
-              style={{ font: "400 22px/1 var(--mono)", color: "var(--fg-3)" }}
-            >
-              proxy
-            </span>
-          </div>
+          <img
+            src="/logo.png"
+            alt="FastLLM Proxy"
+            style={{ width: 280, maxWidth: "100%", display: "block" }}
+          />
           <div
             style={{
               font: "450 34px/1.2 var(--sans)",
