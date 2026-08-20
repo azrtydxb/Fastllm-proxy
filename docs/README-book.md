@@ -1,7 +1,5 @@
 ![FastLLM Proxy](images/banner.webp)
 
-# fastllm-proxy
-
 **The lowest-overhead LLM router. Production-ready, highly available, and one
 OpenAI-compatible endpoint in front of everything you serve.**
 
