@@ -221,9 +221,11 @@
 .sidebar-scrollbox::before {
   content: "";
   display: block;
-  height: 58px;
-  margin: 10px 14px 14px;
-  background: url("../images/logo.webp") no-repeat left center / contain;
+  /* The mark is 2.8:1; at the sidebar's ~272px of usable width this height
+   * lets it span the full column. */
+  height: 96px;
+  margin: 12px 14px 16px;
+  background: url("../images/logo.webp") no-repeat center / contain;
 }
 
 /* The section headers in SUMMARY.md ("Using it", "Running it", "Reference")
