@@ -277,7 +277,9 @@ pre {
 .ayu {
   --bg: #030817;
   --fg: #f8faff;
-  --sidebar-bg: #071126;
+  /* Matches the black baked into the logo image, so the mark sits on the
+   * sidebar without a visible rectangle around it. */
+  --sidebar-bg: #000209;
   --sidebar-fg: #aab7d1;
   --sidebar-active: #00d9f5;
   --sidebar-non-existant: #687897;
