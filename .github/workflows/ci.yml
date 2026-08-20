@@ -65,14 +65,25 @@ jobs:
         run: cargo test --features control --locked -- --include-ignored
       # Semantic routing is behind a feature, so the run above never compiles
       # it — and a test that needs it is `#[cfg]`d out rather than failing for
-      # the wrong reason. This run is what actually exercises it. The model is
-      # fetched from HuggingFace on first use and cached by the runner.
+      # the wrong reason. This run is what actually exercises it.
+      #
+      # The classifier model comes from HuggingFace on first use. The ARC
+      # runners are ephemeral pods, so "cached by the runner" lasts exactly
+      # one pod — without this cache every fresh pod re-downloads the model
+      # inside the semantic-routing test's health window and the test dies
+      # waiting. HF_HOME pins the cache somewhere actions/cache can see.
+      - name: Cache the classifier model
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .hf-cache
+          key: hf-potion-code-16m
       - name: Clippy (classifier)
         run: cargo clippy --all-targets --features "control classifier-tier2" -- -D warnings
       - name: Test (classifier)
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
+          HF_HOME: ${{ github.workspace }}/.hf-cache
         run: cargo test --features "control classifier" --locked -- --include-ignored
 
   # A separate job with its own container, so the Rust job stays Node-free —

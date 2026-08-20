@@ -39,7 +39,9 @@ impl Drop for Proc {
 }
 
 const PROXY_TOKEN: &str = "semantic-routing-e2e-token";
-/// Downloaded once into the shared HuggingFace cache; every later run reuses it.
+/// Downloaded into the HuggingFace cache (`HF_HOME`) on first use. In CI that
+/// cache is restored by actions/cache — the runners are ephemeral pods, so
+/// without it every run starts cold and pays the download at proxy startup.
 const CLASSIFIER_MODEL: &str = "minishlab/potion-code-16M";
 
 fn encryption_key() -> String {
@@ -67,8 +69,8 @@ fn cleanup_for(suffix: &str) -> TestCleanup {
         .track_suffix("permissions", "resource", suffix)
 }
 
-fn wait_healthy(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+fn wait_healthy(port: u16, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
     loop {
         if !matches!(
             ureq::get(&format!("http://127.0.0.1:{port}/health")).call(),
@@ -77,7 +79,10 @@ fn wait_healthy(port: u16) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("fastllm-proxy on port {port} did not answer /health within 60s");
+            panic!(
+                "fastllm-proxy on port {port} did not answer /health within {}s",
+                timeout.as_secs()
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -106,7 +111,14 @@ fn start(port: u16, admin_port: u16, database_url: &str, with_classifier: bool) 
     }
     let child = cmd.spawn().expect("failed to spawn fastllm-proxy");
     let proc = Proc(child);
-    wait_healthy(port);
+    // A classifier-enabled start may be paying the one-time model download
+    // before the listener comes up; 60s only covers a warm cache.
+    let timeout = if with_classifier {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(60)
+    };
+    wait_healthy(port, timeout);
     proc
 }
 
