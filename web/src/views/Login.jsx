@@ -70,7 +70,7 @@ export function Login({ onLoggedIn, error: outerError }) {
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <img
-            src="/logo.png"
+            src="/logo.webp"
             alt="FastLLM Proxy"
             style={{ width: 280, maxWidth: "100%", display: "block" }}
           />
