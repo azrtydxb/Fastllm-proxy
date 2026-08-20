@@ -350,3 +350,61 @@ pre {
   background-clip: text;
   color: transparent;
 }
+
+/* ------------------------------------------------------ landing (design) */
+
+/* The Introduction page's designed sections (from FastLLM Docs.dc.html).
+ * Cards are deliberately dark in every theme — the brand is dark-first and
+ * these are branded panels, like the banner itself. Hover and responsive
+ * behaviour lives here because the page's markup carries only inline
+ * layout. */
+
+.f-card,
+.f-start,
+.f-frow {
+  transition: 150ms ease;
+}
+
+.f-card:hover,
+.f-start:hover {
+  border-color: #253a6b !important;
+}
+
+a.f-start:hover {
+  border-color: #1769ff !important;
+}
+
+a.f-start {
+  text-decoration: none;
+}
+
+.f-frow:hover {
+  background: #0a1530 !important;
+}
+
+@media (max-width: 1100px) {
+  .f-metrics {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .f-starts {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .f-hero-title {
+    font-size: 38px !important;
+  }
+  .f-pillars,
+  .f-metrics,
+  .f-starts {
+    grid-template-columns: 1fr !important;
+  }
+  .f-flow {
+    display: none !important;
+  }
+  .f-frow {
+    grid-template-columns: 1fr !important;
+    gap: 6px !important;
+  }
+}
