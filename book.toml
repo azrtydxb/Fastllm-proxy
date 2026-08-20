@@ -25,7 +25,9 @@ default-theme = "ayu"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/azrtydxb/Fastllm-proxy"
 edit-url-template = "https://github.com/azrtydxb/Fastllm-proxy/edit/main/{path}"
-site-url = "/Fastllm-proxy/"
+# Served at the apex of the custom domain (fastllm.azrty.com), not under
+# the repository-name subpath github.io defaults to.
+site-url = "/"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 # Presentation only, written in mdBook's own theme variables so it survives
 # all five themes. See theme/custom.css for what each rule is fixing.

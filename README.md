@@ -210,7 +210,7 @@ cargo build --release
 
 ## Documentation
 
-**Read it as a site: [azrtydxb.github.io/Fastllm-proxy](https://azrtydxb.github.io/Fastllm-proxy/)** — same files, with search, diagrams and screenshots.
+**Read it as a site: [fastllm.azrty.com](https://fastllm.azrty.com/)** — same files, with search, diagrams and screenshots.
 
 |                                                  |                                                                                                                |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
