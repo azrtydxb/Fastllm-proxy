@@ -203,6 +203,18 @@
 
 /* ---------------------------------------------------------------- sidebar */
 
+/* The logo heads the navigation. A pseudo-element rather than an index.hbs
+ * override: the template drifts with every mdBook release, one CSS rule
+ * does not. The url is relative to this stylesheet, which mdBook copies to
+ * theme/ in the site output — one level above images/. */
+.sidebar-scrollbox::before {
+  content: "";
+  display: block;
+  height: 58px;
+  margin: 10px 14px 14px;
+  background: url("../images/logo.webp") no-repeat left center / contain;
+}
+
 /* The section headers in SUMMARY.md ("Using it", "Running it", "Reference")
  * are the book's structure and were rendering at the same weight as the
  * pages under them. */
