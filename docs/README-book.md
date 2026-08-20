@@ -1,4 +1,4 @@
-![FastLLM Proxy](images/logo.webp)
+<img src="images/logo.webp" alt="FastLLM Proxy" width="380" />
 
 # fastllm-proxy
 
