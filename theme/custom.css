@@ -340,12 +340,13 @@ pre {
 }
 
 /* h1s take the brand gradient — "occasional headline text" is exactly a
- * page title, and nowhere else. */
-.ayu .content h1,
-.light .content h1 {
+ * page title, and nowhere else. The rule lives on the anchor mdBook wraps
+ * around every heading's text, because that anchor paints its own --fg
+ * on top of anything the h1 itself does. */
+.ayu .content h1 a.header,
+.light .content h1 a.header {
   background: var(--gradient-fastllm);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  width: fit-content;
 }
