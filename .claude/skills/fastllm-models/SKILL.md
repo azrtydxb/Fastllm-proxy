@@ -29,6 +29,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `DELETE` | `/admin/provider-models/{id}` | Delete models id | — |
 | `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `api_base`, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
 | `GET` | `/admin/providers` | Read providers | — |
+| `POST` | `/admin/providers/register` | Register or refresh a provider's lease | `api_base`, `node`, `engine`*, `ttl_seconds` |
 
 *\* optional field*
 

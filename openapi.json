@@ -722,6 +722,34 @@
         ]
       }
     },
+    "/admin/providers/register": {
+      "post": {
+        "summary": "Register or refresh a provider's lease",
+        "operationId": "post_admin_providers_register",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad api_base, node or ttl_seconds"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/provider-models/{id}": {
       "delete": {
         "summary": "Delete models id",

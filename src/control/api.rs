@@ -615,6 +615,86 @@ struct ProviderView {
     model_count: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderRegistration {
+    /// The address **proxies** should dial, not one inferred from local
+    /// discovery. An agent that finds a container on `172.17.0.2` and
+    /// registers that hands the proxies an address they cannot reach.
+    api_base: String,
+    /// Which host is vouching for it. One principal per node scopes a
+    /// compromised host to its own providers.
+    node: String,
+    /// Metadata only — see `registry_agent::served_models` for why nothing
+    /// depends on it.
+    #[serde(default)]
+    engine: Option<String>,
+    /// How long this registration is good for. The agent refreshes well
+    /// inside it; a lapse is what starts the provider degrading.
+    ttl_seconds: i64,
+}
+
+/// `POST /admin/providers/register` — a host says what address it is serving on.
+///
+/// Deliberately does *not* take a model list. The control plane enumerates the
+/// provider itself, so discovery and reachability are the same test and a model
+/// the proxies cannot dial is never registered. See
+/// `.procoder/adr/0003-the-control-plane-enumerates-a-providers-models.md`.
+async fn post_provider_register(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<ProviderRegistration>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let api_base = body.api_base.trim().trim_end_matches('/').to_string();
+    if !(api_base.starts_with("http://") || api_base.starts_with("https://")) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("api_base {api_base:?} must start with http:// or https://"),
+        ));
+    }
+    if body.ttl_seconds <= 0 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than zero".to_string(),
+        ));
+    }
+    if body.node.trim().is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "node must name the host registering this provider".to_string(),
+        ));
+    }
+
+    let id = crate::control::registry_agent::register(
+        &ctx.pool,
+        &api_base,
+        body.node.trim(),
+        body.engine.as_deref(),
+        body.ttl_seconds,
+    )
+    .await
+    .map_err(|e| db_error("registering a provider", &e))?;
+
+    // A provider registered by hand keeps the kind it was given: registration
+    // must never quietly convert a static provider into one that can expire.
+    let kind: String = sqlx::query_scalar("SELECT kind FROM providers WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| db_error("reading the provider back", &e))?;
+
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": id,
+            "api_base": api_base,
+            "kind": kind,
+            "leased": kind == "dynamic",
+        })),
+    ))
+}
+
 /// The Providers screen used to invent this by grouping backends on their
 /// `api_base` at render time, which meant a provider could not be named,
 /// counted, or referred to by anything else. Since migration 0029 it is a row.
@@ -5373,6 +5453,7 @@ pub async fn serve(
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
         .route("/admin/providers", get(list_providers))
+        .route("/admin/providers/register", post(post_provider_register))
         .route("/admin/provider-models", get(list_models).post(post_model))
         .route(
             "/admin/provider-models/{id}",

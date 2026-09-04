@@ -11,6 +11,7 @@ pub mod import;
 pub mod k8s;
 pub mod pricing;
 pub mod reconcile;
+pub mod registry_agent;
 pub mod secrets;
 #[cfg(test)]
 pub mod test_support;
