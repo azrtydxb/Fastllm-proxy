@@ -1,6 +1,6 @@
 # Migrate multi-backend models without breaking callers
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: provider-decomposition-and-the-provider-model-rename
 Sprint: sprint-2
@@ -27,15 +27,35 @@ extends every grant on the original name to each name it was split into.
 
 ## Acceptance criteria
 
-- [ ] Every model with two or more backends gains a frontend model of the same name balancing across the split provider models
-- [ ] The generated frontend model inherits the old `models.policy`
-- [ ] Single-backend models gain nothing
-- [ ] A frontend model that already pointed at a split model still reaches every
+- [x] Every model with two or more backends gains a frontend model of the same name balancing across the split provider models
+- [x] The generated frontend model inherits the old `models.policy`
+- [x] Single-backend models gain nothing
+- [x] A frontend model that already pointed at a split model still reaches every
       provider it used to — the split must not quietly halve its capacity
-- [ ] A request to `bge-m3` on kw succeeds before and after the migration with the same client config
-- [ ] Every grant on the original name reaches each name it was split into — a
+- [x] A request to `bge-m3` on kw succeeds before and after the migration with the same client config
+- [x] Every grant on the original name reaches each name it was split into — a
       caller holding `model:invoke` on the old name can still make the same
       request afterwards
-- [ ] The migration is idempotent, or refuses to run twice, and is exercised against a copy of the kw database
+- [x] The migration is idempotent, or refuses to run twice, and is exercised against a copy of the kw database
 
 ## Evidence
+
+- `bge-m3`, the only multi-backend model on kw, became two provider models with
+  a frontend model of the same name balancing across them — `migrations/0029`.
+- Single-backend models gained nothing: the three OpenRouter models are
+  untouched.
+- A caller naming `bge-m3` works before and after with the same client config:
+  HTTP 200 and a real embedding vector on kw.
+- Grants survive. They did not at first — the first real request after 0029
+  returned `403 model_access_denied` for `bge-m3@192.168.10.245:8890` and two
+  live roles had silently lost access. `migrations/0030` extends every grant on
+  the original name to each name it was split into; both roles now hold all
+  three, and the request returns 200.
+- Capacity survives. It did not at first either — `embed` already pointed at
+  `bge-m3` across two hosts and afterwards reached one, with nothing failing and
+  nothing logged. `migrations/0032` restores every missing sibling at the same
+  weight, appended so an operator's ordering is preserved. Verified with real
+  traffic: 12 varied requests to `embed` reached both `.245` and `.246`.
+- Idempotent: 0030 and 0032 both run twice on a clone of the live database
+  without adding a row.
+- Exercised against a copy of the kw database before each was applied.

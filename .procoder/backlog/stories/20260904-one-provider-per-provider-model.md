@@ -1,6 +1,6 @@
 # One provider per provider model, names unique per provider
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: provider-decomposition-and-the-provider-model-rename
 Sprint: sprint-1
@@ -17,10 +17,23 @@ So the constraint is added alongside the global one rather than replacing it, an
 
 ## Acceptance criteria
 
-- [ ] A provider model references exactly one provider; the schema cannot express two
-- [ ] `UNIQUE (provider_id, name)` exists, alongside the global constraint rather than instead of it
-- [ ] Two providers serving the same model coexist as separate provider models, verified on kw
-- [ ] An ADR records why per-provider names wait, and what has to move first
-- [ ] The migration's qualified names stay internal: the clean name reaches callers through the frontend model, verified by a request on kw
+- [x] A provider model references exactly one provider; the schema cannot express two
+- [x] `UNIQUE (provider_id, name)` exists, alongside the global constraint rather than instead of it
+- [x] Two providers serving the same model coexist as separate provider models, verified on kw
+- [x] An ADR records why per-provider names wait, and what has to move first
+- [x] The migration's qualified names stay internal: the clean name reaches callers through the frontend model, verified by a request on kw
 
 ## Evidence
+
+- A provider model references exactly one provider: `models.provider_id` is a
+  single column, so the schema cannot express two — `migrations/0029`.
+- `UNIQUE (provider_id, name)` exists alongside the global `models_name_key`
+  rather than instead of it, which is what ADR 0005 settled and why.
+- Two providers serving the same model coexist: on kw, `bge-m3` runs on
+  `192.168.10.245:8890` and `192.168.10.246:8890` as two provider models.
+- ADR 0005 records why per-provider names wait and what has to move first —
+  target resolution by `models.name` and grants by `model/<name>`, both of
+  which move to the frontend model in ADR 0002.
+- The qualified names stay internal: a caller naming `bge-m3` on kw gets
+  HTTP 200 with a real embedding, and `usage_events` shows
+  `requested_model = bge-m3` served by `bge-m3@192.168.10.245:8890`.
