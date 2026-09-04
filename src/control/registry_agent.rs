@@ -269,8 +269,24 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
             probe(client, &api_base, &registered).await
         };
 
-        match &outcome {
-            Probe::Healthy => {
+        // A degraded provider is described by *why*, because "unreachable" and
+        // "serving something else" are different problems with different
+        // fixes — only the second means the host is fine and the registry is
+        // wrong, which is the case this whole feature exists for.
+        let degraded_reason = match outcome {
+            Probe::Healthy => None,
+            Probe::Mismatch { ref missing } => {
+                report.mismatched.push(name.clone());
+                Some(format!("serving something else; missing {missing:?}"))
+            }
+            Probe::Unreachable { ref error } => {
+                report.unreachable.push(name.clone());
+                Some(error.clone())
+            }
+        };
+
+        match degraded_reason {
+            None => {
                 sqlx::query(
                     "UPDATE providers SET last_seen_at = now(), degraded_since = NULL, \
                      degraded_reason = NULL WHERE id = $1",
@@ -280,14 +296,7 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
                 .await?;
                 report.healthy += 1;
             }
-            Probe::Mismatch { missing } | Probe::Unreachable { .. } => {
-                let reason = match &outcome {
-                    Probe::Mismatch { .. } => {
-                        format!("serving something else; missing {missing:?}")
-                    }
-                    Probe::Unreachable { error } => error.clone(),
-                    Probe::Healthy => unreachable!(),
-                };
+            Some(reason) => {
                 // `COALESCE` so the clock starts at the *first* failure and is
                 // not reset by every subsequent one — otherwise a provider
                 // failing every probe would never age out.
@@ -299,11 +308,6 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
                 .bind(&reason)
                 .execute(pool)
                 .await?;
-                if matches!(outcome, Probe::Mismatch { .. }) {
-                    report.mismatched.push(name.clone());
-                } else {
-                    report.unreachable.push(name.clone());
-                }
             }
         }
     }
