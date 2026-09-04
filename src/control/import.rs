@@ -150,35 +150,38 @@ pub async fn import(
         // against two `api_base`s is two provider models, which is exactly
         // what a file describing one name on two hosts means.
         //
-        // Keyed on endpoint and auth so re-running over an edited file
-        // converges rather than duplicating, and so every model on one
-        // endpoint shares one credential.
-        let existing_provider: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
-             AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
-        )
-        .bind(api_base)
-        .bind(protocol)
-        .bind(&auth_header)
-        .bind(&auth_scheme)
-        .fetch_optional(&mut *tx)
-        .await?;
+        // Keyed on the endpoint alone. A provider *is* an endpoint, so
+        // `protocol:` or `auth_header:` corrected in the file is a correction
+        // to the description of the same provider, not a second one -- keying
+        // on them too would fork a new provider on every such edit, which is
+        // the opposite of the convergence import exists to give.
+        let existing_provider: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM providers WHERE api_base = $1")
+                .bind(api_base)
+                .fetch_optional(&mut *tx)
+                .await?;
         let provider_id = match existing_provider {
+            // Converge rather than leave the row as first imported: an edited
+            // file is the documented way to change policy, so a `protocol:`
+            // corrected in YAML that never reached the database would be a
+            // silent mismatch from the other direction.
+            //
             // The credential is the one field written only when the file names
             // one. A file with no `api_key` usually means it was set through
             // the admin API afterwards, and overwriting it with NULL on the
             // next import would revoke a working provider for nothing.
             Some(id) => {
-                if encrypted_key.is_some() {
-                    sqlx::query(
-                        "UPDATE providers SET upstream_api_key = COALESCE($2, upstream_api_key) \
-                         WHERE id = $1",
-                    )
-                    .bind(id)
-                    .bind(&encrypted_key)
-                    .execute(&mut *tx)
-                    .await?;
-                }
+                sqlx::query(
+                    "UPDATE providers SET protocol = $2, auth_header = $3, auth_scheme = $4, \
+                     upstream_api_key = COALESCE($5, upstream_api_key) WHERE id = $1",
+                )
+                .bind(id)
+                .bind(protocol)
+                .bind(&auth_header)
+                .bind(&auth_scheme)
+                .bind(&encrypted_key)
+                .execute(&mut *tx)
+                .await?;
                 id
             }
             None => {
@@ -216,15 +219,43 @@ pub async fn import(
             }
         };
 
+        // A file naming one `model_name` against two `api_base`s means two
+        // provider models. Model names are still globally unique until
+        // addressing moves to the frontend model (ADR 0005), so the second one
+        // is qualified by its provider -- the same shape migration 0029
+        // produces, so an imported database and a migrated one look alike.
+        let provider_name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+            .bind(provider_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let qualified = format!("{name}@{provider_name}");
+
         // Look up before inserting (rather than INSERT ... ON CONFLICT and
         // checking `xmax`) so a genuine per-run count of *new* models falls
         // out directly — no separate "count what changed" query needed.
+        // Either spelling counts as this provider's, so a re-import converges
+        // onto the row it created last time rather than adding a third.
         let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM models WHERE name = $1 AND provider_id = $2")
-                .bind(name)
+            sqlx::query_scalar("SELECT id FROM models WHERE provider_id = $1 AND name IN ($2, $3)")
                 .bind(provider_id)
+                .bind(name)
+                .bind(&qualified)
                 .fetch_optional(&mut *tx)
                 .await?;
+        let insert_name = if existing.is_some() {
+            name.clone()
+        } else {
+            let taken: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM models WHERE name = $1)")
+                    .bind(name)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if taken {
+                qualified
+            } else {
+                name.clone()
+            }
+        };
         match existing {
             // Converge rather than leave the row as first imported. An edited
             // file is the documented way to change policy, so an
@@ -245,7 +276,7 @@ pub async fn import(
                     "INSERT INTO models (name, provider_id, upstream_model, default_max_tokens) \
                      VALUES ($1, $2, $3, $4)",
                 )
-                .bind(name)
+                .bind(&insert_name)
                 .bind(provider_id)
                 .bind(&upstream)
                 .bind(default_max_tokens)

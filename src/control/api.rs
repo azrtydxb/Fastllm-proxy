@@ -7575,11 +7575,28 @@ mod tests {
         assert_eq!(created.0["credential_kind"], "gcp_service_account");
 
         // And the default stays `static`, so every existing caller is
-        // unaffected by the field existing.
+        // unaffected by the field existing. On its own model, because a
+        // provider model has exactly one provider and the row above already
+        // took this one's.
+        let (_, plain_model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewModel {
+                policy: None,
+                name: unique_name("gcp-validate"),
+                description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
         let (_, plain) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(plain_model.0["id"].as_i64().unwrap()),
             Json(NewBackend::openai("http://plain:8000/v1", None)),
         )
         .await
