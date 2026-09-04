@@ -183,7 +183,7 @@ export function VirtualModels({ onUnauthorised }) {
           <Card>
             <Empty>
               A frontend model is a name callers ask for; it resolves to a chain
-              of backend models. Create one to start.
+              of provider models. Create one to start.
             </Empty>
           </Card>
         ) : (
