@@ -219,6 +219,20 @@ struct Cli {
     #[arg(long, default_value_t = 5, env = "FASTLLM_SNAPSHOT_REBUILD_INTERVAL")]
     snapshot_rebuild_interval: u64,
 
+    /// Seconds between provider sweeps (`--role all`/`control`).
+    ///
+    /// Each sweep is one `GET /v1/models` per provider, which answers both
+    /// whether it is reachable and whether it still serves what the registry
+    /// says — the second being the drift a liveness probe reports as healthy.
+    ///
+    /// 60s by default: frequent enough that a dynamic provider's lease is
+    /// noticed promptly, rare enough that a deployment with many providers is
+    /// not making a request a second for no reason. Deletion is governed by
+    /// the grace window, not by this, so a slower sweep delays *noticing* and
+    /// never shortens how long a host has to come back.
+    #[arg(long, default_value_t = 60, env = "FASTLLM_PROVIDER_SWEEP_INTERVAL")]
+    provider_sweep_interval: u64,
+
     /// PEM certificate (chain) for the admin API's `/snapshot` and `/usage`
     /// listener (`--role all`/`control`). Requires `--tls-key`. Absent means
     /// plain HTTP, which is legitimate for a dev deployment with no real
@@ -934,6 +948,22 @@ async fn run_control(cli: Cli) -> Result<()> {
         // one deployed on the cluster, so omitting it here would have meant
         // the retention policy existed everywhere except in production.
         fastllm_proxy::control::api::spawn_usage_retention(pool.clone());
+        // One `GET /v1/models` per provider, on a schedule: whether it is
+        // alive, and whether it is still serving what the registry claims.
+        // The second is the drift no liveness probe can see, and the reason
+        // this exists at all.
+        fastllm_proxy::control::api::spawn_provider_sweep(
+            pool.clone(),
+            Arc::new(upstream::Upstream::new(
+                upstream::Config {
+                    max_idle_per_host: 2,
+                    idle_timeout: Duration::from_secs(30),
+                    connect_timeout: Duration::from_secs(5),
+                },
+                tls_config(None)?,
+            )),
+            Duration::from_secs(cli.provider_sweep_interval),
+        );
         let tls = admin_tls_config(&cli)?;
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.admin_port)
             .parse()
@@ -1095,6 +1125,22 @@ async fn run_all(cli: Cli) -> Result<()> {
         // Usage now takes a row per request rather than only for capped
         // principals, so the table needs a policy rather than watching.
         fastllm_proxy::control::api::spawn_usage_retention(pool.clone());
+        // One `GET /v1/models` per provider, on a schedule: whether it is
+        // alive, and whether it is still serving what the registry claims.
+        // The second is the drift no liveness probe can see, and the reason
+        // this exists at all.
+        fastllm_proxy::control::api::spawn_provider_sweep(
+            pool.clone(),
+            Arc::new(upstream::Upstream::new(
+                upstream::Config {
+                    max_idle_per_host: 2,
+                    idle_timeout: Duration::from_secs(30),
+                    connect_timeout: Duration::from_secs(5),
+                },
+                tls_config(None)?,
+            )),
+            Duration::from_secs(cli.provider_sweep_interval),
+        );
         let admin_tls_enabled = admin_tls.is_some();
         tokio::spawn(async move {
             if let Err(e) = fastllm_proxy::control::api::serve(

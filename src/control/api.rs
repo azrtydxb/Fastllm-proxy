@@ -4145,6 +4145,63 @@ pub async fn roll_up_and_prune_usage_for_test(pool: &PgPool) -> Result<(u64, u64
 /// Hourly rather than on the snapshot-rebuild tick: this touches only rows
 /// months old, so running it more often is pure cost, and its failure is not
 /// urgent — the next tick catches up whatever the last one missed.
+/// Probe every provider on a schedule: record what is healthy, degrade what is
+/// not, and remove dynamic providers whose absence has outlasted the grace
+/// window.
+///
+/// One `GET /v1/models` per provider answers both questions that matter —
+/// whether it is alive, and whether it is still serving what the registry says
+/// — and it costs one call however many models ride on it.
+///
+/// This runs on the control plane, not the proxies: once, rather than once per
+/// replica, and nowhere near the request path.
+pub fn spawn_provider_sweep(
+    pool: PgPool,
+    client: std::sync::Arc<crate::upstream::Upstream>,
+    interval: std::time::Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match crate::control::registry_agent::sweep(&pool, &client).await {
+                Ok(r) => {
+                    if !r.mismatched.is_empty() {
+                        // Loudest of the three, because it is the one an
+                        // operator cannot see any other way: the host is up,
+                        // the probe is green, and it is serving the wrong
+                        // thing.
+                        tracing::warn!(
+                            providers = ?r.mismatched,
+                            "provider is serving models other than those registered on it"
+                        );
+                    }
+                    if !r.unreachable.is_empty() {
+                        tracing::info!(providers = ?r.unreachable, "provider unreachable; degraded");
+                    }
+                    if !r.deleted.is_empty() {
+                        tracing::warn!(
+                            providers = ?r.deleted,
+                            "removed dynamic providers whose absence outlasted the grace window"
+                        );
+                    }
+                    if r.models_added > 0 || r.models_removed > 0 {
+                        tracing::info!(
+                            added = r.models_added,
+                            removed = r.models_removed,
+                            "reconciled models on dynamic providers"
+                        );
+                    }
+                }
+                // Warn, never fail. A sweep that cannot run costs freshness;
+                // taking the control plane down over it would cost service.
+                Err(e) => tracing::warn!(error = %e, "provider sweep failed; will retry next tick"),
+            }
+        }
+    });
+}
+
 pub fn spawn_usage_retention(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
