@@ -21,6 +21,7 @@
   - [Roles and configuration](operations/configuration.md)
   - [Logs, metrics and traces](operations/observability.md)
   - [Usage records and prices](operations/usage-records.md)
+  - [Registering hosts that serve models](operations/registering-hosts.md)
 - [Security](security.md)
 - [Command-line reference](cli.md)
 
