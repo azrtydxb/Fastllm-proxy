@@ -38,7 +38,7 @@ environment, or again after editing the file — grants dropped from the file ar
 revoked rather than left behind, so re-importing converges instead of
 accumulating.
 
-It seeds `models`, `model_backends` **and the `auth:` block**: a
+It seeds `providers`, `models` **and the `auth:` block**: a
 `service_account` principal per key, the key as a SHA-256 hash, and its model
 grants as a role named `import:<name>`. `models: ['*']` becomes `model:invoke`
 on `model/*`; a named list becomes one grant per model.
@@ -94,7 +94,7 @@ nothing here competes with it.
 fastllm-proxy reencrypt-backends --database-url postgres://...
 ```
 
-One-shot migration for `model_backends.upstream_api_key` rows still holding
+One-shot migration for `providers.upstream_api_key` rows still holding
 pre-encryption plaintext. Safe to run more than once; an already-encrypted row
 is left alone. Needed once, by deployments that predate
 `migrations/0004_encrypted_upstream_api_key.sql`.
@@ -200,7 +200,7 @@ and these should not:
 
 |                              |                                                                                                                                                                                                          |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FASTLLM_ENCRYPTION_KEY`     | Encrypts `model_backends.upstream_api_key` at rest. **Not regenerable** — lose it and those credentials are unrecoverable; change it without running `reencrypt-backends` and the process will not start |
+| `FASTLLM_ENCRYPTION_KEY`     | Encrypts `providers.upstream_api_key` at rest. **Not regenerable** — lose it and those credentials are unrecoverable; change it without running `reencrypt-backends` and the process will not start |
 | `FASTLLM_PROXY_TOKEN`        | Also a flag, but the variable is the form to use                                                                                                                                                         |
 | `FASTLLM_BOOTSTRAP_PASSWORD` | `set-password`'s `--password`                                                                                                                                                                            |
 

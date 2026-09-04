@@ -43,7 +43,7 @@ services:
       # Both planes must agree on this: it is what the proxy presents to
       # /snapshot. Generate your own with `openssl rand -hex 24`.
       FASTLLM_PROXY_TOKEN: pt-change-me
-      # Encrypts model_backends.upstream_api_key at rest; --role control
+      # Encrypts providers.upstream_api_key at rest; --role control
       # refuses to start without it. Not a secret in this file's case because
       # this file is a worked example — generate your own for anything real.
       FASTLLM_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"

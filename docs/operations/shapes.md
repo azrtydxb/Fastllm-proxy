@@ -56,7 +56,7 @@ fastllm-proxy set-password --name you --password 'change-me'
 Three things about this shape worth knowing before you rely on it:
 
 - **`FASTLLM_ENCRYPTION_KEY` is not regenerable.** It encrypts
-  `model_backends.upstream_api_key` at rest. Lose it and the upstream
+  `providers.upstream_api_key` at rest. Lose it and the upstream
   credentials in that database are gone; change it and the process will not
   start. Put it wherever you keep secrets before you put anything in the
   database.

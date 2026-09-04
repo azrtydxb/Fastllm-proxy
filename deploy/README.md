@@ -62,7 +62,7 @@ Two Deployments, one Postgres, since Task 12:
 
 ### TLS on `/snapshot` and `/usage`
 
-`/snapshot` carries `model_backends.upstream_api_key` in usable plaintext form — encrypted at rest in Postgres, but the proxy has to present it to the backend, so the _transport_ has to be trusted wherever a backend has a real credential. This cluster's do, so `fastllm-control` terminates TLS on its admin listener (both `/admin/*` and `/snapshot`/`/usage` share the one listener — there is no way to TLS one route and not the others on the same port).
+`/snapshot` carries `providers.upstream_api_key` in usable plaintext form — encrypted at rest in Postgres, but the proxy has to present it to the backend, so the _transport_ has to be trusted wherever a backend has a real credential. This cluster's do, so `fastllm-control` terminates TLS on its admin listener (both `/admin/*` and `/snapshot`/`/usage` share the one listener — there is no way to TLS one route and not the others on the same port).
 
 The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `novamail` and others use) via the `fastllm-control-tls` `Certificate` in `control.yaml`. cert-manager writes `tls.crt`/`tls.key` (mounted into `fastllm-control` at `/etc/fastllm/tls`, passed to `--tls-cert`/`--tls-key`) and `ca.crt` (mounted into `fastllm-proxy` at `/etc/fastllm/ca`, passed to `--ca-bundle`) into that one Secret — `cluster-ca` is a private CA no public root store trusts, so without `--ca-bundle` the proxy's TLS handshake to `fastllm-control` fails closed. `FASTLLM_CONTROL_URL` in `deployment.yaml` points at `https://fastllm-control.fastllm.svc:4001/snapshot` accordingly.
 
@@ -213,7 +213,7 @@ kubectl -n fastllm create secret generic fastllm-proxy-token \
 # committing a real token to git.)
 
 # Also generate the encryption-at-rest key: fastllm-control encrypts
-# model_backends.upstream_api_key with this before writing it to Postgres
+# providers.upstream_api_key with this before writing it to Postgres
 # (see README.md's "Encryption at rest" section) and refuses to start
 # without it. Same rotation caveat as the proxy token: don't hand-edit
 # control.yaml's placeholder, overwrite it here.
@@ -334,7 +334,7 @@ interval plus one `--config-poll` interval (default 5s each, so worst case
 For a single model or backend, the admin API is the supported route — it
 publishes a rebuilt snapshot on the spot, so only `fastllm-proxy`'s poll
 interval stands between the write and the change taking effect. Direct SQL
-against `models`/`model_backends` is no longer the documented way to do any of
+against `providers`/`models` is no longer the documented way to do any of
 this; it bypasses the write path and waits on the periodic rebuild.
 
 ```bash

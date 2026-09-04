@@ -45,7 +45,7 @@ spec:
             - name: FASTLLM_PROXY_TOKEN
               valueFrom:
                 secretKeyRef: { name: fastllm-secrets, key: proxy-token }
-            # Encrypts model_backends.upstream_api_key at rest. --role control
+            # Encrypts providers.upstream_api_key at rest. --role control
             # refuses to start without it rather than falling back to
             # plaintext. Not regenerable: losing it loses those credentials.
             - name: FASTLLM_ENCRYPTION_KEY

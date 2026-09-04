@@ -114,7 +114,7 @@ spec:
           # anyone else installing this version gets.
           # `deployment.yaml` carries the same tag and must move at the same
           # time: the two planes share a schema.
-          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:0.2.0
+          image: 192.168.10.123/azrtydxb/fastllm-proxy/proxy:main
           imagePullPolicy: Always
           args:
             - --role=control

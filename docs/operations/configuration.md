@@ -23,11 +23,11 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
 ```
 
-Idempotent — seeds `models`/`model_backends` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely.
+Idempotent — seeds `providers`/`models` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely.
 
 Everything a backend row can hold is carried across, not just the address:
 
-| from the file        | into `model_backends`                                                                                                                                                                                                                                 |
+| from the file        | into `providers`/`models`                                                                                                                                                                                                                                 |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `api_base`           | the address, trailing slash trimmed                                                                                                                                                                                                                   |
 | `model`              | `upstream_model`. A transport prefix (`openai/`, `vllm/`, `openrouter/`) is stripped; a wire-format prefix (`anthropic/`, `gemini/`) only when the backend speaks that protocol, so an OpenRouter id like `anthropic/claude-sonnet-4` survives intact |
