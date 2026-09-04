@@ -804,7 +804,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             targets,
-            vec![format!("{name}@a:8000"), format!("{name}@b:8000")],
+            vec![
+                format!("{name}@{name}-a:8000"),
+                format!("{name}@{name}-b:8000")
+            ],
             "the pooled name must reach both providers"
         );
 
