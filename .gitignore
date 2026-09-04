@@ -24,3 +24,7 @@ mermaid-init.js
 
 # The procoder code index is generated per machine, not source.
 /.procoder/index/
+
+# procoder regenerates these per checkout, and its own gate rejects the
+# handoff file it just wrote — tracking them makes every commit fail.
+.procoder/state/
