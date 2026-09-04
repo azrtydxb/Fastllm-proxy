@@ -244,6 +244,25 @@ cargo test
 cargo build --release
 ```
 
+### Claude skills
+
+`.claude/skills/` holds one skill per resource domain, covering every endpoint in
+[`openapi.json`](openapi.json) plus two operational skills for running the
+deployment and the inference backends behind it.
+
+The endpoint table inside each skill is generated — `openapi.json` carries no
+schemas, so request fields are read from the axum route table and the
+`Deserialize` structs in `src/control/api.rs`. Everything outside the
+`<!-- BEGIN GENERATED -->` markers is hand-written and preserved.
+
+```bash
+python3 scripts/gen-claude-skills.py          # regenerate
+python3 scripts/gen-claude-skills.py --check  # fail if stale (runs in CI)
+```
+
+The check also fails when an endpoint belongs to no skill, so "every endpoint is
+covered" is enforced by the build rather than asserted here.
+
 ## License
 
 Apache-2.0

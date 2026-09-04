@@ -589,6 +589,89 @@ async fn revoke_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize)]
+struct ProviderView {
+    id: i64,
+    name: String,
+    /// `static`, `cloud` or `dynamic`. Only `dynamic` providers are ever
+    /// removed automatically; the other two are here because a human put them
+    /// here, and absence is not evidence that the human changed their mind.
+    kind: String,
+    api_base: String,
+    protocol: String,
+    auth_header: String,
+    /// Whether a credential is configured — never the credential itself, in
+    /// either plaintext or ciphertext. `upstream_api_key` is the one secret in
+    /// this schema that cannot be reduced to a hash (the proxy has to present
+    /// it upstream), so the only safe thing to say about it here is whether it
+    /// is set.
+    has_upstream_api_key: bool,
+    /// Which catalogue entry this came from, absent for a hand-typed address.
+    catalogue_key: Option<String>,
+    /// How many provider models this provider serves. The count rather than
+    /// the models themselves: `GET /admin/models` already carries those, and a
+    /// provider fronting a few hundred models would make this response the
+    /// wrong shape for the question it answers.
+    model_count: i64,
+}
+
+/// The Providers screen used to invent this by grouping backends on their
+/// `api_base` at render time, which meant a provider could not be named,
+/// counted, or referred to by anything else. Since migration 0029 it is a row.
+async fn list_providers(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<ProviderView>>, ApiError> {
+    type Row = (
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        Option<String>,
+        i64,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, \
+             p.upstream_api_key IS NOT NULL, p.catalogue_key, \
+             (SELECT count(*) FROM models m WHERE m.provider_id = p.id) \
+         FROM providers p ORDER BY p.name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing providers", &e))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    kind,
+                    api_base,
+                    protocol,
+                    auth_header,
+                    has_upstream_api_key,
+                    catalogue_key,
+                    model_count,
+                )| ProviderView {
+                    id,
+                    name,
+                    kind,
+                    api_base,
+                    protocol,
+                    auth_header,
+                    has_upstream_api_key,
+                    catalogue_key,
+                    model_count,
+                },
+            )
+            .collect(),
+    ))
+}
+
 /// A model's link to its provider, kept in the shape the UI already reads.
 ///
 /// Since migration 0029 a provider model has exactly one provider, so this is
@@ -1751,7 +1834,11 @@ async fn post_backend(
                 .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
                 .unwrap_or(&api_base)
                 .to_string();
-            let kind = if is_private_host(&host) { "static" } else { "cloud" };
+            let kind = if is_private_host(&host) {
+                "static"
+            } else {
+                "cloud"
+            };
             let mut name = host.clone();
             for n in 2..100 {
                 let taken: bool =
@@ -5261,6 +5348,7 @@ pub async fn serve(
             "/admin/mcp-servers/{id}",
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
+        .route("/admin/providers", get(list_providers))
         .route("/admin/models", get(list_models).post(post_model))
         .route(
             "/admin/models/{id}",

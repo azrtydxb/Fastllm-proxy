@@ -697,6 +697,31 @@
         ]
       }
     },
+    "/admin/providers": {
+      "get": {
+        "summary": "Read providers",
+        "operationId": "get_admin_providers",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/models/{id}": {
       "delete": {
         "summary": "Delete models id",

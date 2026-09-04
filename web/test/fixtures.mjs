@@ -145,6 +145,44 @@ const FIXTURES = {
       },
     },
   ],
+  // One provider per endpoint, which is what the schema allows since
+  // migration 0029. `local-qwen` runs on two hosts, so it is two provider
+  // models — the pair a frontend model balances across.
+  "/admin/providers": [
+    {
+      id: 1,
+      name: "10.42.1.7:8000",
+      kind: "static",
+      api_base: "http://10.42.1.7:8000/v1",
+      protocol: "openai",
+      auth_header: "authorization",
+      has_upstream_api_key: false,
+      catalogue_key: null,
+      model_count: 1,
+    },
+    {
+      id: 2,
+      name: "10.42.1.8:8000",
+      kind: "static",
+      api_base: "http://10.42.1.8:8000/v1",
+      protocol: "openai",
+      auth_header: "authorization",
+      has_upstream_api_key: false,
+      catalogue_key: null,
+      model_count: 1,
+    },
+    {
+      id: 3,
+      name: "api.anthropic.com",
+      kind: "cloud",
+      api_base: "https://api.anthropic.com/v1",
+      protocol: "anthropic",
+      auth_header: "x-api-key",
+      has_upstream_api_key: true,
+      catalogue_key: "anthropic",
+      model_count: 1,
+    },
+  ],
   "/admin/models": [
     {
       id: 3,
@@ -154,12 +192,14 @@ const FIXTURES = {
       output_price_per_mtok: 0,
       cache_ttl_seconds: 300,
       context_length: 262144,
-      // Two backends and no policy of its own: the case the load-balancing
-      // control exists for, and the state ("deployment default") it starts in.
+      // No policy of its own: the state ("deployment default") the
+      // load-balancing control starts in.
       policy: null,
+      provider_id: 1,
+      provider_name: "10.42.1.7:8000",
       backends: [
         {
-          id: 11,
+          id: 3,
           api_base: "http://10.42.1.7:8000/v1",
           upstream_model: "qwen2.5-32b",
           has_upstream_api_key: false,
@@ -167,8 +207,22 @@ const FIXTURES = {
           auth_header: "authorization",
           default_max_tokens: null,
         },
+      ],
+    },
+    {
+      id: 4,
+      name: "local-qwen@10.42.1.8:8000",
+      description: "self-hosted",
+      input_price_per_mtok: 0,
+      output_price_per_mtok: 0,
+      cache_ttl_seconds: 300,
+      context_length: 262144,
+      policy: null,
+      provider_id: 2,
+      provider_name: "10.42.1.8:8000",
+      backends: [
         {
-          id: 12,
+          id: 4,
           api_base: "http://10.42.1.8:8000/v1",
           upstream_model: "qwen2.5-32b",
           has_upstream_api_key: false,
@@ -185,9 +239,11 @@ const FIXTURES = {
       input_price_per_mtok: null,
       output_price_per_mtok: null,
       cache_ttl_seconds: null,
+      provider_id: 3,
+      provider_name: "api.anthropic.com",
       backends: [
         {
-          id: 12,
+          id: 5,
           api_base: "https://api.anthropic.com/v1",
           upstream_model: "claude-sonnet-4-5",
           has_upstream_api_key: true,

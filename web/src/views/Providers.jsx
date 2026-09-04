@@ -17,16 +17,19 @@ import {
   Row,
   Stack,
   fmtInt,
-  hostOf,
 } from "../ui.jsx";
 
-// A provider is a grouping this screen invents, not a thing the API models.
+// A provider is a row in `providers`, read from `GET /admin/providers`.
 //
-// The database has models and backends; "OpenRouter" is what a human calls
-// every backend whose api_base points at openrouter.ai. Grouping them here is
-// useful — it answers "what are we actually talking to, and with what
-// credentials" in one look — but it is presentation, so nothing is written
-// back at this level and nothing claims to be a provider record.
+// It used to be a grouping this screen invented, by bucketing every backend
+// whose api_base shared an origin. That answered the right question but could
+// not be named, counted or referred to by anything else — which is why a
+// registration service had nothing to register. Since migration 0029 it is a
+// record, and this screen reads it rather than deriving it.
+//
+// Models are still fetched, for two things the provider row does not carry:
+// which model names ride on it, and health, which is per (api_base,
+// upstream_model) on each proxy's own report.
 //
 // What is deliberately absent: region and latency. Neither is modelled
 // anywhere. Region would have to be parsed out of a hostname for the two
@@ -42,11 +45,12 @@ export function Providers({ onUnauthorised, go }) {
 
   const { data, error, loading, setError } = useLoader(
     async () => {
-      const [models, fleet] = await Promise.all([
+      const [providers, models, fleet] = await Promise.all([
+        api.get("/admin/providers"),
         api.get("/admin/models"),
         api.get("/admin/fleet"),
       ]);
-      return { models, fleet };
+      return { providers, models, fleet };
     },
     { onUnauthorised },
   );
@@ -57,33 +61,28 @@ export function Providers({ onUnauthorised, go }) {
 
   const health = new Map(mergeBackends(data.fleet).map((b) => [b.key, b]));
 
-  // Group by origin, which is what distinguishes one provider from another —
-  // path segments are per-model, and splitting on them would show four
-  // "providers" for one Vertex project.
+  // One card per provider row. The models query still supplies the names and
+  // the health lookup, both of which hang off a model rather than a provider.
   const groups = new Map();
+  for (const p of data.providers) {
+    groups.set(p.id, {
+      origin: p.api_base,
+      host: p.name,
+      kind: p.kind,
+      bases: new Set([p.api_base]),
+      models: new Set(),
+      protocols: new Set([p.protocol]),
+      credentialled: p.has_upstream_api_key ? 1 : 0,
+      backends: p.model_count,
+      up: 0,
+      reported: 0,
+    });
+  }
   for (const m of data.models) {
+    const g = groups.get(m.provider_id);
+    if (!g) continue;
+    g.models.add(m.name);
     for (const b of m.backends) {
-      const origin = originOf(b.api_base);
-      let g = groups.get(origin);
-      if (!g) {
-        g = {
-          origin,
-          host: hostOf(b.api_base),
-          bases: new Set(),
-          models: new Set(),
-          protocols: new Set(),
-          credentialled: 0,
-          backends: 0,
-          up: 0,
-          reported: 0,
-        };
-        groups.set(origin, g);
-      }
-      g.bases.add(b.api_base);
-      g.models.add(m.name);
-      g.protocols.add(b.protocol);
-      g.backends += 1;
-      if (b.has_upstream_api_key) g.credentialled += 1;
       const h = health.get(backendKey(b.api_base, b.upstream_model || m.name));
       if (h) {
         g.reported += 1;
@@ -95,8 +94,8 @@ export function Providers({ onUnauthorised, go }) {
   const all = [...groups.values()].sort((a, b) => a.host.localeCompare(b.host));
   const shown = all
     .filter((g) => {
-      if (filter === "Hosted") return g.credentialled > 0;
-      if (filter === "Self-hosted") return g.credentialled === 0;
+      if (filter === "Hosted") return g.kind === "cloud";
+      if (filter === "Self-hosted") return g.kind !== "cloud";
       if (filter === "Native protocol")
         return [...g.protocols].some((p) => p !== "openai");
       return true;
@@ -144,7 +143,8 @@ export function Providers({ onUnauthorised, go }) {
 
       <Muted>
         A provider is a row in a table, not a code change — anything speaking
-        the OpenAI API is already supported. Backends are added on the{" "}
+        the OpenAI API is already supported. Models are attached to a provider
+        on the{" "}
         <a href="#/models" onClick={() => go("models")}>
           Models
         </a>{" "}
@@ -155,7 +155,7 @@ export function Providers({ onUnauthorised, go }) {
         <Card>
           <Empty>
             {all.length === 0
-              ? "No backends are configured yet."
+              ? "No providers are configured yet."
               : "No provider matches that filter."}
           </Empty>
         </Card>
@@ -278,10 +278,3 @@ export function Providers({ onUnauthorised, go }) {
   );
 }
 
-function originOf(apiBase) {
-  try {
-    return new URL(apiBase).origin;
-  } catch {
-    return apiBase;
-  }
-}

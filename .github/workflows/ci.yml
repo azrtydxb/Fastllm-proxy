@@ -43,6 +43,17 @@ jobs:
         run: rustup component add rustfmt clippy
       - name: Format
         run: cargo fmt --all --check
+      # The Claude skills in .claude/skills carry a generated endpoint table
+      # derived from openapi.json and the axum route table. Regenerating here
+      # rather than trusting it: a skill that has quietly stopped matching the
+      # API is worse than no skill, and this also fails when a newly added
+      # endpoint belongs to no skill at all.
+      - name: Skills up to date
+        # rust:1-bookworm ships no python3, so install it rather than let the
+        # step fail for a reason unrelated to what it checks.
+        run: |
+          command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3; }
+          python3 scripts/gen-claude-skills.py --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
