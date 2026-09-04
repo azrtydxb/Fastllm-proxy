@@ -13,11 +13,17 @@ As a client calling `bge-m3` today, my requests keep working after the migration
 
 Single-backend models — the three OpenRouter ones — need nothing.
 
-Grants are the half that is easy to miss. `proxy.rs` authorises against the
+Grants are the half that is easy to miss, and 0029 missed it. `proxy.rs` authorises against the
 resolved concrete model, so renaming one revokes every grant naming it. The
 first real request after this migration reached kw came back `403
 model_access_denied` for `bge-m3@192.168.10.245:8890`, a model the caller had
 never heard of, and two live roles had lost access with nothing reporting it.
+
+Fixed forward in migration 0030 rather than by correcting 0029, which had
+already been applied: `sqlx` checksums migrations and refuses to start when an
+applied one changes. 0030 recovers the split from the shape 0029 left behind —
+a frontend model whose target is named `<frontend name>@<something>` — and
+extends every grant on the original name to each name it was split into.
 
 ## Acceptance criteria
 

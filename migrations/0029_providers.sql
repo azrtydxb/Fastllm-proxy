@@ -208,31 +208,4 @@ JOIN virtual_models v ON v.name = s.original_name
 JOIN models m ON m.name = s.name
 GROUP BY v.id, m.id;
 
--- Grants name the model, so renaming one revokes it.
---
--- `proxy.rs` authorises against the *resolved concrete model*, never the
--- frontend name -- "a virtual model routes access; it must never be able to
--- grant it". So a principal holding `model:invoke` on `model/bge-m3` reaches
--- the frontend model created above, which resolves to `bge-m3@<provider>`, and
--- is then refused for a model it was never granted. Found by making the call:
--- the first real request after this migration came back
--- `403 model_access_denied` naming a model the caller had never heard of.
---
--- Every grant on the original name is therefore extended to each name it was
--- split into. The original is left in place: it costs nothing, and it is what
--- the move to frontend-model authorisation will read.
-INSERT INTO permissions (verb, resource)
-SELECT DISTINCT p.verb, 'model/' || s.name
-FROM split_models s
-JOIN permissions p ON p.resource = 'model/' || s.original_name
-ON CONFLICT (verb, resource) DO NOTHING;
-
-INSERT INTO role_permissions (role_id, permission_id)
-SELECT DISTINCT rp.role_id, np.id
-FROM split_models s
-JOIN permissions op ON op.resource = 'model/' || s.original_name
-JOIN role_permissions rp ON rp.permission_id = op.id
-JOIN permissions np ON np.verb = op.verb AND np.resource = 'model/' || s.name
-ON CONFLICT DO NOTHING;
-
 DROP TABLE model_backends;
