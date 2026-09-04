@@ -37,7 +37,12 @@ pub async fn served_models(client: &Upstream, api_base: &str) -> anyhow::Result<
         .await
         .map_err(|_| anyhow::anyhow!("{url} timed out"))??;
     let status = resp.status();
-    let body = resp.into_body().collect().await?.to_bytes();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
+        .to_bytes();
     if !status.is_success() {
         anyhow::bail!("{url} answered {status}");
     }
@@ -165,8 +170,6 @@ pub async fn register(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn a_provider_serving_what_is_registered_is_healthy() {
         // `probe` compares sets; the transport is exercised end to end by the
