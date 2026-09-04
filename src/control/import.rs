@@ -344,8 +344,12 @@ pub async fn import(
             // hosts, and inventing one would be a change of behaviour
             // disguised as an import.
             sqlx::query(
-                "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position) \
-                 SELECT $1, id, 1, $3 FROM provider_models WHERE name = $2",
+                "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
+                                                      target_provider_name, target_model_name, \
+                                                      weight, position) \
+                 SELECT $1, pm.id, p.name, pm.name, 1, $3 \
+                   FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id \
+                  WHERE pm.name = $2",
             )
             .bind(vm_id)
             .bind(target)

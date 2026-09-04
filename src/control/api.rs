@@ -2251,8 +2251,15 @@ async fn post_rule_target(
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position)
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        // The name is copied from the model at write time and is what the
+        // target is really bound to — the id only records which row carries
+        // that name today, and goes NULL if it is deleted.
+        "INSERT INTO rule_targets (rule_id, provider_model_id, target_provider_name, \
+                                   target_model_name, weight, position)
+         SELECT $1, pm.id, p.name, pm.name, $3, $4
+           FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id
+          WHERE pm.id = $2
+         RETURNING id",
     )
     .bind(rule_id)
     .bind(body.provider_model_id)
@@ -2312,8 +2319,14 @@ async fn post_default_target(
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position)
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        // Same as a rule's target: bound by name, with the id as a cache.
+        "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
+                                              target_provider_name, target_model_name, \
+                                              weight, position)
+         SELECT $1, pm.id, p.name, pm.name, $3, $4
+           FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id
+          WHERE pm.id = $2
+         RETURNING id",
     )
     .bind(frontend_model_id)
     .bind(body.provider_model_id)

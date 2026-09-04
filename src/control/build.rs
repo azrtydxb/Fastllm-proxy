@@ -852,23 +852,34 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     .fetch_all(pool)
     .await?;
 
-    // `provider_model_id` is resolved to the model's *name* here, once, rather than
-    // carried as an id into `crate::routing`: the request path matches
-    // targets by the same string it already has (the model name off the
-    // wire/body), and routing types staying name-based is what lets
-    // `FrontendModelDef::resolve` hand a target straight to
-    // `Registry::pool_has_healthy` with no id-to-name lookup on the hot path.
+    // A target is carried as the model's *name*, which is also how it is
+    // stored: the request path matches targets by the same string it already
+    // has (the model name off the wire/body), and routing types staying
+    // name-based is what lets `FrontendModelDef::resolve` hand a target
+    // straight to `Registry::pool_has_healthy` with no id-to-name lookup on
+    // the hot path.
+    //
+    // Read from `target_model_name` rather than joined from
+    // `provider_model_id`, and that is the whole of what makes a frontend
+    // model survive its target being deleted. The id is a cache of "which row
+    // is that name right now" and goes NULL when the model does; the name
+    // stays, so a model re-registered under the same name on the same provider
+    // is picked up by the next snapshot with nothing to reattach by hand.
+    //
+    // A target naming a model that does not currently exist yields no pool and
+    // is simply not routable, which is the same state the request path already
+    // handles for a model whose every backend is down.
     type TargetRow = (i64, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
     let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT rt.rule_id, m.name, rt.weight, rt.position
-         FROM rule_targets rt JOIN provider_models m ON m.id = rt.provider_model_id
+        "SELECT rt.rule_id, rt.target_model_name, rt.weight, rt.position
+         FROM rule_targets rt
          ORDER BY rt.rule_id, rt.position",
     )
     .fetch_all(pool)
     .await?;
     let default_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.frontend_model_id, m.name, vd.weight, vd.position
-         FROM frontend_model_defaults vd JOIN provider_models m ON m.id = vd.provider_model_id
+        "SELECT vd.frontend_model_id, vd.target_model_name, vd.weight, vd.position
+         FROM frontend_model_defaults vd
          ORDER BY vd.frontend_model_id, vd.position",
     )
     .fetch_all(pool)
