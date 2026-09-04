@@ -362,3 +362,20 @@ Lands inside change (A), which already breaks the snapshot wire format.
 - Also rename the API route to `/admin/provider-models`, riding A's existing
   breaking change rather than paying for a second one later.
 - Rename the DB table too (`models` -> `provider_models`).
+
+## RBAC on frontend models: the per-target filtering is gone
+
+Implemented and in CI. Authorisation checks the name the caller used; a grant
+on a frontend model authorises the whole chain it routes to. The failover
+chain used to be filtered per target.
+
+Consequence: adding a target to a frontend model extends the reach of everyone
+holding it, with no new grant on record.
+
+- Accept it. It follows necessarily from "RBAC on frontend models" — requiring
+  the provider-model grant as well would mean renaming one still revokes
+  access, which is the problem #8 exists to fix. Mitigated by editing a
+  frontend model needing `config:write`, which already grants everything.
+- Keep per-target filtering in addition to the frontend-model grant, and accept
+  that provider-model names stay load-bearing — which means the registrar
+  cannot churn them and #13 needs a different design.
