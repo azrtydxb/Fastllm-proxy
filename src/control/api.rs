@@ -642,7 +642,7 @@ struct ProviderRegistration {
 /// `.procoder/adr/0003-the-control-plane-enumerates-a-providers-models.md`.
 async fn post_provider_register(
     State(ctx): State<Ctx>,
-    _perm: RequireConfigWrite,
+    _perm: RequireProviderRegister,
     Json(body): Json<ProviderRegistration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let api_base = body.api_base.trim().trim_end_matches('/').to_string();
@@ -3286,6 +3286,11 @@ const GRANTABLE_VERBS: &[&str] = &[
     "model:invoke",
     "mcp:invoke",
     "agent:invoke",
+    // Held by a registration agent, scoped to the node it speaks for
+    // (`node/spark-246`, or `node/*`). Deliberately not `config:write`: that
+    // is all-or-nothing and would let a GPU host rewrite principals and
+    // passwords, when all it needs is to say which addresses it is serving on.
+    "provider:register",
 ];
 
 #[derive(Deserialize)]
@@ -3401,6 +3406,7 @@ fn validate_grant(verb: &str, resource: &str) -> Result<(), ApiError> {
         "model:invoke" => Some("model/"),
         "mcp:invoke" => Some("mcp/"),
         "agent:invoke" => Some("agent/"),
+        "provider:register" => Some("node/"),
         _ => None,
     } {
         if !resource.starts_with(prefix) {
@@ -4698,8 +4704,46 @@ async fn require_session(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
+    // A principal API key is accepted as well as a session cookie, because a
+    // registration agent on a GPU host is not a person at a browser. Giving it
+    // a password so it could `POST /login` would put one on every GPU host,
+    // which is the thing having machine credentials exists to avoid.
+    //
+    // This authenticates only. What a key may *do* is still decided by
+    // `check_permission` per route, and the verb an agent holds
+    // (`provider:register` on `node/...`) grants nothing else — a key without
+    // it gets a 403 from every other admin route exactly as before.
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        let hash = hash_key(bearer.trim()).to_vec();
+        let principal_id: Option<i64> = sqlx::query_scalar(
+            "SELECT principal_id FROM api_keys \
+              WHERE hash = $1 AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(hash)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| db_error("authenticating a key", &e))?;
+        let Some(principal_id) = principal_id else {
+            return Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired key",
+            ));
+        };
+        request
+            .extensions_mut()
+            .insert(AdminPrincipal(principal_id));
+        return Ok(next.run(request).await);
+    }
+
     let Some(token) = session_cookie(&headers) else {
-        return Err(api_error(StatusCode::UNAUTHORIZED, "no session cookie"));
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "no session cookie or bearer key",
+        ));
     };
     let Some(principal_id) = crate::control::auth::authenticate_session(&ctx.pool, &token).await
     else {
@@ -4878,6 +4922,34 @@ impl FromRequestParts<Ctx> for RequireKeyRevoke {
 
     async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
         check_permission(parts, state, admin_permission::KEY_REVOKE)
+            .await
+            .map(|()| Self)
+    }
+}
+
+/// An agent may register providers and do nothing else.
+///
+/// `config:write` would have worked and is what the first cut used, but it is
+/// all-or-nothing — it would let a GPU host rewrite principals, roles and
+/// passwords when all it needs is to say which addresses it is serving on. A
+/// registration agent runs unattended on a machine whose main job is running
+/// other people's model weights; it should hold the least thing that works.
+///
+/// A session with `config:write` is accepted too, so an operator can register
+/// a provider by hand without minting a key first.
+struct RequireProviderRegister;
+
+impl FromRequestParts<Ctx> for RequireProviderRegister {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        if check_permission(parts, state, "provider:register")
+            .await
+            .is_ok()
+        {
+            return Ok(Self);
+        }
+        check_permission(parts, state, admin_permission::CONFIG_WRITE)
             .await
             .map(|()| Self)
     }
