@@ -429,51 +429,70 @@ export function Models({ onUnauthorised }) {
                 })}
               </Table>
 
-              <Row gap={8} style={{ marginTop: 12, flexWrap: "nowrap" }}>
-                <input
-                  placeholder="api_base"
-                  style={{ flex: 1.8 }}
-                  value={draftFor(m.id).api_base || ""}
-                  onChange={(e) => setDraft(m.id, { api_base: e.target.value })}
-                />
-                <input
-                  placeholder="upstream_model"
-                  style={{ flex: 1.1 }}
-                  value={draftFor(m.id).upstream_model || ""}
-                  onChange={(e) =>
-                    setDraft(m.id, { upstream_model: e.target.value })
-                  }
-                />
-                <select
-                  style={{ flex: 0.7 }}
-                  value={draftFor(m.id).protocol || "openai"}
-                  onChange={(e) => setDraft(m.id, { protocol: e.target.value })}
-                >
-                  <option value="openai">openai</option>
-                  <option value="anthropic">anthropic</option>
-                  <option value="gemini">gemini</option>
-                </select>
-                <input
-                  placeholder="default_max_tokens"
-                  style={{ flex: 0.8 }}
-                  value={draftFor(m.id).default_max_tokens || ""}
-                  onChange={(e) =>
-                    setDraft(m.id, { default_max_tokens: e.target.value })
-                  }
-                />
-                <input
-                  type="password"
-                  placeholder="api key"
-                  style={{ flex: 0.8 }}
-                  value={draftFor(m.id).upstream_api_key || ""}
-                  onChange={(e) =>
-                    setDraft(m.id, { upstream_api_key: e.target.value })
-                  }
-                />
-                <Button variant="secondary" onClick={() => addBackend(m.id)}>
-                  Add backend
-                </Button>
-              </Row>
+              {/* A provider model has exactly one provider since migration
+                  0029, so offering this form on a model that already has one
+                  would only earn a 409. Detaching is how you change it, and
+                  two upstreams for one client-facing name is now a frontend
+                  model with two targets. */}
+              {m.backends.length > 0 ? (
+                <div style={{ marginTop: 12 }}>
+                  <Muted>
+                    Served by {m.provider_name}. A model has one provider —
+                    remove this one to point it elsewhere, or put both behind a
+                    frontend model to balance across them.
+                  </Muted>
+                </div>
+              ) : (
+                <Row gap={8} style={{ marginTop: 12, flexWrap: "nowrap" }}>
+                  <input
+                    placeholder="api_base"
+                    style={{ flex: 1.8 }}
+                    value={draftFor(m.id).api_base || ""}
+                    onChange={(e) =>
+                      setDraft(m.id, { api_base: e.target.value })
+                    }
+                  />
+                  <input
+                    placeholder="upstream_model"
+                    style={{ flex: 1.1 }}
+                    value={draftFor(m.id).upstream_model || ""}
+                    onChange={(e) =>
+                      setDraft(m.id, { upstream_model: e.target.value })
+                    }
+                  />
+                  <select
+                    style={{ flex: 0.7 }}
+                    value={draftFor(m.id).protocol || "openai"}
+                    onChange={(e) =>
+                      setDraft(m.id, { protocol: e.target.value })
+                    }
+                  >
+                    <option value="openai">openai</option>
+                    <option value="anthropic">anthropic</option>
+                    <option value="gemini">gemini</option>
+                  </select>
+                  <input
+                    placeholder="default_max_tokens"
+                    style={{ flex: 0.8 }}
+                    value={draftFor(m.id).default_max_tokens || ""}
+                    onChange={(e) =>
+                      setDraft(m.id, { default_max_tokens: e.target.value })
+                    }
+                  />
+                  <input
+                    type="password"
+                    placeholder="api key"
+                    style={{ flex: 0.8 }}
+                    value={draftFor(m.id).upstream_api_key || ""}
+                    onChange={(e) =>
+                      setDraft(m.id, { upstream_api_key: e.target.value })
+                    }
+                  />
+                  <Button variant="secondary" onClick={() => addBackend(m.id)}>
+                    Attach provider
+                  </Button>
+                </Row>
+              )}
               {draftFor(m.id).protocol === "anthropic" &&
                 !draftFor(m.id).default_max_tokens && (
                   <div style={{ marginTop: 8 }}>

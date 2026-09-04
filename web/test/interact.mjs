@@ -484,7 +484,7 @@ await goto("models");
   const upstream = $("input").find((i) => i.placeholder === "upstream_model");
   await fill(base, "http://10.0.0.9:8000/v1");
   await fill(upstream, "some-model");
-  await click(byText("Add backend"));
+  await click(byText("Attach provider"));
   const call = lastCall("POST", "/backends");
   check("backend POST is sent", !!call);
   check(

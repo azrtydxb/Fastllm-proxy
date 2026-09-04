@@ -233,6 +233,20 @@ const FIXTURES = {
       ],
     },
     {
+      // No provider: not routable, and the state the attach form exists for.
+      // It is also the drift this work exists to end, so the UI has to show it
+      // rather than hide it.
+      id: 6,
+      name: "orphaned-model",
+      description: "",
+      input_price_per_mtok: null,
+      output_price_per_mtok: null,
+      cache_ttl_seconds: null,
+      provider_id: null,
+      provider_name: null,
+      backends: [],
+    },
+    {
       id: 5,
       name: "claude-sonnet",
       description: "",
