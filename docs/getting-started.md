@@ -56,16 +56,19 @@ flowchart LR
     end
 ```
 
-Two backends under one model name make a load-balanced pool. A principal holds
+A model runs on one provider; the same model on two hosts is two provider
+models, balanced by a frontend model in front of them. A principal holds
 roles; roles carry grants; a key is how a principal proves it is that
 principal. Nothing else needs explaining before the first request.
 
 ## 3. Add a model
 
-A **model** is a name clients ask for. A **backend** is somewhere that serves
-it. Two backends under one model name make a load-balanced pool.
+A **provider** is somewhere that serves models — a vLLM host, an OpenRouter
+account. A **provider model** is one model on one provider. Running the same
+model on two hosts gives two provider models; a frontend model in front of them
+is what balances the two.
 
-On **Models**, create one, then add a backend to it:
+On **Models**, create one, then attach it to a provider:
 
 ![The Models screen: each model with its backends, prices, cache TTL and context window](images/ui-models.png)
 

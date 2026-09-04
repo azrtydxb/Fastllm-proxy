@@ -83,10 +83,12 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/models/7/backends \
   }'
 ```
 
-Two backends under one model become one load-balanced pool — and two entries
-sharing a `model_name` in a LiteLLM config
+The same model on two providers is two provider models, and a frontend model in
+front of them is what balances the two — two entries sharing a `model_name` in a
+LiteLLM config
 [import](operations/configuration.md#migrating-a-file-mode-deployment-onto-a-database)
-to exactly that. It is the whole mechanism behind failover and traffic splitting — see
+to exactly that shape. It is the whole mechanism behind failover and traffic
+splitting — see
 [virtual models](features.md#virtual-models-routing-as-configuration-not-code)
 for routing between _different_ models.
 

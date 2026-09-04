@@ -61,8 +61,8 @@ Two words, used consistently from here on:
 
 |                    |                                                                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Backend model**  | What a request is routed _to_: one name, one or more backends behind it, and a load-balancing policy for choosing between them |
-| **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of backend models                             |
+| **Provider model** | What a request is routed _to_: one name on one provider. Two hosts serving the same model are two provider models                |
+| **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of provider models — and where two of them are balanced against each other |
 
 A client can address either — a backend model resolves to itself. The admin
 API still spells these `models` and `virtual-models` in its paths, which is
