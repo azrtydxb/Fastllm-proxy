@@ -220,3 +220,111 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         .await
         .unwrap();
 }
+
+/// Deleting a model must not delete what it was billed for.
+///
+/// `usage_events.model_id` was `ON DELETE CASCADE`, which was a reasonable
+/// reading while models were deleted rarely and by hand — migration 0005 argued
+/// exactly that. It stops being reasonable the moment anything deletes them on
+/// a schedule: swap a model off a host and that week's inference disappears
+/// from usage and spend, with no error, because the cascade is doing what it
+/// was told.
+///
+/// This pins the row surviving *and* still naming what served it, because a
+/// row that survives with nothing but a NULL id is not usable evidence of
+/// anything.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set; skipping");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+
+    let model = unique_name("deleted-model");
+    let principal = unique_name("deleted-model-principal");
+    // The model is deleted by the test itself; only the principal needs
+    // cleaning up, and the usage rows go with it.
+    let _cleanup = TestCleanup::new()
+        .track_prefix("models", "name", "deleted-model")
+        .track_prefix("principals", "name", "deleted-model-principal");
+
+    let provider: i64 = sqlx::query_scalar(
+        "INSERT INTO providers (name, api_base) VALUES ($1, 'http://gone:8000/v1') RETURNING id",
+    )
+    .bind(&model)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let model_id: i64 = sqlx::query_scalar(
+        "INSERT INTO models (name, provider_id, upstream_model) \
+         VALUES ($1, $2, 'gone') RETURNING id",
+    )
+    .bind(&model)
+    .bind(provider)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let principal_id: i64 = sqlx::query_scalar(
+        "INSERT INTO principals (name, kind) VALUES ($1, 'service_account') RETURNING id",
+    )
+    .bind(&principal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO usage_events \
+             (principal_id, model_id, model_name, provider_name, prompt_tokens, \
+              completion_tokens, at, usage_reported) \
+         VALUES ($1, $2, $3, $3, 100, 200, now(), true)",
+    )
+    .bind(principal_id)
+    .bind(model_id)
+    .bind(&model)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM models WHERE id = $1")
+        .bind(model_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (rows, named, id_cleared): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), \
+                count(*) FILTER (WHERE model_name = $2), \
+                count(*) FILTER (WHERE model_id IS NULL) \
+           FROM usage_events WHERE principal_id = $1",
+    )
+    .bind(principal_id)
+    .bind(&model)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(rows, 1, "the usage row must outlive the model");
+    assert_eq!(named, 1, "and must still say what it was billed under");
+    assert_eq!(id_cleared, 1, "the id is cleared, not the row");
+
+    // The provider is a separate lifetime: deleting a model must not take it,
+    // because other models may still be on it.
+    let provider_left: i64 = sqlx::query_scalar("SELECT count(*) FROM providers WHERE id = $1")
+        .bind(provider)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(provider_left, 1);
+
+    sqlx::query("DELETE FROM providers WHERE id = $1")
+        .bind(provider)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
