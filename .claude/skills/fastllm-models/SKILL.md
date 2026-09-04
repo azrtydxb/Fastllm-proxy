@@ -28,6 +28,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `PATCH` | `/admin/models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`*, `policy`* |
 | `DELETE` | `/admin/models/{id}` | Delete models id | — |
 | `POST` | `/admin/models/{id}/backends` | Create models id backends | `api_base`, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
+| `GET` | `/admin/providers` | Read providers | — |
 
 *\* optional field*
 
