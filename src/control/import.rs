@@ -773,9 +773,9 @@ mod tests {
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n\
              \x20 - model_name: {name}\n\
-             \x20   litellm_params: {{ model: openai/{name}, api_base: http://a:8000/v1 }}\n\
+             \x20   litellm_params: {{ model: openai/{name}, api_base: http://{name}-a:8000/v1 }}\n\
              \x20 - model_name: {name}\n\
-             \x20   litellm_params: {{ model: openai/{name}, api_base: http://b:8000/v1 }}\n"
+             \x20   litellm_params: {{ model: openai/{name}, api_base: http://{name}-b:8000/v1 }}\n"
         ))
         .unwrap();
 
@@ -835,12 +835,18 @@ mod tests {
         let _cleanup = TestCleanup::new().track_prefix("models", "name", "native-import-test-");
 
         let name = unique_name("native-import-test");
+        // The endpoint is derived from the unique name, not the real
+        // `api.anthropic.com`. A provider is keyed on its endpoint and shared
+        // by every model on it since migration 0029, so importing the real
+        // hostname here would converge onto the deployment's own Anthropic
+        // provider and overwrite its credential with `sk-ant-test`. This suite
+        // runs against a shared database.
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n\
              \x20 - model_name: {name}\n\
              \x20   litellm_params:\n\
              \x20     model: anthropic/claude-sonnet-4\n\
-             \x20     api_base: https://api.anthropic.com/v1\n\
+             \x20     api_base: https://{name}.example.invalid/v1\n\
              \x20     api_key: sk-ant-test\n\
              \x20     protocol: anthropic\n\
              \x20     auth_header: x-api-key\n\
@@ -899,7 +905,7 @@ mod tests {
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n\
              \x20 - model_name: {model}\n\
-             \x20   litellm_params: {{ api_base: http://h:8000/v1 }}\n\
+             \x20   litellm_params: {{ api_base: http://{name}-h:8000/v1 }}\n\
              auth:\n\
              \x20 keys:\n\
              \x20   - key: sk-limits-import-test-aaaaaaaaaaaa\n\
@@ -975,7 +981,7 @@ mod tests {
                 "model_list:\n\
                  \x20 - model_name: {name}\n\
                  \x20   litellm_params:\n\
-                 \x20     api_base: https://api.anthropic.com/v1\n\
+                 \x20     api_base: https://{name}.example.invalid/v1\n\
                  \x20     api_key: sk-ant-test\n\
                  \x20     protocol: {protocol}\n\
                  \x20     default_max_tokens: {tokens}\n"
@@ -1020,7 +1026,7 @@ mod tests {
 
         let name = unique_name("import-dup-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
-            "model_list:\n  - model_name: {name}\n    litellm_params: {{ api_base: http://a:8000/v1 }}\n"
+            "model_list:\n  - model_name: {name}\n    litellm_params: {{ api_base: http://{name}-a:8000/v1 }}\n"
         ))
         .unwrap();
         let first = import(&pool, &cfg, &test_key()).await.unwrap();
@@ -1056,7 +1062,7 @@ mod tests {
         let name = unique_name("secret-backend");
         let plaintext_credential = "sk-do-not-leak-this-upstream-token";
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
-            "model_list:\n  - model_name: {name}\n    litellm_params: {{ api_base: http://a:8000/v1, api_key: {plaintext_credential} }}\n"
+            "model_list:\n  - model_name: {name}\n    litellm_params: {{ api_base: http://{name}-a:8000/v1, api_key: {plaintext_credential} }}\n"
         ))
         .unwrap();
 
@@ -1119,9 +1125,9 @@ mod tests {
         let yaml = format!(
             "model_list:\n\
              \x20 - model_name: {granted_model}\n\
-             \x20   litellm_params: {{ api_base: http://a:8000/v1 }}\n\
+             \x20   litellm_params: {{ api_base: http://{granted_model}:8000/v1 }}\n\
              \x20 - model_name: {ungranted_model}\n\
-             \x20   litellm_params: {{ api_base: http://b:8000/v1 }}\n\
+             \x20   litellm_params: {{ api_base: http://{ungranted_model}:8000/v1 }}\n\
              auth:\n\
              \x20 keys:\n\
              \x20   - key: {named_key}\n\
@@ -1316,8 +1322,8 @@ mod tests {
 
         let models = format!(
             "model_list:\n\
-             \x20 - model_name: {a}\n    litellm_params: {{ api_base: http://a:8000/v1 }}\n\
-             \x20 - model_name: {b}\n    litellm_params: {{ api_base: http://b:8000/v1 }}\n"
+             \x20 - model_name: {a}\n    litellm_params: {{ api_base: http://{a}:8000/v1 }}\n\
+             \x20 - model_name: {b}\n    litellm_params: {{ api_base: http://{b}:8000/v1 }}\n"
         );
         let wide: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "{models}auth:\n  keys:\n    - key: {key}\n      name: {principal}\n      models: [{a}, {b}]\n"
