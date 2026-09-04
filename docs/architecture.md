@@ -117,7 +117,7 @@ sequenceDiagram
     P->>P: SHA-256 → principal (401 if unknown/expired)
     P->>P: classify prompt — only when classes are configured
     P->>P: resolve model — frontend models evaluate rules, producing a fallback chain
-    P->>P: authorise the RESOLVED concrete model (403 if ungranted)
+    P->>P: authorise the name the caller used (403 if ungranted)
     P->>P: rate limit (429) and budget (402)
     P->>P: translate request — only if backend.protocol ≠ openai
     P->>B: forward, original bytes (or the translated ones)
@@ -133,13 +133,25 @@ sequenceDiagram
 
 Two decisions in that flow are load-bearing:
 
-- **Authorisation is checked against the resolved concrete model**, never the
-  virtual name. A frontend model routes access; it must never grant it, or a
-  rule edit or a weighted split could hand a caller a model they were never
-  granted. With a fallback chain this becomes a filter: ungranted candidates
-  are dropped from the chain, so failover only ever moves to a model the caller
-  already had. The "served here" check runs _before_ it, so an unknown model is
-  a 404 for everyone and 403-vs-404 cannot be used to probe what exists.
+- **Authorisation is checked against the name the caller used.** A request
+  naming a frontend model is authorised against that frontend model; one naming
+  a provider model directly is authorised against the provider model. A
+  frontend model is how a model is exposed, so it is what gets granted — and a
+  grant on it covers the chain it routes to, rather than being filtered per
+  target. Adding a target to a frontend model therefore extends the reach of
+  everyone holding it, which is acceptable only because editing one requires
+  `config:write`, itself all-or-nothing and already sufficient to grant any
+  model outright. It is not a skeleton key: a provider model named directly
+  still needs its own grant.
+
+  This reversed the earlier rule, which required a grant on the resolved
+  provider model. That rule pinned every grant to a provider model's *name*, so
+  renaming one revoked access silently — migration 0029 did exactly that in
+  production. See
+  `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`.
+
+  The "served here" check runs _before_ authorisation, so an unknown model is a
+  404 for everyone and 403-vs-404 cannot be used to probe what exists.
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
   never per frame. The response is still forwarded as opaque bytes. A
   translated response is the exception in the cheaper direction: its token
