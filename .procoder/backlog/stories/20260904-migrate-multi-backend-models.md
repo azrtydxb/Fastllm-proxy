@@ -30,6 +30,8 @@ extends every grant on the original name to each name it was split into.
 - [ ] Every model with two or more backends gains a frontend model of the same name balancing across the split provider models
 - [ ] The generated frontend model inherits the old `models.policy`
 - [ ] Single-backend models gain nothing
+- [ ] A frontend model that already pointed at a split model still reaches every
+      provider it used to — the split must not quietly halve its capacity
 - [ ] A request to `bge-m3` on kw succeeds before and after the migration with the same client config
 - [ ] Every grant on the original name reaches each name it was split into — a
       caller holding `model:invoke` on the old name can still make the same
