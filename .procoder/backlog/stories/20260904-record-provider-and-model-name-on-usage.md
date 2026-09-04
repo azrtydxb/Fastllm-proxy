@@ -20,6 +20,9 @@ Denormalising the name also fixes something the current schema cannot express â€
 - [ ] Deleting a provider model leaves its usage rows intact and still reportable by name
 - [ ] Existing rows are backfilled from current names by the migration
 - [ ] Usage and spend reports read the recorded names, and a name reused for something else does not merge the two periods
+- [ ] The hourly rollup is keyed by the recorded name, not the model id â€” a
+      NULL id in a NOT NULL primary-key column would fail the whole retention
+      batch, not merely lose a name
 - [ ] Verified on kw: record usage, delete the model, the report still shows it
 
 ## Evidence

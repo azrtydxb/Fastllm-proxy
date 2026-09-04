@@ -3136,7 +3136,13 @@ async fn usage_summary(
     // An allow-list, not interpolation: this is the one place a caller's
     // string would reach the query text.
     let key_expr = match q.group_by.as_str() {
-        "model" => "m.name",
+        // The name recorded on the event, not the one joined from `models`.
+        // A model that has since been deleted has no row to join to, and
+        // every such request would otherwise collapse into one nameless
+        // bucket — which is the same disappearance the cascade used to cause,
+        // moved from the data to the report. `m.name` is the fallback for
+        // rows written before `model_name` existed.
+        "model" => "coalesce(u.model_name, m.name)",
         "principal" => "p.name",
         "day" => "to_char(date_trunc('day', u.at), 'YYYY-MM-DD')",
         // What the *caller asked for*, which for a virtual model is the
@@ -3144,7 +3150,7 @@ async fn usage_summary(
         // this answers "how much traffic does each virtual model carry",
         // which grouping on the served model cannot: by then the routing
         // decision has already been made and the virtual name is gone.
-        "virtual_model" => "coalesce(u.requested_model, m.name)",
+        "virtual_model" => "coalesce(u.requested_model, u.model_name, m.name)",
         other => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
@@ -3994,12 +4000,20 @@ async fn roll_up_and_prune_usage(pool: &PgPool) -> Result<(u64, u64), sqlx::Erro
     let cutoff = chrono::Utc::now() - chrono::Duration::days(RAW_RETENTION_DAYS);
 
     let rolled = sqlx::query(
+        // Keyed by the name the request was billed under, not the model id.
+        // The id is NULL once the model is deleted, and it is part of this
+        // table's primary key — so keying on it would fail the whole batch the
+        // first time retention met a request served by a since-deleted model,
+        // which is exactly what a registration service expiring a lease
+        // produces. The name is also the better key: it does not merge two
+        // different models that happened to reuse an id.
         "INSERT INTO usage_rollup_hourly (
-             hour, model_id, principal_id, requests, upstream_errors,
+             hour, model_id, model_name, principal_id, requests, upstream_errors,
              refused_authorisation, refused_rate_limit, refused_budget, refused_no_backend,
              prompt_tokens, completion_tokens, cost_micros, unpriced_requests,
              duration_ms_sum, duration_ms_count)
-         SELECT date_trunc('hour', at), model_id, principal_id,
+         SELECT date_trunc('hour', at), min(model_id), coalesce(model_name, '(unknown)'),
+                principal_id,
                 count(*),
                 count(*) FILTER (WHERE refusal IS NULL AND status >= 400),
                 count(*) FILTER (WHERE refusal = 'authorisation'),
@@ -4014,8 +4028,8 @@ async fn roll_up_and_prune_usage(pool: &PgPool) -> Result<(u64, u64), sqlx::Erro
                 count(*) FILTER (WHERE duration_ms IS NOT NULL)
          FROM usage_events
          WHERE at < $1
-         GROUP BY 1, 2, 3
-         ON CONFLICT (hour, model_id, principal_id) DO UPDATE SET
+         GROUP BY 1, coalesce(model_name, '(unknown)'), principal_id
+         ON CONFLICT (hour, model_name, principal_id) DO UPDATE SET
              requests              = usage_rollup_hourly.requests + EXCLUDED.requests,
              upstream_errors       = usage_rollup_hourly.upstream_errors + EXCLUDED.upstream_errors,
              refused_authorisation = usage_rollup_hourly.refused_authorisation
@@ -4271,10 +4285,22 @@ async fn post_usage(
 
     // `UNNEST` turns the parallel arrays back into rows, positionally —
     // this is what lets one round trip insert a whole batch instead of one
-    // query per event. The `JOIN`s against `principals`/`models` (rather than
-    // a `NOT NULL` foreign key the `INSERT` could violate) are what makes an
-    // unresolvable row silently absent from `RETURNING` instead of failing
-    // the statement outright.
+    // query per event. The `JOIN` against `principals` (rather than a
+    // `NOT NULL` foreign key the `INSERT` could violate) is what makes a row
+    // naming an unknown principal silently absent from `RETURNING` instead of
+    // failing the statement outright.
+    //
+    // `models` is a LEFT JOIN, deliberately. It used to be an inner one, which
+    // dropped any event naming a model that no longer existed — reasonable
+    // while models were deleted rarely and by hand, and wrong the moment
+    // anything deletes them on a schedule: a proxy flushing a batch for a
+    // model that expired mid-flush would lose those rows, and that is the
+    // normal shape of a model swap, not an edge case. The traffic happened;
+    // recording it is the only honest thing to do about it.
+    //
+    // A row that misses gets no `model_id` and no price, so its cost is NULL —
+    // unknown rather than a confident zero — and `model_name` still says what
+    // the caller asked for.
     let accepted_rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
             SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
@@ -4284,10 +4310,12 @@ async fn post_usage(
                      duration_ms, ttft_ms, status, requested_model, reported_cost,
                      usage_reported, refusal)
          )
-         INSERT INTO usage_events (principal_id, model_id, prompt_tokens, completion_tokens, at,
+         INSERT INTO usage_events (principal_id, model_id, model_name, provider_name,
+                                   prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, usage_reported,
                                    refusal, cost_micros)
-         SELECT i.principal_id, m.id, i.prompt_tokens, i.completion_tokens, i.at,
+         SELECT i.principal_id, m.id, i.model_name, pr.name,
+                i.prompt_tokens, i.completion_tokens, i.at,
                 i.duration_ms, i.ttft_ms, i.status, i.requested_model, i.usage_reported,
                 i.refusal,
                 -- Computed here, from the price at the time the request
@@ -4328,7 +4356,8 @@ async fn post_usage(
                 )
          FROM input i
          JOIN principals p ON p.id = i.principal_id
-         JOIN models m ON m.name = i.model_name
+         LEFT JOIN models m ON m.name = i.model_name
+         LEFT JOIN providers pr ON pr.id = m.provider_id
          RETURNING id, principal_id, prompt_tokens, completion_tokens, COALESCE(cost_micros, 0)",
     )
     .bind(&principal_ids)
