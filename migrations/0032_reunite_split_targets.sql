@@ -14,6 +14,16 @@
 --
 -- Forward rather than by amending 0029, which is applied: `sqlx` checksums
 -- migrations and refuses to start when an applied one changes.
+--
+-- One case is deliberately *not* repaired here. `models.is_fallback` is a
+-- boolean on one row rather than a list of targets, so a deployment whose
+-- fallback model was split keeps the flag on one part and falls back to one
+-- provider where it used to have several. Degraded rather than broken, and
+-- unfixable at this level: the repair is for the deployment-wide fallback to
+-- be able to name a frontend model, which is a change to what a fallback *is*,
+-- not something a migration should invent. No such deployment exists to test
+-- against here, and shipping untested SQL for one would be worse than saying
+-- so.
 
 -- Every sibling a split target is missing. A model 0029 produced is named
 -- `<original>@<provider>`, and the frontend model it created carries
