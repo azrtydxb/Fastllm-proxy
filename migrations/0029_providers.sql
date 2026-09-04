@@ -118,18 +118,22 @@ JOIN providers p
  AND p.credential_kind = b.credential_kind
 WHERE m.id = b.model_id;
 
--- Names become unique per provider rather than globally.
+-- Model names stay globally unique for now, and a UNIQUE (provider_id, name)
+-- is added alongside rather than instead.
 --
--- This follows from the split rather than being chosen: two DGX Sparks both
--- serving `bge-m3` are two provider models, and both are called `bge-m3`
--- because the name is whatever the provider exposes. Frontend models are left
--- as the only global namespace, which is also the only namespace a client
--- names.
+-- Per-provider names are where this is going -- two Sparks both serving
+-- `bge-m3` should both be called `bge-m3` -- but routing cannot express it
+-- yet. `build_virtual_models` carries a virtual model's targets as
+-- `models.name` and `resolve_target_models` resolves a candidate back by
+-- name, so two rows sharing a name would collapse into one target and send
+-- every request to whichever the lookup happened to find. Grants are
+-- `model/<name>` for the same reason.
 --
--- NULL `provider_id` rows do not conflict with each other under this
--- constraint. That is the correct reading: a model with no provider is not
--- routable, so two of them cannot be ambiguous.
-ALTER TABLE models DROP CONSTRAINT models_name_key;
+-- Both of those move to the frontend model (see
+-- .procoder/adr/0002-authorisation-moves-to-the-frontend-model.md), and that
+-- is the change that can carry per-provider names with it. Until then the
+-- constraint below is the honest one: it records the intended shape without
+-- letting the database into a state routing would silently get wrong.
 ALTER TABLE models ADD CONSTRAINT models_provider_name UNIQUE (provider_id, name);
 
 -- A model with a second backend becomes a second provider model, and the two
@@ -142,17 +146,17 @@ ALTER TABLE models ADD CONSTRAINT models_provider_name UNIQUE (provider_id, name
 CREATE TEMP TABLE split_models ON COMMIT DROP AS
 SELECT b.model_id AS original_id,
        m.name     AS original_name,
-       -- Almost always the name the provider exposes, unchanged. The
-       -- exception is a model that had two backends on the *same* endpoint
-       -- differing only in `upstream_model`: both would land on one provider
-       -- under one name and collide, so the second and later ones carry the
-       -- upstream name that distinguishes them. Rare, and better than a
-       -- migration that fails on a database nobody thought was unusual.
-       CASE WHEN COUNT(*) OVER (PARTITION BY b.model_id, p.id) > 1
-                 AND ROW_NUMBER() OVER (PARTITION BY b.model_id ORDER BY b.id) > 1
-            THEN m.name || '#' || b.upstream_model
-            ELSE m.name
-       END AS name,
+       -- Qualified by the provider, because model names are still globally
+       -- unique (see above) and these rows all came from one name. The
+       -- clean name is not lost: it goes to the frontend model created
+       -- below, which is what clients actually call.
+       --
+       -- The upstream name is appended as well only where one provider
+       -- served the same model under two upstream names, which is the one
+       -- case the provider alone does not disambiguate.
+       m.name || '@' || p.name ||
+           CASE WHEN COUNT(*) OVER (PARTITION BY b.model_id, p.id) > 1
+                THEN '#' || b.upstream_model ELSE '' END AS name,
        p.id AS provider_id, b.upstream_model, b.default_max_tokens,
        ROW_NUMBER() OVER (PARTITION BY b.model_id ORDER BY b.id) AS n
 FROM model_backends b
@@ -165,6 +169,15 @@ JOIN providers p
  AND p.upstream_api_key IS NOT DISTINCT FROM b.upstream_api_key
  AND p.credential_kind = b.credential_kind
 WHERE b.model_id IN (SELECT model_id FROM model_backends GROUP BY model_id HAVING COUNT(*) > 1);
+
+-- Every split model is renamed, the original included, so the clean name is
+-- left free for the frontend model that now carries it. Leaving the original
+-- unrenamed would work -- a virtual model shadows a concrete one of the same
+-- name in `resolve_target_models` -- but it would leave a concrete model
+-- permanently unreachable by its own name, which reads as a bug to anyone
+-- who meets it later.
+UPDATE models m SET name = s.name FROM split_models s
+WHERE m.id = s.original_id AND s.n = 1;
 
 -- Rows 2..N become new models. Row 1 already updated the original above.
 -- Price, context and cache settings are copied so the split is invisible in
@@ -192,7 +205,7 @@ INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position
 SELECT v.id, m.id, 1, ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY m.id) - 1
 FROM split_models s
 JOIN virtual_models v ON v.name = s.original_name
-JOIN models m ON m.name = s.name AND m.provider_id = s.provider_id
+JOIN models m ON m.name = s.name
 GROUP BY v.id, m.id;
 
 DROP TABLE model_backends;
