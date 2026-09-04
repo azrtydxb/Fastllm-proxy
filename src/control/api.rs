@@ -963,12 +963,6 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
     }
 }
 
-/// A model and a frontend model sharing a name would make the `model` field
-/// in a request body ambiguous about which one a client meant — rather than
-/// pick a silent precedence order between them, creation of either is
-/// refused while the other name is taken. See `post_frontend_model`'s mirror
-/// check.
-
 /// `(id, name, url, transport, description, auth_header, auth_scheme, enabled,
 /// credential_set)` — a row shape, named because clippy is right that nine
 /// anonymous tuple elements is not a type anyone can read.
