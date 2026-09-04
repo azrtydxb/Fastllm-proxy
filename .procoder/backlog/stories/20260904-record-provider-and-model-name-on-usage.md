@@ -1,6 +1,6 @@
 # Record the provider and model name on usage events
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: usage-survives-model-churn
 Sprint: sprint-7

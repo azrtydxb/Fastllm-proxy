@@ -1,6 +1,6 @@
 # Stop dropping usage for unknown models
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: usage-survives-model-churn
 Sprint: sprint-7

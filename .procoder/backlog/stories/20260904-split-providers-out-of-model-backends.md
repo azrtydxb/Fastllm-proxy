@@ -1,6 +1,6 @@
 # Split providers out of model_backends
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: provider-decomposition-and-the-provider-model-rename
 Sprint: sprint-1
