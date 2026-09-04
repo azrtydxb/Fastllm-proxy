@@ -421,14 +421,33 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     );
 
     // The authorisation decision, pinned end to end: this caller is granted
-    // only the frontend model's *name*, never the provider model ("backend-a")
-    // it resolves to for a non-canary caller. If authorisation checked the
-    // virtual name instead of the resolved target, this would incorrectly
-    // succeed (reach routing, 502) instead of being refused.
+    // only the frontend model's *name*, and that is now what authorises the
+    // request. A frontend model is how a model is exposed, so it is what gets
+    // granted; the caller reaches routing and gets the 502 an unreachable
+    // fixture backend produces, rather than a 403.
+    //
+    // This assertion is the reverse of what it used to be, deliberately — see
+    // `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`. The
+    // old rule required a grant on the resolved provider model, guarding
+    // against someone who could edit routing rules but should not reach some
+    // model. That person cannot exist: editing rules needs `config:write`,
+    // which is all-or-nothing and already lets its holder grant themselves any
+    // model outright. What the old rule did cost was real — it pinned every
+    // grant to a provider model's name, so renaming one revoked access with
+    // nothing reporting it, which migration 0029 did in production.
     let (status, _) = chat(port, &virtual_only_key, &vm_name);
+    assert_ne!(
+        status, 403,
+        "a grant on the frontend model is what authorises a request naming it"
+    );
+
+    // And it unlocks *that frontend model*, not the provider models behind it.
+    // Naming one directly still needs a grant on it, so the frontend model
+    // cannot be used as a way in to something it happens to route to.
+    let (status, _) = chat(port, &virtual_only_key, &model_a_name);
     assert_eq!(
         status, 403,
-        "a grant on the virtual name alone must not unlock the provider model it resolves to"
+        "a grant on the frontend model must not unlock a provider model named directly"
     );
 
     // An unknown model — virtual or concrete — is still a 404 regardless of

@@ -269,19 +269,27 @@ struct BodyPeek {
 /// (`crate::routing`) when the name is a virtual one.
 ///
 /// **Authorisation decision**, pinned by
-/// `tests::a_virtual_models_grant_does_not_reach_its_targets_and_vice_versa`:
-/// the caller is authorised against the *resolved provider model*
-/// (`proxy_request` checks `principal.may_invoke(&target_model)` on what
-/// this function returns), never against the virtual name by itself. A
-/// frontend model routes access; it must never be able to grant it. The
-/// alternative — authorising the virtual name and letting its rules
-/// silently decide which provider model actually serves the request —
-/// would let a frontend model's configuration (or the weighted split, or a
-/// health-driven failover) expand a principal's reach beyond whatever it
-/// was actually granted, with no grant on record for the model that ends up
-/// serving the request. Requiring the concrete grant means adding a virtual
-/// model in front of existing models never changes who can reach what; it
-/// only changes how an already-authorised request gets routed.
+/// `a_virtual_models_rule_reaches_the_right_backend_and_authorisation_checks_the_resolved_model`
+/// in `tests/virtual_models.rs`: `proxy_request` authorises the name the
+/// caller actually used. A request naming a frontend model is authorised
+/// against that frontend model; one naming a provider model directly is
+/// authorised against the provider model.
+///
+/// This reverses the earlier rule, which required a grant on the resolved
+/// provider model on the grounds that a frontend model must never be able to
+/// grant access — see
+/// `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`. That
+/// guarded against someone who can edit a frontend model's rules but should
+/// not reach one of its targets, and that person cannot exist: editing rules
+/// requires `config:write`, which is all-or-nothing and already lets its
+/// holder grant themselves any model outright. The cost of the old rule was
+/// not hypothetical — it pinned every grant to a provider model's *name*, so
+/// renaming one revoked access silently, which migration 0029 did in
+/// production and 0030 exists to repair.
+///
+/// A grant on a frontend model unlocks that frontend model, not the provider
+/// models behind it: naming one directly still needs its own grant, so a
+/// frontend model cannot be used as a way in to something it routes to.
 ///
 /// Returns the resolved model name, or an error response when the requested
 /// name — virtual or concrete — does not resolve to anything at all. This
@@ -569,10 +577,29 @@ async fn proxy_request(
     }
 
     // Authorisation is a set lookup against the pre-flattened grant list, not
-    // a walk of the RBAC graph, and costs nothing measurable. Checked against
-    // every *resolved concrete* candidate — see `resolve_target_models` for
-    // why a frontend model's targets are what get authorised, never the virtual
-    // name by itself.
+    // a walk of the RBAC graph, and costs nothing measurable.
+    //
+    // **It checks the name the caller actually used.** A frontend model is how
+    // a model is exposed, so it is what gets granted; a request naming one is
+    // authorised against it and not against whichever provider model its rules
+    // happen to resolve to.
+    //
+    // This reverses what this function used to do, and the reversal is
+    // deliberate — see
+    // `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`. The
+    // old rule was that "a frontend model routes access; it must never be able
+    // to grant it", guarding against someone who can edit routing rules but
+    // should not reach some provider model. That person cannot exist: editing
+    // rules needs `config:write`, which is all-or-nothing and already lets the
+    // holder grant themselves any model directly. Meanwhile the old rule had a
+    // real cost — it pinned every grant to a provider model's *name*, so
+    // renaming one revoked access silently. Migration 0029 did exactly that in
+    // production and 0030 exists to clean it up, and a registration service
+    // creating and deleting names on a lease would do it continuously.
+    //
+    // A request naming a provider model directly is still authorised against
+    // that provider model. Removing direct addressing is a separate change,
+    // not a side effect of this one.
     //
     // Ungranted candidates are dropped from the chain rather than failing the
     // request outright: failover then only ever moves to a model this caller
@@ -580,7 +607,15 @@ async fn proxy_request(
     // different grants without any of them widening anyone's reach. When that
     // empties the chain the request is refused, naming the target the rule
     // actually chose.
+    let via_frontend_model = snapshot.frontend_models.contains_key(&requested_model);
     let routable: Vec<(String, Pool)> = match principal {
+        Some(p) if via_frontend_model => {
+            if p.may_invoke(&requested_model) {
+                served.clone()
+            } else {
+                Vec::new()
+            }
+        }
         Some(p) => served
             .iter()
             .filter(|(m, _)| p.may_invoke(m))
