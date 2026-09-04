@@ -70,7 +70,7 @@ is what balances the two.
 
 On **Models**, create one, then attach it to a provider:
 
-![The Models screen: each model with its backends, prices, cache TTL and context window](images/ui-models.png)
+![The Provider models screen: each model with its provider, prices, cache TTL and context window](images/ui-models.png)
 
 Each row shows what a client needs to know and what an operator needs to
 decide: the backends behind the name, whether a credential is set (never the

@@ -64,10 +64,10 @@ Two words, used consistently from here on:
 | **Provider model** | What a request is routed _to_: one name on one provider. Two hosts serving the same model are two provider models                |
 | **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of provider models — and where two of them are balanced against each other |
 
-A client can address either — a backend model resolves to itself. The admin
-API still spells these `provider_models` and `frontend-models` in its paths, which is
-what every existing script and the OpenAPI description use; the vocabulary
-changed, the wire format did not.
+A client can address either — a provider model resolves to itself. The admin
+API spells them `/admin/provider-models` and `/admin/frontend-models`, and the
+tables are `provider_models` and `frontend_models`: one word for one thing,
+from the schema through to the screen.
 
 A **frontend model** is a client-facing name with an ordered list of rules and a fallback chain. First rule whose conditions match wins; conditions within a rule are AND'd; targets are weighted _and_ ordered, so a rule is both a split and a failover chain.
 

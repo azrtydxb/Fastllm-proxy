@@ -11,7 +11,7 @@ provider is a grouping this screen invents rather than a record the API
 models — the database has models and backends, and "OpenRouter" is what a
 human calls every backend pointing at `openrouter.ai`. What each card answers
 is the question you actually have: how many models ride on it, whether a
-credential is set (never the credential itself), and how many of its backends
+credential is set (never the credential itself), and how many of its models
 are up.
 
 ## The catalogue
@@ -67,7 +67,7 @@ model first and then a backend under it.
 
 In the UI, on **Models**:
 
-![The Models screen: each model with its backends, credential state, prices, cache TTL and context window](images/ui-models.png)
+![The Provider models screen: each model with its provider, credential state, prices, cache TTL and context window](images/ui-models.png)
 
 By API:
 

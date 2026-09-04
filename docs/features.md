@@ -65,11 +65,11 @@ marginally _ahead_ of no-proxy, which is measurement noise and reported as such.
 
 Cache-affinity with a load escape hatch: a shared prefix returns to the node
 holding its KV cache, unless that node is meaningfully hotter than the
-least-loaded one. The policy is **per backend model**: two identical local
+least-loaded one. The policy is **per provider model**: two identical local
 replicas sharing a prefix cache want affinity, three hosted providers of
 differing speed want `lowest-latency`, and one deployment commonly has both —
-so `--policy` is the default and each backend model may override it (**Backend
-models** screen, or `policy` on the admin API). `least-loaded`, `round-robin`
+so `--policy` is the default and each provider model may override it
+(**Provider models** screen, or `policy` on the admin API). `least-loaded`, `round-robin`
 and `lowest-latency` are
 selectable — the last for pools whose members are not equivalent, where a slow
 backend with one queued request looks emptier than a fast one with two.
@@ -85,7 +85,7 @@ flowchart TD
     CND --> T["targets — weighted <i>and</i> ordered<br/>a split and a failover chain at once"]
     T --> GRANT{"caller has<br/>model:invoke?"}
     GRANT -->|no| DROP["dropped from the chain<br/>failover never widens reach"]
-    GRANT -->|yes| POOL["the model's backends"]
+    GRANT -->|yes| POOL["the provider model's pool"]
     POOL --> POL{"policy"}
     POL -->|cache-affinity| AFF["prefix hash → the node<br/>holding that KV cache<br/><i>unless it is meaningfully hotter</i>"]
     POL -->|least-loaded| LL["fewest in-flight"]

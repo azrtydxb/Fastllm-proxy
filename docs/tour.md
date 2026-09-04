@@ -72,8 +72,15 @@ Roles carry permissions; principals hold roles. The matrix is the clearest
 single picture of it — click a cell to grant or revoke. **Model grants** is the
 same idea for `model:invoke`, per model.
 
-A grant on a frontend model does **not** unlock the backend models behind it.
-Failover can never widen a caller's reach.
+A grant on a frontend model **does** cover the chain it routes to — the
+frontend model is the exposure, so granting it grants what the operator pointed
+it at. It is not a skeleton key: naming a provider model directly still needs a
+grant on that model.
+
+This reversed a rule that required a grant on the resolved provider model. That
+rule pinned every grant to a provider model's *name*, so renaming one revoked
+access with nothing reporting it — see
+`.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`.
 
 ## Limits & budgets — caps that are enforced without a database call
 
