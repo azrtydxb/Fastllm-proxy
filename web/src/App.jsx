@@ -51,17 +51,18 @@ const SCREENS = {
   },
   providers: {
     title: "Providers",
-    subtitle: "grouped by api_base — adding one is a row in a table",
+    subtitle: "where models are served from — cloud, static or registered",
     view: Providers,
   },
   models: {
-    title: "Backend models",
-    subtitle: "what requests are routed to — one name, one or more backends",
+    title: "Provider models",
+    subtitle: "what requests are routed to — one name on one provider",
     view: Models,
   },
   routing: {
     title: "Frontend models",
-    subtitle: "what clients ask for — rules, weights and failover chains",
+    subtitle:
+      "what clients ask for — rules, weights and failover chains. The only name a client uses",
     view: VirtualModels,
   },
   classes: {
@@ -130,7 +131,7 @@ const NAV = [
     label: "ROUTE",
     items: [
       { id: "providers", label: "Providers" },
-      { id: "models", label: "Backend models" },
+      { id: "models", label: "Provider models" },
       { id: "routing", label: "Frontend models" },
       { id: "classes", label: "Prompt classes" },
       { id: "mcp", label: "MCP servers" },

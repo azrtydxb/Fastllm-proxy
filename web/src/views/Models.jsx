@@ -144,11 +144,11 @@ export function Models({ onUnauthorised }) {
 
       <Row>
         <Muted>
-          Backend models: what requests are actually routed to. One name, one or
-          more backends, and how to load-balance between them. Prices are per
-          million tokens; caching is opt-in per model. A model with no price
-          stores NULL rather than zero, so spend is reported as unpriced instead
-          of free.
+          Provider models: what requests are actually routed to. One name on one
+          provider — the same model on two hosts is two provider models, and a
+          frontend model is what balances between them. Prices are per million
+          tokens; caching is opt-in per model. A model with no price stores NULL
+          rather than zero, so spend is reported as unpriced instead of free.
         </Muted>
         <Spacer />
         <Button onClick={() => runSync(true)} disabled={busy}>
