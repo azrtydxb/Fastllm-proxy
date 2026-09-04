@@ -1,6 +1,6 @@
 # Register a provider on a lease
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Epic: the-registration-and-health-service
 Sprint: sprint-8

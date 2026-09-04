@@ -1,6 +1,6 @@
 # The registration and health service
 
-Status: open
+Status: done 2026-09-04
 Created: 2026-09-04
 Milestone: self-registering-hosts
 Issue: #13
