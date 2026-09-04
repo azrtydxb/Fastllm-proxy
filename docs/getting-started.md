@@ -47,7 +47,7 @@ flowchart LR
     subgraph SERVE["what gets served"]
         M["<b>model</b><br/>a name clients ask for"] --> B1["<b>backend</b><br/>somewhere serving it"]
         M --> B2["<b>backend</b>"]
-        VM["<b>virtual model</b><br/>a name with rules"] -.->|targets| M
+        VM["<b>frontend model</b><br/>a name with rules"] -.->|targets| M
     end
     subgraph WHO["who may ask"]
         PR["<b>principal</b><br/>a person or a service"] --> RO["<b>role</b>"]
@@ -80,10 +80,10 @@ and the declared context window.
 Or by API, if you would rather script it:
 
 ```bash
-curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models \
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/provider-models \
   -H 'content-type: application/json' -d '{"name":"my-model"}'          # -> {"id":N}
 
-curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models/N/backends \
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/provider-models/N/backends \
   -H 'content-type: application/json' \
   -d '{"api_base":"http://localhost:8000/v1","upstream_model":"Qwen/Qwen3-8B"}'
 ```

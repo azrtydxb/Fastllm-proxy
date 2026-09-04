@@ -653,10 +653,10 @@
         ]
       }
     },
-    "/admin/models": {
+    "/admin/provider-models": {
       "get": {
-        "summary": "Read models",
-        "operationId": "get_admin_models",
+        "summary": "Read provider models",
+        "operationId": "get_admin_provider_models",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -676,8 +676,8 @@
         ]
       },
       "post": {
-        "summary": "Create models",
-        "operationId": "post_admin_models",
+        "summary": "Create provider models",
+        "operationId": "post_admin_provider_models",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -722,10 +722,10 @@
         ]
       }
     },
-    "/admin/models/{id}": {
+    "/admin/provider-models/{id}": {
       "delete": {
         "summary": "Delete models id",
-        "operationId": "delete_admin_models_id",
+        "operationId": "delete_admin_provider_models_id",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -756,7 +756,7 @@
       },
       "patch": {
         "summary": "Correct a model in place. An explicit null clears a field; an absent field is left alone",
-        "operationId": "patch_admin_models_id",
+        "operationId": "patch_admin_provider_models_id",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -786,10 +786,10 @@
         ]
       }
     },
-    "/admin/models/{id}/backends": {
+    "/admin/provider-models/{id}/backends": {
       "post": {
         "summary": "Create models id backends",
-        "operationId": "post_admin_models_id_backends",
+        "operationId": "post_admin_provider_models_id_backends",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1621,7 +1621,7 @@
     },
     "/admin/usage": {
       "get": {
-        "summary": "Aggregate usage and spend, grouped by model, principal, virtual model or day",
+        "summary": "Aggregate usage and spend, grouped by model, principal, frontend model or day",
         "operationId": "get_admin_usage",
         "tags": ["admin"],
         "responses": {
@@ -1642,10 +1642,10 @@
         ]
       }
     },
-    "/admin/virtual-model-defaults/{id}": {
+    "/admin/frontend-model-defaults/{id}": {
       "delete": {
-        "summary": "Delete virtual-model-defaults id",
-        "operationId": "delete_admin_virtual_model_defaults_id",
+        "summary": "Delete frontend-model-defaults id",
+        "operationId": "delete_admin_frontend_model_defaults_id",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1675,10 +1675,10 @@
         ]
       }
     },
-    "/admin/virtual-models": {
+    "/admin/frontend-models": {
       "get": {
-        "summary": "Read virtual-models",
-        "operationId": "get_admin_virtual_models",
+        "summary": "Read frontend-models",
+        "operationId": "get_admin_frontend_models",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1698,8 +1698,8 @@
         ]
       },
       "post": {
-        "summary": "Create virtual-models",
-        "operationId": "post_admin_virtual_models",
+        "summary": "Create frontend-models",
+        "operationId": "post_admin_frontend_models",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1719,10 +1719,10 @@
         ]
       }
     },
-    "/admin/virtual-models/{id}": {
+    "/admin/frontend-models/{id}": {
       "delete": {
-        "summary": "Delete virtual-models id",
-        "operationId": "delete_admin_virtual_models_id",
+        "summary": "Delete frontend-models id",
+        "operationId": "delete_admin_frontend_models_id",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1752,10 +1752,10 @@
         ]
       }
     },
-    "/admin/virtual-models/{id}/defaults": {
+    "/admin/frontend-models/{id}/defaults": {
       "post": {
-        "summary": "Create virtual-models id defaults",
-        "operationId": "post_admin_virtual_models_id_defaults",
+        "summary": "Create frontend-models id defaults",
+        "operationId": "post_admin_frontend_models_id_defaults",
         "tags": ["admin"],
         "responses": {
           "200": {
@@ -1785,10 +1785,10 @@
         ]
       }
     },
-    "/admin/virtual-models/{id}/rules": {
+    "/admin/frontend-models/{id}/rules": {
       "post": {
-        "summary": "Create virtual-models id rules",
-        "operationId": "post_admin_virtual_models_id_rules",
+        "summary": "Create frontend-models id rules",
+        "operationId": "post_admin_frontend_models_id_rules",
         "tags": ["admin"],
         "responses": {
           "200": {

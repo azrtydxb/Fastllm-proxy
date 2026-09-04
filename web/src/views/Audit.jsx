@@ -37,10 +37,10 @@ const COLS = [
 const TARGET_FILTERS = [
   ["", "All"],
   ["/admin/keys", "keys"],
-  ["/admin/models", "models"],
+  ["/admin/provider-models", "models"],
   ["/admin/principals", "principals"],
   ["/admin/roles", "roles"],
-  ["/admin/virtual-models", "routing"],
+  ["/admin/frontend-models", "routing"],
 ];
 
 export function Audit({ onUnauthorised }) {

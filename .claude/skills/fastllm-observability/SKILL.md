@@ -24,7 +24,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `GET` | `/admin/fleet` | What each proxy replica reports, kept per replica and never merged | — |
 | `GET` | `/admin/health` | Read health | — |
 | `GET` | `/admin/timeseries` | Bucketed traffic, latency and spend. Empty buckets come back as explicit zeros; latency is null where there was nothing to measure | — |
-| `GET` | `/admin/usage` | Aggregate usage and spend, grouped by model, principal, virtual model or day | — |
+| `GET` | `/admin/usage` | Aggregate usage and spend, grouped by model, principal, frontend model or day | — |
 | `GET` | `/metrics` | Prometheus text. Unauthenticated | — |
 
 *\* optional field*

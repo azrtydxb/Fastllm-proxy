@@ -148,7 +148,7 @@ if (wildcard && wildcard.resource !== "model/*") {
   console.log("  ✓ blanket model grant is model/*");
 }
 
-const vms = await get("/admin/virtual-models");
+const vms = await get("/admin/frontend-models");
 const rule = vms.flatMap((v) => v.rules)[0];
 if (rule) {
   if ("match_condition" in rule) {

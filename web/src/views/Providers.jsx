@@ -47,7 +47,7 @@ export function Providers({ onUnauthorised, go }) {
     async () => {
       const [providers, models, fleet] = await Promise.all([
         api.get("/admin/providers"),
-        api.get("/admin/models"),
+        api.get("/admin/provider-models"),
         api.get("/admin/fleet"),
       ]);
       return { providers, models, fleet };

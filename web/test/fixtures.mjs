@@ -183,7 +183,7 @@ const FIXTURES = {
       model_count: 1,
     },
   ],
-  "/admin/models": [
+  "/admin/provider-models": [
     {
       id: 3,
       name: "local-qwen",
@@ -268,7 +268,7 @@ const FIXTURES = {
       ],
     },
   ],
-  "/admin/virtual-models": [
+  "/admin/frontend-models": [
     {
       id: 2,
       name: "gpt-router",

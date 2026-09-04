@@ -99,7 +99,7 @@ Every decision in that diagram is answered from the pre-flattened snapshot in
 memory. None of it is a query — which is the reason the whole thing is
 affordable per request.
 
-### Virtual models: routing as configuration, not code
+### Frontend models: routing as configuration, not code
 
 One client-facing name, ordered rules, weighted _and_ ordered targets — so a
 rule is both a traffic split and a failover chain. Rules match on principal,

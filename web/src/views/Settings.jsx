@@ -40,7 +40,7 @@ export function Settings({ onUnauthorised, config }) {
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
       const [models, fallback, cfg] = await Promise.all([
-        api.get("/admin/models"),
+        api.get("/admin/provider-models"),
         api.get("/admin/fallback-model"),
         api.get("/admin/config"),
       ]);

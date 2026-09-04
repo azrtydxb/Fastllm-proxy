@@ -52,7 +52,7 @@ export function Principals({ onUnauthorised }) {
       const [principals, roles, models] = await Promise.all([
         api.get("/admin/principals"),
         api.get("/admin/roles"),
-        api.get("/admin/models"),
+        api.get("/admin/provider-models"),
       ]);
       return { principals, roles, models };
     },

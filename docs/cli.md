@@ -38,7 +38,7 @@ environment, or again after editing the file — grants dropped from the file ar
 revoked rather than left behind, so re-importing converges instead of
 accumulating.
 
-It seeds `providers`, `models` **and the `auth:` block**: a
+It seeds `providers`, `provider_models` **and the `auth:` block**: a
 `service_account` principal per key, the key as a SHA-256 hash, and its model
 grants as a role named `import:<name>`. `models: ['*']` becomes `model:invoke`
 on `model/*`; a named list becomes one grant per model.

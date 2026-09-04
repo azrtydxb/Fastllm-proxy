@@ -1,6 +1,6 @@
 ---
 name: fastllm-gateway
-description: Send inference requests through the FastLLM OpenAI-compatible gateway — chat completions, completions, embeddings, rerank, score, responses, moderations, audio speech and transcription, image generation and edits, and listing available models. Use when calling a model through the proxy, testing that a model or virtual model actually serves, or debugging a 401, 404 or 503 from a client.
+description: Send inference requests through the FastLLM OpenAI-compatible gateway — chat completions, completions, embeddings, rerank, score, responses, moderations, audio speech and transcription, image generation and edits, and listing available models. Use when calling a model through the proxy, testing that a model or frontend model actually serves, or debugging a 401, 404 or 503 from a client.
 ---
 
 # FastLLM gateway
@@ -43,7 +43,7 @@ curl http://192.168.10.125/v1/chat/completions -H "Authorization: Bearer <key>" 
 **`401` means the gateway is healthy.** It reached the proxy and was rejected for
 credentials. A connection refused or `000` is the failure worth chasing.
 
-**`404 model_not_found` on a virtual model means no viable target**, not an
+**`404 model_not_found` on a frontend model means no viable target**, not an
 unknown name — check the chain resolves to something routable.
 
 **An unknown model name is a 404 regardless of permissions**, deliberately, so

@@ -48,7 +48,7 @@ export function Models({ onUnauthorised }) {
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
       const [models, fleet] = await Promise.all([
-        api.get("/admin/models"),
+        api.get("/admin/provider-models"),
         api.get("/admin/fleet"),
       ]);
       return { models, fleet };
@@ -70,7 +70,7 @@ export function Models({ onUnauthorised }) {
     if (!newModel.name.trim()) return;
     const ok = await attempt(
       () =>
-        api.post("/admin/models", {
+        api.post("/admin/provider-models", {
           name: newModel.name.trim(),
           description: newModel.description.trim(),
         }),
@@ -88,7 +88,7 @@ export function Models({ onUnauthorised }) {
     if (!d.api_base) return;
     const ok = await attempt(
       () =>
-        api.post(`/admin/models/${modelId}/backends`, {
+        api.post(`/admin/provider-models/${modelId}/backends`, {
           api_base: d.api_base.trim(),
           upstream_model: d.upstream_model?.trim() || undefined,
           upstream_api_key: d.upstream_api_key || undefined,
@@ -108,7 +108,7 @@ export function Models({ onUnauthorised }) {
 
   const savePrices = async (m, patch) => {
     const ok = await attempt(
-      () => api.patch(`/admin/models/${m.id}`, patch),
+      () => api.patch(`/admin/provider-models/${m.id}`, patch),
       setError,
       onUnauthorised,
     );
@@ -318,7 +318,7 @@ export function Models({ onUnauthorised }) {
                   if (!window.confirm(`Delete ${m.name} and all its backends?`))
                     return;
                   const ok = await attempt(
-                    () => api.del(`/admin/models/${m.id}`),
+                    () => api.del(`/admin/provider-models/${m.id}`),
                     setError,
                     onUnauthorised,
                   );

@@ -231,7 +231,7 @@ fn limiter_check_body_contains_no_await_or_io_tokens() {
 /// three-line wrapper over it: guarding the wrapper would say nothing about
 /// the function that does the work.
 #[test]
-fn virtual_model_resolve_body_contains_no_await_or_io_tokens() {
+fn frontend_model_resolve_body_contains_no_await_or_io_tokens() {
     let source = include_str!("../src/routing.rs");
     let body = extract_fn_body(source, "pub fn resolve_candidates(");
 

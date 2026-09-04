@@ -82,8 +82,8 @@ export function VirtualModels({ onUnauthorised }) {
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
       const [vms, models, principals, fallback] = await Promise.all([
-        api.get("/admin/virtual-models"),
-        api.get("/admin/models"),
+        api.get("/admin/frontend-models"),
+        api.get("/admin/provider-models"),
         api.get("/admin/principals"),
         api.get("/admin/fallback-model"),
       ]);
@@ -103,7 +103,7 @@ export function VirtualModels({ onUnauthorised }) {
     if (!creating.trim()) return;
     const ok = await attempt(
       () =>
-        api.post("/admin/virtual-models", {
+        api.post("/admin/frontend-models", {
           name: creating.trim(),
           description: "",
         }),
@@ -223,7 +223,7 @@ export function VirtualModels({ onUnauthorised }) {
                     )
                       return;
                     const ok = await attempt(
-                      () => api.del(`/admin/virtual-models/${vm.id}`),
+                      () => api.del(`/admin/frontend-models/${vm.id}`),
                       setError,
                       onUnauthorised,
                     );
@@ -449,7 +449,7 @@ export function VirtualModels({ onUnauthorised }) {
                       onClick={async () => {
                         const ok = await attempt(
                           () =>
-                            api.del(`/admin/virtual-model-defaults/${t.id}`),
+                            api.del(`/admin/frontend-model-defaults/${t.id}`),
                           setError,
                           onUnauthorised,
                         );
@@ -503,7 +503,7 @@ export function VirtualModels({ onUnauthorised }) {
                   onAdd={async (model_id, weight) => {
                     const ok = await attempt(
                       () =>
-                        api.post(`/admin/virtual-models/${vm.id}/defaults`, {
+                        api.post(`/admin/frontend-models/${vm.id}/defaults`, {
                           model_id,
                           weight,
                           position: vm.default_targets.length,
@@ -648,7 +648,7 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
         // because every field of it is `#[serde(default)]` with no
         // `deny_unknown_fields`, a nested object deserialises to an empty
         // condition and answers 201 — a catch-all rule with no error anywhere.
-        const rule = await api.post(`/admin/virtual-models/${vm.id}/rules`, {
+        const rule = await api.post(`/admin/frontend-models/${vm.id}/rules`, {
           position: vm.rules.length,
           ...match_condition,
         });

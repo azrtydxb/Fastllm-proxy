@@ -42,9 +42,9 @@ Folded from `usage_events`, one row per request. A model with no price
 contributes nothing to spend and is counted as _unpriced_ rather than as zero,
 so a spend figure never quietly understates.
 
-## Virtual models — one name, many targets
+## Frontend models — one name, many targets
 
-![The Virtual models screen: rules with their conditions and weighted targets, and a dry-run panel](images/ui-virtual-models.png)
+![The Frontend models screen: rules with their conditions and weighted targets, and a dry-run panel](images/ui-frontend-models.png)
 
 A client-facing name with ordered rules. The first rule whose conditions match
 wins; targets are weighted _and_ ordered, so one rule is both a split and a

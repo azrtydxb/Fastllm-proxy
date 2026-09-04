@@ -55,7 +55,7 @@ export function Overview({ onUnauthorised, config, go }) {
     async () => {
       const [fleet, models, traffic, events] = await Promise.all([
         api.get("/admin/fleet"),
-        api.get("/admin/models"),
+        api.get("/admin/provider-models"),
         // Asked for wide and ranked here: the route orders by spend, so a
         // free self-hosted model carrying most of the traffic sorts last and a
         // limit of 6 would drop it out of a panel about *traffic*.

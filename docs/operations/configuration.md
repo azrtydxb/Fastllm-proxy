@@ -23,11 +23,11 @@ One binary, three ways to run it, via `--role` (`FASTLLM_ROLE`):
 fastllm-proxy import --config litellm_config.yaml --database-url postgres://...
 ```
 
-Idempotent — seeds `providers`/`models` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely.
+Idempotent — seeds `providers`/`provider_models` **and the `auth:` block** (a `service_account` principal per key, the key itself as a SHA-256 hash, and its model grants) from a LiteLLM-format config, and can be run more than once safely.
 
 Everything a backend row can hold is carried across, not just the address:
 
-| from the file        | into `providers`/`models`                                                                                                                                                                                                                                 |
+| from the file        | into `providers`/`provider_models`                                                                                                                                                                                                                                 |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `api_base`           | the address, trailing slash trimmed                                                                                                                                                                                                                   |
 | `model`              | `upstream_model`. A transport prefix (`openai/`, `vllm/`, `openrouter/`) is stripped; a wire-format prefix (`anthropic/`, `gemini/`) only when the backend speaks that protocol, so an OpenRouter id like `anthropic/claude-sonnet-4` survives intact |
@@ -46,7 +46,7 @@ The `auth:` block carries its enforcement, not only its identity:
 | ------------- | ---------------------------------------------------------------------------------------------- |
 | `key`         | `api_keys.hash` (SHA-256) plus a display prefix. Never stored in plaintext, never printed back |
 | `name`        | a `service_account` principal, and a role `import:<name>` holding just that key's grants       |
-| `models`      | one `model:invoke` grant per model; `['*']` becomes allow-all                                  |
+| `provider_models`      | one `model:invoke` grant per model; `['*']` becomes allow-all                                  |
 | `expires_at`  | the key's expiry                                                                               |
 | `limits`      | the `limits` row — `requests_per_min`, `tokens_per_min`                                        |
 | `budget`      | the `budgets` row, as a `monthly` window, because the file format has no window to carry       |

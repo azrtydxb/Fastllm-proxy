@@ -15,12 +15,12 @@ Every admin route needs one of four permissions, seeded by `migrations/0001_init
 
 | Permission     | Routes                                                                                                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `usage:read`   | Every `GET /admin/*` route (keys, principals, models, virtual models, roles, limits, budgets, health)                                          |
+| `usage:read`   | Every `GET /admin/*` route (keys, principals, models, frontend models, roles, limits, budgets, health)                                          |
 | `key:create`   | `POST /admin/keys`                                                                                                                             |
 | `key:revoke`   | `DELETE /admin/keys/{id}`                                                                                                                      |
-| `config:write` | Every other write: principals (create/delete/roles/**password**), models, backends, virtual models, routing rules and targets, limits, budgets |
+| `config:write` | Every other write: principals (create/delete/roles/**password**), models, backends, frontend models, routing rules and targets, limits, budgets |
 
-There is no finer-grained permission for "manage principals" or "manage virtual models" than `config:write` — the schema does not seed one, and inventing a permission per table would multiply roles for no operator-visible benefit. The built-in `operator` role holds everything except `model:invoke` (i.e. all four of the above); `admin` holds everything including `model:invoke`. A role with `usage:read` alone can list and view but never create, revoke or reconfigure anything — the shape a read-only UI viewer or an audit tool needs.
+There is no finer-grained permission for "manage principals" or "manage frontend models" than `config:write` — the schema does not seed one, and inventing a permission per table would multiply roles for no operator-visible benefit. The built-in `operator` role holds everything except `model:invoke` (i.e. all four of the above); `admin` holds everything including `model:invoke`. A role with `usage:read` alone can list and view but never create, revoke or reconfigure anything — the shape a read-only UI viewer or an audit tool needs.
 
 **Bootstrapping the first login.** A freshly migrated database has no session anyone can obtain — every `principals` row starts with `password_hash IS NULL`. Run this once, with the same database access `import` already requires:
 
@@ -38,7 +38,7 @@ Whether it gets its own reachable address is a deployment decision about _that_ 
 
 `--role all`/`control` serve a React dashboard from `/` and `/ui/*` (`src/control/ui.rs`; frontend source in `web/`). `--role proxy` serves no UI at all; `control::api::serve`, where the UI's fallback route is mounted, is never called for that role.
 
-Sixteen screens, all driven by the admin API above: **Overview** (fleet, backends, traffic, recent changes), **Metrics**, **Usage & spend**, **Providers**, **Models**, **Virtual models** with the routing dry-run, **Prompt classes** with the leave-one-out evaluation, **MCP servers**, **Agents**, **API keys**, **Principals & roles** with the permission matrix and per-model grants, **Limits & budgets**, **Audit log**, **Fleet**, and **Settings**. A seventeenth, **Deployment**, appears only when a `FastllmProxy` manages this process — it edits the resource rather than the database, so it is absent from every other install and its routes 404 there.
+Sixteen screens, all driven by the admin API above: **Overview** (fleet, backends, traffic, recent changes), **Metrics**, **Usage & spend**, **Providers**, **Models**, **Frontend models** with the routing dry-run, **Prompt classes** with the leave-one-out evaluation, **MCP servers**, **Agents**, **API keys**, **Principals & roles** with the permission matrix and per-model grants, **Limits & budgets**, **Audit log**, **Fleet**, and **Settings**. A seventeenth, **Deployment**, appears only when a `FastllmProxy` manages this process — it edits the resource rather than the database, so it is absent from every other install and its routes 404 there.
 
 **Nothing on a screen is invented.** Where the control plane cannot answer a question, the UI says so and names what can: per-backend latency percentiles are per process and do not merge, so the Metrics screen prints the `histogram_quantile` query rather than an average of p99s; a model with no price shows `unpriced`, never `$0.00`; a backend no replica has probed shows a grey dot, not a green one. The rule is the same one the docs follow — a number nobody can reproduce is worse than an absent one.
 

@@ -1,11 +1,11 @@
 ---
 name: fastllm-routing
-description: Route requests across models in FastLLM — create, inspect or change virtual models, their default targets, weighted splits, and routing rules (by caller, prompt size, streaming, headers, budget, time of day, semantic class, or backend load for local/cloud spillover). Use when asked to expose a model under a client-facing name, decide which backend a request should hit, set up failover or canary traffic, or explain why a request went where it did. Not for registering models or backends (fastllm-models) or for sending inference requests (fastllm-gateway).
+description: Route requests across models in FastLLM — create, inspect or change frontend models, their default targets, weighted splits, and routing rules (by caller, prompt size, streaming, headers, budget, time of day, semantic class, or backend load for local/cloud spillover). Use when asked to expose a model under a client-facing name, decide which backend a request should hit, set up failover or canary traffic, or explain why a request went where it did. Not for registering models or backends (fastllm-models) or for sending inference requests (fastllm-gateway).
 ---
 
 # FastLLM routing
 
-A **virtual model** is a client-facing name backed by an ordered list of rules.
+A **frontend model** is a client-facing name backed by an ordered list of rules.
 The first rule whose conditions all hold wins and commits to its own targets;
 if none match, the defaults are used. Everything is pre-resolved into the
 snapshot, so the request path does no I/O to route.
@@ -18,7 +18,7 @@ master key is not an admin credential.
 ```bash
 curl -sk -c /tmp/ck -X POST https://192.168.10.129:4001/login \
   -H 'content-type: application/json' -d '{"name":"<user>","password":"<pw>"}'
-curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/virtual-models
+curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/frontend-models
 ```
 
 ## Test before you apply
@@ -31,16 +31,16 @@ change here — it is the only way to check a rule does what you meant.
 
 | Method | Path | Summary | Body fields |
 |---|---|---|---|
+| `DELETE` | `/admin/frontend-model-defaults/{id}` | Delete frontend-model-defaults id | — |
+| `GET` | `/admin/frontend-models` | Read frontend-models | — |
+| `POST` | `/admin/frontend-models` | Create frontend-models | `name`, `description`* |
+| `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
+| `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`, `weight`*, `position` |
+| `POST` | `/admin/frontend-models/{id}/rules` | Create frontend-models id rules | `position`, `match_condition` |
 | `POST` | `/admin/routing/dry-run` | Which rule would decide, and what the chain resolves to, without dispatching | `model`, `principal_id`*, `streaming`*, `prompt_tokens`*, `max_tokens`*, `headers`*, `class`*, `class_refines`* |
 | `DELETE` | `/admin/rule-targets/{id}` | Delete rule-targets id | — |
 | `DELETE` | `/admin/rules/{id}` | Delete rules id | — |
-| `POST` | `/admin/rules/{id}/targets` | Create rules id targets | `model_id`, `weight`*, `position` |
-| `DELETE` | `/admin/virtual-model-defaults/{id}` | Delete virtual-model-defaults id | — |
-| `GET` | `/admin/virtual-models` | Read virtual-models | — |
-| `POST` | `/admin/virtual-models` | Create virtual-models | `name`, `description`* |
-| `DELETE` | `/admin/virtual-models/{id}` | Delete virtual-models id | — |
-| `POST` | `/admin/virtual-models/{id}/defaults` | Create virtual-models id defaults | `model_id`, `weight`*, `position` |
-| `POST` | `/admin/virtual-models/{id}/rules` | Create virtual-models id rules | `position`, `match_condition` |
+| `POST` | `/admin/rules/{id}/targets` | Create rules id targets | `provider_model_id`, `weight`*, `position` |
 
 *\* optional field*
 
@@ -48,7 +48,7 @@ change here — it is the only way to check a rule does what you meant.
 
 ## Traps
 
-**A model and a virtual model cannot share a name.** The API returns 409:
+**A model and a frontend model cannot share a name.** The API returns 409:
 a client request naming it would be ambiguous. Enforced in `post_virtual_model`
 against `model_name_exists`, and pinned by
 `a_model_and_a_virtual_model_cannot_share_a_name`. Writing straight to Postgres
@@ -87,7 +87,7 @@ because no admin credential is available, say so explicitly in your report.
 
 ```bash
 # what the control plane now believes
-curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/virtual-models
+curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/frontend-models
 
 # what a request would actually do
 curl -sk -b /tmp/ck -X POST https://192.168.10.129:4001/admin/routing/dry-run \

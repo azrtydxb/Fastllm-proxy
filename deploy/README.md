@@ -334,27 +334,27 @@ interval plus one `--config-poll` interval (default 5s each, so worst case
 For a single model or backend, the admin API is the supported route — it
 publishes a rebuilt snapshot on the spot, so only `fastllm-proxy`'s poll
 interval stands between the write and the change taking effect. Direct SQL
-against `providers`/`models` is no longer the documented way to do any of
+against `providers`/`provider_models` is no longer the documented way to do any of
 this; it bypasses the write path and waits on the periodic rebuild.
 
 ```bash
 E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
 
-E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/models     # models, backend ids, api_bases
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/provider-models     # models, backend ids, api_bases
 
-E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/provider-models -H 'content-type: application/json' \
   -d '{"name":"qwen3-6-35b-a3b-nvfp4"}'
 # {"id":3,"name":"qwen3-6-35b-a3b-nvfp4"}
 
 # Add a backend to that pool. upstream_model defaults to the model's own name;
 # upstream_api_key is encrypted before it reaches Postgres and can never be
-# read back — GET /admin/models reports only whether one is set.
-E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+# read back — GET /admin/provider-models reports only whether one is set.
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/provider-models/3/backends -H 'content-type: application/json' \
   -d '{"api_base":"http://192.168.10.245:40045/v1"}'
 # {"id":9,...}
 
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/backends/9   # drop one replica
-E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/models/3     # drop the model and its backends
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/provider-models/3     # drop the model and its backends
 ```
 
 ## Memory, and the classifier
@@ -393,9 +393,9 @@ C="curl -s --cacert /tmp/kwca.crt"
 $C -c /tmp/ck -X POST https://192.168.10.129:4001/login \
   -H 'content-type: application/json' \
   -d '{"name":"bootstrap","password":"..."}'
-$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/models \
+$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/provider-models \
   -H 'content-type: application/json' -d '{"name":"claude-sonnet","description":"via OpenRouter"}'
-$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/models/$ID/backends \
+$C -b /tmp/ck -X POST https://192.168.10.129:4001/admin/provider-models/$ID/backends \
   -H 'content-type: application/json' \
   -d '{"api_base":"https://openrouter.ai/api/v1",
        "upstream_model":"anthropic/claude-sonnet-4",
@@ -440,9 +440,9 @@ one at the new address.
 ```bash
 E() { kubectl -n fastllm exec deploy/fastllm-control -- "$@"; }
 
-E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/models          # find the model id and the stale backend id
+E curl -s --cacert /etc/fastllm/tls/ca.crt https://localhost:4001/admin/provider-models          # find the model id and the stale backend id
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/backends/9
-E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/models/3/backends -H 'content-type: application/json' \
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPOST https://localhost:4001/admin/provider-models/3/backends -H 'content-type: application/json' \
   -d '{"api_base":"http://192.168.10.245:40118/v1"}'
 ```
 

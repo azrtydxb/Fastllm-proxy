@@ -293,7 +293,7 @@ await click(byText("+ Add rule"));
   await click(byText("Create rule"));
   const call = lastCall("POST", "/rules");
   check(
-    "rule POST reaches /admin/virtual-models/{id}/rules",
+    "rule POST reaches /admin/frontend-models/{id}/rules",
     !!call,
     "no request was sent",
   );
@@ -344,7 +344,7 @@ await goto("models");
     ?.querySelector("input");
   await fill(priceInput, "3.5");
   await click(byText("Save"));
-  const call = lastCall("PATCH", "/admin/models/");
+  const call = lastCall("PATCH", "/admin/provider-models/");
   check("price edit sends PATCH", !!call, "no PATCH was sent");
   check(
     "dollars are converted to micro-units",
@@ -364,7 +364,7 @@ await goto("models");
   await click(byText("Save"));
   check(
     "an unparseable price sends nothing at all",
-    !lastCall("PATCH", "/admin/models/"),
+    !lastCall("PATCH", "/admin/provider-models/"),
     "a PATCH was sent for input that cannot be read",
   );
   check(
@@ -383,7 +383,7 @@ await goto("models");
     ?.querySelector("select");
   await fill(lb, "lowest-latency");
   await click(byText("Save"));
-  const lbCall = lastCall("PATCH", "/admin/models/");
+  const lbCall = lastCall("PATCH", "/admin/provider-models/");
   check(
     "a per-model policy is sent as policy",
     lbCall?.body?.policy === "lowest-latency",
@@ -402,8 +402,8 @@ await goto("models");
   await click(byText("Save"));
   check(
     "clearing it sends an explicit null",
-    lastCall("PATCH", "/admin/models/")?.body?.policy === null,
-    `sent ${JSON.stringify(lastCall("PATCH", "/admin/models/")?.body?.policy)}`,
+    lastCall("PATCH", "/admin/provider-models/")?.body?.policy === null,
+    `sent ${JSON.stringify(lastCall("PATCH", "/admin/provider-models/")?.body?.policy)}`,
   );
 
   // Price sync: the preview, then the override that makes an already-priced
@@ -453,7 +453,7 @@ await goto("models");
   if (ctx) {
     await fill(ctx, "");
     await click(byText("Save"));
-    const cleared = lastCall("PATCH", "/admin/models/");
+    const cleared = lastCall("PATCH", "/admin/provider-models/");
     check(
       "clearing the context length sends null, not 0",
       cleared?.body?.context_length === null,
@@ -468,7 +468,7 @@ await goto("models");
       ?.querySelector("input");
     await fill(ctx2, "262144");
     await click(byText("Save"));
-    const set = lastCall("PATCH", "/admin/models/");
+    const set = lastCall("PATCH", "/admin/provider-models/");
     check(
       "a context length is sent as a number",
       set?.body?.context_length === 262144,

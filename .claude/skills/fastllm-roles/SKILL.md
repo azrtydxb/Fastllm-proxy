@@ -37,5 +37,5 @@ a set lookup, not a graph walk — so a role change takes effect only once the
 proxies pick up the next snapshot.
 
 **A caller is authorised against the resolved concrete model, never the virtual
-name.** A virtual model routes access; it cannot grant it. Adding a virtual model
+name.** A frontend model routes access; it cannot grant it. Adding a frontend model
 in front of existing models never widens anyone's reach.

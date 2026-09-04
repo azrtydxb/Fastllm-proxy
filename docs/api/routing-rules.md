@@ -1,9 +1,9 @@
 # Routing rules
 
-The rule grammar behind virtual models, and the dry-run that answers which
+The rule grammar behind frontend models, and the dry-run that answers which
 rule would decide before anything is dispatched.
 
-A virtual model is a client-facing name with an ordered list of rules and a
+A frontend model is a client-facing name with an ordered list of rules and a
 fallback. First rule whose conditions match wins; conditions within a rule are
 AND'd. Targets are weighted (relative shares, not percentages), and the target
 list is a **fallback chain**, not just a split.
@@ -61,7 +61,7 @@ dropped from the chain, so a chain can span models with different grants
 safely. Usage is attributed to the model that actually answered.
 
 Malformed conditions (`"after": "25:00"`, `days: [8]`, a percentage above 100)
-are rejected by `POST /admin/virtual-models/{id}/rules` with a message naming
+are rejected by `POST /admin/frontend-models/{id}/rules` with a message naming
 the field, rather than stored as a rule that silently never matches.
 
 ## Routing dry-run

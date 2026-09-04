@@ -32,9 +32,9 @@ Grants are per model: `model:invoke` on `model/<name>`, or `model/*` for all.
 A grant on a _virtual_ model does not unlock the concrete models it routes to —
 that is deliberate, so a failover chain can never widen someone's reach.
 
-### `403` for a virtual model that works sometimes
+### `403` for a frontend model that works sometimes
 
-The rule matched a target you hold, and the default did not. A virtual model
+The rule matched a target you hold, and the default did not. A frontend model
 resolves per request, so a caller granted only some of its targets succeeds on
 the prompts that route to those and fails on the rest. Either grant the whole
 chain or point the client at a concrete model.
@@ -93,7 +93,7 @@ non-zero if the queue to the control plane is backing up.
 The models have no prices. A request against an unpriced model contributes
 nothing to a total and is counted as `unpriced_requests` rather than as zero
 cost, so a spend figure never quietly understates. Set prices with
-`PATCH /admin/models/{id}` or the edit form. A self-hosted model legitimately
+`PATCH /admin/provider-models/{id}` or the edit form. A self-hosted model legitimately
 has no price; a hosted one should have.
 
 ### The chart says "a control plane older than the accounting change does not serve this"

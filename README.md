@@ -65,7 +65,7 @@ Two words, used consistently from here on:
 | **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of provider models — and where two of them are balanced against each other |
 
 A client can address either — a backend model resolves to itself. The admin
-API still spells these `models` and `virtual-models` in its paths, which is
+API still spells these `provider_models` and `frontend-models` in its paths, which is
 what every existing script and the OpenAPI description use; the vocabulary
 changed, the wire format did not.
 
@@ -169,9 +169,9 @@ docker compose exec fastllm fastllm-proxy set-password --name you --password 'ch
 curl -sk -c /tmp/ck -X POST https://localhost:4001/login \
   -H 'content-type: application/json' -d '{"name":"you","password":"change-me"}'
 
-curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models \
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/provider-models \
   -H 'content-type: application/json' -d '{"name":"my-model"}'          # -> {"id":N}
-curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/models/N/backends \
+curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/provider-models/N/backends \
   -H 'content-type: application/json' \
   -d '{"api_base":"http://localhost:8000/v1","upstream_model":"Qwen/Qwen3-8B"}'
 curl -sk -b /tmp/ck -X POST https://localhost:4001/admin/keys \

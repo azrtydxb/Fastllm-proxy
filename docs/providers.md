@@ -72,10 +72,10 @@ In the UI, on **Models**:
 By API:
 
 ```bash
-curl -sk -b /tmp/ck -X POST https://control:4001/admin/models \
+curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models \
   -H 'content-type: application/json' -d '{"name":"kimi-k2"}'    # -> {"id":7}
 
-curl -sk -b /tmp/ck -X POST https://control:4001/admin/models/7/backends \
+curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models/7/backends \
   -H 'content-type: application/json' -d '{
     "api_base": "https://api.moonshot.ai/v1",
     "upstream_model": "moonshot-v1-128k",
@@ -89,7 +89,7 @@ LiteLLM config
 [import](operations/configuration.md#migrating-a-file-mode-deployment-onto-a-database)
 to exactly that shape. It is the whole mechanism behind failover and traffic
 splitting — see
-[virtual models](features.md#virtual-models-routing-as-configuration-not-code)
+[frontend models](features.md#frontend-models-routing-as-configuration-not-code)
 for routing between _different_ models.
 
 ## Credentials
@@ -145,7 +145,7 @@ itself fronts Anthropic, Gemini and several hundred other models in OpenAI
 format:
 
 ```bash
-curl -X POST https://control/admin/models/$MODEL_ID/backends \
+curl -X POST https://control/admin/provider-models/$MODEL_ID/backends \
   -H 'content-type: application/json' -b "$SESSION" \
   -d '{"api_base":"https://openrouter.ai/api/v1",
        "upstream_model":"anthropic/claude-sonnet-4",

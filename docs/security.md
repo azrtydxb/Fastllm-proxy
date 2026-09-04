@@ -52,7 +52,7 @@ checks _what_ that principal may do:
 
 | permission                  |                                                             |
 | --------------------------- | ----------------------------------------------------------- |
-| `config:write`              | Models, backends, virtual models, principals, roles, limits |
+| `config:write`              | Models, backends, frontend models, principals, roles, limits |
 | `key:create` / `key:revoke` | API keys                                                    |
 | `usage:read`                | Usage, spend, audit, metrics                                |
 | `model:invoke`              | Per model, and the only one the data plane checks           |
@@ -63,7 +63,7 @@ full admin, because nothing checked past "is this a valid session".
 
 ![The permission matrix: roles down the side, the four admin permissions across, click a cell to grant or revoke](images/ui-permission-matrix.png)
 
-**A grant on a virtual model does not unlock the concrete models behind it**,
+**A grant on a frontend model does not unlock the concrete models behind it**,
 and failover drops any candidate the caller lacks `model:invoke` on —
 including the deployment-wide fallback. Routing can never widen a caller's
 reach, which is the property that makes it safe to let routing be

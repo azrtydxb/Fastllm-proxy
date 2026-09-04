@@ -888,7 +888,7 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
 /// pick a silent precedence order between them, creation of either is
 /// refused while the other name is taken. See `post_virtual_model`'s mirror
 /// check.
-async fn virtual_model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
+async fn frontend_model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM frontend_models WHERE name = $1)")
         .bind(name)
         .fetch_one(pool)
@@ -1382,7 +1382,7 @@ async fn post_model(
             "name must not be empty; it is the name clients address this model by",
         ));
     }
-    if virtual_model_name_exists(&ctx.pool, &body.name)
+    if frontend_model_name_exists(&ctx.pool, &body.name)
         .await
         .map_err(|e| db_error("model creation", &e))?
     {
@@ -6061,7 +6061,7 @@ mod tests {
     /// keys/models/principals, applied to the P1 tables.
     #[tokio::test]
     #[ignore = "requires postgres"]
-    async fn virtual_model_routes_publish_rules_and_targets_to_the_snapshot() {
+    async fn frontend_model_routes_publish_rules_and_targets_to_the_snapshot() {
         let (ctx, cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "vm-route-primary-")

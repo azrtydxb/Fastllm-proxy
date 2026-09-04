@@ -93,7 +93,7 @@ export function TimeseriesModal({ initialRange = "24h", onClose }) {
 
   useEffect(() => {
     api
-      .get("/admin/models")
+      .get("/admin/provider-models")
       .then(setModels)
       .catch(() => {});
     api

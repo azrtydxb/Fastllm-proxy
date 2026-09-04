@@ -7,7 +7,7 @@ prices come from.
 
 `usage_events` carries latency and outcome alongside the token counts:
 `duration_ms`, `ttft_ms`, `status`, and `requested_model` when the client asked
-for a name that differs from the one that served it — a virtual model, or the
+for a name that differs from the one that served it — a frontend model, or the
 head of a chain that failed over.
 
 **One row per request that reached a backend**, whether or not the response

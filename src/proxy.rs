@@ -400,7 +400,7 @@ async fn proxy_request(
     let (requested_model, model_field, streaming, max_tokens) =
         match multipart::boundary(content_type) {
             // Multipart: the audio routes. `model` is a form field, and the rest of
-            // the body — the upload — must not be touched. Virtual-model routing
+            // the body — the upload — must not be touched. Frontend-model routing
             // rules that key on `max_tokens` have nothing to read here (it is not
             // a multipart field on these routes), so it is simply `None`.
             Some(boundary) => {

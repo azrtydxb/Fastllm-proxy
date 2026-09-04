@@ -108,7 +108,7 @@ migration.
 ## Adding a provider
 
 Usually nothing to write. Anything speaking the OpenAI API is a row in a config
-file or a `POST /admin/models/{id}/backends`. A provider that wants its key in
+file or a `POST /admin/provider-models/{id}/backends`. A provider that wants its key in
 its own header (Azure OpenAI's `api-key`) is `auth_header` plus an empty
 `auth_scheme`. Only a genuinely different wire format — a fourth alongside
 OpenAI, Anthropic and Gemini — is code, and that lands in `src/protocol/`.

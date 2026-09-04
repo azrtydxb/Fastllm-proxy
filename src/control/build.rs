@@ -1165,7 +1165,7 @@ mod tests {
     /// against the real schema from `migrations/0008_virtual_models_and_routing_rules.sql`.
     #[tokio::test]
     #[ignore = "requires postgres"]
-    async fn virtual_models_rules_and_targets_are_resolved_into_the_snapshot() {
+    async fn frontend_models_rules_and_targets_are_resolved_into_the_snapshot() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();

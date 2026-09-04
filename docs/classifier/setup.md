@@ -67,9 +67,9 @@ base-rate trap that once hid a total classifier failure in this codebase.
 
 ### Then name the class in a rule
 
-![The Virtual models screen: a rule's conditions and weighted targets, with a dry-run panel](../images/ui-virtual-models.png)
+![The Frontend models screen: a rule's conditions and weighted targets, with a dry-run panel](../images/ui-frontend-models.png)
 
-On **Virtual models**, a rule's condition can be a prompt class, and its
+On **Frontend models**, a rule's condition can be a prompt class, and its
 targets are weighted and ordered. **Dry-run** answers which rule a given
 prompt would hit and what the chain resolves to, without dispatching
 anything — which is how you confirm the classifier and the rule agree before

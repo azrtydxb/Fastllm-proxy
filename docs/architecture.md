@@ -116,7 +116,7 @@ sequenceDiagram
     C->>P: POST /v1/chat/completions
     P->>P: SHA-256 → principal (401 if unknown/expired)
     P->>P: classify prompt — only when classes are configured
-    P->>P: resolve model — virtual models evaluate rules, producing a fallback chain
+    P->>P: resolve model — frontend models evaluate rules, producing a fallback chain
     P->>P: authorise the RESOLVED concrete model (403 if ungranted)
     P->>P: rate limit (429) and budget (402)
     P->>P: translate request — only if backend.protocol ≠ openai
@@ -134,7 +134,7 @@ sequenceDiagram
 Two decisions in that flow are load-bearing:
 
 - **Authorisation is checked against the resolved concrete model**, never the
-  virtual name. A virtual model routes access; it must never grant it, or a
+  virtual name. A frontend model routes access; it must never grant it, or a
   rule edit or a weighted split could hand a caller a model they were never
   granted. With a fallback chain this becomes a filter: ungranted candidates
   are dropped from the chain, so failover only ever moves to a model the caller
