@@ -558,7 +558,7 @@ async fn a_429_from_the_first_model_fails_over_to_the_next_in_the_chain() {
 /// gets the refusal, not a silent hop onto a model they cannot use.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres"]
-async fn failover_only_reaches_models_the_caller_was_already_granted() {
+async fn a_frontend_model_grant_covers_the_chain_it_routes_to() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let (port, admin_port, p1, p2) = (14821, 14822, 14823, 14824);
     let suffix = suffix(port);
@@ -583,7 +583,8 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
     fx.set_default_chain();
     wait_for_frontend_model(port, &fx.key, &fx.frontend_name);
 
-    // A second principal granted only the *primary* and the virtual name.
+    // A second principal granted the *primary* and the frontend model, but not
+    // the secondary.
     let narrow_name = format!("fo-narrow-{suffix}");
     let narrow = admin_post(
         admin_port,
@@ -622,12 +623,39 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(served_by(&body), "secondary");
 
-    // The narrow one has no permitted fallback, so it gets the primary's own
-    // 429 rather than being quietly routed onto a model it was never granted.
+    // And so does the narrow one, which is the reversal.
+    //
+    // A grant on the frontend model authorises everything that frontend model
+    // can route to. It used to authorise nothing by itself: the chain was
+    // filtered per target, so this caller got the primary's own 429 rather than
+    // being routed onto a secondary it had no grant on.
+    //
+    // That per-target filtering is gone, and deliberately -- see
+    // `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`. A
+    // frontend model *is* the exposure; granting it grants what the operator
+    // pointed it at. The consequence is worth stating plainly: adding a target
+    // to a frontend model extends the reach of everyone who holds it. The thing
+    // that makes that acceptable is that editing a frontend model needs
+    // `config:write`, which is all-or-nothing and already lets its holder grant
+    // themselves any model outright -- so it is not a way to reach anything
+    // they could not already have taken directly.
     let (status, body) = chat(port, &narrow_key, req);
     assert_eq!(
-        status, 429,
-        "a caller without a grant on the fallback must not be routed to it: {body}"
+        status, 200,
+        "a grant on the frontend model covers the chain it routes to: {body}"
+    );
+    assert_eq!(served_by(&body), "secondary");
+
+    // What it must *not* do is unlock the secondary when named directly. The
+    // frontend model is the grant; it is not a skeleton key for its targets.
+    let direct = serde_json::json!({
+        "model": fx.secondary,
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, body) = chat(port, &narrow_key, direct);
+    assert_eq!(
+        status, 403,
+        "a frontend model grant must not unlock a target named directly: {body}"
     );
 }
 

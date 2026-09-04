@@ -163,7 +163,18 @@ pub async fn build_snapshot_with(
     )
     .fetch_all(pool)
     .await?;
-    let all_names: Vec<String> = model_rows.iter().map(|(_, n, ..)| n.clone()).collect();
+    // Provider model names *and* frontend model names, because a grant can now
+    // name either: authorisation checks the name the caller used
+    // (`proxy::resolve_target_models`), so a grant on a frontend model has to
+    // survive flattening rather than being dropped as unknown. Fetched here
+    // rather than from `build_frontend_models` below because flattening runs
+    // first and needs only the names.
+    let mut all_names: Vec<String> = model_rows.iter().map(|(_, n, ..)| n.clone()).collect();
+    let frontend_names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM frontend_models ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+    all_names.extend(frontend_names);
 
     type BackendRow = (
         i64,
@@ -460,12 +471,18 @@ pub async fn build_snapshot_with(
         .bind(id)
         .fetch_all(pool)
         .await?;
-        // Deliberately *not* widened to include frontend model names — see
-        // the authorisation decision in `proxy::resolve_target_model`'s doc
-        // comment: a frontend model routes access, it does not grant it, so
-        // `allowed_models` only ever needs to answer "may this principal
-        // invoke this *concrete* model", the same question it has always
-        // answered.
+        // Includes frontend model names as well as provider model names.
+        // It used to be deliberately narrower, on the rule that a frontend
+        // model routes access and does not grant it — reversed in
+        // `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`,
+        // because that rule pinned every grant to a provider model's name and
+        // so made renaming one revoke access silently.
+        //
+        // `allowed_models` now answers "may this principal invoke this name",
+        // for whichever kind of name the caller actually used. A grant naming
+        // a frontend model that was dropped here would look exactly like no
+        // grant at all: a 403 naming a provider model the caller never asked
+        // for, which is how this was found.
         let (allowed_models, allow_all) = flatten_grants(&perms, &all_names);
         let (allowed_mcp, allow_all_mcp) = flatten_mcp_grants(&perms, &all_mcp_names);
         let (allowed_agents, allow_all_agents) = flatten_agent_grants(&perms, &all_agent_names);
