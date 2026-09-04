@@ -9,6 +9,7 @@ use crate::control::secrets::{self, EncryptionKey};
 use crate::snapshot::hash_key;
 use anyhow::Context;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// What an import run actually did — every field is a per-run delta, the
@@ -105,6 +106,20 @@ pub async fn import(
     let mut summary = ImportSummary::default();
     let mut models = 0usize;
     let mut backends = 0usize;
+
+    // A `model_name` appearing more than once used to mean one model with
+    // several backends. It now means several provider models -- one per
+    // endpoint -- held together by a frontend model carrying the name callers
+    // already use, which is exactly what migration 0029 produces for the same
+    // shape. Counting first is what lets every one of them be qualified, so
+    // the bare name is left free for the frontend model.
+    let mut occurrences: HashMap<&str, usize> = HashMap::new();
+    for entry in &cfg.model_list {
+        *occurrences.entry(entry.model_name.as_str()).or_default() += 1;
+    }
+    // Every provider model that came from a pooled `model_name`, so the
+    // frontend model below can point at them.
+    let mut pooled: HashMap<String, Vec<String>> = HashMap::new();
 
     for entry in &cfg.model_list {
         let name = &entry.model_name;
@@ -242,20 +257,31 @@ pub async fn import(
                 .bind(&qualified)
                 .fetch_optional(&mut *tx)
                 .await?;
-        let insert_name = if existing.is_some() {
-            name.clone()
+        let pooled_here = occurrences.get(name.as_str()).copied().unwrap_or(1) > 1;
+        let insert_name = if pooled_here {
+            // Every one of them, not just the second: the bare name has to be
+            // free for the frontend model that will carry it.
+            qualified.clone()
         } else {
-            let taken: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM models WHERE name = $1)")
-                    .bind(name)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let taken: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM models WHERE name = $1 AND provider_id <> $2)",
+            )
+            .bind(name)
+            .bind(provider_id)
+            .fetch_one(&mut *tx)
+            .await?;
             if taken {
-                qualified
+                qualified.clone()
             } else {
                 name.clone()
             }
         };
+        if pooled_here {
+            pooled
+                .entry(name.clone())
+                .or_default()
+                .push(insert_name.clone());
+        }
         match existing {
             // Converge rather than leave the row as first imported. An edited
             // file is the documented way to change policy, so an
@@ -263,9 +289,11 @@ pub async fn import(
             // database would be a silent mismatch from the other direction.
             Some(id) => {
                 sqlx::query(
-                    "UPDATE models SET upstream_model = $2, default_max_tokens = $3 WHERE id = $1",
+                    "UPDATE models SET name = $2, upstream_model = $3, default_max_tokens = $4 \
+                     WHERE id = $1",
                 )
                 .bind(id)
+                .bind(&insert_name)
                 .bind(&upstream)
                 .bind(default_max_tokens)
                 .execute(&mut *tx)
@@ -284,6 +312,42 @@ pub async fn import(
                 .await?;
                 models += 1;
             }
+        }
+    }
+
+    // The frontend model that keeps a pooled `model_name` callable. Without
+    // it, a config meaning "one name, two hosts" would leave callers naming
+    // something that no longer exists.
+    for (client_name, targets) in &pooled {
+        let vm_id: i64 = sqlx::query_scalar(
+            "INSERT INTO virtual_models (name, description) VALUES ($1, $2) \
+             ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+        )
+        .bind(client_name)
+        .bind(format!(
+            "Balances {client_name} across the providers the imported config names for it."
+        ))
+        .fetch_one(&mut *tx)
+        .await?;
+        // Rebuilt rather than merged, so an edited file that drops a host
+        // drops the target too instead of routing there forever.
+        sqlx::query("DELETE FROM virtual_model_defaults WHERE virtual_model_id = $1")
+            .bind(vm_id)
+            .execute(&mut *tx)
+            .await?;
+        for (position, target) in targets.iter().enumerate() {
+            // Equal weight: the file expressed no preference between the
+            // hosts, and inventing one would be a change of behaviour
+            // disguised as an import.
+            sqlx::query(
+                "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position) \
+                 SELECT $1, id, 1, $3 FROM models WHERE name = $2",
+            )
+            .bind(vm_id)
+            .bind(target)
+            .bind(position as i32)
+            .execute(&mut *tx)
+            .await?;
         }
     }
 
@@ -701,7 +765,9 @@ mod tests {
         // Not `unique_name("qwen3")` — the tag itself would prefix-match
         // the real registered model `qwen3-6-35b-a3b-nvfp4`, which this
         // suite must never touch. `qwen3-import-test` is unambiguous.
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "qwen3-import-test-");
+        let _cleanup = TestCleanup::new()
+            .track_prefix("models", "name", "qwen3-import-test-")
+            .track_prefix("virtual_models", "name", "qwen3-import-test-");
 
         let name = unique_name("qwen3-import-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
@@ -714,9 +780,43 @@ mod tests {
         .unwrap();
 
         let summary = import(&pool, &cfg, &test_key()).await.unwrap();
-        // Two entries sharing a model_name are one pool with two backends.
-        assert_eq!(summary.models, 1);
-        assert_eq!(summary.backends, 2);
+        // Two entries sharing a model_name are two provider models on two
+        // providers, because a provider model has exactly one provider since
+        // migration 0029. They used to be one model with two backends.
+        assert_eq!(summary.models, 2);
+        assert_eq!(summary.backends, 2, "one provider per endpoint");
+
+        // And callers naming the pooled name still reach something: the
+        // frontend model holds it and balances across both, the same shape
+        // migration 0029 produces for a model that had two backends.
+        let targets: Vec<String> = sqlx::query_scalar(
+            "SELECT m.name FROM virtual_models v \
+             JOIN virtual_model_defaults d ON d.virtual_model_id = v.id \
+             JOIN models m ON m.id = d.model_id \
+             WHERE v.name = $1 ORDER BY d.position",
+        )
+        .bind(&name)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            targets,
+            vec![format!("{name}@a:8000"), format!("{name}@b:8000")],
+            "the pooled name must reach both providers"
+        );
+
+        // Re-running must converge, not accumulate a third target.
+        let again = import(&pool, &cfg, &test_key()).await.unwrap();
+        assert_eq!(again.models, 0, "re-import must report no new model");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM virtual_model_defaults d \
+             JOIN virtual_models v ON v.id = d.virtual_model_id WHERE v.name = $1",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2, "re-import must be idempotent");
     }
 
     /// Every backend column a YAML file can name, checked against the row.
