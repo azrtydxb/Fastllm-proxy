@@ -642,7 +642,7 @@ struct ProviderRegistration {
 /// `.procoder/adr/0003-the-control-plane-enumerates-a-providers-models.md`.
 async fn post_provider_register(
     State(ctx): State<Ctx>,
-    _perm: RequireProviderRegister,
+    perm: RequireProviderRegister,
     Json(body): Json<ProviderRegistration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let api_base = body.api_base.trim().trim_end_matches('/').to_string();
@@ -663,6 +663,27 @@ async fn post_provider_register(
             StatusCode::BAD_REQUEST,
             "node must name the host registering this provider".to_string(),
         ));
+    }
+
+    // The scope, actually enforced. A key held by `spark-246` may register
+    // providers for `spark-246` and no other node; `node/*` is the unscoped
+    // form, and a session with `config:write` bypasses this because it can
+    // already do anything.
+    if let Some(principal_id) = perm.0 {
+        let scopes = principal_permission_resources(&ctx.pool, principal_id, "provider:register")
+            .await
+            .map_err(|e| db_error("reading register scopes", &e))?;
+        let wanted = format!("node/{}", body.node.trim());
+        let scoped_ok = scopes.iter().any(|r| r == "node/*" || r == &wanted);
+        if !scopes.is_empty() && !scoped_ok {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "this key may register providers for {scopes:?}, not {wanted:?}. A \
+                     registration agent holds provider:register on its own node"
+                ),
+            ));
+        }
     }
 
     let id = crate::control::registry_agent::register(
@@ -4824,6 +4845,31 @@ mod admin_permission {
 /// admin permission migration 0001 seeds is scoped to `'*'`, unlike
 /// `model:invoke` (`model/*`), so there is nothing finer to match against
 /// resource here the way `Principal::may_invoke` matches model names.
+/// The resources a principal holds a verb on.
+///
+/// `principal_has_permission` deliberately ignores resources: every admin verb
+/// migration 0001 seeds is scoped to `'*'`, so there was nothing to match
+/// against. `provider:register` is the first admin verb that is not — a
+/// registration agent holds it on `node/<its own name>` — and a scope that is
+/// stored but never checked is worse than no scope, because it reads on a
+/// permission matrix as though it were enforced.
+async fn principal_permission_resources(
+    pool: &PgPool,
+    principal_id: i64,
+    verb: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT p.resource FROM principal_roles pr
+           JOIN role_permissions rp ON rp.role_id = pr.role_id
+           JOIN permissions p ON p.id = rp.permission_id
+          WHERE pr.principal_id = $1 AND p.verb = $2",
+    )
+    .bind(principal_id)
+    .bind(verb)
+    .fetch_all(pool)
+    .await
+}
+
 async fn principal_has_permission(
     pool: &PgPool,
     principal_id: i64,
@@ -4937,21 +4983,31 @@ impl FromRequestParts<Ctx> for RequireKeyRevoke {
 ///
 /// A session with `config:write` is accepted too, so an operator can register
 /// a provider by hand without minting a key first.
-struct RequireProviderRegister;
+/// Carries the caller's principal id, because the scope this verb is granted
+/// on (`node/<name>`) can only be checked against the node in the request
+/// body, which an extractor cannot see.
+struct RequireProviderRegister(Option<i64>);
 
 impl FromRequestParts<Ctx> for RequireProviderRegister {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
+        let principal = parts
+            .extensions
+            .get::<AdminPrincipal>()
+            .copied()
+            .map(|AdminPrincipal(id)| id);
         if check_permission(parts, state, "provider:register")
             .await
             .is_ok()
         {
-            return Ok(Self);
+            return Ok(Self(principal));
         }
+        // A session that can do anything does not need the scoped verb, and
+        // `None` tells the handler not to apply a node scope to it.
         check_permission(parts, state, admin_permission::CONFIG_WRITE)
             .await
-            .map(|()| Self)
+            .map(|()| Self(None))
     }
 }
 
