@@ -187,7 +187,7 @@ pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<i
 /// if it was not already — the same "this is now a login-capable identity"
 /// step `fastllm-proxy set-password` and `PUT /admin/principals/{id}/password`
 /// both need. Hashed with Argon2id, never encrypted: unlike
-/// `model_backends.upstream_api_key` (which the proxy must present to a
+/// `providers.upstream_api_key` (which the proxy must present to a
 /// backend and so must be recoverable), nothing ever needs the plaintext
 /// password back.
 pub async fn set_password(pool: &PgPool, principal_id: i64, password: &str) -> anyhow::Result<()> {

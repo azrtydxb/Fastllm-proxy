@@ -59,7 +59,7 @@ pub fn import_role_name(principal: &str) -> String {
     format!("import:{principal}")
 }
 
-/// Seed `models`/`model_backends` and `auth:` keys from a LiteLLM-format config.
+/// Seed `providers`/`models` and `auth:` keys from a LiteLLM-format config.
 ///
 /// Idempotent on `(model_id, api_base, upstream_model)` for backends, on
 /// `principals.name`, and on `api_keys.hash`: re-running this over the same
@@ -108,38 +108,14 @@ pub async fn import(
 
     for entry in &cfg.model_list {
         let name = &entry.model_name;
-        // Look up before inserting (rather than INSERT ... ON CONFLICT and
-        // checking `xmax`) so a genuine per-run count of *new* models falls
-        // out directly, the same way `backends` is counted below — no
-        // separate "count what changed" query needed.
-        let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM models WHERE name = $1")
-            .bind(name)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let model_id = match existing {
-            Some(id) => id,
-            None => {
-                let id: i64 =
-                    sqlx::query_scalar("INSERT INTO models (name) VALUES ($1) RETURNING id")
-                        .bind(name)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                models += 1;
-                id
-            }
-        };
-
         let api_base = entry.litellm_params.api_base.trim_end_matches('/');
         let upstream = entry.litellm_params.upstream_model(name);
-        // Keyed on (model, api_base, upstream_model) so re-running import over
-        // an edited file converges rather than duplicating.
-        //
         // upstream_api_key is encrypted at rest with AES-256-GCM
         // (`control::secrets`) before it ever reaches Postgres — see that
         // module's doc comment for exactly what this does and does not
         // protect. `effective_api_key` already strips LiteLLM's
         // `not-needed`/`sk-1234`-style placeholders, so `None` here means
-        // "this backend genuinely has no credential", not "encryption was
+        // "this entry genuinely has no credential", not "encryption was
         // skipped".
         let encrypted_key = entry
             .litellm_params
@@ -165,66 +141,117 @@ pub async fn import(
         // Three states, not two: absent means `Bearer`, `""` means send the key
         // raw (NULL in the column), anything else is that prefix. Treating
         // absent and empty alike would quietly drop `Bearer` from every
-        // backend that did not mention the field.
+        // entry that did not mention the field.
         let auth_scheme = entry.litellm_params.auth_scheme_or_default();
         let default_max_tokens = entry.litellm_params.default_max_tokens.map(|t| t as i32);
 
-        let existing_backend: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM model_backends
-             WHERE model_id = $1 AND api_base = $2 AND upstream_model = $3",
+        // The provider is resolved before the model, because since migration
+        // 0029 a model's identity is (provider, name) — the same `model_name`
+        // against two `api_base`s is two provider models, which is exactly
+        // what a file describing one name on two hosts means.
+        //
+        // Keyed on endpoint and auth so re-running over an edited file
+        // converges rather than duplicating, and so every model on one
+        // endpoint shares one credential.
+        let existing_provider: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
+             AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
         )
-        .bind(model_id)
         .bind(api_base)
-        .bind(&upstream)
+        .bind(protocol)
+        .bind(&auth_header)
+        .bind(&auth_scheme)
         .fetch_optional(&mut *tx)
         .await?;
-
-        match existing_backend {
-            // Converge rather than leave the row as first imported. An edited
-            // file is the documented way to change policy, so a `protocol:`
-            // corrected in YAML that never reached the database would be the
-            // same silent mismatch from the other direction.
-            //
+        let provider_id = match existing_provider {
             // The credential is the one field written only when the file names
-            // one. A file with no `api_key` usually means the credential was
-            // set through the admin API afterwards, and overwriting it with
-            // NULL on the next import would revoke a working backend for
-            // nothing.
+            // one. A file with no `api_key` usually means it was set through
+            // the admin API afterwards, and overwriting it with NULL on the
+            // next import would revoke a working provider for nothing.
             Some(id) => {
-                sqlx::query(
-                    "UPDATE model_backends
-                        SET protocol = $2, auth_header = $3, auth_scheme = $4,
-                            default_max_tokens = $5,
-                            upstream_api_key = COALESCE($6, upstream_api_key)
-                      WHERE id = $1",
+                if encrypted_key.is_some() {
+                    sqlx::query(
+                        "UPDATE providers SET upstream_api_key = COALESCE($2, upstream_api_key) \
+                         WHERE id = $1",
+                    )
+                    .bind(id)
+                    .bind(&encrypted_key)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                id
+            }
+            None => {
+                let host = api_base
+                    .split_once("://")
+                    .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+                    .unwrap_or(api_base);
+                let mut provider_name = host.to_string();
+                for n in 2..100 {
+                    let taken: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM providers WHERE name = $1)",
+                    )
+                    .bind(&provider_name)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if !taken {
+                        break;
+                    }
+                    provider_name = format!("{host}#{n}");
+                }
+                let id: i64 = sqlx::query_scalar(
+                    "INSERT INTO providers (name, api_base, protocol, auth_header, auth_scheme, \
+                     upstream_api_key) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
                 )
-                .bind(id)
+                .bind(&provider_name)
+                .bind(api_base)
                 .bind(protocol)
                 .bind(&auth_header)
                 .bind(&auth_scheme)
+                .bind(&encrypted_key)
+                .fetch_one(&mut *tx)
+                .await?;
+                backends += 1;
+                id
+            }
+        };
+
+        // Look up before inserting (rather than INSERT ... ON CONFLICT and
+        // checking `xmax`) so a genuine per-run count of *new* models falls
+        // out directly — no separate "count what changed" query needed.
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM models WHERE name = $1 AND provider_id = $2")
+                .bind(name)
+                .bind(provider_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        match existing {
+            // Converge rather than leave the row as first imported. An edited
+            // file is the documented way to change policy, so an
+            // `upstream_model` corrected in YAML that never reached the
+            // database would be a silent mismatch from the other direction.
+            Some(id) => {
+                sqlx::query(
+                    "UPDATE models SET upstream_model = $2, default_max_tokens = $3 WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&upstream)
                 .bind(default_max_tokens)
-                .bind(encrypted_key)
                 .execute(&mut *tx)
                 .await?;
             }
             None => {
                 sqlx::query(
-                    "INSERT INTO model_backends
-                       (model_id, api_base, upstream_model, upstream_api_key,
-                        protocol, auth_header, auth_scheme, default_max_tokens)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    "INSERT INTO models (name, provider_id, upstream_model, default_max_tokens) \
+                     VALUES ($1, $2, $3, $4)",
                 )
-                .bind(model_id)
-                .bind(api_base)
+                .bind(name)
+                .bind(provider_id)
                 .bind(&upstream)
-                .bind(encrypted_key)
-                .bind(protocol)
-                .bind(&auth_header)
-                .bind(&auth_scheme)
                 .bind(default_max_tokens)
                 .execute(&mut *tx)
                 .await?;
-                backends += 1;
+                models += 1;
             }
         }
     }
@@ -553,7 +580,7 @@ where
     reencrypt_plaintext_backends_scoped(conn, key, None).await
 }
 
-/// The same sweep, optionally narrowed to one model's backends.
+/// The same sweep, optionally narrowed to one model's provider.
 ///
 /// The whole-table form is what an operator wants for a key rotation, and is
 /// right to refuse the batch when it meets a blob it can neither decrypt nor
@@ -573,8 +600,10 @@ where
 {
     let mut conn = conn.acquire().await?;
     let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, upstream_api_key FROM model_backends
-         WHERE upstream_api_key IS NOT NULL AND ($1::bigint IS NULL OR model_id = $1)",
+        "SELECT id, upstream_api_key FROM providers
+         WHERE upstream_api_key IS NOT NULL
+           AND ($1::bigint IS NULL
+                OR id = (SELECT provider_id FROM models WHERE id = $1))",
     )
     .bind(only_model_id)
     .fetch_all(&mut *conn)
@@ -587,12 +616,12 @@ where
         }
         let plaintext = String::from_utf8(blob).map_err(|_| {
             anyhow::anyhow!(
-                "model_backends.id={id}: upstream_api_key is neither valid ciphertext under the \
+                "providers.id={id}: upstream_api_key is neither valid ciphertext under the \
                  given key nor valid UTF-8 plaintext; refusing to guess"
             )
         })?;
         let reencrypted = secrets::encrypt(key, &plaintext)?;
-        sqlx::query("UPDATE model_backends SET upstream_api_key = $1 WHERE id = $2")
+        sqlx::query("UPDATE providers SET upstream_api_key = $1 WHERE id = $2")
             .bind(reencrypted)
             .bind(id)
             .execute(&mut *conn)
@@ -609,7 +638,7 @@ mod tests {
     /// The scratch database used for these tests is shared across the whole
     /// `cargo test` invocation (and, in practice, with whatever else happens
     /// to be pointed at it). The brief's original tests started with
-    /// `TRUNCATE models, model_backends CASCADE`, which is fine in isolation
+    /// `TRUNCATE models, providers CASCADE`, which is fine in isolation
     /// but races with any other test truncating the same tables concurrently
     /// — including each other, once `models` stopped being a total count and
     /// started being a per-run delta (a truncate from the sibling test
@@ -697,8 +726,8 @@ mod tests {
             Option<String>,
             Option<i32>,
         ) = sqlx::query_as(
-            "SELECT b.protocol, b.auth_header, b.auth_scheme, b.default_max_tokens
-               FROM model_backends b JOIN models m ON m.id = b.model_id
+            "SELECT p.protocol, p.auth_header, p.auth_scheme, m.default_max_tokens
+               FROM models m JOIN providers p ON p.id = m.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -833,8 +862,8 @@ mod tests {
         assert_eq!(summary.backends, 0, "a corrected file must not add a row");
 
         let (protocol, max_tokens): (String, Option<i32>) = sqlx::query_as(
-            "SELECT b.protocol, b.default_max_tokens
-               FROM model_backends b JOIN models m ON m.id = b.model_id
+            "SELECT p.protocol, m.default_max_tokens
+               FROM models m JOIN providers p ON p.id = m.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -875,12 +904,13 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM model_backends WHERE model_id = $1")
-                .bind(model_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM models WHERE id = $1 AND provider_id IS NOT NULL",
+        )
+        .bind(model_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(count, 1, "re-import must be idempotent");
     }
 
@@ -902,8 +932,8 @@ mod tests {
         import(&pool, &cfg, &key).await.unwrap();
 
         let stored: Vec<u8> = sqlx::query_scalar(
-            "SELECT upstream_api_key FROM model_backends b
-             JOIN models m ON m.id = b.model_id
+            "SELECT p.upstream_api_key FROM models m
+             JOIN providers p ON p.id = m.provider_id
              WHERE m.name = $1",
         )
         .bind(&name)
@@ -1330,26 +1360,31 @@ mod tests {
         // connection ever sees a row that was inserted and migrated inside
         // the same uncommitted transaction.
         let mut tx = pool.begin().await.unwrap();
-        let model_id: i64 =
-            sqlx::query_scalar("INSERT INTO models (name) VALUES ($1) RETURNING id")
-                .bind(&name)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
         // Simulate a row written by the pre-encryption code path: raw
-        // plaintext bytes, exactly as the old `import` stored them.
-        sqlx::query(
-            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
-             VALUES ($1, 'http://legacy:8000/v1', 'legacy-model', $2)",
+        // plaintext bytes, exactly as the old `import` stored them. The
+        // credential lives on the provider since migration 0029, so that is
+        // where the legacy shape has to be reproduced.
+        let provider_id: i64 = sqlx::query_scalar(
+            "INSERT INTO providers (name, api_base, upstream_api_key) \
+             VALUES ($1, 'http://legacy:8000/v1', $2) RETURNING id",
         )
-        .bind(model_id)
+        .bind(&name)
         .bind(b"sk-legacy-plaintext-token".to_vec())
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let model_id: i64 = sqlx::query_scalar(
+            "INSERT INTO models (name, provider_id, upstream_model) \
+             VALUES ($1, $2, 'legacy-model') RETURNING id",
+        )
+        .bind(&name)
+        .bind(provider_id)
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
 
         // Scoped to this test's own model: the shared dev database also holds
-        // real backends encrypted under the deployment's key, which this
+        // real providers encrypted under the deployment's key, which this
         // test's throwaway key cannot decrypt — and the unscoped sweep is
         // right to refuse those rather than guess.
         let migrated = reencrypt_plaintext_backends_scoped(&mut tx, &key, Some(model_id))
@@ -1359,8 +1394,8 @@ mod tests {
         tx.commit().await.unwrap();
 
         let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT upstream_api_key FROM model_backends WHERE model_id = $1")
-                .bind(model_id)
+            sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
+                .bind(provider_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1375,8 +1410,8 @@ mod tests {
             .await
             .unwrap();
         let stored_again: Vec<u8> =
-            sqlx::query_scalar("SELECT upstream_api_key FROM model_backends WHERE model_id = $1")
-                .bind(model_id)
+            sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
+                .bind(provider_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();

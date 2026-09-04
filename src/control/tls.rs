@@ -1,7 +1,7 @@
 //! TLS for the control plane's admin listener.
 //!
 //! `/snapshot` carries usable upstream backend credentials (see the schema
-//! comment on `model_backends.upstream_api_key`) and `/usage` is gated by the
+//! comment on `providers.upstream_api_key`) and `/usage` is gated by the
 //! same bearer token, so the design requires TLS "in any deployment where
 //! backends have real credentials". This module is what makes that possible:
 //! a cert and key turn `control::api::serve` from plain HTTP into HTTPS. When

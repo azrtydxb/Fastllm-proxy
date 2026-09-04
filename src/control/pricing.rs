@@ -174,12 +174,13 @@ pub async fn sync(
 ) -> anyhow::Result<SyncReport> {
     let prices = fetch(client, source).await?;
 
-    // One row per (model, upstream_model): a model's price comes from whatever
-    // its backends actually call upstream.
+    // One row per model: its price comes from whatever it actually calls
+    // upstream. Since migration 0029 a provider model has one provider and one
+    // `upstream_model`, so this no longer fans out — a model that used to
+    // appear once per backend now appears once.
     let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT m.id, m.name, b.upstream_model, m.input_price_per_mtok
-         FROM models m LEFT JOIN model_backends b ON b.model_id = m.id
-         ORDER BY m.name",
+        "SELECT m.id, m.name, m.upstream_model, m.input_price_per_mtok
+         FROM models m ORDER BY m.name",
     )
     .fetch_all(pool)
     .await?;

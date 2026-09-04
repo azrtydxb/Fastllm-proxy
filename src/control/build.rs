@@ -106,7 +106,7 @@ fn flatten_for(
 /// tens of principals, so the N+1 shape costs nothing that matters and stays
 /// far easier to read than the joined equivalent.
 ///
-/// `key` decrypts `model_backends.upstream_api_key` (see `control::secrets`
+/// `key` decrypts `providers.upstream_api_key` (see `control::secrets`
 /// for the format and exactly what encryption at rest here does and does
 /// not protect). The snapshot this returns still carries the credential in
 /// usable plaintext form — the proxy has to present it to the backend — so
@@ -176,9 +176,20 @@ pub async fn build_snapshot_with(
         Option<i32>,
         String,
     );
+    // The join that used to be a table. A provider model has exactly one
+    // provider (migration 0029), so this yields at most one row per model and
+    // `BackendDef` — the proxy's resolved view of "where do I send this and
+    // how do I authenticate" — is unchanged by the split. The snapshot wire
+    // format therefore does not move, which is why proxies do not need to be
+    // upgraded in step with the control plane.
+    //
+    // A model with no provider yields no row and is not routable. That is the
+    // same state a model with no backends had before, and the proxy already
+    // handles it as "no healthy backend".
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
-        "SELECT model_id, api_base, upstream_model, upstream_api_key, protocol, auth_header, \
-         auth_scheme, default_max_tokens, credential_kind FROM model_backends",
+        "SELECT m.id, p.api_base, m.upstream_model, p.upstream_api_key, p.protocol, \
+         p.auth_header, p.auth_scheme, m.default_max_tokens, p.credential_kind \
+         FROM models m JOIN providers p ON p.id = m.provider_id",
     )
     .fetch_all(pool)
     .await?;
@@ -1006,9 +1017,14 @@ mod tests {
     /// partially completed key rotation, a row never migrated) used to fail
     /// `build_snapshot` outright — a hard exit on the startup path,
     /// crash-looping the control plane and taking every model offline over
-    /// one bad backend. It must instead drop just that backend and let the
-    /// snapshot build carry every other backend, including a sibling backend
-    /// on the very same model.
+    /// one bad credential. It must instead drop just the models on that
+    /// provider and let every other provider's models build.
+    ///
+    /// Since migration 0029 the credential lives on the provider, so
+    /// containment is at provider granularity rather than backend
+    /// granularity — one unusable credential takes out that provider's
+    /// models and nothing else. There is no longer such a thing as a sibling
+    /// backend on the same model to be spared.
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn one_undecryptable_backend_is_dropped_and_the_rest_of_the_snapshot_still_builds() {
@@ -1019,77 +1035,86 @@ mod tests {
         let key = test_key();
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "undecryptable-model")
-            .track_prefix("models", "name", "unrelated-model");
+            .track_prefix("models", "name", "unrelated-model")
+            .track_prefix("providers", "name", "undecryptable-provider")
+            .track_prefix("providers", "name", "healthy-provider");
+
+        // A credential that cannot possibly decrypt: not `encrypt`-produced
+        // ciphertext at all, so `secrets::decrypt` fails on the version byte
+        // — the same shape a partially completed key rotation or an
+        // unmigrated pre-encryption row would take. Valid UTF-8 (unlike, say,
+        // `0xFF` bytes) deliberately: `_cleanup` removes this row at the end,
+        // but this module's tests share one scratch database with
+        // `control::import`'s, including
+        // `reencrypt_migrates_a_plaintext_row_and_is_idempotent`, which scans
+        // every provider with a non-null `upstream_api_key` and treats "does
+        // not decrypt" as "must be a pre-migration plaintext row" — bytes
+        // that are not valid UTF-8 would trip that function's own
+        // refuse-to-guess `bail!` if the two ever ran concurrently.
+        let broken_provider = unique_name("undecryptable-provider");
+        let broken_provider_id: i64 = sqlx::query_scalar(
+            "INSERT INTO providers (name, api_base, upstream_api_key) \
+             VALUES ($1, 'http://broken:8000/v1', $2) RETURNING id",
+        )
+        .bind(&broken_provider)
+        .bind(b"not-an-encrypt-produced-ciphertext-blob-at-all".to_vec())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let healthy_provider = unique_name("healthy-provider");
+        let healthy_provider_id: i64 = sqlx::query_scalar(
+            "INSERT INTO providers (name, api_base) \
+             VALUES ($1, 'http://healthy:8000/v1') RETURNING id",
+        )
+        .bind(&healthy_provider)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let broken_model = unique_name("undecryptable-model");
-        let model_id: i64 =
-            sqlx::query_scalar("INSERT INTO models (name) VALUES ($1) RETURNING id")
-                .bind(&broken_model)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // A backend whose `upstream_api_key` cannot possibly decrypt: not
-        // `encrypt`-produced ciphertext at all, so `secrets::decrypt` fails
-        // on the version byte, the same shape a partially completed key
-        // rotation or an unmigrated pre-encryption row would take. Valid
-        // UTF-8 (unlike, say, `0xFF` bytes) deliberately: `_cleanup` above
-        // removes this row at the end of the test, but this whole module's
-        // tests share one scratch database with `control::import`'s while
-        // it exists, including `reencrypt_migrates_a_plaintext_row_and_is_idempotent`,
-        // which scans *every* `model_backends` row with a non-null
-        // `upstream_api_key` and treats "does not decrypt" as "must be a
-        // pre-migration plaintext row" (`reencrypt_plaintext_backends`'s
-        // documented contract) — bytes that are not valid UTF-8 would trip
-        // that function's own refuse-to-guess `bail!` if the two tests ever
-        // run concurrently against the same database.
         sqlx::query(
-            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
-             VALUES ($1, 'http://broken:8000/v1', 'broken', $2)",
+            "INSERT INTO models (name, provider_id, upstream_model) VALUES ($1, $2, 'broken')",
         )
-        .bind(model_id)
-        .bind(b"not-an-encrypt-produced-ciphertext-blob-at-all".to_vec())
+        .bind(&broken_model)
+        .bind(broken_provider_id)
         .execute(&pool)
         .await
         .unwrap();
 
-        // A healthy sibling backend on the *same* model, so the test proves
-        // containment at backend granularity, not merely "other models
-        // survive".
-        sqlx::query(
-            "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key)
-             VALUES ($1, 'http://healthy:8000/v1', 'healthy', NULL)",
-        )
-        .bind(model_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // An unrelated model, to prove the failure does not take down the
-        // rest of the snapshot either.
+        // A model on a *different* provider, so the test proves containment
+        // rather than merely "the build did not panic".
         let other_model = unique_name("unrelated-model");
-        sqlx::query("INSERT INTO models (name) VALUES ($1)")
-            .bind(&other_model)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO models (name, provider_id, upstream_model) VALUES ($1, $2, 'healthy')",
+        )
+        .bind(&other_model)
+        .bind(healthy_provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let snapshot = build_snapshot(&pool, &key)
             .await
-            .expect("one undecryptable backend must not fail the whole snapshot");
+            .expect("one undecryptable credential must not fail the whole snapshot");
 
         let model = snapshot
             .models
             .iter()
             .find(|m| m.name == broken_model)
             .expect("the model itself must still be in the snapshot");
-        assert_eq!(
-            model.backends.len(),
-            1,
-            "the undecryptable backend must be dropped, the healthy one kept"
+        assert!(
+            model.backends.is_empty(),
+            "the model on the undecryptable provider must have no usable backend"
         );
-        assert_eq!(model.backends[0].api_base, "http://healthy:8000/v1");
 
+        let healthy = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == other_model)
+            .expect("a model on an unrelated provider must be unaffected");
+        assert_eq!(healthy.backends.len(), 1);
+        assert_eq!(healthy.backends[0].api_base, "http://healthy:8000/v1");
         assert!(
             snapshot.models.iter().any(|m| m.name == other_model),
             "an unrelated model must be unaffected"

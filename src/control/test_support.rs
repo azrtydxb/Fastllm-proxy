@@ -22,7 +22,7 @@
 // Not every test in this module needs every tracking method.
 #![allow(dead_code)]
 
-/// Deletes tracked rows on drop. Foreign keys from `model_backends`,
+/// Deletes tracked rows on drop. Foreign keys from `models`,
 /// `virtual_model`-family tables, `api_keys`, `principal_roles`, `limits`,
 /// `budgets` and `usage_events` are all `ON DELETE CASCADE` back to
 /// `models`/`virtual_models`/`principals` (see the migrations), so tracking

@@ -589,6 +589,12 @@ async fn revoke_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A model's link to its provider, kept in the shape the UI already reads.
+///
+/// Since migration 0029 a provider model has exactly one provider, so this is
+/// a view over the join rather than a row of its own — `id` is the **model's**
+/// id, because the model *is* the link. `DELETE /admin/backends/{id}` detaches
+/// that model from its provider and takes the same id.
 #[derive(Serialize)]
 struct BackendView {
     id: i64,
@@ -629,6 +635,16 @@ struct ModelView {
     /// deployment's `--policy`, which is what every model meant before this
     /// was settable.
     policy: Option<String>,
+    /// The provider serving this model, absent when none is configured.
+    ///
+    /// Absent is a real state and not an error: a model can outlive its
+    /// provider, and before migration 0029 the same condition was "a model
+    /// with no backends". It is not routable, and the UI shows it as needing
+    /// attention rather than hiding it.
+    provider_id: Option<i64>,
+    provider_name: Option<String>,
+    /// Zero or one entry, never more. Kept as a list so existing clients and
+    /// the UI keep parsing; the one-provider rule is enforced by the schema.
     backends: Vec<BackendView>,
 }
 
@@ -636,6 +652,9 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
+    // `upstream_api_key IS NOT NULL` rather than the column: this query must
+    // not be able to return a credential even by accident, so the ciphertext
+    // never leaves Postgres on this path at all.
     type ModelRow = (
         i64,
         String,
@@ -645,26 +664,25 @@ async fn list_models(
         Option<i32>,
         Option<i64>,
         Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<bool>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
     );
     let models: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds, context_length, policy FROM models ORDER BY name",
+        "SELECT m.id, m.name, m.description, m.input_price_per_mtok, \
+             m.output_price_per_mtok, m.cache_ttl_seconds, m.context_length, m.policy, \
+             p.id, p.name, p.api_base, m.upstream_model, \
+             p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, m.default_max_tokens \
+         FROM models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.name",
     )
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("listing models", &e))?;
-    // `upstream_api_key IS NOT NULL` rather than the column: this query must
-    // not be able to return a credential even by accident, so the ciphertext
-    // never leaves Postgres on this path at all.
-    type BackendListRow = (i64, i64, String, String, bool, String, String, Option<i32>);
-    let backends: Vec<BackendListRow> = sqlx::query_as(
-        "SELECT id, model_id, api_base, upstream_model, upstream_api_key IS NOT NULL, \
-         protocol, auth_header, default_max_tokens
-         FROM model_backends ORDER BY id",
-    )
-    .fetch_all(&ctx.pool)
-    .await
-    .map_err(|e| db_error("listing backends", &e))?;
 
     Ok(Json(
         models
@@ -679,39 +697,44 @@ async fn list_models(
                     cache_ttl_seconds,
                     context_length,
                     policy,
-                )| ModelView {
-                    id,
-                    name,
-                    description,
-                    input_price_per_mtok,
-                    output_price_per_mtok,
-                    cache_ttl_seconds,
-                    context_length,
-                    policy,
-                    backends: backends
-                        .iter()
-                        .filter(|(_, model_id, ..)| *model_id == id)
-                        .map(
-                            |(
-                                bid,
-                                _,
-                                api_base,
-                                upstream_model,
-                                has_key,
-                                protocol,
-                                auth_header,
-                                default_max_tokens,
-                            )| BackendView {
-                                id: *bid,
-                                api_base: api_base.clone(),
-                                upstream_model: upstream_model.clone(),
-                                has_upstream_api_key: *has_key,
-                                protocol: protocol.clone(),
-                                auth_header: auth_header.clone(),
-                                default_max_tokens: *default_max_tokens,
-                            },
-                        )
-                        .collect(),
+                    provider_id,
+                    provider_name,
+                    api_base,
+                    upstream_model,
+                    has_key,
+                    protocol,
+                    auth_header,
+                    default_max_tokens,
+                )| {
+                    // Every provider column arrives together or not at all —
+                    // they come from one LEFT JOIN row — so one of them
+                    // deciding is enough, and `api_base` is the one without
+                    // which nothing is routable.
+                    let backends = match api_base {
+                        Some(api_base) => vec![BackendView {
+                            id,
+                            api_base,
+                            upstream_model: upstream_model.unwrap_or_else(|| name.clone()),
+                            has_upstream_api_key: has_key.unwrap_or(false),
+                            protocol: protocol.unwrap_or_else(|| "openai".into()),
+                            auth_header: auth_header.unwrap_or_else(|| "authorization".into()),
+                            default_max_tokens,
+                        }],
+                        None => Vec::new(),
+                    };
+                    ModelView {
+                        id,
+                        name,
+                        description,
+                        input_price_per_mtok,
+                        output_price_per_mtok,
+                        cache_ttl_seconds,
+                        context_length,
+                        policy,
+                        provider_id,
+                        provider_name,
+                        backends,
+                    }
                 },
             )
             .collect(),
@@ -1537,6 +1560,26 @@ impl NewBackend {
 /// Fill in the auth defaults a protocol implies, so an operator adding an
 /// Anthropic backend does not have to know that it wants a raw key in
 /// `x-api-key` rather than a bearer token — and cannot get it wrong.
+/// Whether an endpoint looks like it is on our own network.
+///
+/// This only picks the initial `kind` label for a newly created provider, so
+/// being wrong is a cosmetic matter an operator can correct — nothing routes,
+/// authenticates or expires on it. It exists because "static" and "cloud"
+/// differ in how they are *configured* (a typed address versus a catalogue
+/// entry), and guessing right the overwhelming majority of the time is better
+/// than making every operator answer a question they did not ask.
+fn is_private_host(host: &str) -> bool {
+    let h = host.split(':').next().unwrap_or(host);
+    h == "localhost"
+        || h.starts_with("127.")
+        || h.starts_with("10.")
+        || h.starts_with("192.168.")
+        || h.strip_prefix("172.")
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|octet| octet.parse::<u8>().ok())
+            .is_some_and(|octet| (16..=31).contains(&octet))
+}
+
 fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
     match protocol {
         "anthropic" => ("x-api-key", None),
@@ -1649,28 +1692,115 @@ async fn post_backend(
         None => default_scheme.map(str::to_string),
     };
 
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO model_backends (model_id, api_base, upstream_model, upstream_api_key, \
-         protocol, auth_header, auth_scheme, default_max_tokens, credential_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+    // A provider model has exactly one provider, so attaching a second is a
+    // conflict rather than an addition. Refusing is the honest answer: the
+    // caller wanted two upstreams for one name, and that is now a frontend
+    // model with two targets, not a model with two backends.
+    let existing: Option<i64> = sqlx::query_scalar("SELECT provider_id FROM models WHERE id = $1")
+        .bind(model_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| db_error("provider lookup", &e))?;
+    if existing.is_some() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "model {model_name:?} already has a provider; a provider model has exactly one. \
+                 Detach it first, or create a frontend model with both as targets to balance \
+                 across them"
+            ),
+        ));
+    }
+
+    // Same endpoint and auth means the same provider, which is the whole point
+    // of the split: one credential shared by every model on it, so rotating it
+    // is one write. A credential supplied here updates the provider's, since
+    // the caller has just demonstrated a newer one.
+    let provider_id: i64 = match sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
+         AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
     )
-    .bind(model_id)
     .bind(&api_base)
-    .bind(&upstream_model)
-    .bind(encrypted)
     .bind(&protocol)
     .bind(&auth_header)
     .bind(&auth_scheme)
-    .bind(body.default_max_tokens)
-    .bind(&credential_kind)
-    .fetch_one(&ctx.pool)
+    .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| db_error("backend creation", &e))?;
+    .map_err(|e| db_error("provider lookup", &e))?
+    {
+        Some(id) => {
+            if encrypted.is_some() {
+                sqlx::query(
+                    "UPDATE providers SET upstream_api_key = $1, credential_kind = $2 WHERE id = $3",
+                )
+                .bind(&encrypted)
+                .bind(&credential_kind)
+                .bind(id)
+                .execute(&ctx.pool)
+                .await
+                .map_err(|e| db_error("provider credential update", &e))?;
+            }
+            id
+        }
+        None => {
+            // host:port is what the Providers screen already called this
+            // thing, so an operator sees the name they were reading before it
+            // was a record. The suffix only appears when that is ambiguous.
+            let host = api_base
+                .split_once("://")
+                .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+                .unwrap_or(&api_base)
+                .to_string();
+            let kind = if is_private_host(&host) { "static" } else { "cloud" };
+            let mut name = host.clone();
+            for n in 2..100 {
+                let taken: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE name = $1)")
+                        .bind(&name)
+                        .fetch_one(&ctx.pool)
+                        .await
+                        .map_err(|e| db_error("provider name check", &e))?;
+                if !taken {
+                    break;
+                }
+                name = format!("{host}#{n}");
+            }
+            sqlx::query_scalar(
+                "INSERT INTO providers (name, kind, api_base, protocol, auth_header, \
+                 auth_scheme, upstream_api_key, credential_kind) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+            )
+            .bind(&name)
+            .bind(kind)
+            .bind(&api_base)
+            .bind(&protocol)
+            .bind(&auth_header)
+            .bind(&auth_scheme)
+            .bind(&encrypted)
+            .bind(&credential_kind)
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider creation", &e))?
+        }
+    };
+
+    sqlx::query(
+        "UPDATE models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
+         WHERE id = $4",
+    )
+    .bind(provider_id)
+    .bind(&upstream_model)
+    .bind(body.default_max_tokens)
+    .bind(model_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("attaching provider", &e))?;
     refresh(&ctx).await;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "id": id,
+            "id": model_id,
+            "provider_id": provider_id,
             "model_id": model_id,
             "api_base": api_base,
             "upstream_model": upstream_model,
@@ -1688,15 +1818,26 @@ async fn delete_backend(
     _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    let done = sqlx::query("DELETE FROM model_backends WHERE id = $1")
-        .bind(id)
-        .execute(&ctx.pool)
-        .await
-        .map_err(|e| db_error("backend deletion", &e))?;
+    // The id is the model's, because since migration 0029 the model *is* the
+    // link to its provider. Detaching leaves the model, its price, its usage
+    // history and any frontend model pointing at it untouched — it simply
+    // stops being routable, which is the reversible half of "remove this
+    // backend" and the only half this route should ever do.
+    let done = sqlx::query(
+        "UPDATE models SET provider_id = NULL, upstream_model = NULL, \
+         default_max_tokens = NULL WHERE id = $1 AND provider_id IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("detaching provider", &e))?;
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            format!("no backend with id {id}; GET /admin/models lists each model's backend ids"),
+            format!(
+                "no model with id {id} that has a provider; GET /admin/models lists each \
+                 model's provider"
+            ),
         ));
     }
     refresh(&ctx).await;
@@ -3902,7 +4043,7 @@ async fn openapi_ui() -> impl IntoResponse {
 /// say) can never be written for the route added after this one.
 ///
 /// `/snapshot` discloses every key hash and usable upstream backend
-/// credentials (see the schema comment on `model_backends.upstream_api_key`);
+/// credentials (see the schema comment on `providers.upstream_api_key`);
 /// `/usage` accepts writes from anything holding this token. Both are worth
 /// paying for a non-short-circuiting compare rather than plain `==`.
 ///
@@ -5242,7 +5383,7 @@ pub async fn serve(
         }
         None => {
             // `/snapshot` carries usable upstream credentials (see the schema
-            // comment on `model_backends.upstream_api_key`) and `/usage`
+            // comment on `providers.upstream_api_key`) and `/usage`
             // accepts writes gated by the same bearer token — plain HTTP
             // means both travel, and the token that gates them, in the
             // clear. Not fatal: a dev deployment with no real backend
@@ -5573,7 +5714,11 @@ mod tests {
         )
         .await
         .unwrap();
+        // `id` is the model's — the model is its own link to a provider since
+        // migration 0029 — while the credential lives on the provider, so the
+        // two ids below are deliberately different.
         let backend_id = backend.0["id"].as_i64().unwrap();
+        let provider_id = backend.0["provider_id"].as_i64().unwrap();
 
         // The snapshot the routes published, not one this test built.
         let snap = cache.current_snapshot();
@@ -5605,8 +5750,8 @@ mod tests {
 
         // Encrypted at rest, not merely absent from the response.
         let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT upstream_api_key FROM model_backends WHERE id = $1")
-                .bind(backend_id)
+            sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
+                .bind(provider_id)
                 .fetch_one(&ctx.pool)
                 .await
                 .unwrap();

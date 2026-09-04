@@ -260,7 +260,7 @@ struct Cli {
 /// One-shot maintenance commands, as opposed to `Cli`'s server-starting flags.
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Seed `models`/`model_backends` from a LiteLLM-format config file.
+    /// Seed `providers`/`models` from a LiteLLM-format config file.
     ///
     /// The migration path off a file-driven deployment onto the control
     /// plane: run this once per environment (safely more than once — it is
@@ -276,7 +276,7 @@ enum Command {
         database_url: String,
     },
 
-    /// One-shot migration: re-encrypt any `model_backends.upstream_api_key`
+    /// One-shot migration: re-encrypt any `providers.upstream_api_key`
     /// rows still holding pre-encryption plaintext (see
     /// `migrations/0004_encrypted_upstream_api_key.sql`). Safe to run more
     /// than once — an already-migrated row is left alone.

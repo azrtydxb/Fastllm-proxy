@@ -124,7 +124,7 @@ pub struct LitellmParams {
     #[serde(default)]
     pub model: Option<String>,
 
-    // The four below exist on the control plane's `model_backends` table and
+    // The four below exist on the control plane's `providers` table and
     // were unreachable from a YAML file, so `File` mode could not describe a
     // native backend, an Azure-style key header, or an Anthropic backend's
     // required token cap. The same deployment was configurable one way and not

@@ -1,4 +1,4 @@
-//! Encryption at rest for `model_backends.upstream_api_key`.
+//! Encryption at rest for `providers.upstream_api_key`.
 //!
 //! This protects the database, not the snapshot: `/snapshot` still carries
 //! the credential in usable plaintext form, because the proxy has to
