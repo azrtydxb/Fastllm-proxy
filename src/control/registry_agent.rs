@@ -219,6 +219,83 @@ mod tests {
     }
 }
 
+/// Bring a dynamic provider's models in line with what it actually serves.
+///
+/// Adds what is newly served and removes what is not, for `dynamic` providers
+/// only — a static or cloud provider's models are a human's list, and a model
+/// missing from one `GET /v1/models` is not permission to delete it.
+///
+/// **A learned model is inventory, not an exposure.** Nothing here creates a
+/// frontend model for it, so a model that appears on a registered host reaches
+/// nobody until an operator points a frontend model at it. That is the
+/// closed-by-default half of moving authorisation to frontend models: a host
+/// starting an unrelated model must not hand existing principals access to it
+/// (`.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`).
+pub async fn reconcile_models(
+    pool: &PgPool,
+    provider_id: i64,
+    provider_name: &str,
+    served: &[String],
+) -> Result<(usize, usize), sqlx::Error> {
+    let known: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, upstream_model FROM provider_models \
+         WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+    )
+    .bind(provider_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut added = 0usize;
+    for upstream in served {
+        if known.iter().any(|(_, u)| u == upstream) {
+            continue;
+        }
+        // The name the provider exposes, qualified only when that name is
+        // already taken by another provider's model. Names are still globally
+        // unique until addressing moves to frontend models (ADR 0005), and a
+        // second host serving the same model is the normal case rather than an
+        // error.
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)")
+                .bind(upstream)
+                .fetch_one(pool)
+                .await?;
+        let name = if taken {
+            format!("{upstream}@{provider_name}")
+        } else {
+            upstream.clone()
+        };
+        sqlx::query(
+            "INSERT INTO provider_models (name, provider_id, upstream_model) \
+             VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(&name)
+        .bind(provider_id)
+        .bind(upstream)
+        .execute(pool)
+        .await?;
+        added += 1;
+    }
+
+    // Gone from the provider means gone from the registry -- but only its own
+    // models, and only for a provider whose whole point is that it is
+    // maintained automatically. Usage rows survive this (migration 0031) and a
+    // frontend model pointing at it keeps its target by name (0036), so the
+    // delete is recoverable in every way that matters.
+    let removed = sqlx::query(
+        "DELETE FROM provider_models \
+          WHERE provider_id = $1 AND upstream_model IS NOT NULL \
+            AND NOT (upstream_model = ANY($2))",
+    )
+    .bind(provider_id)
+    .bind(served)
+    .execute(pool)
+    .await?
+    .rows_affected() as usize;
+
+    Ok((added, removed))
+}
+
 /// How long a dynamic provider may be degraded before it is deleted.
 ///
 /// Longer than a model load, on purpose. A 27B on a DGX Spark takes over ten
@@ -249,6 +326,10 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
             .await?;
 
     for (id, name, api_base, lease) in providers {
+        let kind: String = sqlx::query_scalar("SELECT kind FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
         let registered: Vec<String> = sqlx::query_scalar(
             "SELECT upstream_model FROM provider_models \
              WHERE provider_id = $1 AND upstream_model IS NOT NULL",
@@ -284,6 +365,17 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
                 Some(error.clone())
             }
         };
+
+        // Only a dynamic provider learns. A cloud provider answering with four
+        // hundred models must not have four hundred rows created for it, and a
+        // static provider's list is a human's.
+        if kind == "dynamic" && degraded_reason.is_none() {
+            if let Ok(served) = served_models(client, &api_base).await {
+                let (added, removed) = reconcile_models(pool, id, &name, &served).await?;
+                report.models_added += added;
+                report.models_removed += removed;
+            }
+        }
 
         match degraded_reason {
             None => {
@@ -340,4 +432,6 @@ pub struct SweepReport {
     pub unreachable: Vec<String>,
     /// Dynamic providers whose absence outlasted the grace window.
     pub deleted: Vec<String>,
+    pub models_added: usize,
+    pub models_removed: usize,
 }
