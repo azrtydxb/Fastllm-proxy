@@ -323,9 +323,10 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         serde_json::json!({ "provider_model_id": model_a_id, "weight": 100, "position": 0 }),
     );
 
-    // Three principals: one that matches the rule (and is granted the model
-    // it resolves to), one that does not match it (granted the default's
-    // model), and one granted only the virtual name itself.
+    // Three principals, all granted the frontend model they name: one that
+    // matches the rule, one that does not and so falls through to the
+    // defaults, and one used below to show the grant does not reach past the
+    // frontend model to a provider model named directly.
     let canary_principal = admin_post(
         admin_port,
         &cookie,
@@ -334,8 +335,11 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     );
     let canary_principal_id = canary_principal["id"].as_i64().unwrap();
     // One role both makes `roles.matches` true (the rule's own condition)
-    // and grants `model:invoke` on the model that rule routes to.
-    grant_one_model(&pool, canary_principal_id, &model_b_name, &canary_role).await;
+    // and grants `model:invoke` on the frontend model these callers name.
+    // The grant is on the frontend model rather than on the provider model
+    // the rule resolves to, because that is what authorises a request naming
+    // it — see the reversal documented on `proxy::resolve_target_models`.
+    grant_one_model(&pool, canary_principal_id, &vm_name, &canary_role).await;
 
     let normal_principal = admin_post(
         admin_port,
@@ -347,7 +351,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     grant_one_model(
         &pool,
         normal_principal_id,
-        &model_a_name,
+        &vm_name,
         &name("vm-e2e-grant-a"),
     )
     .await;
@@ -484,12 +488,16 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .map(|m| m["id"].as_str().unwrap())
         .collect();
     assert!(
-        ids.contains(&model_b_name.as_str()),
-        "the provider model this key is granted must be listed: {ids:?}"
-    );
-    assert!(
         ids.contains(&vm_name.as_str()),
-        "a frontend model reaching a granted target must be listed: {ids:?}"
+        "the frontend model this key is granted must be listed: {ids:?}"
+    );
+    // The provider models behind it are not, because this key holds no grant
+    // on either. A model picker populated from this list offers what the
+    // caller can actually name, which after the move to frontend-model
+    // authorisation is the frontend model and not its targets.
+    assert!(
+        !ids.contains(&model_b_name.as_str()),
+        "a provider model this key cannot name directly must not be listed: {ids:?}"
     );
     assert!(
         !ids.contains(&model_a_name.as_str()),
