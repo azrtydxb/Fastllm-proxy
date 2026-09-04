@@ -40,7 +40,7 @@ fn unique_name(tag: &str) -> String {
 async fn insert_event(
     pool: &sqlx::PgPool,
     principal_id: i64,
-    model_id: i64,
+    provider_model_id: i64,
     days_ago: i64,
     status: i16,
     refusal: Option<&str>,
@@ -50,12 +50,12 @@ async fn insert_event(
 ) {
     sqlx::query(
         "INSERT INTO usage_events
-             (principal_id, model_id, prompt_tokens, completion_tokens, at,
+             (principal_id, provider_model_id, prompt_tokens, completion_tokens, at,
               duration_ms, status, refusal, usage_reported, cost_micros)
          VALUES ($1, $2, $3, $4, now() - make_interval(days => $5), 100, $6, $7, $8, $9)",
     )
     .bind(principal_id)
-    .bind(model_id)
+    .bind(provider_model_id)
     .bind(prompt)
     .bind(completion)
     .bind(days_ago as i32)
@@ -84,11 +84,12 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         .track_prefix("models", "name", "retention-model")
         .track_prefix("principals", "name", "retention-principal");
 
-    let model_id: i64 = sqlx::query_scalar("INSERT INTO models (name) VALUES ($1) RETURNING id")
-        .bind(&model)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let provider_model_id: i64 =
+        sqlx::query_scalar("INSERT INTO provider_models (name) VALUES ($1) RETURNING id")
+            .bind(&model)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let principal_id: i64 = sqlx::query_scalar(
         "INSERT INTO principals (name, kind) VALUES ($1, 'service_account') RETURNING id",
     )
@@ -103,7 +104,7 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         insert_event(
             &pool,
             principal_id,
-            model_id,
+            provider_model_id,
             120,
             200,
             None,
@@ -113,7 +114,18 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         )
         .await;
     }
-    insert_event(&pool, principal_id, model_id, 120, 500, None, 0, 0, None).await;
+    insert_event(
+        &pool,
+        principal_id,
+        provider_model_id,
+        120,
+        500,
+        None,
+        0,
+        0,
+        None,
+    )
+    .await;
     for (status, kind) in [
         (403i16, "authorisation"),
         (429, "rate_limit"),
@@ -123,7 +135,7 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         insert_event(
             &pool,
             principal_id,
-            model_id,
+            provider_model_id,
             120,
             status,
             Some(kind),
@@ -136,7 +148,18 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
 
     // And one inside the window, which must survive untouched — the roll-up
     // must not reach forward into rows the raw table is still meant to hold.
-    insert_event(&pool, principal_id, model_id, 1, 200, None, 7, 9, Some(11)).await;
+    insert_event(
+        &pool,
+        principal_id,
+        provider_model_id,
+        1,
+        200,
+        None,
+        7,
+        9,
+        Some(11),
+    )
+    .await;
 
     let cutoff_sql = "at < now() - make_interval(days => 90)";
     let before: i64 = sqlx::query_scalar(&format!(
@@ -223,7 +246,7 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
 
 /// Deleting a model must not delete what it was billed for.
 ///
-/// `usage_events.model_id` was `ON DELETE CASCADE`, which was a reasonable
+/// `usage_events.provider_model_id` was `ON DELETE CASCADE`, which was a reasonable
 /// reading while models were deleted rarely and by hand — migration 0005 argued
 /// exactly that. It stops being reasonable the moment anything deletes them on
 /// a schedule: swap a model off a host and that week's inference disappears
@@ -261,8 +284,8 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let model_id: i64 = sqlx::query_scalar(
-        "INSERT INTO models (name, provider_id, upstream_model) \
+    let provider_model_id: i64 = sqlx::query_scalar(
+        "INSERT INTO provider_models (name, provider_id, upstream_model) \
          VALUES ($1, $2, 'gone') RETURNING id",
     )
     .bind(&model)
@@ -280,19 +303,19 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
 
     sqlx::query(
         "INSERT INTO usage_events \
-             (principal_id, model_id, model_name, provider_name, prompt_tokens, \
+             (principal_id, provider_model_id, model_name, provider_name, prompt_tokens, \
               completion_tokens, at, usage_reported) \
          VALUES ($1, $2, $3, $3, 100, 200, now(), true)",
     )
     .bind(principal_id)
-    .bind(model_id)
+    .bind(provider_model_id)
     .bind(&model)
     .execute(&pool)
     .await
     .unwrap();
 
-    sqlx::query("DELETE FROM models WHERE id = $1")
-        .bind(model_id)
+    sqlx::query("DELETE FROM provider_models WHERE id = $1")
+        .bind(provider_model_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -300,7 +323,7 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
     let (rows, named, id_cleared): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*), \
                 count(*) FILTER (WHERE model_name = $2), \
-                count(*) FILTER (WHERE model_id IS NULL) \
+                count(*) FILTER (WHERE provider_model_id IS NULL) \
            FROM usage_events WHERE principal_id = $1",
     )
     .bind(principal_id)

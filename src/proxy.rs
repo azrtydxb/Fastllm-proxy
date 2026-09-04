@@ -248,7 +248,7 @@ struct BodyPeek {
     model: Option<String>,
     #[serde(default)]
     stream: Option<bool>,
-    /// Read for virtual-model routing rules that match on requested
+    /// Read for frontend-model routing rules that match on requested
     /// generation length (`crate::routing::ShapeMatch`) — already sitting in
     /// the same JSON object `model` is parsed out of, so this costs nothing
     /// beyond one more field in a struct `serde_json` already skips past
@@ -264,19 +264,19 @@ struct BodyPeek {
     max_tokens: Option<u64>,
 }
 
-/// Resolve the client-requested model name to the concrete model that will
-/// actually be routed to, evaluating a virtual model's rules
+/// Resolve the client-requested model name to the provider model that will
+/// actually be routed to, evaluating a frontend model's rules
 /// (`crate::routing`) when the name is a virtual one.
 ///
 /// **Authorisation decision**, pinned by
 /// `tests::a_virtual_models_grant_does_not_reach_its_targets_and_vice_versa`:
-/// the caller is authorised against the *resolved concrete model*
+/// the caller is authorised against the *resolved provider model*
 /// (`proxy_request` checks `principal.may_invoke(&target_model)` on what
 /// this function returns), never against the virtual name by itself. A
-/// virtual model routes access; it must never be able to grant it. The
+/// frontend model routes access; it must never be able to grant it. The
 /// alternative — authorising the virtual name and letting its rules
-/// silently decide which concrete model actually serves the request —
-/// would let a virtual model's configuration (or the weighted split, or a
+/// silently decide which provider model actually serves the request —
+/// would let a frontend model's configuration (or the weighted split, or a
 /// health-driven failover) expand a principal's reach beyond whatever it
 /// was actually granted, with no grant on record for the model that ends up
 /// serving the request. Requiring the concrete grant means adding a virtual
@@ -286,9 +286,9 @@ struct BodyPeek {
 /// Returns the resolved model name, or an error response when the requested
 /// name — virtual or concrete — does not resolve to anything at all. This
 /// runs *before* authorisation, mirroring the existing "resolve, then
-/// authorise" order for concrete models (an unknown name is a 404
+/// authorise" order for provider models (an unknown name is a 404
 /// regardless of what the caller may invoke — see `tests/rbac.rs`): a
-/// caller who names a virtual model with no viable target learns "no such
+/// caller who names a frontend model with no viable target learns "no such
 /// model", not "you may not use the model this routes to", which would leak
 /// routing internals to someone the very next check might reject anyway.
 ///
@@ -305,7 +305,7 @@ fn resolve_target_models(
     prefix: u64,
     registry: &Registry,
 ) -> Result<Vec<String>, Response<ResBody>> {
-    let Some(vm) = snapshot.virtual_models.get(requested_model) else {
+    let Some(vm) = snapshot.frontend_models.get(requested_model) else {
         return Ok(vec![requested_model.to_string()]);
     };
     let candidates = vm.resolve_candidates(facts, prefix, registry);
@@ -314,7 +314,7 @@ fn resolve_target_models(
             StatusCode::NOT_FOUND,
             "model_not_found",
             &format!(
-                "virtual model {requested_model:?} has no viable target for this request; \
+                "frontend model {requested_model:?} has no viable target for this request; \
                  check its routing rules and defaults"
             ),
         ));
@@ -450,10 +450,10 @@ async fn proxy_request(
 
     let registry = state.registry.load();
     // Same hash the backend router uses for prefix affinity, computed once
-    // and reused for the virtual-model weighted split below — see
+    // and reused for the frontend-model weighted split below — see
     // `crate::routing`'s module doc comment for why reusing it (rather than
     // a second, independent hash) is what makes the split deterministic
-    // *and* keeps cache locality once a concrete model is chosen.
+    // *and* keeps cache locality once a provider model is chosen.
     let prefix = state.router.prefix_key(&collected);
 
     // Classification runs before rule evaluation, and only when this snapshot
@@ -507,7 +507,7 @@ async fn proxy_request(
         max_tokens,
         streaming,
         headers: &parts.headers,
-        // One clock read, and only for a virtual model — `resolve_target_models`
+        // One clock read, and only for a frontend model — `resolve_target_models`
         // returns before touching this for an ordinary name.
         now: chrono::Utc::now(),
         class: class_name,
@@ -571,7 +571,7 @@ async fn proxy_request(
     // Authorisation is a set lookup against the pre-flattened grant list, not
     // a walk of the RBAC graph, and costs nothing measurable. Checked against
     // every *resolved concrete* candidate — see `resolve_target_models` for
-    // why a virtual model's targets are what get authorised, never the virtual
+    // why a frontend model's targets are what get authorised, never the virtual
     // name by itself.
     //
     // Ungranted candidates are dropped from the chain rather than failing the
@@ -1324,7 +1324,7 @@ struct UsageTracking {
     /// reported to the control plane.
     metrics: Option<Arc<crate::telemetry::ModelMetrics>>,
     principal_id: PrincipalId,
-    /// The resolved concrete model name (`snapshot::ModelDef::name`), not
+    /// The resolved provider model name (`snapshot::ModelDef::name`), not
     /// the client-requested one — see `usage::UsageEvent::model`'s doc
     /// comment for why the data plane only ever reports the name the way the
     /// snapshot named it.
@@ -2147,7 +2147,7 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
 /// OpenAI-shaped model list, filtered to what this caller may actually
 /// invoke.
 ///
-/// **Lists both concrete and virtual models**, and only the ones the
+/// **Lists both concrete and frontend models**, and only the ones the
 /// caller's grants cover. It used to enumerate everything *configured*, on
 /// the reasoning that listing is not access control — a caller with no grant
 /// already gets 403 from `/v1/chat/completions`, so hiding the name added
@@ -2161,9 +2161,9 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
 /// not have is a usability defect however sound the authorisation behind it
 /// is. OpenAI's own `/v1/models` returns what the key can use.
 ///
-/// A virtual model is listed when the caller may invoke **any** model it can
+/// A frontend model is listed when the caller may invoke **any** model it can
 /// route to — its rules' targets or its defaults. Requiring all of them
-/// would hide a virtual model that would in fact work for most prompts;
+/// would hide a frontend model that would in fact work for most prompts;
 /// requiring none would advertise one that can never resolve to anything
 /// this caller is allowed. Neither is what the caller wants to know, which
 /// is "is this name worth trying".
@@ -2178,7 +2178,7 @@ fn models_response(
 ) -> Response<ResBody> {
     let registry = state.registry.load();
     let mut names: Vec<&str> = registry.model_names();
-    names.extend(snapshot.virtual_models.keys().map(String::as_str));
+    names.extend(snapshot.frontend_models.keys().map(String::as_str));
     names.sort_unstable();
     names.dedup();
 
@@ -2187,9 +2187,9 @@ fn models_response(
             if p.may_invoke(name) {
                 return true;
             }
-            // Not a concrete grant — but it may be a virtual model whose
+            // Not a concrete grant — but it may be a frontend model whose
             // chain reaches something this caller does hold.
-            snapshot.virtual_models.get(*name).is_some_and(|vm| {
+            snapshot.frontend_models.get(*name).is_some_and(|vm| {
                 vm.rules
                     .iter()
                     .flat_map(|r| r.targets.iter())
@@ -2888,28 +2888,28 @@ model_list:
         crate::registry::Registry::build(&cfg, &crate::registry::Interner::default(), None).unwrap()
     }
 
-    /// **Authorisation decision, pinned.** A virtual model resolves to a
+    /// **Authorisation decision, pinned.** A frontend model resolves to a
     /// concrete target (`resolve_target_model`), and what gets checked
     /// against a principal's grants is that *resolved* concrete name, never
     /// the virtual one — see that function's doc comment for the full
     /// reasoning. This test proves both directions of the consequence
     /// directly, without a database:
     ///
-    /// - A principal granted only the *concrete* model that a virtual model
+    /// - A principal granted only the *concrete* model that a frontend model
     ///   happens to resolve to reaches it, despite never being granted the
     ///   virtual name itself.
     /// - A principal granted only the *virtual* name is refused, because
     ///   the grant recorded is for a name that is never actually checked —
     ///   this is the escalation path the design doc warns about, and it must
-    ///   not exist: being granted a virtual model must never, by itself,
-    ///   unlock whatever concrete model it happens to route to today.
+    ///   not exist: being granted a frontend model must never, by itself,
+    ///   unlock whatever provider model it happens to route to today.
     #[test]
     fn authorisation_checks_the_resolved_concrete_model_not_the_virtual_name() {
         let registry = registry_with_two_models();
-        let mut virtual_models = HashMap::new();
-        virtual_models.insert(
+        let mut frontend_models = HashMap::new();
+        frontend_models.insert(
             "vm".to_string(),
-            crate::routing::VirtualModelDef {
+            crate::routing::FrontendModelDef {
                 name: "vm".into(),
                 rules: vec![],
                 default_targets: vec![crate::routing::WeightedTarget {
@@ -2919,7 +2919,7 @@ model_list:
             },
         );
         let snapshot = Snapshot {
-            virtual_models,
+            frontend_models,
             ..Snapshot::default()
         };
 
@@ -2962,25 +2962,25 @@ model_list:
             class_refines: &[],
         };
         let target = resolve_target_models("vm", &snapshot, &facts, 0, &registry)
-            .expect("the virtual model has a viable default target")
+            .expect("the frontend model has a viable default target")
             .remove(0);
         assert_eq!(target, "concrete-a");
 
         assert!(
             granted_concrete_only.may_invoke(&target),
-            "a grant on the concrete model the virtual model resolves to must be honoured"
+            "a grant on the provider model the frontend model resolves to must be honoured"
         );
         assert!(
             !granted_virtual_only.may_invoke(&target),
-            "a grant on only the virtual NAME must not, by itself, unlock the concrete model \
-             it happens to route to — that would let a virtual model's configuration silently \
+            "a grant on only the virtual NAME must not, by itself, unlock the provider model \
+             it happens to route to — that would let a frontend model's configuration silently \
              expand a principal's reach beyond what was actually granted"
         );
     }
 
-    /// A virtual model whose name collides with nothing still resolves
+    /// A frontend model whose name collides with nothing still resolves
     /// straight through: `resolve_target_models` on a name that is not in
-    /// `snapshot.virtual_models` is the identity function, so ordinary
+    /// `snapshot.frontend_models` is the identity function, so ordinary
     /// (concrete) routing is completely unaffected by this feature existing.
     #[test]
     fn a_concrete_model_name_resolves_to_itself() {

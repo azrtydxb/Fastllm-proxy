@@ -55,7 +55,7 @@ fn suffix(port: u16) -> String {
 fn cleanup_for(suffix: &str) -> TestCleanup {
     TestCleanup::new()
         .track_suffix("models", "name", suffix)
-        .track_suffix("virtual_models", "name", suffix)
+        .track_suffix("frontend_models", "name", suffix)
         .track_suffix("principals", "name", suffix)
         .track_suffix("api_keys", "name", suffix)
         .track_suffix("roles", "name", suffix)
@@ -346,7 +346,7 @@ async fn grant_models(pool: &sqlx::PgPool, principal_id: i64, models: &[&str], r
 
 struct Fixture {
     key: String,
-    virtual_name: String,
+    frontend_name: String,
     primary: String,
     secondary: String,
     vm_id: i64,
@@ -354,7 +354,7 @@ struct Fixture {
     admin_port: u16,
 }
 
-/// Two concrete models, each with one mock backend, plus a virtual model in
+/// Two provider models, each with one mock backend, plus a frontend model in
 /// front of them and a principal granted both.
 #[allow(clippy::too_many_arguments)]
 async fn provision(
@@ -372,14 +372,14 @@ async fn provision(
         let m = admin_post(
             admin_port,
             cookie,
-            "/admin/models",
+            "/admin/provider-models",
             serde_json::json!({"name": name, "description": "failover e2e"}),
         );
         let id = m["id"].as_i64().unwrap();
         admin_post(
             admin_port,
             cookie,
-            &format!("/admin/models/{id}/backends"),
+            &format!("/admin/provider-models/{id}/backends"),
             serde_json::json!({
                 "api_base": format!("http://127.0.0.1:{port}/v1"),
                 "upstream_model": name,
@@ -388,12 +388,12 @@ async fn provision(
         ids.push(id);
     }
 
-    let virtual_name = format!("vm-{suffix}");
+    let frontend_name = format!("vm-{suffix}");
     let vm = admin_post(
         admin_port,
         cookie,
-        "/admin/virtual-models",
-        serde_json::json!({"name": virtual_name}),
+        "/admin/frontend-models",
+        serde_json::json!({"name": frontend_name}),
     );
     let vm_id = vm["id"].as_i64().unwrap();
 
@@ -408,7 +408,7 @@ async fn provision(
     grant_models(
         pool,
         principal_id,
-        &[&primary, &secondary, &virtual_name],
+        &[&primary, &secondary, &frontend_name],
         &format!("fo-role-{suffix}"),
     )
     .await;
@@ -422,7 +422,7 @@ async fn provision(
 
     Fixture {
         key: k["key"].as_str().unwrap().to_string(),
-        virtual_name,
+        frontend_name,
         primary,
         secondary,
         vm_id,
@@ -432,9 +432,9 @@ async fn provision(
 }
 
 impl Fixture {
-    fn model_id(&self, name: &str) -> i64 {
+    fn provider_model_id(&self, name: &str) -> i64 {
         let models = ureq::get(&format!(
-            "http://127.0.0.1:{}/admin/models",
+            "http://127.0.0.1:{}/admin/provider-models",
             self.admin_port
         ))
         .set("cookie", &self.cookie)
@@ -458,9 +458,9 @@ impl Fixture {
             admin_post(
                 self.admin_port,
                 &self.cookie,
-                &format!("/admin/virtual-models/{}/defaults", self.vm_id),
+                &format!("/admin/frontend-models/{}/defaults", self.vm_id),
                 serde_json::json!({
-                    "model_id": self.model_id(name),
+                    "provider_model_id": self.provider_model_id(name),
                     // All weight on the primary so the head of the chain is not
                     // a coin flip: this test is about the *tail*.
                     "weight": if i == 0 { 100 } else { 0 },
@@ -471,7 +471,7 @@ impl Fixture {
     }
 }
 
-fn wait_for_virtual_model(port: u16, key: &str, model: &str) {
+fn wait_for_frontend_model(port: u16, key: &str, model: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let (status, body) = chat(
@@ -483,7 +483,7 @@ fn wait_for_virtual_model(port: u16, key: &str, model: &str) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("virtual model {model} never reached the snapshot: {status} {body}");
+            panic!("frontend model {model} never reached the snapshot: {status} {body}");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -516,10 +516,10 @@ async fn a_429_from_the_first_model_fails_over_to_the_next_in_the_chain() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix, p1, p2).await;
     fx.set_default_chain();
-    wait_for_virtual_model(port, &fx.key, &fx.virtual_name);
+    wait_for_frontend_model(port, &fx.key, &fx.frontend_name);
 
     let req = serde_json::json!({
-        "model": fx.virtual_name,
+        "model": fx.frontend_name,
         "messages": [{"role": "user", "content": "hello"}],
     });
 
@@ -581,7 +581,7 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix, p1, p2).await;
     fx.set_default_chain();
-    wait_for_virtual_model(port, &fx.key, &fx.virtual_name);
+    wait_for_frontend_model(port, &fx.key, &fx.frontend_name);
 
     // A second principal granted only the *primary* and the virtual name.
     let narrow_name = format!("fo-narrow-{suffix}");
@@ -595,7 +595,7 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
     grant_models(
         &pool,
         narrow_id,
-        &[&fx.primary, &fx.virtual_name],
+        &[&fx.primary, &fx.frontend_name],
         &format!("fo-narrow-role-{suffix}"),
     )
     .await;
@@ -613,7 +613,7 @@ async fn failover_only_reaches_models_the_caller_was_already_granted() {
     std::thread::sleep(Duration::from_secs(3));
 
     let req = serde_json::json!({
-        "model": fx.virtual_name,
+        "model": fx.frontend_name,
         "messages": [{"role": "user", "content": "hello"}],
     });
 
@@ -662,7 +662,7 @@ async fn a_header_rule_routes_batch_work_to_a_different_model() {
     let rule = admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{}/rules", fx.vm_id),
+        &format!("/admin/frontend-models/{}/rules", fx.vm_id),
         serde_json::json!({"position": 0, "headers": {"x-fastllm-tier": "batch"}}),
     );
     let rule_id = rule["id"].as_i64().unwrap();
@@ -671,19 +671,19 @@ async fn a_header_rule_routes_batch_work_to_a_different_model() {
         &cookie,
         &format!("/admin/rules/{rule_id}/targets"),
         serde_json::json!({
-            "model_id": fx.model_id(&fx.secondary), "weight": 100, "position": 0
+            "provider_model_id": fx.provider_model_id(&fx.secondary), "weight": 100, "position": 0
         }),
     );
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{}/defaults", fx.vm_id),
-        serde_json::json!({"model_id": fx.model_id(&fx.primary), "weight": 100, "position": 0}),
+        &format!("/admin/frontend-models/{}/defaults", fx.vm_id),
+        serde_json::json!({"provider_model_id": fx.provider_model_id(&fx.primary), "weight": 100, "position": 0}),
     );
-    wait_for_virtual_model(port, &fx.key, &fx.virtual_name);
+    wait_for_frontend_model(port, &fx.key, &fx.frontend_name);
 
     let req = serde_json::json!({
-        "model": fx.virtual_name,
+        "model": fx.frontend_name,
         "messages": [{"role": "user", "content": "hello"}],
     });
 
@@ -734,7 +734,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
     let vm = admin_post(
         admin_port,
         &cookie,
-        "/admin/virtual-models",
+        "/admin/frontend-models",
         serde_json::json!({"name": format!("vm-{suffix}")}),
     );
     let vm_id = vm["id"].as_i64().unwrap();
@@ -753,7 +753,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
         let (status, text) = admin_post_status(
             admin_port,
             &cookie,
-            &format!("/admin/virtual-models/{vm_id}/rules"),
+            &format!("/admin/frontend-models/{vm_id}/rules"),
             body.clone(),
         );
         assert_eq!(status, 400, "{body} should be refused, got {text}");
@@ -767,7 +767,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
     let (status, text) = admin_post_status(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{vm_id}/rules"),
+        &format!("/admin/frontend-models/{vm_id}/rules"),
         serde_json::json!({
             "position": 0, "after": "22:00", "before": "06:00", "days": [1, 2, 3, 4, 5],
             "utc_offset_minutes": 120, "stream": false, "max_inflight_per_backend": 4
@@ -781,7 +781,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
 /// Rule-level failover only reaches targets that rule named. A chain whose
 /// every model is unreachable has nowhere left to go — and a rule author cannot
 /// anticipate every way that happens. The fallback catches those, and it
-/// applies to a plain concrete model name too, not only a virtual one.
+/// applies to a plain provider model name too, not only a virtual one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres"]
 async fn a_fallback_model_catches_a_chain_that_ran_out() {
@@ -806,19 +806,19 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     let cookie = support::login_cookie(admin_port, &admin_name);
     let fx = provision(&pool, admin_port, &cookie, &suffix, p1, p2).await;
 
-    // No chain at all: the virtual model's only target is the dead primary.
+    // No chain at all: the frontend model's only target is the dead primary.
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{}/defaults", fx.vm_id),
+        &format!("/admin/frontend-models/{}/defaults", fx.vm_id),
         serde_json::json!({
-            "model_id": fx.model_id(&fx.primary), "weight": 100, "position": 0
+            "provider_model_id": fx.provider_model_id(&fx.primary), "weight": 100, "position": 0
         }),
     );
-    wait_for_virtual_model(port, &fx.key, &fx.virtual_name);
+    wait_for_frontend_model(port, &fx.key, &fx.frontend_name);
 
     let req = serde_json::json!({
-        "model": fx.virtual_name,
+        "model": fx.frontend_name,
         "messages": [{"role": "user", "content": "hello"}],
     });
 
@@ -827,12 +827,12 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     assert_eq!(status, 502, "a dead single-target chain should fail");
 
     // Name the second model as the deployment-wide fallback.
-    let rescue_id = fx.model_id(&fx.secondary);
+    let rescue_id = fx.provider_model_id(&fx.secondary);
     ureq::put(&format!(
         "http://127.0.0.1:{admin_port}/admin/fallback-model"
     ))
     .set("cookie", &cookie)
-    .send_json(serde_json::json!({"model_id": rescue_id}))
+    .send_json(serde_json::json!({"provider_model_id": rescue_id}))
     .expect("setting the fallback model");
     std::thread::sleep(Duration::from_secs(3));
 
@@ -842,7 +842,7 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     assert_eq!(served_by(&body), "rescue");
     assert!(rescue.hits() > before);
 
-    // It applies to a concrete model name too, not only a virtual one.
+    // It applies to a provider model name too, not only a virtual one.
     let (status, body) = chat(
         port,
         &fx.key,
@@ -855,7 +855,7 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     assert_eq!(
         served_by(&body),
         "rescue",
-        "a dead concrete model should also reach the fallback"
+        "a dead provider model should also reach the fallback"
     );
 
     // Clearing it restores the previous behaviour, so this is not a one-way door.
@@ -863,7 +863,7 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
         "http://127.0.0.1:{admin_port}/admin/fallback-model"
     ))
     .set("cookie", &cookie)
-    .send_json(serde_json::json!({"model_id": serde_json::Value::Null}))
+    .send_json(serde_json::json!({"provider_model_id": serde_json::Value::Null}))
     .expect("clearing the fallback model");
     std::thread::sleep(Duration::from_secs(3));
     let (status, _) = chat(

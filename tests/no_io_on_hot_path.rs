@@ -11,7 +11,7 @@
 //! Four functions are guarded, one per stage of the request path a caller
 //! actually waits on before the upstream call itself: `Snapshot::authenticate`
 //! / `Principal::may_invoke` (authorisation), `Limiter::check` (P2 rate
-//! limits), `VirtualModelDef::resolve` (P1 routing rules) and
+//! limits), `FrontendModelDef::resolve` (P1 routing rules) and
 //! `TailBuffer::push` (P3 usage accounting's hot-path side — the read-back
 //! in `TailBuffer::extract_usage` runs once at end of stream, off the
 //! per-frame path, and is deliberately not part of what this file pins).
@@ -52,7 +52,7 @@
 
 use fastllm_proxy::limiter::{Decision, Limiter, Limits};
 use fastllm_proxy::registry::Registry;
-use fastllm_proxy::routing::{RequestFacts, VirtualModelDef};
+use fastllm_proxy::routing::{FrontendModelDef, RequestFacts};
 use fastllm_proxy::snapshot::{hash_key, AuthError, KeyEntry, Principal, Snapshot};
 use fastllm_proxy::tail_buffer::TailBuffer;
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ const _LIMITER_CHECK_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
 /// to a type only that binding refers to.
 #[allow(dead_code)]
 type ResolveFn =
-    for<'a> fn(&'a VirtualModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Option<String>;
+    for<'a> fn(&'a FrontendModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Option<String>;
 
 /// The same check for the candidate-list form, which is what `proxy_request`
 /// actually calls now — `resolve` is a thin wrapper over it, so guarding only
@@ -108,17 +108,17 @@ type ResolveFn =
 /// refers to.
 #[allow(dead_code)]
 type ResolveCandidatesFn =
-    for<'a> fn(&'a VirtualModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Vec<String>;
+    for<'a> fn(&'a FrontendModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Vec<String>;
 
-/// Same reasoning again for `VirtualModelDef::resolve` (P1 routing rules,
+/// Same reasoning again for `FrontendModelDef::resolve` (P1 routing rules,
 /// `src/routing.rs`): were it `async fn`, or were `&Registry` swapped for a
 /// pool/client, this coercion fails to compile. `&Registry` itself stays in
 /// the signature deliberately — it is the in-memory backend-health view
 /// this function reads, the routing equivalent of `Snapshot` above, not a
 /// handle to anything that does I/O.
-const _VIRTUAL_MODEL_RESOLVE_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveFn = VirtualModelDef::resolve;
+const _VIRTUAL_MODEL_RESOLVE_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveFn = FrontendModelDef::resolve;
 const _VIRTUAL_MODEL_RESOLVE_CANDIDATES_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveCandidatesFn =
-    VirtualModelDef::resolve_candidates;
+    FrontendModelDef::resolve_candidates;
 
 /// Same reasoning again for `TailBuffer::push` (P3 usage accounting's
 /// per-frame side, `src/tail_buffer.rs`): were it `async fn`, or were it
@@ -222,7 +222,7 @@ fn limiter_check_body_contains_no_await_or_io_tokens() {
     assert_no_await_or_io_tokens(&body, "Limiter::check");
 }
 
-/// `VirtualModelDef::resolve_candidates` (P1 routing rules): matches rules and
+/// `FrontendModelDef::resolve_candidates` (P1 routing rules): matches rules and
 /// orders targets against the in-memory `Registry`/`RoutingRule` state built at
 /// snapshot time, per `src/routing.rs`'s doc comments — reconciled *into*
 /// the snapshot ahead of time, not looked up per request.
@@ -237,12 +237,12 @@ fn virtual_model_resolve_body_contains_no_await_or_io_tokens() {
 
     assert!(
         body.contains("order_candidates"),
-        "sanity check failed: `VirtualModelDef::resolve_candidates` no longer calls \
+        "sanity check failed: `FrontendModelDef::resolve_candidates` no longer calls \
          `order_candidates`; either the function was rewritten (update this \
          test to match) or the extraction above grabbed the wrong span"
     );
 
-    assert_no_await_or_io_tokens(&body, "VirtualModelDef::resolve_candidates");
+    assert_no_await_or_io_tokens(&body, "FrontendModelDef::resolve_candidates");
 }
 
 /// `TailBuffer::push` (P3 usage accounting's per-frame side): a bounded
@@ -309,7 +309,7 @@ fn authorisation_reads_only_the_snapshot() {
         keys,
         principals,
         models: vec![],
-        virtual_models: HashMap::new(),
+        frontend_models: HashMap::new(),
         open: false,
     };
 

@@ -65,7 +65,7 @@ pub fn import_role_name(principal: &str) -> String {
 
 /// Seed `providers`/`models` and `auth:` keys from a LiteLLM-format config.
 ///
-/// Idempotent on `(model_id, api_base, upstream_model)` for backends, on
+/// Idempotent on `(provider_model_id, api_base, upstream_model)` for backends, on
 /// `principals.name`, and on `api_keys.hash`: re-running this over the same
 /// file, or an edited one, converges the database on the file rather than
 /// duplicating it. That is what makes it safe to run against a live
@@ -253,13 +253,14 @@ pub async fn import(
         // out directly — no separate "count what changed" query needed.
         // Either spelling counts as this provider's, so a re-import converges
         // onto the row it created last time rather than adding a third.
-        let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM models WHERE provider_id = $1 AND name IN ($2, $3)")
-                .bind(provider_id)
-                .bind(name)
-                .bind(&qualified)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM provider_models WHERE provider_id = $1 AND name IN ($2, $3)",
+        )
+        .bind(provider_id)
+        .bind(name)
+        .bind(&qualified)
+        .fetch_optional(&mut *tx)
+        .await?;
         let pooled_here = occurrences.get(name.as_str()).copied().unwrap_or(1) > 1;
         let insert_name = if pooled_here {
             // Every one of them, not just the second: the bare name has to be
@@ -267,7 +268,7 @@ pub async fn import(
             qualified.clone()
         } else {
             let taken: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM models WHERE name = $1 AND provider_id <> $2)",
+                "SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1 AND provider_id <> $2)",
             )
             .bind(name)
             .bind(provider_id)
@@ -292,7 +293,7 @@ pub async fn import(
             // database would be a silent mismatch from the other direction.
             Some(id) => {
                 sqlx::query(
-                    "UPDATE models SET name = $2, upstream_model = $3, default_max_tokens = $4 \
+                    "UPDATE provider_models SET name = $2, upstream_model = $3, default_max_tokens = $4 \
                      WHERE id = $1",
                 )
                 .bind(id)
@@ -304,7 +305,7 @@ pub async fn import(
             }
             None => {
                 sqlx::query(
-                    "INSERT INTO models (name, provider_id, upstream_model, default_max_tokens) \
+                    "INSERT INTO provider_models (name, provider_id, upstream_model, default_max_tokens) \
                      VALUES ($1, $2, $3, $4)",
                 )
                 .bind(&insert_name)
@@ -323,7 +324,7 @@ pub async fn import(
     // something that no longer exists.
     for (client_name, targets) in &pooled {
         let vm_id: i64 = sqlx::query_scalar(
-            "INSERT INTO virtual_models (name, description) VALUES ($1, $2) \
+            "INSERT INTO frontend_models (name, description) VALUES ($1, $2) \
              ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
         )
         .bind(client_name)
@@ -334,7 +335,7 @@ pub async fn import(
         .await?;
         // Rebuilt rather than merged, so an edited file that drops a host
         // drops the target too instead of routing there forever.
-        sqlx::query("DELETE FROM virtual_model_defaults WHERE virtual_model_id = $1")
+        sqlx::query("DELETE FROM frontend_model_defaults WHERE frontend_model_id = $1")
             .bind(vm_id)
             .execute(&mut *tx)
             .await?;
@@ -343,8 +344,8 @@ pub async fn import(
             // hosts, and inventing one would be a change of behaviour
             // disguised as an import.
             sqlx::query(
-                "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position) \
-                 SELECT $1, id, 1, $3 FROM models WHERE name = $2",
+                "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position) \
+                 SELECT $1, id, 1, $3 FROM provider_models WHERE name = $2",
             )
             .bind(vm_id)
             .bind(target)
@@ -701,7 +702,7 @@ where
         "SELECT id, upstream_api_key FROM providers
          WHERE upstream_api_key IS NOT NULL
            AND ($1::bigint IS NULL
-                OR id = (SELECT provider_id FROM models WHERE id = $1))",
+                OR id = (SELECT provider_id FROM provider_models WHERE id = $1))",
     )
     .bind(only_model_id)
     .fetch_all(&mut *conn)
@@ -770,7 +771,7 @@ mod tests {
         // suite must never touch. `qwen3-import-test` is unambiguous.
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "qwen3-import-test-")
-            .track_prefix("virtual_models", "name", "qwen3-import-test-");
+            .track_prefix("frontend_models", "name", "qwen3-import-test-");
 
         let name = unique_name("qwen3-import-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
@@ -793,9 +794,9 @@ mod tests {
         // frontend model holds it and balances across both, the same shape
         // migration 0029 produces for a model that had two backends.
         let targets: Vec<String> = sqlx::query_scalar(
-            "SELECT m.name FROM virtual_models v \
-             JOIN virtual_model_defaults d ON d.virtual_model_id = v.id \
-             JOIN models m ON m.id = d.model_id \
+            "SELECT m.name FROM frontend_models v \
+             JOIN frontend_model_defaults d ON d.frontend_model_id = v.id \
+             JOIN provider_models m ON m.id = d.provider_model_id \
              WHERE v.name = $1 ORDER BY d.position",
         )
         .bind(&name)
@@ -815,8 +816,8 @@ mod tests {
         let again = import(&pool, &cfg, &test_key()).await.unwrap();
         assert_eq!(again.models, 0, "re-import must report no new model");
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM virtual_model_defaults d \
-             JOIN virtual_models v ON v.id = d.virtual_model_id WHERE v.name = $1",
+            "SELECT count(*) FROM frontend_model_defaults d \
+             JOIN frontend_models v ON v.id = d.frontend_model_id WHERE v.name = $1",
         )
         .bind(&name)
         .fetch_one(&pool)
@@ -870,7 +871,7 @@ mod tests {
             Option<i32>,
         ) = sqlx::query_as(
             "SELECT p.protocol, p.auth_header, p.auth_scheme, m.default_max_tokens
-               FROM models m JOIN providers p ON p.id = m.provider_id
+               FROM provider_models m JOIN providers p ON p.id = m.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -1006,7 +1007,7 @@ mod tests {
 
         let (protocol, max_tokens): (String, Option<i32>) = sqlx::query_as(
             "SELECT p.protocol, m.default_max_tokens
-               FROM models m JOIN providers p ON p.id = m.provider_id
+               FROM provider_models m JOIN providers p ON p.id = m.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -1042,15 +1043,16 @@ mod tests {
         // created on the second run, so it reports zero, not the table total.
         assert_eq!(second.models, 0, "re-import must not report a new model");
 
-        let model_id: i64 = sqlx::query_scalar("SELECT id FROM models WHERE name = $1")
-            .bind(&name)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let provider_model_id: i64 =
+            sqlx::query_scalar("SELECT id FROM provider_models WHERE name = $1")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM models WHERE id = $1 AND provider_id IS NOT NULL",
+            "SELECT count(*) FROM provider_models WHERE id = $1 AND provider_id IS NOT NULL",
         )
-        .bind(model_id)
+        .bind(provider_model_id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1075,7 +1077,7 @@ mod tests {
         import(&pool, &cfg, &key).await.unwrap();
 
         let stored: Vec<u8> = sqlx::query_scalar(
-            "SELECT p.upstream_api_key FROM models m
+            "SELECT p.upstream_api_key FROM provider_models m
              JOIN providers p ON p.id = m.provider_id
              WHERE m.name = $1",
         )
@@ -1516,8 +1518,8 @@ mod tests {
         .fetch_one(&mut *tx)
         .await
         .unwrap();
-        let model_id: i64 = sqlx::query_scalar(
-            "INSERT INTO models (name, provider_id, upstream_model) \
+        let provider_model_id: i64 = sqlx::query_scalar(
+            "INSERT INTO provider_models (name, provider_id, upstream_model) \
              VALUES ($1, $2, 'legacy-model') RETURNING id",
         )
         .bind(&name)
@@ -1530,7 +1532,7 @@ mod tests {
         // real providers encrypted under the deployment's key, which this
         // test's throwaway key cannot decrypt — and the unscoped sweep is
         // right to refuse those rather than guess.
-        let migrated = reencrypt_plaintext_backends_scoped(&mut tx, &key, Some(model_id))
+        let migrated = reencrypt_plaintext_backends_scoped(&mut tx, &key, Some(provider_model_id))
             .await
             .unwrap();
         assert!(migrated >= 1);
@@ -1549,9 +1551,10 @@ mod tests {
         );
 
         // Running it again must be a no-op: the row is already ciphertext.
-        let migrated_again = reencrypt_plaintext_backends_scoped(&pool, &key, Some(model_id))
-            .await
-            .unwrap();
+        let migrated_again =
+            reencrypt_plaintext_backends_scoped(&pool, &key, Some(provider_model_id))
+                .await
+                .unwrap();
         let stored_again: Vec<u8> =
             sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
                 .bind(provider_id)

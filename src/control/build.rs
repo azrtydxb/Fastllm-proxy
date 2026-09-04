@@ -7,7 +7,7 @@
 use crate::control::gcp;
 use crate::control::secrets::{self, EncryptionKey};
 use crate::protocol::Protocol;
-use crate::routing::{MatchConditionJson, RoutingRule, VirtualModelDef, WeightedTarget};
+use crate::routing::{FrontendModelDef, MatchConditionJson, RoutingRule, WeightedTarget};
 use crate::snapshot::PromptClassDef;
 use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
@@ -159,7 +159,7 @@ pub async fn build_snapshot_with(
     // wide stops being readable at the call site.
     type ModelRow = (i64, String, Option<i32>, Option<i64>, Option<String>);
     let model_rows: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, cache_ttl_seconds, context_length, policy FROM models ORDER BY name",
+        "SELECT id, name, cache_ttl_seconds, context_length, policy FROM provider_models ORDER BY name",
     )
     .fetch_all(pool)
     .await?;
@@ -189,7 +189,7 @@ pub async fn build_snapshot_with(
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
         "SELECT m.id, p.api_base, m.upstream_model, p.upstream_api_key, p.protocol, \
          p.auth_header, p.auth_scheme, m.default_max_tokens, p.credential_kind \
-         FROM models m JOIN providers p ON p.id = m.provider_id",
+         FROM provider_models m JOIN providers p ON p.id = m.provider_id",
     )
     .fetch_all(pool)
     .await?;
@@ -460,9 +460,9 @@ pub async fn build_snapshot_with(
         .bind(id)
         .fetch_all(pool)
         .await?;
-        // Deliberately *not* widened to include virtual model names — see
+        // Deliberately *not* widened to include frontend model names — see
         // the authorisation decision in `proxy::resolve_target_model`'s doc
-        // comment: a virtual model routes access, it does not grant it, so
+        // comment: a frontend model routes access, it does not grant it, so
         // `allowed_models` only ever needs to answer "may this principal
         // invoke this *concrete* model", the same question it has always
         // answered.
@@ -500,7 +500,7 @@ pub async fn build_snapshot_with(
         );
     }
 
-    let virtual_models = build_virtual_models(pool).await?;
+    let frontend_models = build_virtual_models(pool).await?;
 
     type KeyRow = (Vec<u8>, i64, Option<chrono::DateTime<chrono::Utc>>, bool);
     let key_rows: Vec<KeyRow> =
@@ -527,7 +527,7 @@ pub async fn build_snapshot_with(
 
     let prompt_classes = build_prompt_classes(pool, embed).await?;
     let fallback_model: Option<String> =
-        sqlx::query_scalar("SELECT name FROM models WHERE is_fallback LIMIT 1")
+        sqlx::query_scalar("SELECT name FROM provider_models WHERE is_fallback LIMIT 1")
             .fetch_optional(pool)
             .await?;
 
@@ -536,7 +536,7 @@ pub async fn build_snapshot_with(
         keys,
         principals,
         models,
-        virtual_models,
+        frontend_models,
         prompt_classes,
         mcp_servers,
         a2a_agents,
@@ -814,8 +814,8 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
     Ok(budgets)
 }
 
-/// Resolve `virtual_models`/`routing_rules`/`rule_targets`/
-/// `virtual_model_defaults` into the pre-evaluated form `crate::routing`
+/// Resolve `frontend_models`/`routing_rules`/`rule_targets`/
+/// `frontend_model_defaults` into the pre-evaluated form `crate::routing`
 /// consumes.
 ///
 /// Three flat queries rather than one deep join, same rationale as the
@@ -823,36 +823,36 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
 /// rebuild against a handful of rows, and three queries assembled in memory
 /// stay far easier to follow than one join across five tables with `weight`
 /// and `position` columns that would otherwise need disambiguating aliases.
-async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, VirtualModelDef>> {
-    let vm_rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM virtual_models")
+async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, FrontendModelDef>> {
+    let vm_rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM frontend_models")
         .fetch_all(pool)
         .await?;
 
     type RuleRow = (i64, i64, serde_json::Value);
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, virtual_model_id, match_json FROM routing_rules ORDER BY virtual_model_id, position",
+        "SELECT id, frontend_model_id, match_json FROM routing_rules ORDER BY frontend_model_id, position",
     )
     .fetch_all(pool)
     .await?;
 
-    // `model_id` is resolved to the model's *name* here, once, rather than
+    // `provider_model_id` is resolved to the model's *name* here, once, rather than
     // carried as an id into `crate::routing`: the request path matches
     // targets by the same string it already has (the model name off the
     // wire/body), and routing types staying name-based is what lets
-    // `VirtualModelDef::resolve` hand a target straight to
+    // `FrontendModelDef::resolve` hand a target straight to
     // `Registry::pool_has_healthy` with no id-to-name lookup on the hot path.
-    type TargetRow = (i64, String, i32, i32); // owning id (rule_id or virtual_model_id), model name, weight, position
+    type TargetRow = (i64, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
     let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
         "SELECT rt.rule_id, m.name, rt.weight, rt.position
-         FROM rule_targets rt JOIN models m ON m.id = rt.model_id
+         FROM rule_targets rt JOIN provider_models m ON m.id = rt.provider_model_id
          ORDER BY rt.rule_id, rt.position",
     )
     .fetch_all(pool)
     .await?;
     let default_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.virtual_model_id, m.name, vd.weight, vd.position
-         FROM virtual_model_defaults vd JOIN models m ON m.id = vd.model_id
-         ORDER BY vd.virtual_model_id, vd.position",
+        "SELECT vd.frontend_model_id, m.name, vd.weight, vd.position
+         FROM frontend_model_defaults vd JOIN provider_models m ON m.id = vd.provider_model_id
+         ORDER BY vd.frontend_model_id, vd.position",
     )
     .fetch_all(pool)
     .await?;
@@ -873,11 +873,11 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, V
             .collect()
     };
 
-    let mut virtual_models = HashMap::new();
+    let mut frontend_models = HashMap::new();
     for (vm_id, vm_name) in vm_rows {
         let rules = rule_rows
             .iter()
-            .filter(|(_, virtual_model_id, _)| *virtual_model_id == vm_id)
+            .filter(|(_, frontend_model_id, _)| *frontend_model_id == vm_id)
             .filter_map(|(rule_id, _, match_json)| {
                 let parsed: MatchConditionJson = match serde_json::from_value(match_json.clone()) {
                     Ok(m) => m,
@@ -891,7 +891,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, V
                         // undecryptable backend.
                         tracing::error!(
                             error = %e,
-                            virtual_model = %vm_name,
+                            frontend_model = %vm_name,
                             rule_id,
                             "dropping routing rule: match_json failed to parse; excluded from \
                              this snapshot rather than matching every request or failing the \
@@ -907,16 +907,16 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, V
             })
             .collect();
         let default_targets = targets_for(vm_id, &default_target_rows);
-        virtual_models.insert(
+        frontend_models.insert(
             vm_name.clone(),
-            VirtualModelDef {
+            FrontendModelDef {
                 name: vm_name,
                 rules,
                 default_targets,
             },
         );
     }
-    Ok(virtual_models)
+    Ok(frontend_models)
 }
 
 #[cfg(test)]
@@ -1074,7 +1074,7 @@ mod tests {
 
         let broken_model = unique_name("undecryptable-model");
         sqlx::query(
-            "INSERT INTO models (name, provider_id, upstream_model) VALUES ($1, $2, 'broken')",
+            "INSERT INTO provider_models (name, provider_id, upstream_model) VALUES ($1, $2, 'broken')",
         )
         .bind(&broken_model)
         .bind(broken_provider_id)
@@ -1086,7 +1086,7 @@ mod tests {
         // rather than merely "the build did not panic".
         let other_model = unique_name("unrelated-model");
         sqlx::query(
-            "INSERT INTO models (name, provider_id, upstream_model) VALUES ($1, $2, 'healthy')",
+            "INSERT INTO provider_models (name, provider_id, upstream_model) VALUES ($1, $2, 'healthy')",
         )
         .bind(&other_model)
         .bind(healthy_provider_id)
@@ -1159,8 +1159,8 @@ mod tests {
     }
 
     /// `build_virtual_models` (via `build_snapshot`) resolves all four P1
-    /// tables — `virtual_models`, `routing_rules`, `rule_targets`,
-    /// `virtual_model_defaults` — into the pre-evaluated form
+    /// tables — `frontend_models`, `routing_rules`, `rule_targets`,
+    /// `frontend_model_defaults` — into the pre-evaluated form
     /// `crate::routing` reads. This exercises every one of them together,
     /// against the real schema from `migrations/0008_virtual_models_and_routing_rules.sql`.
     #[tokio::test]
@@ -1173,21 +1173,21 @@ mod tests {
             .track_prefix("models", "name", "vm-primary")
             .track_prefix("models", "name", "vm-secondary")
             .track_prefix("models", "name", "vm-fallback")
-            .track_prefix("virtual_models", "name", "vm-canary");
+            .track_prefix("frontend_models", "name", "vm-canary");
 
         let primary = unique_name("vm-primary");
         let secondary = unique_name("vm-secondary");
         let fallback = unique_name("vm-fallback");
         for name in [&primary, &secondary, &fallback] {
-            sqlx::query("INSERT INTO models (name) VALUES ($1)")
+            sqlx::query("INSERT INTO provider_models (name) VALUES ($1)")
                 .bind(name)
                 .execute(&pool)
                 .await
                 .unwrap();
         }
-        let model_id: HashMap<String, i64> = {
+        let provider_model_id: HashMap<String, i64> = {
             let rows: Vec<(i64, String)> =
-                sqlx::query_as("SELECT id, name FROM models WHERE name = ANY($1)")
+                sqlx::query_as("SELECT id, name FROM provider_models WHERE name = ANY($1)")
                     .bind(vec![primary.clone(), secondary.clone(), fallback.clone()])
                     .fetch_all(&pool)
                     .await
@@ -1197,7 +1197,7 @@ mod tests {
 
         let vm_name = unique_name("vm-canary");
         let vm_id: i64 =
-            sqlx::query_scalar("INSERT INTO virtual_models (name) VALUES ($1) RETURNING id")
+            sqlx::query_scalar("INSERT INTO frontend_models (name) VALUES ($1) RETURNING id")
                 .bind(&vm_name)
                 .fetch_one(&pool)
                 .await
@@ -1205,7 +1205,7 @@ mod tests {
 
         let match_json = serde_json::json!({ "roles": ["canary"] });
         let rule_id: i64 = sqlx::query_scalar(
-            "INSERT INTO routing_rules (virtual_model_id, position, match_json)
+            "INSERT INTO routing_rules (frontend_model_id, position, match_json)
              VALUES ($1, 0, $2) RETURNING id",
         )
         .bind(vm_id)
@@ -1214,36 +1214,36 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO rule_targets (rule_id, model_id, weight, position) VALUES ($1, $2, 70, 0)",
+            "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position) VALUES ($1, $2, 70, 0)",
         )
         .bind(rule_id)
-        .bind(model_id[&primary])
+        .bind(provider_model_id[&primary])
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO rule_targets (rule_id, model_id, weight, position) VALUES ($1, $2, 30, 1)",
+            "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position) VALUES ($1, $2, 30, 1)",
         )
         .bind(rule_id)
-        .bind(model_id[&secondary])
+        .bind(provider_model_id[&secondary])
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position)
+            "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position)
              VALUES ($1, $2, 100, 0)",
         )
         .bind(vm_id)
-        .bind(model_id[&fallback])
+        .bind(provider_model_id[&fallback])
         .execute(&pool)
         .await
         .unwrap();
 
         let snapshot = build_snapshot(&pool, &key).await.unwrap();
         let vm = snapshot
-            .virtual_models
+            .frontend_models
             .get(&vm_name)
-            .expect("the virtual model must be in the snapshot");
+            .expect("the frontend model must be in the snapshot");
 
         assert_eq!(vm.rules.len(), 1);
         let rule = &vm.rules[0];

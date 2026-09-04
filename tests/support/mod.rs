@@ -1,5 +1,5 @@
 //! Cleanup helper for the Postgres-backed integration tests in `tests/`
-//! (`budgets.rs`, `virtual_models.rs`, and any other that touches the
+//! (`budgets.rs`, `frontend_models.rs`, and any other that touches the
 //! database). Identical in spirit to `src/control/test_support.rs`, which
 //! the unit tests in `src/control/*.rs` use instead — that module is
 //! `#[cfg(test)]`-only and not visible to these integration test binaries
@@ -45,7 +45,7 @@ pub const TEST_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO
 /// gated on both a valid session (`require_session`) *and* a permission the
 /// matched route requires (`RequirePermission` — see `src/control/api.rs`),
 /// so a caller of this helper that meant "give me a working admin session
-/// for some other test" (`budgets.rs`, `virtual_models.rs`) would otherwise
+/// for some other test" (`budgets.rs`, `frontend_models.rs`) would otherwise
 /// start getting 403s that test was never meant to exercise. A test that
 /// specifically wants a *narrower* principal — the RBAC finding this helper
 /// predates — grants its own role directly instead of using this one; see
@@ -102,9 +102,9 @@ pub fn login_cookie(admin_port: u16, name: &str) -> String {
 }
 
 /// Deletes tracked rows on drop. Foreign keys from `models`,
-/// `virtual_model`-family tables, `api_keys`, `principal_roles`, `limits`,
+/// `frontend_model`-family tables, `api_keys`, `principal_roles`, `limits`,
 /// `budgets` and `usage_events` are all `ON DELETE CASCADE` back to
-/// `models`/`virtual_models`/`principals` (see the migrations), so tracking
+/// `models`/`frontend_models`/`principals` (see the migrations), so tracking
 /// just the parent row is enough — the join/child rows go with it.
 pub struct TestCleanup {
     // (table, column, pattern) in the order they should be deleted.

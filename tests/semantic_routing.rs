@@ -61,7 +61,7 @@ fn suffix(port: u16) -> String {
 fn cleanup_for(suffix: &str) -> TestCleanup {
     TestCleanup::new()
         .track_suffix("models", "name", suffix)
-        .track_suffix("virtual_models", "name", suffix)
+        .track_suffix("frontend_models", "name", suffix)
         .track_suffix("prompt_classes", "name", suffix)
         .track_suffix("principals", "name", suffix)
         .track_suffix("api_keys", "name", suffix)
@@ -226,7 +226,7 @@ async fn grant_all(pool: &sqlx::PgPool, principal_id: i64, role_name: &str) {
 
 struct Fixture {
     key: String,
-    virtual_name: String,
+    frontend_name: String,
     /// Only read by the classification test, which is gated on the
     /// `classifier` feature — without it, nothing routes to the coding model
     /// and there is nothing to assert against.
@@ -235,7 +235,7 @@ struct Fixture {
     default_base: String,
 }
 
-/// Two concrete models on unreachable addresses, a virtual model in front, and
+/// Two provider models on unreachable addresses, a frontend model in front, and
 /// a principal that may invoke everything.
 async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &str) -> Fixture {
     let coding_base = "http://127.0.0.1:9911/v1".to_string();
@@ -249,25 +249,25 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         let m = admin_post(
             admin_port,
             cookie,
-            "/admin/models",
+            "/admin/provider-models",
             serde_json::json!({"name": name, "description": "semantic routing e2e"}),
         );
         let id = m["id"].as_i64().unwrap();
         admin_post(
             admin_port,
             cookie,
-            &format!("/admin/models/{id}/backends"),
+            &format!("/admin/provider-models/{id}/backends"),
             serde_json::json!({"api_base": base, "upstream_model": name}),
         );
         ids.push(id);
     }
 
-    let virtual_name = format!("auto-{suffix}");
+    let frontend_name = format!("auto-{suffix}");
     let vm = admin_post(
         admin_port,
         cookie,
-        "/admin/virtual-models",
-        serde_json::json!({"name": virtual_name}),
+        "/admin/frontend-models",
+        serde_json::json!({"name": frontend_name}),
     );
     let vm_id = vm["id"].as_i64().unwrap();
 
@@ -292,7 +292,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
     let rule = admin_post(
         admin_port,
         cookie,
-        &format!("/admin/virtual-models/{vm_id}/rules"),
+        &format!("/admin/frontend-models/{vm_id}/rules"),
         serde_json::json!({"position": 0, "class": format!("horticulture-{suffix}")}),
     );
     let rule_id = rule["id"].as_i64().unwrap();
@@ -300,18 +300,18 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         admin_port,
         cookie,
         &format!("/admin/rules/{rule_id}/targets"),
-        serde_json::json!({"model_id": ids[0], "weight": 100, "position": 0}),
+        serde_json::json!({"provider_model_id": ids[0], "weight": 100, "position": 0}),
     );
     admin_post(
         admin_port,
         cookie,
-        &format!("/admin/virtual-models/{vm_id}/defaults"),
-        serde_json::json!({"model_id": ids[1], "weight": 100, "position": 0}),
+        &format!("/admin/frontend-models/{vm_id}/defaults"),
+        serde_json::json!({"provider_model_id": ids[1], "weight": 100, "position": 0}),
     );
 
     Fixture {
         key: k["key"].as_str().unwrap().to_string(),
-        virtual_name,
+        frontend_name,
         coding_base,
         default_base,
     }
@@ -398,7 +398,7 @@ fn wait_for_routing(port: u16, key: &str, model: &str) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("virtual model {model} never became routable: {body}");
+            panic!("frontend model {model} never became routable: {body}");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -442,7 +442,7 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
             }),
         );
     }
-    wait_for_routing(port, &fx.key, &fx.virtual_name);
+    wait_for_routing(port, &fx.key, &fx.frontend_name);
     wait_for_routable_classes(
         admin_port,
         &cookie,
@@ -461,7 +461,7 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
     // ~21k labelled examples in `docs/classifier/measurements.md`, and asserting it here
     // would make this test's result depend on which other classes happen to
     // exist in a shared database.
-    let matched = routed_to(port, &fx.key, &fx.virtual_name, HORTICULTURE_EXAMPLES[0]);
+    let matched = routed_to(port, &fx.key, &fx.frontend_name, HORTICULTURE_EXAMPLES[0]);
     assert!(
         matched.contains(&fx.coding_base),
         "a horticulture question should reach the class's model, got: {matched}"
@@ -470,7 +470,7 @@ async fn a_prompt_class_routes_a_coding_question_away_from_the_default() {
     // Classifies cleanly as `maritime`, which no rule names — so it falls
     // through to the default for a reason this test controls, rather than by
     // hoping nothing matches.
-    let unmatched = routed_to(port, &fx.key, &fx.virtual_name, MARITIME_EXAMPLES[0]);
+    let unmatched = routed_to(port, &fx.key, &fx.frontend_name, MARITIME_EXAMPLES[0]);
     assert!(
         unmatched.contains(&fx.default_base),
         "a prompt outside the class should fall through to the default, got: {unmatched}"
@@ -524,7 +524,7 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
             ],
         }),
     );
-    wait_for_routing(port, &fx.key, &fx.virtual_name);
+    wait_for_routing(port, &fx.key, &fx.frontend_name);
     // No classifier here, so the class never becomes routable — wait for the
     // snapshot to carry the class at all, then assert it does not match.
     std::thread::sleep(Duration::from_secs(3));
@@ -532,7 +532,7 @@ async fn without_a_classifier_a_class_rule_falls_through_rather_than_failing() {
     let body = routed_to(
         port,
         &fx.key,
-        &fx.virtual_name,
+        &fx.frontend_name,
         "Why does my Python script raise a KeyError?",
     );
     assert!(

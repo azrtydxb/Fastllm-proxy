@@ -8,8 +8,8 @@
 use crate::limiter::Limits;
 use crate::protocol::Protocol;
 use crate::routing::{
-    BudgetMatch, CallerMatch, ClassMatch, HeaderMatch, LoadMatch, RoutingRule, RuleConditions,
-    ShapeMatch, TimeMatch, VirtualModelDef, WeightedTarget,
+    BudgetMatch, CallerMatch, ClassMatch, FrontendModelDef, HeaderMatch, LoadMatch, RoutingRule,
+    RuleConditions, ShapeMatch, TimeMatch, WeightedTarget,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -267,12 +267,12 @@ pub struct Snapshot {
     pub keys: HashMap<[u8; 32], KeyEntry>,
     pub principals: HashMap<PrincipalId, Principal>,
     pub models: Vec<ModelDef>,
-    /// Virtual models, keyed by their client-facing name for an O(1) lookup
+    /// Frontend models, keyed by their client-facing name for an O(1) lookup
     /// on the request path before falling back to treating the requested
-    /// name as a concrete model (`proxy::resolve_model`). Empty in `File`
-    /// mode: virtual models are a control-plane-only feature (P1 depends on
+    /// name as a provider model (`proxy::resolve_model`). Empty in `File`
+    /// mode: frontend models are a control-plane-only feature (P1 depends on
     /// P0's database), and a bare YAML config has nowhere to store rules.
-    pub virtual_models: HashMap<String, VirtualModelDef>,
+    pub frontend_models: HashMap<String, FrontendModelDef>,
     /// Prompt classes with their centroids, already averaged and normalised by
     /// the control plane. Empty unless an operator defined classes *and* the
     /// build carries a classifier — see `crate::classifier`.
@@ -348,7 +348,7 @@ pub struct WireSnapshot {
     /// old last-known-good cache written by a previous version rather than
     /// failing to deserialise it outright.
     #[serde(default)]
-    pub virtual_models: Vec<WireVirtualModel>,
+    pub frontend_models: Vec<WireFrontendModel>,
     #[serde(default)]
     pub prompt_classes: Vec<WirePromptClass>,
     /// Same `#[serde(default)]` rationale as every field above it: a proxy
@@ -380,7 +380,7 @@ pub struct WirePrincipal {
     pub roles: Vec<String>,
     /// Absent from a snapshot cached on disk before this field existed —
     /// `#[serde(default)]` lets an `Http`-mode proxy read an old
-    /// last-known-good cache the same way `virtual_models` already does.
+    /// last-known-good cache the same way `frontend_models` already does.
     #[serde(default)]
     pub limits: Option<WireLimits>,
     /// Absent from a snapshot cached on disk before this field existed —
@@ -554,7 +554,7 @@ fn default_tier() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireVirtualModel {
+pub struct WireFrontendModel {
     pub name: String,
     pub rules: Vec<WireRoutingRule>,
     pub default_targets: Vec<WireWeightedTarget>,
@@ -581,7 +581,7 @@ impl Snapshot {
         self.keys == other.keys
             && self.principals == other.principals
             && self.models == other.models
-            && self.virtual_models == other.virtual_models
+            && self.frontend_models == other.frontend_models
             && self.open == other.open
     }
 
@@ -727,10 +727,10 @@ impl Snapshot {
             // also why /snapshot must be TLS.
             mcp_servers: self.mcp_servers.values().cloned().collect(),
             a2a_agents: self.a2a_agents.values().cloned().collect(),
-            virtual_models: self
-                .virtual_models
+            frontend_models: self
+                .frontend_models
                 .values()
-                .map(|vm| WireVirtualModel {
+                .map(|vm| WireFrontendModel {
                     name: vm.name.clone(),
                     rules: vm
                         .rules
@@ -910,13 +910,13 @@ impl Snapshot {
                 .into_iter()
                 .map(|a| (a.name.clone(), a))
                 .collect(),
-            virtual_models: w
-                .virtual_models
+            frontend_models: w
+                .frontend_models
                 .into_iter()
                 .map(|vm| {
                     (
                         vm.name.clone(),
-                        VirtualModelDef {
+                        FrontendModelDef {
                             name: vm.name,
                             rules: vm
                                 .rules
@@ -1001,7 +1001,7 @@ impl Snapshot {
                 .collect(),
             principals: principals.into_iter().map(|p| (p.id, p)).collect(),
             models,
-            virtual_models: HashMap::new(),
+            frontend_models: HashMap::new(),
             prompt_classes: Vec::new(),
             mcp_servers: Default::default(),
             a2a_agents: Default::default(),
@@ -1303,7 +1303,7 @@ mod tests {
             keys,
             principals: vec![],
             models: vec![],
-            virtual_models: vec![],
+            frontend_models: vec![],
             open: false,
         };
 

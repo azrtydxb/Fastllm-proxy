@@ -535,7 +535,7 @@ impl Registry {
     /// Whether `model_name` has a pool with at least one backend currently in
     /// rotation.
     ///
-    /// Used by virtual-model target selection (`crate::routing`) to decide
+    /// Used by frontend-model target selection (`crate::routing`) to decide
     /// whether a target is "unhealthy or saturated" enough to fall through to
     /// the next one in its chain. A model with no pool at all (misconfigured
     /// target, or a name that does not exist) counts the same as one with

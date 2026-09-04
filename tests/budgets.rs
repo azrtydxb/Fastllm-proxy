@@ -9,7 +9,7 @@
 //!   over-budget refuses, under-budget passes — without needing Postgres or
 //!   a real upstream.
 //! - `--role all` against real Postgres and a real (mock) upstream, in the
-//!   style of `tests/virtual_models.rs`: a principal completes one request,
+//!   style of `tests/frontend_models.rs`: a principal completes one request,
 //!   the mock upstream's real `usage` object is read back through the tail
 //!   buffer and reported, the control plane folds it into `budgets`, and the
 //!   *next* request is refused — proving the whole after-the-fact loop the
@@ -294,7 +294,7 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     // cleanup line placed after the assertions instead of in a `Drop` guard
     // would leave rows behind on every failing run. Tracked by the same
     // literal tag `unique_name` below prefixes each name with, since
-    // (unlike `virtual_models.rs`) each call mints its own timestamp rather
+    // (unlike `frontend_models.rs`) each call mints its own timestamp rather
     // than sharing one suffix.
     let _cleanup = TestCleanup::new()
         .track_prefix("models", "name", "budget-e2e-model")
@@ -310,14 +310,14 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     let model = admin_post(
         admin_port,
         &cookie,
-        "/admin/models",
+        "/admin/provider-models",
         serde_json::json!({ "name": model_name }),
     );
-    let model_id = model["id"].as_i64().unwrap();
+    let provider_model_id = model["id"].as_i64().unwrap();
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/models/{model_id}/backends"),
+        &format!("/admin/provider-models/{provider_model_id}/backends"),
         serde_json::json!({ "api_base": format!("http://127.0.0.1:{upstream_port}/v1") }),
     );
 

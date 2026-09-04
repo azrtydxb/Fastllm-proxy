@@ -1,4 +1,4 @@
-//! Virtual models: a client-facing name backed by an ordered list of rules.
+//! Frontend models: a client-facing name backed by an ordered list of rules.
 //!
 //! Everything here is pre-resolved into the [`Snapshot`](crate::snapshot::Snapshot)
 //! by the control plane, exactly like RBAC grants are (`control::build::flatten_grants`).
@@ -26,12 +26,12 @@
 //!
 //! ## No recursion
 //!
-//! A virtual model's targets are concrete model names only — `rule_targets`
-//! and `virtual_model_defaults` reference `models.id`, not `virtual_models.id`,
-//! so a virtual model targeting another virtual model cannot even be
+//! A frontend model's targets are provider model names only — `rule_targets`
+//! and `frontend_model_defaults` reference `models.id`, not `frontend_models.id`,
+//! so a frontend model targeting another frontend model cannot even be
 //! expressed in the schema. That sidesteps cycle detection and an
-//! evaluation-depth limit entirely, for a feature (virtual models chaining to
-//! virtual models) nobody asked for.
+//! evaluation-depth limit entirely, for a feature (frontend models chaining to
+//! frontend models) nobody asked for.
 
 use crate::registry::Registry;
 use crate::snapshot::{Principal, PrincipalId};
@@ -67,7 +67,7 @@ pub fn estimate_prompt_tokens(body_len: usize) -> u64 {
 ///
 /// `weight` is a relative share, not a percentage that has to sum to 100 —
 /// two targets weighted 1 and 1 split evenly, 1 and 3 split 25/75. This
-/// mirrors how `rule_targets`/`virtual_model_defaults` store it, and it means
+/// mirrors how `rule_targets`/`frontend_model_defaults` store it, and it means
 /// adding a third target never requires rebalancing the other two's numbers
 /// to keep them summing to 100.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,7 +539,7 @@ pub struct RuleConditions {
     pub class: ClassMatch,
 }
 
-/// One rule in a virtual model's ordered chain: match conditions AND'd
+/// One rule in a frontend model's ordered chain: match conditions AND'd
 /// together, and the targets to route to when they all hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutingRule {
@@ -607,18 +607,18 @@ impl RoutingRule {
 
 /// A client-facing name with an ordered list of rules and a fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct VirtualModelDef {
+pub struct FrontendModelDef {
     pub name: String,
     /// Evaluated in order; the first whose conditions match wins.
     pub rules: Vec<RoutingRule>,
     /// Used when no rule matches. Never consulted otherwise, even if a
     /// matching rule's own targets turn out to be unroutable (see
-    /// [`VirtualModelDef::resolve`]'s doc comment).
+    /// [`FrontendModelDef::resolve`]'s doc comment).
     pub default_targets: Vec<WeightedTarget>,
 }
 
-impl VirtualModelDef {
-    /// Resolve to one concrete model name.
+impl FrontendModelDef {
+    /// Resolve to one provider model name.
     ///
     /// `prefix_hash` must be the same hash the request's backend routing
     /// uses (`Router::prefix_key`) — reusing it, rather than computing a
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn the_first_matching_rule_wins() {
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn a_later_rule_is_used_when_an_earlier_one_does_not_match() {
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
@@ -1038,7 +1038,7 @@ mod tests {
     fn the_same_prefix_always_resolves_to_the_same_target() {
         let targets = vec![target("a", 30), target("b", 70)];
         let reg = registry_with(&["a", "b"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: targets,
@@ -1058,7 +1058,7 @@ mod tests {
     fn distinct_prefixes_distribute_close_to_the_configured_weights() {
         let targets = vec![target("a", 1), target("b", 3)];
         let reg = registry_with(&["a", "b"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: targets,
@@ -1099,7 +1099,7 @@ mod tests {
     fn an_unhealthy_primary_falls_through_to_the_next_target() {
         let reg = registry_with(&["primary", "secondary"]);
         reg.pool("primary").unwrap()[0].mark_probe_failed(1);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             // weight 100 on primary so `choose_weighted` always picks it
@@ -1117,7 +1117,7 @@ mod tests {
     #[test]
     fn a_healthy_primary_is_not_bypassed() {
         let reg = registry_with(&["primary", "secondary"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
@@ -1134,7 +1134,7 @@ mod tests {
         let reg = registry_with(&["primary", "secondary"]);
         reg.pool("primary").unwrap()[0].mark_probe_failed(1);
         reg.pool("secondary").unwrap()[0].mark_probe_failed(1);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn a_saturated_local_rule_spills_to_the_next_rule() {
         let reg = registry_with(&["local", "cloud"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![
                 rule_with(
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn resolve_candidates_returns_the_whole_chain_not_just_the_winner() {
         let reg = registry_with(&["primary", "secondary"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 0)],
@@ -1537,7 +1537,7 @@ mod tests {
     #[test]
     fn a_candidate_chain_never_repeats_a_model() {
         let reg = registry_with(&["a"]);
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("a", 1), target("a", 1)],
@@ -1602,8 +1602,8 @@ mod tests {
     // --- default fallback -------------------------------------------
 
     #[test]
-    fn no_matching_rule_falls_back_to_the_virtual_models_defaults() {
-        let vm = VirtualModelDef {
+    fn no_matching_rule_falls_back_to_the_frontend_models_defaults() {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
                 conditions: RuleConditions {
@@ -1631,7 +1631,7 @@ mod tests {
 
     #[test]
     fn a_matched_rule_with_no_routable_target_does_not_fall_through_to_defaults() {
-        let vm = VirtualModelDef {
+        let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
                 conditions: RuleConditions::default(),

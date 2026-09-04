@@ -23,9 +23,9 @@
 #![allow(dead_code)]
 
 /// Deletes tracked rows on drop. Foreign keys from `models`,
-/// `virtual_model`-family tables, `api_keys`, `principal_roles`, `limits`,
+/// `frontend_model`-family tables, `api_keys`, `principal_roles`, `limits`,
 /// `budgets` and `usage_events` are all `ON DELETE CASCADE` back to
-/// `models`/`virtual_models`/`principals` (see the migrations), so tracking
+/// `models`/`frontend_models`/`principals` (see the migrations), so tracking
 /// just the parent row is enough — the join/child rows go with it.
 pub struct TestCleanup {
     // (table, column, pattern) in the order they should be deleted.

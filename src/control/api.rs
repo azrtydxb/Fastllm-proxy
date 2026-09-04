@@ -609,7 +609,7 @@ struct ProviderView {
     /// Which catalogue entry this came from, absent for a hand-typed address.
     catalogue_key: Option<String>,
     /// How many provider models this provider serves. The count rather than
-    /// the models themselves: `GET /admin/models` already carries those, and a
+    /// the models themselves: `GET /admin/provider-models` already carries those, and a
     /// provider fronting a few hundred models would make this response the
     /// wrong shape for the question it answers.
     model_count: i64,
@@ -636,7 +636,7 @@ async fn list_providers(
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, \
              p.upstream_api_key IS NOT NULL, p.catalogue_key, \
-             (SELECT count(*) FROM models m WHERE m.provider_id = p.id) \
+             (SELECT count(*) FROM provider_models m WHERE m.provider_id = p.id) \
          FROM providers p ORDER BY p.name",
     )
     .fetch_all(&ctx.pool)
@@ -761,7 +761,7 @@ async fn list_models(
              m.output_price_per_mtok, m.cache_ttl_seconds, m.context_length, m.policy, \
              p.id, p.name, p.api_base, m.upstream_model, \
              p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, m.default_max_tokens \
-         FROM models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.name",
+         FROM provider_models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.name",
     )
     .fetch_all(&ctx.pool)
     .await
@@ -883,20 +883,20 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
     }
 }
 
-/// A model and a virtual model sharing a name would make the `model` field
+/// A model and a frontend model sharing a name would make the `model` field
 /// in a request body ambiguous about which one a client meant — rather than
 /// pick a silent precedence order between them, creation of either is
 /// refused while the other name is taken. See `post_virtual_model`'s mirror
 /// check.
 async fn virtual_model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM virtual_models WHERE name = $1)")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM frontend_models WHERE name = $1)")
         .bind(name)
         .fetch_one(pool)
         .await
 }
 
 async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM models WHERE name = $1)")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -1170,7 +1170,7 @@ struct NewMcpServer {
 /// `GET /admin/mcp-servers`.
 ///
 /// Reports **whether** a credential is set and never what it is — the same
-/// rule `/admin/models` follows, and the reason `upstream_api_key` is not in
+/// rule `/admin/provider-models` follows, and the reason `upstream_api_key` is not in
 /// the select list at all rather than filtered out afterwards.
 async fn list_mcp_servers(
     State(ctx): State<Ctx>,
@@ -1389,7 +1389,7 @@ async fn post_model(
         return Err(api_error(
             StatusCode::CONFLICT,
             format!(
-                "a virtual model named {:?} already exists; a model and a virtual model cannot \
+                "a frontend model named {:?} already exists; a model and a frontend model cannot \
                  share a name, since a client request naming it would be ambiguous",
                 body.name
             ),
@@ -1401,7 +1401,7 @@ async fn post_model(
     // wonder later why the model ignored it.
     let policy = validated_policy(body.policy.as_deref())?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok, \
+        "INSERT INTO provider_models (name, description, input_price_per_mtok, output_price_per_mtok, \
              cache_ttl_seconds, context_length, policy) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
@@ -1420,7 +1420,7 @@ async fn post_model(
                 StatusCode::CONFLICT,
                 format!(
                     "a model named {:?} already exists; add another backend to it with \
-                             POST /admin/models/{{id}}/backends instead of creating a second model",
+                             POST /admin/provider-models/{{id}}/backends instead of creating a second model",
                     body.name
                 ),
             )
@@ -1475,7 +1475,7 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-/// `PATCH /admin/models/{id}`: change a model's description, prices or cache
+/// `PATCH /admin/provider-models/{id}`: change a model's description, prices or cache
 /// TTL in place.
 ///
 /// Exists because prices change. Without it the only way to correct one was to
@@ -1526,7 +1526,7 @@ async fn patch_model(
     // `COALESCE($n, column)` would make "set to null" impossible, so each field
     // carries its own "was it present" flag instead.
     let done = sqlx::query(
-        "UPDATE models SET
+        "UPDATE provider_models SET
            description           = CASE WHEN $2 THEN $3  ELSE description           END,
            input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
            output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
@@ -1555,7 +1555,7 @@ async fn patch_model(
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            format!("no model with id {id}; GET /admin/models lists the ids that exist"),
+            format!("no model with id {id}; GET /admin/provider-models lists the ids that exist"),
         ));
     }
     refresh(&ctx).await;
@@ -1567,7 +1567,7 @@ async fn delete_model(
     _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    let done = sqlx::query("DELETE FROM models WHERE id = $1")
+    let done = sqlx::query("DELETE FROM provider_models WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
         .await
@@ -1575,7 +1575,7 @@ async fn delete_model(
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            format!("no model with id {id}; GET /admin/models lists the ids that exist"),
+            format!("no model with id {id}; GET /admin/provider-models lists the ids that exist"),
         ));
     }
     refresh(&ctx).await;
@@ -1590,7 +1590,7 @@ struct NewBackend {
     /// with a `litellm_params` entry that names no `model`.
     upstream_model: Option<String>,
     /// Encrypted before it reaches Postgres and never readable back through
-    /// this API — `GET /admin/models` reports only whether one is set.
+    /// this API — `GET /admin/provider-models` reports only whether one is set.
     upstream_api_key: Option<String>,
     /// Everything below defaults to today's behaviour, so a caller (or a
     /// test) that names none of them gets an OpenAI-compatible backend
@@ -1674,7 +1674,7 @@ fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
 async fn post_backend(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(model_id): Path<i64>,
+    Path(provider_model_id): Path<i64>,
     Json(body): Json<NewBackend>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let api_base = body.api_base.trim().trim_end_matches('/').to_string();
@@ -1687,17 +1687,20 @@ async fn post_backend(
             format!("api_base {api_base:?} must start with http:// or https://"),
         ));
     }
-    // Fetched rather than assumed so a bad `model_id` is reported as such,
+    // Fetched rather than assumed so a bad `provider_model_id` is reported as such,
     // and so `upstream_model` can default to the model's own name.
-    let model_name: Option<String> = sqlx::query_scalar("SELECT name FROM models WHERE id = $1")
-        .bind(model_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|e| db_error("model lookup", &e))?;
+    let model_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM provider_models WHERE id = $1")
+            .bind(provider_model_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("model lookup", &e))?;
     let Some(model_name) = model_name else {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            format!("no model with id {model_id}; GET /admin/models lists the ids that exist"),
+            format!(
+                "no model with id {provider_model_id}; GET /admin/provider-models lists the ids that exist"
+            ),
         ));
     };
     let upstream_model = body
@@ -1779,11 +1782,12 @@ async fn post_backend(
     // conflict rather than an addition. Refusing is the honest answer: the
     // caller wanted two upstreams for one name, and that is now a frontend
     // model with two targets, not a model with two backends.
-    let existing: Option<i64> = sqlx::query_scalar("SELECT provider_id FROM models WHERE id = $1")
-        .bind(model_id)
-        .fetch_one(&ctx.pool)
-        .await
-        .map_err(|e| db_error("provider lookup", &e))?;
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT provider_id FROM provider_models WHERE id = $1")
+            .bind(provider_model_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider lookup", &e))?;
     if existing.is_some() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -1872,13 +1876,13 @@ async fn post_backend(
     };
 
     sqlx::query(
-        "UPDATE models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
+        "UPDATE provider_models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
          WHERE id = $4",
     )
     .bind(provider_id)
     .bind(&upstream_model)
     .bind(body.default_max_tokens)
-    .bind(model_id)
+    .bind(provider_model_id)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("attaching provider", &e))?;
@@ -1886,9 +1890,9 @@ async fn post_backend(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "id": model_id,
+            "id": provider_model_id,
             "provider_id": provider_id,
-            "model_id": model_id,
+            "provider_model_id": provider_model_id,
             "api_base": api_base,
             "upstream_model": upstream_model,
             "protocol": protocol,
@@ -1911,7 +1915,7 @@ async fn delete_backend(
     // stops being routable, which is the reversible half of "remove this
     // backend" and the only half this route should ever do.
     let done = sqlx::query(
-        "UPDATE models SET provider_id = NULL, upstream_model = NULL, \
+        "UPDATE provider_models SET provider_id = NULL, upstream_model = NULL, \
          default_max_tokens = NULL WHERE id = $1 AND provider_id IS NOT NULL",
     )
     .bind(id)
@@ -1922,7 +1926,7 @@ async fn delete_backend(
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!(
-                "no model with id {id} that has a provider; GET /admin/models lists each \
+                "no model with id {id} that has a provider; GET /admin/provider-models lists each \
                  model's provider"
             ),
         ));
@@ -1931,7 +1935,7 @@ async fn delete_backend(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// --- Virtual models, routing rules and their targets ------------------
+// --- Frontend models, routing rules and their targets ------------------
 //
 // Same CRUD shape as models/backends above: one route per table, every
 // mutating one ending in `refresh(&ctx)` so a write reaches the published
@@ -1943,7 +1947,7 @@ async fn delete_backend(
 #[derive(Serialize)]
 struct TargetView {
     id: i64,
-    model_id: i64,
+    provider_model_id: i64,
     model: String,
     weight: i32,
     position: i32,
@@ -1959,19 +1963,19 @@ struct RuleView {
 }
 
 #[derive(Serialize)]
-struct VirtualModelView {
+struct FrontendModelView {
     id: i64,
     name: String,
     description: String,
     rules: Vec<RuleView>,
     /// Used when no rule matches; see the migration's comment on
-    /// `virtual_model_defaults` for why this is its own table rather than an
+    /// `frontend_model_defaults` for why this is its own table rather than an
     /// always-true rule.
     default_targets: Vec<TargetView>,
 }
 
-// (id, owner_id, model_id, model_name, weight, position) — `owner_id` is
-// `rule_id` for a rule's own targets and `virtual_model_id` for a virtual
+// (id, owner_id, provider_model_id, model_name, weight, position) — `owner_id` is
+// `rule_id` for a rule's own targets and `frontend_model_id` for a virtual
 // model's defaults; the two queries below share this shape so `to_targets`
 // works for either without duplicating it.
 type TargetRow = (i64, i64, i64, String, i32, i32);
@@ -1979,46 +1983,48 @@ type TargetRow = (i64, i64, i64, String, i32, i32);
 async fn list_virtual_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
-) -> Result<Json<Vec<VirtualModelView>>, ApiError> {
+) -> Result<Json<Vec<FrontendModelView>>, ApiError> {
     let vms: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, name, description FROM virtual_models ORDER BY name")
+        sqlx::query_as("SELECT id, name, description FROM frontend_models ORDER BY name")
             .fetch_all(&ctx.pool)
             .await
-            .map_err(|e| db_error("listing virtual models", &e))?;
+            .map_err(|e| db_error("listing frontend models", &e))?;
     let rules: Vec<(i64, i64, i32, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, virtual_model_id, position, match_json FROM routing_rules
-         ORDER BY virtual_model_id, position",
+        "SELECT id, frontend_model_id, position, match_json FROM routing_rules
+         ORDER BY frontend_model_id, position",
     )
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("listing routing rules", &e))?;
     let rule_targets: Vec<TargetRow> = sqlx::query_as(
-        "SELECT rt.id, rt.rule_id, rt.model_id, m.name, rt.weight, rt.position
-         FROM rule_targets rt JOIN models m ON m.id = rt.model_id
+        "SELECT rt.id, rt.rule_id, rt.provider_model_id, m.name, rt.weight, rt.position
+         FROM rule_targets rt JOIN provider_models m ON m.id = rt.provider_model_id
          ORDER BY rt.rule_id, rt.position",
     )
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("listing rule targets", &e))?;
     let default_targets: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.id, vd.virtual_model_id, vd.model_id, m.name, vd.weight, vd.position
-         FROM virtual_model_defaults vd JOIN models m ON m.id = vd.model_id
-         ORDER BY vd.virtual_model_id, vd.position",
+        "SELECT vd.id, vd.frontend_model_id, vd.provider_model_id, m.name, vd.weight, vd.position
+         FROM frontend_model_defaults vd JOIN provider_models m ON m.id = vd.provider_model_id
+         ORDER BY vd.frontend_model_id, vd.position",
     )
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| db_error("listing virtual model defaults", &e))?;
+    .map_err(|e| db_error("listing frontend model defaults", &e))?;
 
     let to_targets = |owner: i64, rows: &[TargetRow]| -> Vec<TargetView> {
         rows.iter()
             .filter(|(_, o, ..)| *o == owner)
-            .map(|(id, _, model_id, model, weight, position)| TargetView {
-                id: *id,
-                model_id: *model_id,
-                model: model.clone(),
-                weight: *weight,
-                position: *position,
-            })
+            .map(
+                |(id, _, provider_model_id, model, weight, position)| TargetView {
+                    id: *id,
+                    provider_model_id: *provider_model_id,
+                    model: model.clone(),
+                    weight: *weight,
+                    position: *position,
+                },
+            )
             .collect()
     };
 
@@ -2027,7 +2033,7 @@ async fn list_virtual_models(
             .map(|(vm_id, name, description)| {
                 let rule_views = rules
                     .iter()
-                    .filter(|(_, virtual_model_id, ..)| *virtual_model_id == vm_id)
+                    .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
                     .map(|(rule_id, _, position, match_json)| {
                         // A rule whose `match_json` cannot parse is still
                         // listed rather than hidden — an operator diagnosing
@@ -2045,7 +2051,7 @@ async fn list_virtual_models(
                         }
                     })
                     .collect();
-                VirtualModelView {
+                FrontendModelView {
                     id: vm_id,
                     name,
                     description,
@@ -2073,24 +2079,24 @@ async fn post_virtual_model(
     if body.name.trim().is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "name must not be empty; it is the name clients address this virtual model by",
+            "name must not be empty; it is the name clients address this frontend model by",
         ));
     }
     if model_name_exists(&ctx.pool, &body.name)
         .await
-        .map_err(|e| db_error("virtual model creation", &e))?
+        .map_err(|e| db_error("frontend model creation", &e))?
     {
         return Err(api_error(
             StatusCode::CONFLICT,
             format!(
-                "a model named {:?} already exists; a model and a virtual model cannot share a \
+                "a model named {:?} already exists; a model and a frontend model cannot share a \
                  name, since a client request naming it would be ambiguous",
                 body.name
             ),
         ));
     }
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO virtual_models (name, description) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO frontend_models (name, description) VALUES ($1, $2) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
@@ -2100,10 +2106,10 @@ async fn post_virtual_model(
         if is_unique_violation(&e) {
             api_error(
                 StatusCode::CONFLICT,
-                format!("a virtual model named {:?} already exists", body.name),
+                format!("a frontend model named {:?} already exists", body.name),
             )
         } else {
-            db_error("virtual model creation", &e)
+            db_error("frontend model creation", &e)
         }
     })?;
     refresh(&ctx).await;
@@ -2118,18 +2124,18 @@ async fn delete_virtual_model(
     _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    // ON DELETE CASCADE (migrations/0008) takes this virtual model's rules
+    // ON DELETE CASCADE (migrations/0008) takes this frontend model's rules
     // and defaults with it, same reasoning as a principal's keys/grants.
-    let done = sqlx::query("DELETE FROM virtual_models WHERE id = $1")
+    let done = sqlx::query("DELETE FROM frontend_models WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
         .await
-        .map_err(|e| db_error("virtual model deletion", &e))?;
+        .map_err(|e| db_error("frontend model deletion", &e))?;
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!(
-                "no virtual model with id {id}; GET /admin/virtual-models lists the ids that exist"
+                "no frontend model with id {id}; GET /admin/frontend-models lists the ids that exist"
             ),
         ));
     }
@@ -2140,7 +2146,7 @@ async fn delete_virtual_model(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewRule {
-    /// Where this rule sits in its virtual model's evaluation order —
+    /// Where this rule sits in its frontend model's evaluation order —
     /// load-bearing, not cosmetic: the first matching rule wins.
     position: i32,
     #[serde(flatten)]
@@ -2150,7 +2156,7 @@ struct NewRule {
 async fn post_rule(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(virtual_model_id): Path<i64>,
+    Path(frontend_model_id): Path<i64>,
     Json(body): Json<NewRule>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Validated at write time so a malformed `"25:00"` or a `days: [8]` is a
@@ -2162,10 +2168,10 @@ async fn post_rule(
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO routing_rules (virtual_model_id, position, match_json)
+        "INSERT INTO routing_rules (frontend_model_id, position, match_json)
          VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(virtual_model_id)
+    .bind(frontend_model_id)
     .bind(body.position)
     .bind(match_json)
     .fetch_one(&ctx.pool)
@@ -2175,7 +2181,7 @@ async fn post_rule(
             api_error(
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "no virtual model with id {virtual_model_id}; GET /admin/virtual-models \
+                    "no frontend model with id {frontend_model_id}; GET /admin/frontend-models \
                      lists the ids that exist"
                 ),
             )
@@ -2183,7 +2189,7 @@ async fn post_rule(
             api_error(
                 StatusCode::CONFLICT,
                 format!(
-                    "virtual model {virtual_model_id} already has a rule at position {}",
+                    "frontend model {frontend_model_id} already has a rule at position {}",
                     body.position
                 ),
             )
@@ -2195,7 +2201,7 @@ async fn post_rule(
     Ok((
         StatusCode::CREATED,
         Json(
-            serde_json::json!({ "id": id, "virtual_model_id": virtual_model_id, "position": body.position }),
+            serde_json::json!({ "id": id, "frontend_model_id": frontend_model_id, "position": body.position }),
         ),
     ))
 }
@@ -2213,7 +2219,7 @@ async fn delete_rule(
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            format!("no rule with id {id}; GET /admin/virtual-models lists each rule's id"),
+            format!("no rule with id {id}; GET /admin/frontend-models lists each rule's id"),
         ));
     }
     refresh(&ctx).await;
@@ -2223,11 +2229,11 @@ async fn delete_rule(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewTarget {
-    model_id: i64,
+    provider_model_id: i64,
     #[serde(default = "default_target_weight")]
     weight: i32,
     /// Failover order within the chain — see
-    /// `crate::routing::VirtualModelDef::resolve`'s doc comment.
+    /// `crate::routing::FrontendModelDef::resolve`'s doc comment.
     position: i32,
 }
 
@@ -2245,11 +2251,11 @@ async fn post_rule_target(
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO rule_targets (rule_id, model_id, weight, position)
+        "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position)
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(rule_id)
-    .bind(body.model_id)
+    .bind(body.provider_model_id)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -2260,7 +2266,7 @@ async fn post_rule_target(
                 StatusCode::BAD_REQUEST,
                 format!(
                     "no rule with id {rule_id} or no model with id {}; a target needs both to exist",
-                    body.model_id
+                    body.provider_model_id
                 ),
             )
         } else if is_unique_violation(&e) {
@@ -2292,7 +2298,7 @@ async fn delete_rule_target(
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            format!("no rule target with id {id}; GET /admin/virtual-models lists each one's id"),
+            format!("no rule target with id {id}; GET /admin/frontend-models lists each one's id"),
         ));
     }
     refresh(&ctx).await;
@@ -2302,15 +2308,15 @@ async fn delete_rule_target(
 async fn post_default_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(virtual_model_id): Path<i64>,
+    Path(frontend_model_id): Path<i64>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position)
+        "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position)
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
-    .bind(virtual_model_id)
-    .bind(body.model_id)
+    .bind(frontend_model_id)
+    .bind(body.provider_model_id)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -2320,16 +2326,16 @@ async fn post_default_target(
             api_error(
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "no virtual model with id {virtual_model_id} or no model with id {}; a \
+                    "no frontend model with id {frontend_model_id} or no model with id {}; a \
                      default target needs both to exist",
-                    body.model_id
+                    body.provider_model_id
                 ),
             )
         } else if is_unique_violation(&e) {
             api_error(
                 StatusCode::CONFLICT,
                 format!(
-                    "virtual model {virtual_model_id} already has a default target at position {}",
+                    "frontend model {frontend_model_id} already has a default target at position {}",
                     body.position
                 ),
             )
@@ -2346,7 +2352,7 @@ async fn delete_default_target(
     _perm: RequireConfigWrite,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    let done = sqlx::query("DELETE FROM virtual_model_defaults WHERE id = $1")
+    let done = sqlx::query("DELETE FROM frontend_model_defaults WHERE id = $1")
         .bind(id)
         .execute(&ctx.pool)
         .await
@@ -2355,7 +2361,7 @@ async fn delete_default_target(
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!(
-                "no default target with id {id}; GET /admin/virtual-models lists each one's id"
+                "no default target with id {id}; GET /admin/frontend-models lists each one's id"
             ),
         ));
     }
@@ -2442,7 +2448,7 @@ struct SyncPricesRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DryRunRequest {
-    /// The name a client would put in `model`. A virtual model is the
+    /// The name a client would put in `model`. A frontend model is the
     /// interesting case; a concrete one resolves to itself.
     model: String,
     #[serde(default)]
@@ -2472,8 +2478,8 @@ struct DryRunResult {
     candidates: Vec<String>,
     /// Which rule decided, by position, or `None` for the defaults.
     matched_rule: Option<usize>,
-    /// `false` when the name is a concrete model, which resolves to itself.
-    virtual_model: bool,
+    /// `false` when the name is a provider model, which resolves to itself.
+    frontend_model: bool,
 }
 
 /// `POST /admin/routing/dry-run`: what would this request route to?
@@ -2507,13 +2513,13 @@ async fn routing_dry_run(
         )
     })?;
 
-    let Some(vm) = snapshot.virtual_models.get(&body.model) else {
-        // A concrete model routes to itself, which is worth answering rather
+    let Some(vm) = snapshot.frontend_models.get(&body.model) else {
+        // A provider model routes to itself, which is worth answering rather
         // than erroring: a UI should be able to ask about any name.
         return Ok(Json(DryRunResult {
             candidates: vec![body.model.clone()],
             matched_rule: None,
-            virtual_model: false,
+            frontend_model: false,
         }));
     };
 
@@ -2549,7 +2555,7 @@ async fn routing_dry_run(
     Ok(Json(DryRunResult {
         candidates,
         matched_rule,
-        virtual_model: true,
+        frontend_model: true,
     }))
 }
 
@@ -2933,7 +2939,7 @@ async fn timeseries_rows(
          -- percentile's name. The chart breaks its line there, the same way
          -- it does for a bucket with nothing in it.
          src AS (
-             SELECT u.at, u.model_id, u.principal_id, u.status, u.refusal,
+             SELECT u.at, u.provider_model_id, u.principal_id, u.status, u.refusal,
                     u.prompt_tokens, u.completion_tokens, u.cost_micros,
                     u.duration_ms, u.ttft_ms, 1::bigint AS weight
              FROM usage_events u
@@ -2949,7 +2955,7 @@ async fn timeseries_rows(
              --
              -- Tokens and cost ride on the served row alone so the sums stay
              -- right; the failure rows carry counts only.
-             SELECT r.hour, r.model_id, r.principal_id, o.status, o.refusal,
+             SELECT r.hour, r.provider_model_id, r.principal_id, o.status, o.refusal,
                     CASE WHEN o.kind = 'ok' THEN r.prompt_tokens ELSE 0 END,
                     CASE WHEN o.kind = 'ok' THEN r.completion_tokens ELSE 0 END,
                     CASE WHEN o.kind = 'ok' THEN NULLIF(r.cost_micros, 0) END,
@@ -2984,7 +2990,7 @@ async fn timeseries_rows(
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS p95,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY u.ttft_ms)     AS ttft95
              FROM src u
-             LEFT JOIN models m ON m.id = u.model_id
+             LEFT JOIN provider_models m ON m.id = u.provider_model_id
              WHERE ($4::text IS NULL OR m.name = $4)
                AND ($5::bigint IS NULL OR u.principal_id = $5)
              GROUP BY 1
@@ -3145,16 +3151,16 @@ async fn usage_summary(
         "model" => "coalesce(u.model_name, m.name)",
         "principal" => "p.name",
         "day" => "to_char(date_trunc('day', u.at), 'YYYY-MM-DD')",
-        // What the *caller asked for*, which for a virtual model is the
+        // What the *caller asked for*, which for a frontend model is the
         // virtual name and for anything else is the model itself. Grouping on
-        // this answers "how much traffic does each virtual model carry",
+        // this answers "how much traffic does each frontend model carry",
         // which grouping on the served model cannot: by then the routing
         // decision has already been made and the virtual name is gone.
-        "virtual_model" => "coalesce(u.requested_model, u.model_name, m.name)",
+        "frontend_model" => "coalesce(u.requested_model, u.model_name, m.name)",
         other => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                format!("group_by {other:?} is not one of: model, principal, day, virtual_model"),
+                format!("group_by {other:?} is not one of: model, principal, day, frontend_model"),
             ))
         }
     };
@@ -3172,7 +3178,7 @@ async fn usage_summary(
                 count(*) FILTER (WHERE u.cost_micros IS NULL) AS unpriced_requests
          FROM usage_events u
          JOIN principals p ON p.id = u.principal_id
-         LEFT JOIN models m ON m.id = u.model_id
+         LEFT JOIN provider_models m ON m.id = u.provider_model_id
          WHERE ($1::timestamptz IS NULL OR u.at >= $1)
            AND ($2::timestamptz IS NULL OR u.at <  $2)
          GROUP BY 1
@@ -4008,11 +4014,11 @@ async fn roll_up_and_prune_usage(pool: &PgPool) -> Result<(u64, u64), sqlx::Erro
         // produces. The name is also the better key: it does not merge two
         // different models that happened to reuse an id.
         "INSERT INTO usage_rollup_hourly (
-             hour, model_id, model_name, principal_id, requests, upstream_errors,
+             hour, provider_model_id, model_name, principal_id, requests, upstream_errors,
              refused_authorisation, refused_rate_limit, refused_budget, refused_no_backend,
              prompt_tokens, completion_tokens, cost_micros, unpriced_requests,
              duration_ms_sum, duration_ms_count)
-         SELECT date_trunc('hour', at), min(model_id), coalesce(model_name, '(unknown)'),
+         SELECT date_trunc('hour', at), min(provider_model_id), coalesce(model_name, '(unknown)'),
                 principal_id,
                 count(*),
                 count(*) FILTER (WHERE refusal IS NULL AND status >= 400),
@@ -4298,7 +4304,7 @@ async fn post_usage(
     // normal shape of a model swap, not an edge case. The traffic happened;
     // recording it is the only honest thing to do about it.
     //
-    // A row that misses gets no `model_id` and no price, so its cost is NULL —
+    // A row that misses gets no `provider_model_id` and no price, so its cost is NULL —
     // unknown rather than a confident zero — and `model_name` still says what
     // the caller asked for.
     let accepted_rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
@@ -4310,7 +4316,7 @@ async fn post_usage(
                      duration_ms, ttft_ms, status, requested_model, reported_cost,
                      usage_reported, refusal)
          )
-         INSERT INTO usage_events (principal_id, model_id, model_name, provider_name,
+         INSERT INTO usage_events (principal_id, provider_model_id, model_name, provider_name,
                                    prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, usage_reported,
                                    refusal, cost_micros)
@@ -4356,7 +4362,7 @@ async fn post_usage(
                 )
          FROM input i
          JOIN principals p ON p.id = i.principal_id
-         LEFT JOIN models m ON m.name = i.model_name
+         LEFT JOIN provider_models m ON m.name = i.model_name
          LEFT JOIN providers pr ON pr.id = m.provider_id
          RETURNING id, principal_id, prompt_tokens, completion_tokens, COALESCE(cost_micros, 0)",
     )
@@ -4634,7 +4640,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AdminPrincipal {
 /// permission scheme invented for this file. A route that does not fit any
 /// of the three specific verbs (`key:create`, `key:revoke`) falls back to
 /// `config:write` — the schema has no finer-grained permission for
-/// "manage principals" or "manage virtual models" than that, and inventing
+/// "manage principals" or "manage frontend models" than that, and inventing
 /// one per table would multiply roles for no operator-visible benefit; see
 /// `admin_routes` in `serve` for the full mapping, route by route.
 mod admin_permission {
@@ -4897,18 +4903,19 @@ async fn get_config(
     _perm: RequireRead,
     caller: AdminPrincipal,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let unpriced: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM models WHERE input_price_per_mtok IS NULL")
-            .fetch_one(&ctx.pool)
-            .await
-            .map_err(|e| db_error("counting unpriced models", &e))?;
+    let unpriced: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM provider_models WHERE input_price_per_mtok IS NULL",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("counting unpriced models", &e))?;
     let cached: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM models WHERE cache_ttl_seconds IS NOT NULL AND cache_ttl_seconds > 0",
+        "SELECT count(*) FROM provider_models WHERE cache_ttl_seconds IS NOT NULL AND cache_ttl_seconds > 0",
     )
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| db_error("counting cache-enabled models", &e))?;
-    let models: i64 = sqlx::query_scalar("SELECT count(*) FROM models")
+    let models: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_models")
         .fetch_one(&ctx.pool)
         .await
         .map_err(|e| db_error("counting models", &e))?;
@@ -5378,18 +5385,18 @@ pub async fn serve(
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
         .route("/admin/providers", get(list_providers))
-        .route("/admin/models", get(list_models).post(post_model))
+        .route("/admin/provider-models", get(list_models).post(post_model))
         .route(
-            "/admin/models/{id}",
+            "/admin/provider-models/{id}",
             axum::routing::patch(patch_model).delete(delete_model),
         )
-        .route("/admin/models/{id}/backends", post(post_backend))
+        .route("/admin/provider-models/{id}/backends", post(post_backend))
         .route("/admin/backends/{id}", delete(delete_backend))
         .route(
-            "/admin/virtual-models",
+            "/admin/frontend-models",
             get(list_virtual_models).post(post_virtual_model),
         )
-        .route("/admin/virtual-models/{id}", delete(delete_virtual_model))
+        .route("/admin/frontend-models/{id}", delete(delete_virtual_model))
         .route(
             "/admin/prompt-classes",
             get(list_prompt_classes).post(post_prompt_class),
@@ -5407,16 +5414,16 @@ pub async fn serve(
             "/admin/fallback-model",
             get(get_fallback_model).put(put_fallback_model),
         )
-        .route("/admin/virtual-models/{id}/rules", post(post_rule))
+        .route("/admin/frontend-models/{id}/rules", post(post_rule))
         .route("/admin/rules/{id}", delete(delete_rule))
         .route("/admin/rules/{id}/targets", post(post_rule_target))
         .route("/admin/rule-targets/{id}", delete(delete_rule_target))
         .route(
-            "/admin/virtual-models/{id}/defaults",
+            "/admin/frontend-models/{id}/defaults",
             post(post_default_target),
         )
         .route(
-            "/admin/virtual-model-defaults/{id}",
+            "/admin/frontend-model-defaults/{id}",
             delete(delete_default_target),
         )
         .route("/admin/roles", get(list_roles).post(post_role))
@@ -5627,7 +5634,7 @@ mod tests {
     /// Two failures with one cause: a field the caller sent that the API did
     /// not model.
     ///
-    /// `context_length` was PATCH-only, so `POST /admin/models` accepted a
+    /// `context_length` was PATCH-only, so `POST /admin/provider-models` accepted a
     /// request carrying it, returned 201, and created a model with no context
     /// window — silently, because serde drops unknown fields by default. It
     /// was found by reading a row after registering a real model, which is the
@@ -5817,13 +5824,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let model_id = model.0["id"].as_i64().unwrap();
+        let provider_model_id = model.0["id"].as_i64().unwrap();
 
         let upstream_credential = "sk-upstream-must-never-come-back";
         let (_, backend) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(provider_model_id),
             Json(NewBackend::openai(
                 "http://route-test:8000/v1/",
                 Some(upstream_credential.into()),
@@ -5893,9 +5900,13 @@ mod tests {
         delete_backend(State(ctx.clone()), RequireConfigWrite, Path(backend_id))
             .await
             .unwrap();
-        delete_model(State(ctx.clone()), RequireConfigWrite, Path(model_id))
-            .await
-            .unwrap();
+        delete_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(provider_model_id),
+        )
+        .await
+        .unwrap();
         delete_principal(State(ctx.clone()), RequireConfigWrite, Path(principal_id))
             .await
             .unwrap();
@@ -6042,7 +6053,7 @@ mod tests {
         assert!(admin.permissions.len() > inference.permissions.len());
     }
 
-    /// Every virtual-model route, end to end: creating a virtual model, a
+    /// Every frontend-model route, end to end: creating a frontend model, a
     /// rule on it, a target on that rule, and a default target all publish
     /// through the same `refresh()` -> `SnapshotSink::store_snapshot` path
     /// every other admin route uses — same invariant
@@ -6055,7 +6066,7 @@ mod tests {
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "vm-route-primary-")
             .track_prefix("models", "name", "vm-route-secondary-")
-            .track_prefix("virtual_models", "name", "vm-route-canary-");
+            .track_prefix("frontend_models", "name", "vm-route-canary-");
         let primary_name = unique_name("vm-route-primary");
         let secondary_name = unique_name("vm-route-secondary");
 
@@ -6128,7 +6139,7 @@ mod tests {
             RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
-                model_id: primary_id,
+                provider_model_id: primary_id,
                 weight: 100,
                 position: 0,
             }),
@@ -6141,7 +6152,7 @@ mod tests {
             RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
-                model_id: secondary_id,
+                provider_model_id: secondary_id,
                 weight: 100,
                 position: 0,
             }),
@@ -6151,9 +6162,9 @@ mod tests {
 
         let snap = cache.current_snapshot();
         let published = snap
-            .virtual_models
+            .frontend_models
             .get(&vm_name)
-            .expect("the virtual model created over the admin API must be in the snapshot");
+            .expect("the frontend model created over the admin API must be in the snapshot");
         assert_eq!(published.rules.len(), 1);
         assert_eq!(
             published.rules[0].conditions.caller.roles,
@@ -6162,7 +6173,7 @@ mod tests {
         assert_eq!(published.rules[0].targets[0].model, primary_name);
         assert_eq!(published.default_targets[0].model, secondary_name);
 
-        // `GET /admin/virtual-models` mirrors the same rows.
+        // `GET /admin/frontend-models` mirrors the same rows.
         let listed = list_virtual_models(State(ctx.clone()), RequireRead)
             .await
             .unwrap();
@@ -6171,7 +6182,7 @@ mod tests {
         assert_eq!(listed_vm.rules[0].targets[0].model, primary_name);
         assert_eq!(listed_vm.default_targets[0].model, secondary_name);
 
-        // Deleting the virtual model cascades its rules and targets, and the
+        // Deleting the frontend model cascades its rules and targets, and the
         // deletion reaches the published snapshot the same way creation did.
         delete_virtual_model(State(ctx.clone()), RequireConfigWrite, Path(vm_id))
             .await
@@ -6179,14 +6190,14 @@ mod tests {
         assert!(
             !cache
                 .current_snapshot()
-                .virtual_models
+                .frontend_models
                 .contains_key(&vm_name),
-            "a deleted virtual model must leave the published snapshot"
+            "a deleted frontend model must leave the published snapshot"
         );
     }
 
     /// The privilege-escalation trap this design explicitly calls out: a
-    /// model and a virtual model must never be allowed to share a name,
+    /// model and a frontend model must never be allowed to share a name,
     /// because the ambiguity would make `authorize`/`resolve_target_model`'s
     /// decision (see that function's doc comment) apply to the wrong one —
     /// whichever table happens to win a lookup, silently.
@@ -6196,7 +6207,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "vm-collision-")
-            .track_prefix("virtual_models", "name", "vm-collision-");
+            .track_prefix("frontend_models", "name", "vm-collision-");
         let name = unique_name("vm-collision");
 
         let (status, _) = post_model(
@@ -6290,7 +6301,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        sqlx::query("INSERT INTO models (name) VALUES ($1)")
+        sqlx::query("INSERT INTO provider_models (name) VALUES ($1)")
             .bind(&name)
             .execute(&pool)
             .await
@@ -7192,7 +7203,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO audit_events (actor_id, actor_name, action, target, detail)
              VALUES (NULL, $1, 'POST', '/admin/keys', '{\"status\":201}'::jsonb),
-                    (NULL, $1, 'DELETE', '/admin/models/1', '{}'::jsonb)",
+                    (NULL, $1, 'DELETE', '/admin/provider-models/1', '{}'::jsonb)",
         )
         .bind(&name)
         .execute(&ctx.pool)
@@ -7532,7 +7543,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let model_id = model.0["id"].as_i64().unwrap();
+        let provider_model_id = model.0["id"].as_i64().unwrap();
 
         let vertex = |key: Option<String>, kind: Option<&str>| {
             NewBackend {
@@ -7551,7 +7562,7 @@ mod tests {
         let err = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(provider_model_id),
             Json(vertex(
                 Some("sk-not-a-key-file".into()),
                 Some("gcp_service_account"),
@@ -7565,7 +7576,7 @@ mod tests {
         let err = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(provider_model_id),
             Json(vertex(None, Some("gcp_service_account"))),
         )
         .await
@@ -7577,7 +7588,7 @@ mod tests {
         let err = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(provider_model_id),
             Json(vertex(Some("x".into()), Some("iam_role"))),
         )
         .await
@@ -7595,7 +7606,7 @@ mod tests {
         let (status, created) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(model_id),
+            Path(provider_model_id),
             Json(vertex(Some(key_file), Some("gcp_service_account"))),
         )
         .await
@@ -7692,7 +7703,7 @@ mod tests {
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "dry-fast-")
             .track_prefix("models", "name", "dry-slow-")
-            .track_prefix("virtual_models", "name", "dry-vm-");
+            .track_prefix("frontend_models", "name", "dry-vm-");
 
         let model = |name: String| {
             let ctx = ctx.clone();
@@ -7758,7 +7769,7 @@ mod tests {
             RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
-                model_id: fast_id,
+                provider_model_id: fast_id,
                 weight: 100,
                 position: 0,
             }),
@@ -7770,7 +7781,7 @@ mod tests {
             RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
-                model_id: slow_id,
+                provider_model_id: slow_id,
                 weight: 100,
                 position: 0,
             }),
@@ -7819,7 +7830,7 @@ mod tests {
         // Any name a UI can type must be answerable, including a concrete
         // model, which resolves to itself rather than erroring.
         let concrete = dry_run(true, fast_name.clone()).await;
-        assert!(!concrete.virtual_model);
+        assert!(!concrete.frontend_model);
         assert_eq!(concrete.candidates, vec![fast_name]);
     }
 
@@ -7836,7 +7847,7 @@ mod tests {
             "/admin/keys",
             "/admin/prices/sync",
             "/admin/roles/operator/permissions",
-            "/admin/models/1",
+            "/admin/provider-models/1",
         ] {
             assert!(!is_read_only(path), "{path} must stay audited");
         }
@@ -7997,7 +8008,7 @@ mod tests {
     }
 
     /// Grouping by the *served* model cannot answer "how much traffic does
-    /// each virtual model carry" — by then the routing decision is made and
+    /// each frontend model carry" — by then the routing decision is made and
     /// the virtual name is gone. This is the only grouping that keeps it.
     #[tokio::test]
     #[ignore = "requires postgres"]
@@ -8044,7 +8055,7 @@ mod tests {
             State(ctx.clone()),
             RequireRead,
             axum::extract::Query(UsageQuery {
-                group_by: "virtual_model".into(),
+                group_by: "frontend_model".into(),
                 since: None,
                 until: None,
                 limit: 1000,
@@ -8060,7 +8071,7 @@ mod tests {
         assert_eq!(router.requests, 1);
         assert!(
             rows.iter().any(|r| r.key.as_deref() == Some(&model_name)),
-            "a request that named a concrete model still groups under it"
+            "a request that named a provider model still groups under it"
         );
         // Deliberately checked here rather than assumed: an unknown grouping
         // must be refused, not interpolated into the query text.
@@ -8068,7 +8079,7 @@ mod tests {
             State(ctx.clone()),
             RequireRead,
             axum::extract::Query(UsageQuery {
-                group_by: "; DROP TABLE models".into(),
+                group_by: "; DROP TABLE provider_models".into(),
                 since: None,
                 until: None,
                 limit: 10,
@@ -8587,7 +8598,7 @@ async fn get_fallback_model(
     _perm: RequireRead,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT id, name FROM models WHERE is_fallback LIMIT 1")
+        sqlx::query_as("SELECT id, name FROM provider_models WHERE is_fallback LIMIT 1")
             .fetch_optional(&ctx.pool)
             .await
             .map_err(|e| db_error("reading the fallback model", &e))?;
@@ -8601,7 +8612,7 @@ async fn get_fallback_model(
 #[serde(deny_unknown_fields)]
 struct FallbackModel {
     /// `null` clears it, leaving no deployment-wide last resort.
-    model_id: Option<i64>,
+    provider_model_id: Option<i64>,
 }
 
 /// Set (or clear) the model every routing chain falls back to.
@@ -8619,19 +8630,20 @@ async fn put_fallback_model(
         .begin()
         .await
         .map_err(|e| db_error("setting the fallback model", &e))?;
-    sqlx::query("UPDATE models SET is_fallback = false WHERE is_fallback")
+    sqlx::query("UPDATE provider_models SET is_fallback = false WHERE is_fallback")
         .execute(&mut *tx)
         .await
         .map_err(|e| db_error("clearing the previous fallback model", &e))?;
 
     let mut name = None;
-    if let Some(id) = body.model_id {
-        let updated: Option<String> =
-            sqlx::query_scalar("UPDATE models SET is_fallback = true WHERE id = $1 RETURNING name")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| db_error("setting the fallback model", &e))?;
+    if let Some(id) = body.provider_model_id {
+        let updated: Option<String> = sqlx::query_scalar(
+            "UPDATE provider_models SET is_fallback = true WHERE id = $1 RETURNING name",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_error("setting the fallback model", &e))?;
         let Some(found) = updated else {
             return Err(api_error(
                 StatusCode::NOT_FOUND,
@@ -8645,6 +8657,6 @@ async fn put_fallback_model(
         .map_err(|e| db_error("setting the fallback model", &e))?;
     refresh(&ctx).await;
     Ok(Json(
-        serde_json::json!({"model_id": body.model_id, "name": name}),
+        serde_json::json!({"provider_model_id": body.provider_model_id, "name": name}),
     ))
 }

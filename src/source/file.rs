@@ -119,7 +119,7 @@ impl SnapshotSource for FileSource {
                     allow_all_agents: false,
                     // `File` mode's `auth.keys` schema has no role concept —
                     // routing rules that match by role are a control-plane
-                    // (P1) feature and `File` mode carries no virtual models
+                    // (P1) feature and `File` mode carries no frontend models
                     // to evaluate them against anyway.
                     roles: HashSet::new(),
                     limits: k.limits.map(|l| crate::limiter::Limits {
@@ -149,7 +149,7 @@ impl SnapshotSource for FileSource {
         let open = keys.is_empty();
         let mut snap = Snapshot {
             // `File` mode has nowhere to store example prompts, so semantic
-            // routing is a control-plane feature the same way virtual models
+            // routing is a control-plane feature the same way frontend models
             // are.
             prompt_classes: Vec::new(),
             // Same reason as `prompt_classes`: a YAML file has nowhere to
@@ -164,8 +164,8 @@ impl SnapshotSource for FileSource {
             principals,
             models,
             // `File` mode has no database to store rules in — see the field
-            // doc comment on `Snapshot::virtual_models`.
-            virtual_models: HashMap::new(),
+            // doc comment on `Snapshot::frontend_models`.
+            frontend_models: HashMap::new(),
             open,
         };
         if let Some(key) = &self.legacy_master_key {

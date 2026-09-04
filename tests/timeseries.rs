@@ -30,10 +30,11 @@ async fn the_timeseries_query_parses_and_decodes_in_every_filter_combination() {
 
     // A model and principal that exist, so the filtered forms take the
     // branch where the predicate is non-NULL rather than short-circuiting.
-    let model: Option<String> = sqlx::query_scalar("SELECT name FROM models ORDER BY id LIMIT 1")
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+    let model: Option<String> =
+        sqlx::query_scalar("SELECT name FROM provider_models ORDER BY id LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     let principal: Option<i64> =
         sqlx::query_scalar("SELECT id FROM principals ORDER BY id LIMIT 1")
             .fetch_optional(&pool)

@@ -232,7 +232,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
     let _cleanup = TestCleanup::new().track_exact("principals", "name", name.clone());
     // A raw `INSERT` with a precomputed Argon2id hash, not
     // `control::auth::hash_password`/`bootstrap_admin_user` — this whole
-    // file (like `budgets.rs`/`virtual_models.rs` before it) deliberately
+    // file (like `budgets.rs`/`frontend_models.rs` before it) deliberately
     // never references `fastllm_proxy::control::*` directly, only `sqlx`,
     // so it still compiles under `cargo build --no-default-features` (which
     // has no `control` module at all) even though this particular test only
@@ -251,7 +251,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
     // accepted on /admin/*, cleared on logout) end to end, which needs a
     // real /admin/* route to probe with a valid session -- not the
     // permission-mapping RBAC finds elsewhere in this suite. Grant `admin`
-    // so `GET /admin/models` below is answered on the strength of the
+    // so `GET /admin/provider-models` below is answered on the strength of the
     // session alone, the same way it was before RequireRead started
     // checking permissions too.
     sqlx::query(
@@ -269,7 +269,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
 
     // No cookie at all: refused.
     assert_eq!(
-        admin_get_with_cookie(admin_port, "/admin/models", None),
+        admin_get_with_cookie(admin_port, "/admin/provider-models", None),
         401,
         "an unauthenticated request to /admin/* must be refused"
     );
@@ -278,7 +278,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
     assert_eq!(
         admin_get_with_cookie(
             admin_port,
-            "/admin/models",
+            "/admin/provider-models",
             Some("fastllm_session=not-a-real-session-token")
         ),
         401,
@@ -308,7 +308,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
 
     // That cookie is now accepted on an /admin/* route.
     assert_eq!(
-        admin_get_with_cookie(admin_port, "/admin/models", Some(&cookie)),
+        admin_get_with_cookie(admin_port, "/admin/provider-models", Some(&cookie)),
         200,
         "a valid session must be accepted"
     );
@@ -320,7 +320,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
         .expect("logout must succeed");
     assert_eq!(logout.status(), 204);
     assert_eq!(
-        admin_get_with_cookie(admin_port, "/admin/models", Some(&cookie)),
+        admin_get_with_cookie(admin_port, "/admin/provider-models", Some(&cookie)),
         401,
         "a session must be rejected once logged out"
     );
@@ -610,7 +610,7 @@ async fn a_principal_with_no_admin_permissions_gets_403_everywhere_but_can_still
     for (method, path, body) in [
         ("GET", "/admin/keys", None),
         ("GET", "/admin/principals", None),
-        ("GET", "/admin/models", None),
+        ("GET", "/admin/provider-models", None),
         ("GET", "/admin/roles", None),
         ("GET", "/admin/limits", None),
         ("GET", "/admin/budgets", None),
@@ -730,7 +730,7 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     // A read: not a change, and auditing every list call would bury the
     // changes in noise.
     assert_eq!(
-        admin_get_with_cookie(admin_port, "/admin/models", Some(&cookie)),
+        admin_get_with_cookie(admin_port, "/admin/provider-models", Some(&cookie)),
         200
     );
 
@@ -739,7 +739,7 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
         admin_write_with_cookie(
             admin_port,
             "POST",
-            "/admin/models",
+            "/admin/provider-models",
             Some(&cookie),
             serde_json::json!({"name": model, "description": ""}),
         ),
@@ -754,7 +754,7 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
         admin_write_with_cookie(
             admin_port,
             "POST",
-            "/admin/models",
+            "/admin/provider-models",
             None,
             serde_json::json!({"name": "no-session", "description": ""}),
         ),
@@ -780,5 +780,5 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     assert_eq!(actor_id, &Some(principal_id));
     assert_eq!(actor_name, &name, "the trail's most important column");
     assert_eq!(action, "POST");
-    assert_eq!(target, "/admin/models");
+    assert_eq!(target, "/admin/provider-models");
 }

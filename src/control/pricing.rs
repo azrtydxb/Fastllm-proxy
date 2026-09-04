@@ -180,7 +180,7 @@ pub async fn sync(
     // appear once per backend now appears once.
     let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT m.id, m.name, m.upstream_model, m.input_price_per_mtok
-         FROM models m ORDER BY m.name",
+         FROM provider_models m ORDER BY m.name",
     )
     .fetch_all(pool)
     .await?;
@@ -209,7 +209,7 @@ pub async fn sync(
         };
         if !dry_run {
             sqlx::query(
-                "UPDATE models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
+                "UPDATE provider_models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
                  WHERE id = $1",
             )
             .bind(id)

@@ -1,6 +1,6 @@
-//! End-to-end virtual-model routing against the real binary and a real
+//! End-to-end frontend-model routing against the real binary and a real
 //! Postgres database, extending the `tests/rbac.rs` pattern from `File`
-//! mode to `--role all` — virtual models are a control-plane feature (P1
+//! mode to `--role all` — frontend models are a control-plane feature (P1
 //! depends on P0's database), so `File` mode has nowhere to store a rule at
 //! all.
 //!
@@ -17,7 +17,7 @@
 //! reaches into Postgres directly for that part, the same way
 //! `control::build`'s and `control::api`'s own DB-backed tests build their
 //! fixtures. Everything that *does* have a route — models, backends,
-//! virtual models, rules, targets, principals, keys — goes through the
+//! frontend models, rules, targets, principals, keys — goes through the
 //! admin API's real HTTP surface, exactly as an operator would use it.
 
 use std::io::Read;
@@ -39,7 +39,7 @@ impl Drop for Proc {
     }
 }
 
-const PROXY_TOKEN: &str = "virtual-model-e2e-proxy-token";
+const PROXY_TOKEN: &str = "frontend-model-e2e-proxy-token";
 
 /// A fixed, valid 32-byte key. What it decrypts is irrelevant here — this
 /// test creates no encrypted `upstream_api_key`, and `build_snapshot`
@@ -203,7 +203,7 @@ async fn grant_one_model(
     .unwrap();
 }
 
-/// A virtual model whose rule matches on the caller's role routes a
+/// A frontend model whose rule matches on the caller's role routes a
 /// canary-role caller and an ordinary caller to two different concrete
 /// models — proven by which backend's (unreachable) `api_base` shows up in
 /// the resulting `502`'s error text, since that text is only ever produced
@@ -214,8 +214,8 @@ async fn grant_one_model(
 ///
 /// Also pins the authorisation decision documented on
 /// `proxy::resolve_target_model` at the full end-to-end level: a caller
-/// granted only the *virtual* name, with no grant on the concrete model it
-/// resolves to today, is refused — being granted a virtual model must never
+/// granted only the *virtual* name, with no grant on the provider model it
+/// resolves to today, is refused — being granted a frontend model must never
 /// by itself unlock whatever it happens to route to.
 #[tokio::test]
 #[ignore = "requires postgres"]
@@ -248,7 +248,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     // database accumulated hundreds of leftover rows before.
     let _cleanup = TestCleanup::new()
         .track_suffix("models", "name", suffix.clone())
-        .track_suffix("virtual_models", "name", suffix.clone())
+        .track_suffix("frontend_models", "name", suffix.clone())
         .track_suffix("principals", "name", suffix.clone())
         .track_suffix("roles", "name", suffix.clone());
 
@@ -258,21 +258,21 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     support::bootstrap_login_user(&pool, &name("vm-e2e-admin")).await;
     let cookie = support::login_cookie(admin_port, &name("vm-e2e-admin"));
 
-    // Two concrete models, each with one backend at an address nothing is
+    // Two provider models, each with one backend at an address nothing is
     // listening on — the point is not a successful completion, it is
     // *which* backend's address ends up in the failure.
     let model_a_name = name("vm-e2e-backend-a");
     let model_a = admin_post(
         admin_port,
         &cookie,
-        "/admin/models",
+        "/admin/provider-models",
         serde_json::json!({ "name": model_a_name }),
     );
     let model_a_id = model_a["id"].as_i64().unwrap();
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/models/{model_a_id}/backends"),
+        &format!("/admin/provider-models/{model_a_id}/backends"),
         serde_json::json!({ "api_base": "http://127.0.0.1:19301/v1" }),
     );
 
@@ -280,25 +280,25 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let model_b = admin_post(
         admin_port,
         &cookie,
-        "/admin/models",
+        "/admin/provider-models",
         serde_json::json!({ "name": model_b_name }),
     );
     let model_b_id = model_b["id"].as_i64().unwrap();
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/models/{model_b_id}/backends"),
+        &format!("/admin/provider-models/{model_b_id}/backends"),
         serde_json::json!({ "api_base": "http://127.0.0.1:19302/v1" }),
     );
 
-    // The virtual model: a rule that only matches the canary role, routing
+    // The frontend model: a rule that only matches the canary role, routing
     // to backend-b; everyone else falls through to the defaults, backend-a.
     let canary_role = name("vm-e2e-canary-role");
     let vm_name = name("vm-e2e-canary-vm");
     let vm = admin_post(
         admin_port,
         &cookie,
-        "/admin/virtual-models",
+        "/admin/frontend-models",
         serde_json::json!({ "name": vm_name }),
     );
     let vm_id = vm["id"].as_i64().unwrap();
@@ -306,7 +306,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     let rule = admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{vm_id}/rules"),
+        &format!("/admin/frontend-models/{vm_id}/rules"),
         serde_json::json!({ "position": 0, "roles": [canary_role] }),
     );
     let rule_id = rule["id"].as_i64().unwrap();
@@ -314,13 +314,13 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         admin_port,
         &cookie,
         &format!("/admin/rules/{rule_id}/targets"),
-        serde_json::json!({ "model_id": model_b_id, "weight": 100, "position": 0 }),
+        serde_json::json!({ "provider_model_id": model_b_id, "weight": 100, "position": 0 }),
     );
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/virtual-models/{vm_id}/defaults"),
-        serde_json::json!({ "model_id": model_a_id, "weight": 100, "position": 0 }),
+        &format!("/admin/frontend-models/{vm_id}/defaults"),
+        serde_json::json!({ "provider_model_id": model_a_id, "weight": 100, "position": 0 }),
     );
 
     // Three principals: one that matches the rule (and is granted the model
@@ -421,14 +421,14 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     );
 
     // The authorisation decision, pinned end to end: this caller is granted
-    // only the virtual model's *name*, never the concrete model ("backend-a")
+    // only the frontend model's *name*, never the provider model ("backend-a")
     // it resolves to for a non-canary caller. If authorisation checked the
     // virtual name instead of the resolved target, this would incorrectly
     // succeed (reach routing, 502) instead of being refused.
     let (status, _) = chat(port, &virtual_only_key, &vm_name);
     assert_eq!(
         status, 403,
-        "a grant on the virtual name alone must not unlock the concrete model it resolves to"
+        "a grant on the virtual name alone must not unlock the provider model it resolves to"
     );
 
     // An unknown model — virtual or concrete — is still a 404 regardless of
@@ -438,13 +438,13 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
 
     // `/v1/models` lists what this caller may invoke, and nothing else.
     //
-    // `canary_key` is granted exactly one concrete model, `model_b`. What
+    // `canary_key` is granted exactly one provider model, `model_b`. What
     // the list must therefore contain is that model *and* the virtual name,
-    // because the virtual model's rule targets `model_b` and so resolves to
+    // because the frontend model's rule targets `model_b` and so resolves to
     // something this caller holds. `model_a` is granted to nobody here and
     // must not appear.
     //
-    // That middle case is the whole reason virtual models get their own
+    // That middle case is the whole reason frontend models get their own
     // rule rather than a plain `may_invoke` check: nothing grants the
     // virtual name itself, and hiding it would hide a name that works.
     //
@@ -466,20 +466,20 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         .collect();
     assert!(
         ids.contains(&model_b_name.as_str()),
-        "the concrete model this key is granted must be listed: {ids:?}"
+        "the provider model this key is granted must be listed: {ids:?}"
     );
     assert!(
         ids.contains(&vm_name.as_str()),
-        "a virtual model reaching a granted target must be listed: {ids:?}"
+        "a frontend model reaching a granted target must be listed: {ids:?}"
     );
     assert!(
         !ids.contains(&model_a_name.as_str()),
-        "a concrete model this key cannot invoke must not be advertised: {ids:?}"
+        "a provider model this key cannot invoke must not be advertised: {ids:?}"
     );
 
-    // `GET /admin/virtual-models` reflects the same rule and targets that
+    // `GET /admin/frontend-models` reflects the same rule and targets that
     // were just exercised over the data plane.
-    let admin_view = admin_get(admin_port, &cookie, "/admin/virtual-models");
+    let admin_view = admin_get(admin_port, &cookie, "/admin/frontend-models");
     let vm_view = admin_view
         .as_array()
         .unwrap()
@@ -491,7 +491,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     assert_eq!(vm_view["default_targets"][0]["model"], model_a_name);
 
     // `_cleanup` (declared above, right after `pool`) deletes every model,
-    // virtual model, principal and role this test created — including
+    // frontend model, principal and role this test created — including
     // `grant_one_model`'s roles, which no admin route creates — when it
     // drops at the end of this function, panic or not.
 }

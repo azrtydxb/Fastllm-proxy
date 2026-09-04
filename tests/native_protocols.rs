@@ -79,7 +79,7 @@ fn cleanup_for(suffix: &str) -> TestCleanup {
 /// The seeded `inference` role does not grant every model — that is the whole
 /// point of the RBAC model — and no admin route grants a single model this
 /// precisely, so this goes to Postgres directly, the same way
-/// `tests/virtual_models.rs` does and for the same reason.
+/// `tests/frontend_models.rs` does and for the same reason.
 async fn grant_one_model(pool: &sqlx::PgPool, principal_id: i64, model: &str, role_name: &str) {
     sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT (name) DO NOTHING")
         .bind(role_name)
@@ -335,10 +335,10 @@ async fn provision(
     let created = admin_post(
         admin_port,
         cookie,
-        "/admin/models",
+        "/admin/provider-models",
         serde_json::json!({"name": model, "description": "native protocol e2e"}),
     );
-    let model_id = created["id"].as_i64().expect("model id");
+    let provider_model_id = created["id"].as_i64().expect("model id");
 
     let mut backend = serde_json::json!({
         "api_base": api_base,
@@ -352,7 +352,7 @@ async fn provision(
     admin_post(
         admin_port,
         cookie,
-        &format!("/admin/models/{model_id}/backends"),
+        &format!("/admin/provider-models/{provider_model_id}/backends"),
         backend,
     );
 
@@ -1065,15 +1065,15 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
     let created = admin_post(
         admin_port,
         &cookie,
-        "/admin/models",
+        "/admin/provider-models",
         serde_json::json!({"name": model, "description": "", "cache_ttl_seconds": 60}),
     );
-    let model_id = created["id"].as_i64().expect("model id");
+    let provider_model_id = created["id"].as_i64().expect("model id");
     // Localises a failure: a cache miss can mean the TTL never reached the
     // database, never reached the snapshot, or never reached the lookup.
     let stored: Option<i32> =
-        sqlx::query_scalar("SELECT cache_ttl_seconds FROM models WHERE id = $1")
-            .bind(model_id)
+        sqlx::query_scalar("SELECT cache_ttl_seconds FROM provider_models WHERE id = $1")
+            .bind(provider_model_id)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1081,7 +1081,7 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/models/{model_id}/backends"),
+        &format!("/admin/provider-models/{provider_model_id}/backends"),
         serde_json::json!({
             "api_base": format!("http://127.0.0.1:{upstream_port}/v1"),
             "upstream_model": "m",
