@@ -489,10 +489,6 @@ fn wait_for_frontend_model(port: u16, key: &str, model: &str) {
     }
 }
 
-/// The headline behaviour: the first model in the chain answers 429, and the
-/// request lands on the second rather than reaching the client as an error.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires postgres"]
 /// Serialises the two tests that contend over the deployment-wide fallback.
 ///
 /// `models_single_fallback` allows exactly one fallback row for the whole
@@ -509,6 +505,10 @@ fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// The headline behaviour: the first model in the chain answers 429, and the
+/// request lands on the second rather than reaching the client as an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
 async fn a_429_from_the_first_model_fails_over_to_the_next_in_the_chain() {
     let _fallback_guard = fallback_lock().lock().await;
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
