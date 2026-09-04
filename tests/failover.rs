@@ -493,7 +493,24 @@ fn wait_for_frontend_model(port: u16, key: &str, model: &str) {
 /// request lands on the second rather than reaching the client as an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres"]
+/// Serialises the two tests that contend over the deployment-wide fallback.
+///
+/// `models_single_fallback` allows exactly one fallback row for the whole
+/// database, and the fallback is appended to *every* chain. So while
+/// `a_fallback_model_catches_a_chain_that_ran_out` has one set, any other
+/// test whose chain runs out is rescued by it — which is how this suite
+/// started returning 200 where it asserts 429, intermittently and with
+/// nothing wrong in either test on its own.
+///
+/// Narrower than `--test-threads=1`: only these two are ordered, and only
+/// because they share a row that cannot be scoped per test.
+fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn a_429_from_the_first_model_fails_over_to_the_next_in_the_chain() {
+    let _fallback_guard = fallback_lock().lock().await;
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let (port, admin_port, p1, p2) = (14811, 14812, 14813, 14814);
     let suffix = suffix(port);
@@ -813,6 +830,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres"]
 async fn a_fallback_model_catches_a_chain_that_ran_out() {
+    let _fallback_guard = fallback_lock().lock().await;
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let (port, admin_port, p1, p2) = (14851, 14852, 14853, 14854);
     let suffix = suffix(port);
