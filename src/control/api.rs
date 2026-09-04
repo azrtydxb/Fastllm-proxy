@@ -886,21 +886,8 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
 /// A model and a frontend model sharing a name would make the `model` field
 /// in a request body ambiguous about which one a client meant — rather than
 /// pick a silent precedence order between them, creation of either is
-/// refused while the other name is taken. See `post_virtual_model`'s mirror
+/// refused while the other name is taken. See `post_frontend_model`'s mirror
 /// check.
-async fn frontend_model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM frontend_models WHERE name = $1)")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-}
-
-async fn model_name_exists(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-}
 
 /// `(id, name, url, transport, description, auth_header, auth_scheme, enabled,
 /// credential_set)` — a row shape, named because clippy is right that nine
@@ -1382,19 +1369,17 @@ async fn post_model(
             "name must not be empty; it is the name clients address this model by",
         ));
     }
-    if frontend_model_name_exists(&ctx.pool, &body.name)
-        .await
-        .map_err(|e| db_error("model creation", &e))?
-    {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            format!(
-                "a frontend model named {:?} already exists; a model and a frontend model cannot \
-                 share a name, since a client request naming it would be ambiguous",
-                body.name
-            ),
-        ));
-    }
+    // A provider model and a frontend model may share a name, and normally do.
+    //
+    // This used to be a 409, on the grounds that a client request naming it
+    // would be ambiguous. It is not: `resolve_target_models` looks in
+    // `frontend_models` first and falls through to a provider model only when
+    // there is no frontend model of that name, so the frontend model wins,
+    // deterministically. Migration 0034 relies on exactly that — it gives every
+    // provider model a frontend model of the *same* name so the model stays
+    // callable once frontend models are the only addressable surface, and
+    // renaming the provider model out of the way instead would revoke every
+    // grant naming it (migration 0029 did that in production).
     // Validated here rather than by a CHECK constraint (see migration 0028):
     // the proxy tolerates an unknown policy by falling back to the default,
     // but an operator typing one into this API deserves to be told, not to
@@ -2065,16 +2050,16 @@ async fn list_virtual_models(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NewVirtualModel {
+struct NewFrontendModel {
     name: String,
     #[serde(default)]
     description: String,
 }
 
-async fn post_virtual_model(
+async fn post_frontend_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Json(body): Json<NewVirtualModel>,
+    Json(body): Json<NewFrontendModel>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     if body.name.trim().is_empty() {
         return Err(api_error(
@@ -2082,19 +2067,9 @@ async fn post_virtual_model(
             "name must not be empty; it is the name clients address this frontend model by",
         ));
     }
-    if model_name_exists(&ctx.pool, &body.name)
-        .await
-        .map_err(|e| db_error("frontend model creation", &e))?
-    {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            format!(
-                "a model named {:?} already exists; a model and a frontend model cannot share a \
-                 name, since a client request naming it would be ambiguous",
-                body.name
-            ),
-        ));
-    }
+    // The same the other way round: putting a frontend model in front of a
+    // provider model of the same name is the normal arrangement, not a clash.
+    // See the note on the model-creation route.
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO frontend_models (name, description) VALUES ($1, $2) RETURNING id",
     )
@@ -5407,7 +5382,7 @@ pub async fn serve(
         .route("/admin/backends/{id}", delete(delete_backend))
         .route(
             "/admin/frontend-models",
-            get(list_virtual_models).post(post_virtual_model),
+            get(list_virtual_models).post(post_frontend_model),
         )
         .route("/admin/frontend-models/{id}", delete(delete_virtual_model))
         .route(
@@ -6118,10 +6093,10 @@ mod tests {
         let secondary_id = secondary.0["id"].as_i64().unwrap();
 
         let vm_name = unique_name("vm-route-canary");
-        let (status, vm) = post_virtual_model(
+        let (status, vm) = post_frontend_model(
             State(ctx.clone()),
             RequireConfigWrite,
-            Json(NewVirtualModel {
+            Json(NewFrontendModel {
                 name: vm_name.clone(),
                 description: String::new(),
             }),
@@ -6216,7 +6191,7 @@ mod tests {
     /// whichever table happens to win a lookup, silently.
     #[tokio::test]
     #[ignore = "requires postgres"]
-    async fn a_model_and_a_virtual_model_cannot_share_a_name() {
+    async fn a_provider_model_and_a_frontend_model_may_share_a_name() {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("models", "name", "vm-collision-")
@@ -6240,24 +6215,24 @@ mod tests {
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
 
-        let err = post_virtual_model(
+        let (status, _) = post_frontend_model(
             State(ctx.clone()),
             RequireConfigWrite,
-            Json(NewVirtualModel {
+            Json(NewFrontendModel {
                 name: name.clone(),
                 description: String::new(),
             }),
         )
         .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::CONFLICT);
+        .expect("a frontend model may take the name of the provider model it fronts");
+        assert_eq!(status, StatusCode::CREATED);
 
         // And the reverse direction.
         let other_name = unique_name("vm-collision-reverse");
-        let (status, _) = post_virtual_model(
+        let (status, _) = post_frontend_model(
             State(ctx.clone()),
             RequireConfigWrite,
-            Json(NewVirtualModel {
+            Json(NewFrontendModel {
                 name: other_name.clone(),
                 description: String::new(),
             }),
@@ -6266,7 +6241,7 @@ mod tests {
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
 
-        let err = post_model(
+        let (status, _) = post_model(
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
@@ -6280,8 +6255,8 @@ mod tests {
             }),
         )
         .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::CONFLICT);
+        .expect("and the reverse: a provider model may be created under a frontend model's name");
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// The regression this task's Critical review finding described:
@@ -7748,10 +7723,10 @@ mod tests {
         let slow_id = model(slow_name.clone()).await;
 
         let vm_name = unique_name("dry-vm");
-        let (_, vm) = post_virtual_model(
+        let (_, vm) = post_frontend_model(
             State(ctx.clone()),
             RequireConfigWrite,
-            Json(NewVirtualModel {
+            Json(NewFrontendModel {
                 name: vm_name.clone(),
                 description: String::new(),
             }),

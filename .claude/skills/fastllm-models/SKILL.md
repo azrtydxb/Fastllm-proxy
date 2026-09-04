@@ -36,8 +36,10 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 
 ## Traps
 
-**A model and a frontend model cannot share a name** — 409, because a client
-request naming it would be ambiguous. Mirrored in both create paths.
+**A provider model and a frontend model may share a name, and normally do.**
+The frontend model wins during resolution, and migration 0034 gives every
+provider model one of the same name so it stays callable. This used to be a
+409 in both create paths; it no longer is.
 
 **The fallback model is appended to every chain, virtual or concrete.** It is the
 last resort when a rule author could not anticipate a failure mode; it is skipped

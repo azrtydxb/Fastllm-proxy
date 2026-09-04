@@ -48,14 +48,16 @@ change here — it is the only way to check a rule does what you meant.
 
 ## Traps
 
-**A model and a frontend model cannot share a name.** The API returns 409:
-a client request naming it would be ambiguous. Enforced in `post_virtual_model`
-against `model_name_exists`, and pinned by
-`a_model_and_a_virtual_model_cannot_share_a_name`. Writing straight to Postgres
-bypasses that check and creates exactly the ambiguity the constraint exists to
-prevent.
+**A provider model and a frontend model may share a name, and normally do.**
+This used to be a 409. It is not ambiguous: `resolve_target_models` looks in
+frontend models first and falls through to a provider model only when there is
+none of that name, so the frontend model wins deterministically. Migration 0034
+depends on it — every provider model gets a frontend model of the same name, so
+it stays callable once frontend models are the only addressable surface.
+Renaming the provider model out of the way instead would revoke every grant
+naming it. Pinned by `a_provider_model_and_a_frontend_model_may_share_a_name`.
 
-**`virtual_model_defaults.position` is `NOT NULL` with no default.** An INSERT
+**`frontend_model_defaults.position` is `NOT NULL` with no default.** An INSERT
 that omits it fails. The API sets it; hand-written SQL must too.
 
 **`weight` is a relative share, not a percentage.** Two targets at 1 and 1 split
