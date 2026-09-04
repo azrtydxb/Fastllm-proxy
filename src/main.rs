@@ -759,11 +759,11 @@ async fn run_import(config: &std::path::Path, database_url: &str) -> Result<()> 
         // already holds it, and `import` must not produce a second copy in a
         // terminal buffer or a CI log.
         println!(
-            "import complete: {} new model(s), {} new backend(s), \
+            "import complete: {} new model(s), {} new provider(s), \
              {} new principal(s) ({} already present), {} new key(s) ({} updated in place), \
              {} new grant(s) ({} already present, {} revoked)",
             summary.models,
-            summary.backends,
+            summary.providers,
             summary.principals,
             summary.principals_existing,
             summary.keys,

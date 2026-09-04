@@ -27,7 +27,10 @@ use std::collections::HashSet;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ImportSummary {
     pub models: usize,
-    pub backends: usize,
+    /// Providers created. It counted backends until migration 0029 made a
+    /// provider a record; a file naming three models on one endpoint creates
+    /// one provider, not three.
+    pub providers: usize,
     /// Principals created from `auth.keys[].name`.
     pub principals: usize,
     pub principals_existing: usize,
@@ -105,7 +108,7 @@ pub async fn import(
     let mut tx = pool.begin().await?;
     let mut summary = ImportSummary::default();
     let mut models = 0usize;
-    let mut backends = 0usize;
+    let mut providers = 0usize;
 
     // A `model_name` appearing more than once used to mean one model with
     // several backends. It now means several provider models -- one per
@@ -229,7 +232,7 @@ pub async fn import(
                 .bind(&encrypted_key)
                 .fetch_one(&mut *tx)
                 .await?;
-                backends += 1;
+                providers += 1;
                 id
             }
         };
@@ -352,7 +355,7 @@ pub async fn import(
     }
 
     summary.models = models;
-    summary.backends = backends;
+    summary.providers = providers;
 
     // Keys after models, in the same transaction: a named grant only
     // flattens into the snapshot if the model exists (see `flatten_grants`),
@@ -784,7 +787,7 @@ mod tests {
         // providers, because a provider model has exactly one provider since
         // migration 0029. They used to be one model with two backends.
         assert_eq!(summary.models, 2);
-        assert_eq!(summary.backends, 2, "one provider per endpoint");
+        assert_eq!(summary.providers, 2, "one provider per endpoint");
 
         // And callers naming the pooled name still reach something: the
         // frontend model holds it and balances across both, the same shape
@@ -996,7 +999,7 @@ mod tests {
         let second: crate::config::FileConfig =
             serde_yaml::from_str(&yaml("anthropic", "4096")).unwrap();
         let summary = import(&pool, &second, &test_key()).await.unwrap();
-        assert_eq!(summary.backends, 0, "a corrected file must not add a row");
+        assert_eq!(summary.providers, 0, "a corrected file must not add a row");
 
         let (protocol, max_tokens): (String, Option<i32>) = sqlx::query_as(
             "SELECT p.protocol, m.default_max_tokens
