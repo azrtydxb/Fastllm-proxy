@@ -10,13 +10,39 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
-- **Load balancing is per backend model, not per process.** `--policy` was a
+- **A provider is a record.** It was a grouping the UI invented at render time,
+  so nothing could register, count or refer to one, and the 80 providers in
+  `docs/providers.md` had nothing to attach to. `providers` now owns the
+  endpoint, the credential, the protocol and the auth scheme; a provider model
+  belongs to exactly one provider and `model_backends` is gone (migration
+  0029). Rotating a shared key is one write where it was one per model.
+- **Hosts that serve models can register themselves.** `agent/fastllm-node-agent.py`
+  registers an address on a lease and heartbeats; the control plane calls
+  `GET /v1/models` itself, so discovery and reachability are the same test and
+  a model the proxies cannot dial is never registered. Every engine answers
+  that one call, so there is no engine matrix and no container mode. See
+  `docs/operations/registering-hosts.md`.
+- **Providers are probed for identity, not just liveness.** One call per
+  provider answers both "is it reachable" and "is it still serving what is
+  registered against it". The second is the drift that motivated this: a host
+  answering happily while serving a different model than the row claims, which
+  a health check reports as healthy. A dynamic provider that stops answering
+  degrades first and is deleted only after 30 minutes — longer than a model
+  load, because suppressing routing is reversible and deletion is not.
+- **Usage survives the model that served it.** `usage_events` records the model
+  and provider name at ingest and the foreign key is nullable, so deleting a
+  model no longer erases what it was billed for (migration 0031). The hourly
+  rollup is keyed by name for the same reason — its `model_id` was `NOT NULL`
+  and part of the primary key, so a deleted model would have failed the whole
+  retention batch.
+
+- **Load balancing is per provider model, not per process.** `--policy` was a
   deployment-wide flag, which is the wrong shape the moment one control plane
   serves both kinds of pool — two identical local replicas sharing a prefix
   cache want `cache-affinity`, three hosted providers of differing speed want
-  `lowest-latency`, and a flag can only be one of them. Each backend model may
-  now carry its own (migration 0028, `policy` on `POST`/`PATCH /admin/models`,
-  a control on the **Backend models** screen). Unset means the deployment
+  `lowest-latency`, and a flag can only be one of them. Each provider model may
+  now carry its own (migration 0028, `policy` on `POST`/`PATCH
+  /admin/provider-models`, a control on the **Provider models** screen). Unset means the deployment
   default, so an existing database behaves exactly as it did.
 - **The price sync can replace a price that is already set.** It never
   overwrote by design — a negotiated rate must not be replaced by a list
@@ -27,16 +53,24 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Changed
 
-- **Two words for two things: backend model and frontend model.** A backend
-  model is what a request is routed _to_ (one name, its backends, its
-  load-balancing policy); a frontend model is what a client asks _for_ (rules
-  and weights resolving to a chain of backend models). The UI, the navigation
-  and the documentation use them consistently; the admin API still spells them
-  `models` and `virtual-models` in its paths, so every existing script and the
-  OpenAPI description keep working.
-
-### Fixed
-
+- **Two words for two things: provider model and frontend model.** A provider
+  model is what a request is routed _to_ — one name on one provider, since the
+  same model on two hosts is two provider models. A frontend model is what a
+  client asks _for_: rules and weights resolving to a chain of them, and the
+  only name a client is meant to use. The schema, the API, the UI and the
+  documentation all use those words now: `provider_models` and
+  `frontend_models`, `/admin/provider-models` and `/admin/frontend-models`
+  (migration 0033). The old routes are gone rather than aliased — this rides
+  the breaking change the provider split already made instead of adding a
+  second one later for a cosmetic reason.
+- **Access is granted on frontend models.** A request naming one is authorised
+  against it; naming a provider model directly still needs a grant on that
+  model. The old rule required a grant on the resolved provider model, which
+  pinned every grant to a provider model's *name* — so renaming one revoked
+  access silently, as migration 0029 demonstrated. A grant on a frontend model
+  covers the chain it routes to, so adding a target extends the reach of
+  everyone holding it; editing one requires `config:write`, which already
+  grants everything.
 - **Declared context windows never reached routing.** `Registry` carried a
   `context_length` map whose doc comment said it was filled from the snapshot,
   and nothing ever filled it — so `routing::candidates`' context-window
