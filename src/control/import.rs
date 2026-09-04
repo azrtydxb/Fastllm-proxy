@@ -905,7 +905,7 @@ mod tests {
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
             "model_list:\n\
              \x20 - model_name: {model}\n\
-             \x20   litellm_params: {{ api_base: http://{name}-h:8000/v1 }}\n\
+             \x20   litellm_params: {{ api_base: http://{model}-h:8000/v1 }}\n\
              auth:\n\
              \x20 keys:\n\
              \x20   - key: sk-limits-import-test-aaaaaaaaaaaa\n\
