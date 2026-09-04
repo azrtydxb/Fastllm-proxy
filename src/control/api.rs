@@ -4734,11 +4734,18 @@ async fn require_session(
     // `check_permission` per route, and the verb an agent holds
     // (`provider:register` on `node/...`) grants nothing else — a key without
     // it gets a 403 from every other admin route exactly as before.
-    if let Some(bearer) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
+    // Only when there is no session cookie. A request carrying both — a
+    // browser session plus some unrelated Authorization header — must still
+    // authenticate as the session it has, and treating a bearer token as
+    // authoritative whenever it appears turned every such request into a 401.
+    let cookie = session_cookie(&headers);
+    if let (None, Some(bearer)) = (
+        &cookie,
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer ")),
+    ) {
         let hash = hash_key(bearer.trim()).to_vec();
         let principal_id: Option<i64> = sqlx::query_scalar(
             "SELECT principal_id FROM api_keys \
@@ -4760,7 +4767,7 @@ async fn require_session(
         return Ok(next.run(request).await);
     }
 
-    let Some(token) = session_cookie(&headers) else {
+    let Some(token) = cookie else {
         return Err(api_error(
             StatusCode::UNAUTHORIZED,
             "no session cookie or bearer key",
