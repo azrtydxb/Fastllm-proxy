@@ -130,6 +130,7 @@ machine.
 | `--snapshot-cache`                | `/var/lib/fastllm/snapshot.json` | Last-known-good snapshot, so a control-plane outage degrades to "stops learning about changes" rather than "stops serving" |
 | `--admin-port`                    | `4001`                           | Admin API bind port (`all`/`control`)                                                                                      |
 | `--snapshot-rebuild-interval`     | `5`                              | Seconds between control-plane rebuilds independent of admin writes                                                         |
+| `--provider-sweep-interval`       | `60`                             | Seconds between provider probes: one `GET /v1/models` each, answering both whether it is reachable and whether it still serves what is registered |
 | `--rate-limit-reconcile-interval` | `5`                              | `Http`-mode `proxy` only. `0` disables                                                                                     |
 
 ### Listener
