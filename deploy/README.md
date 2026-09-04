@@ -422,9 +422,29 @@ The control plane needs egress to the provider and its CA in the trust store;
 public roots are already present in the image, so the hosted providers work
 without `--ca-bundle`.
 
+## Letting hosts register themselves
+
+The section below is the manual version of this, and it is the drift it
+describes that motivated the alternative: run
+[`agent/fastllm-node-agent.py`](../agent/fastllm-node-agent.py) on the host and
+it registers its own addresses on a lease, so a moved port corrects itself.
+
+The control plane then probes each provider on `--provider-sweep-interval`
+(60s), which answers two questions with one call: whether it is reachable, and
+whether it is still serving what is registered against it. The second is the
+one that bit this cluster — a Spark answering happily while serving a different
+model than the row claimed, which a health check reports as healthy.
+
+A dynamic provider that stops answering degrades first and is deleted only
+after 30 minutes, which is longer than a 27B takes to load. Static and cloud
+providers are probed too but never expire.
+
+See [Registering hosts that serve models](../docs/operations/registering-hosts.md).
+
 ## When a Spark's port changes
 
-GPUStack assigns the replica port and it moves on redeploy. If the backend goes
+Do this when nothing is registering the host for you. GPUStack assigns the
+replica port and it moves on redeploy. If the backend goes
 unhealthy, find the current one:
 
 ```bash
