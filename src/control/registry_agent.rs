@@ -227,3 +227,220 @@ mod tests {
         assert!(missing_from(&[], &owned(&["qwen3.8-27b"])).is_empty());
     }
 }
+
+/// Bring a dynamic provider's models in line with what it actually serves.
+///
+/// Adds what is newly served and removes what is not, for `dynamic` providers
+/// only — a static or cloud provider's models are a human's list, and a model
+/// missing from one `GET /v1/models` is not permission to delete it.
+///
+/// **A learned model is inventory, not an exposure.** Nothing here creates a
+/// frontend model for it, so a model that appears on a registered host reaches
+/// nobody until an operator points a frontend model at it. That is the
+/// closed-by-default half of moving authorisation to frontend models: a host
+/// starting an unrelated model must not hand existing principals access to it
+/// (`.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`).
+pub async fn reconcile_models(
+    pool: &PgPool,
+    provider_id: i64,
+    provider_name: &str,
+    served: &[String],
+) -> Result<(usize, usize), sqlx::Error> {
+    let known: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, upstream_model FROM provider_models \
+         WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+    )
+    .bind(provider_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut added = 0usize;
+    for upstream in served {
+        if known.iter().any(|(_, u)| u == upstream) {
+            continue;
+        }
+        // The name the provider exposes, qualified only when that name is
+        // already taken by another provider's model. Names are still globally
+        // unique until addressing moves to frontend models (ADR 0005), and a
+        // second host serving the same model is the normal case rather than an
+        // error.
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)")
+                .bind(upstream)
+                .fetch_one(pool)
+                .await?;
+        let name = if taken {
+            format!("{upstream}@{provider_name}")
+        } else {
+            upstream.clone()
+        };
+        sqlx::query(
+            "INSERT INTO provider_models (name, provider_id, upstream_model) \
+             VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(&name)
+        .bind(provider_id)
+        .bind(upstream)
+        .execute(pool)
+        .await?;
+        added += 1;
+    }
+
+    // Gone from the provider means gone from the registry -- but only its own
+    // models, and only for a provider whose whole point is that it is
+    // maintained automatically. Usage rows survive this (migration 0031) and a
+    // frontend model pointing at it keeps its target by name (0036), so the
+    // delete is recoverable in every way that matters.
+    let removed = sqlx::query(
+        "DELETE FROM provider_models \
+          WHERE provider_id = $1 AND upstream_model IS NOT NULL \
+            AND NOT (upstream_model = ANY($2))",
+    )
+    .bind(provider_id)
+    .bind(served)
+    .execute(pool)
+    .await?
+    .rows_affected() as usize;
+
+    Ok((added, removed))
+}
+
+/// How long a dynamic provider may be degraded before it is deleted.
+///
+/// Longer than a model load, on purpose. A 27B on a DGX Spark takes over ten
+/// minutes to come up and answers nothing while it does; a host reboot is
+/// routine. Deleting on a shorter window would make every restart look like a
+/// decommissioning and throw away the provider's credential to do it.
+const DEGRADED_GRACE: chrono::Duration = chrono::Duration::minutes(30);
+
+/// One pass over every provider: probe, record, and remove what has been gone
+/// long enough.
+///
+/// Two stages, never one. A failed probe or a lapsed lease marks the provider
+/// degraded and takes its models out of rotation; only sustained absence
+/// deletes. Suppressing routing is reversible and deletion is not, and the
+/// asymmetry is the whole design — see
+/// `.procoder/adr/0004-dynamic-providers-degrade-before-they-are-deleted.md`.
+///
+/// Static and cloud providers are probed on the same schedule but never
+/// degrade and are never deleted. A human put them there, and absence is not
+/// evidence the human changed their mind — the probe is advisory for them, and
+/// exists to report drift the operator would otherwise find by accident.
+pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepReport> {
+    let mut report = SweepReport::default();
+
+    let providers: Vec<(i64, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as("SELECT id, name, api_base, lease_expires_at FROM providers ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+
+    for (id, name, api_base, lease) in providers {
+        let kind: String = sqlx::query_scalar("SELECT kind FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+        let registered: Vec<String> = sqlx::query_scalar(
+            "SELECT upstream_model FROM provider_models \
+             WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+
+        // A lapsed lease is treated exactly like an unreachable endpoint: the
+        // agent has stopped vouching for it, and whether the endpoint happens
+        // to still answer is beside the point — nothing is maintaining it.
+        let lapsed = lease.is_some_and(|l| l < chrono::Utc::now());
+        let outcome = if lapsed {
+            Probe::Unreachable {
+                error: "lease lapsed".into(),
+            }
+        } else {
+            probe(client, &api_base, &registered).await
+        };
+
+        // A degraded provider is described by *why*, because "unreachable" and
+        // "serving something else" are different problems with different
+        // fixes — only the second means the host is fine and the registry is
+        // wrong, which is the case this whole feature exists for.
+        let degraded_reason = match outcome {
+            Probe::Healthy => None,
+            Probe::Mismatch { ref missing } => {
+                report.mismatched.push(name.clone());
+                Some(format!("serving something else; missing {missing:?}"))
+            }
+            Probe::Unreachable { ref error } => {
+                report.unreachable.push(name.clone());
+                Some(error.clone())
+            }
+        };
+
+        // Only a dynamic provider learns. A cloud provider answering with four
+        // hundred models must not have four hundred rows created for it, and a
+        // static provider's list is a human's.
+        if kind == "dynamic" && degraded_reason.is_none() {
+            if let Ok(served) = served_models(client, &api_base).await {
+                let (added, removed) = reconcile_models(pool, id, &name, &served).await?;
+                report.models_added += added;
+                report.models_removed += removed;
+            }
+        }
+
+        match degraded_reason {
+            None => {
+                sqlx::query(
+                    "UPDATE providers SET last_seen_at = now(), degraded_since = NULL, \
+                     degraded_reason = NULL WHERE id = $1",
+                )
+                .bind(id)
+                .execute(pool)
+                .await?;
+                report.healthy += 1;
+            }
+            Some(reason) => {
+                // `COALESCE` so the clock starts at the *first* failure and is
+                // not reset by every subsequent one — otherwise a provider
+                // failing every probe would never age out.
+                sqlx::query(
+                    "UPDATE providers SET degraded_since = COALESCE(degraded_since, now()), \
+                     degraded_reason = $2 WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&reason)
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+
+    // Only `dynamic`, and only after the grace window. The `WHERE kind` is the
+    // load-bearing half: without it this would delete the provider a human
+    // typed in because a host was briefly down.
+    let removed: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM providers
+          WHERE kind = 'dynamic'
+            AND degraded_since IS NOT NULL
+            AND degraded_since < now() - make_interval(secs => $1)
+          RETURNING name",
+    )
+    .bind(DEGRADED_GRACE.num_seconds() as f64)
+    .fetch_all(pool)
+    .await?;
+    report.deleted = removed;
+
+    Ok(report)
+}
+
+#[derive(Debug, Default)]
+pub struct SweepReport {
+    pub healthy: usize,
+    /// Reachable but serving something other than what is registered. Reported
+    /// apart from `unreachable` because it is a different problem: the host is
+    /// fine and the registry is wrong.
+    pub mismatched: Vec<String>,
+    pub unreachable: Vec<String>,
+    /// Dynamic providers whose absence outlasted the grace window.
+    pub deleted: Vec<String>,
+    pub models_added: usize,
+    pub models_removed: usize,
+}
