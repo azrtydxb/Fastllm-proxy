@@ -13,12 +13,21 @@ As a client calling `bge-m3` today, my requests keep working after the migration
 
 Single-backend models — the three OpenRouter ones — need nothing.
 
+Grants are the half that is easy to miss. `proxy.rs` authorises against the
+resolved concrete model, so renaming one revokes every grant naming it. The
+first real request after this migration reached kw came back `403
+model_access_denied` for `bge-m3@192.168.10.245:8890`, a model the caller had
+never heard of, and two live roles had lost access with nothing reporting it.
+
 ## Acceptance criteria
 
 - [ ] Every model with two or more backends gains a frontend model of the same name balancing across the split provider models
 - [ ] The generated frontend model inherits the old `models.policy`
 - [ ] Single-backend models gain nothing
 - [ ] A request to `bge-m3` on kw succeeds before and after the migration with the same client config
+- [ ] Every grant on the original name reaches each name it was split into — a
+      caller holding `model:invoke` on the old name can still make the same
+      request afterwards
 - [ ] The migration is idempotent, or refuses to run twice, and is exercised against a copy of the kw database
 
 ## Evidence
