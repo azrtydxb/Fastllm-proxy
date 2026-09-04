@@ -1062,8 +1062,8 @@ mod tests {
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "undecryptable-model")
-            .track_prefix("models", "name", "unrelated-model")
+            .track_prefix("provider_models", "name", "undecryptable-model")
+            .track_prefix("provider_models", "name", "unrelated-model")
             .track_prefix("providers", "name", "undecryptable-provider")
             .track_prefix("providers", "name", "healthy-provider");
 
@@ -1198,9 +1198,9 @@ mod tests {
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = crate::control::secrets::test_key();
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "vm-primary")
-            .track_prefix("models", "name", "vm-secondary")
-            .track_prefix("models", "name", "vm-fallback")
+            .track_prefix("provider_models", "name", "vm-primary")
+            .track_prefix("provider_models", "name", "vm-secondary")
+            .track_prefix("provider_models", "name", "vm-fallback")
             .track_prefix("frontend_models", "name", "vm-canary");
 
         let primary = unique_name("vm-primary");

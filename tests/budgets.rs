@@ -297,7 +297,7 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
     // (unlike `frontend_models.rs`) each call mints its own timestamp rather
     // than sharing one suffix.
     let _cleanup = TestCleanup::new()
-        .track_prefix("models", "name", "budget-e2e-model")
+        .track_prefix("provider_models", "name", "budget-e2e-model")
         .track_prefix("principals", "name", "budget-e2e-principal")
         .track_prefix("principals", "name", "budget-e2e-admin");
 

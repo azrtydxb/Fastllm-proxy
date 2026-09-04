@@ -60,7 +60,7 @@ fn suffix(port: u16) -> String {
 
 fn cleanup_for(suffix: &str) -> TestCleanup {
     TestCleanup::new()
-        .track_suffix("models", "name", suffix)
+        .track_suffix("provider_models", "name", suffix)
         .track_suffix("frontend_models", "name", suffix)
         .track_suffix("prompt_classes", "name", suffix)
         .track_suffix("principals", "name", suffix)

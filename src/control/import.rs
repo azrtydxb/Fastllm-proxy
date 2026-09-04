@@ -774,7 +774,7 @@ mod tests {
         // the real registered model `qwen3-6-35b-a3b-nvfp4`, which this
         // suite must never touch. `qwen3-import-test` is unambiguous.
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "qwen3-import-test-")
+            .track_prefix("provider_models", "name", "qwen3-import-test-")
             .track_prefix("frontend_models", "name", "qwen3-import-test-");
 
         let name = unique_name("qwen3-import-test");
@@ -843,7 +843,8 @@ mod tests {
     async fn import_carries_every_backend_field_the_file_can_name() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "native-import-test-");
+        let _cleanup =
+            TestCleanup::new().track_prefix("provider_models", "name", "native-import-test-");
 
         let name = unique_name("native-import-test");
         // The endpoint is derived from the unique name, not the real
@@ -907,7 +908,7 @@ mod tests {
         // principal, and tracking only the principal left fifteen of them
         // behind in the shared database before anyone noticed.
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "limits-import-test-")
+            .track_prefix("provider_models", "name", "limits-import-test-")
             .track_prefix("principals", "name", "limits-sa-")
             .track_prefix("roles", "name", "import:limits-sa-");
 
@@ -984,7 +985,8 @@ mod tests {
     async fn re_importing_an_edited_backend_converges() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "converge-import-test-");
+        let _cleanup =
+            TestCleanup::new().track_prefix("provider_models", "name", "converge-import-test-");
 
         let name = unique_name("converge-import-test");
         let yaml = |protocol: &str, tokens: &str| {
@@ -1033,7 +1035,8 @@ mod tests {
         // `"m"` alone would be too broad a prefix to track safely (it would
         // match any other test's/run's model name that happens to start
         // with the same letter); a distinctive tag makes tracking exact.
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "import-dup-test-");
+        let _cleanup =
+            TestCleanup::new().track_prefix("provider_models", "name", "import-dup-test-");
 
         let name = unique_name("import-dup-test");
         let cfg: crate::config::FileConfig = serde_yaml::from_str(&format!(
@@ -1069,7 +1072,8 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "secret-backend-");
+        let _cleanup =
+            TestCleanup::new().track_prefix("provider_models", "name", "secret-backend-");
 
         let name = unique_name("secret-backend");
         let plaintext_credential = "sk-do-not-leak-this-upstream-token";
@@ -1168,8 +1172,8 @@ mod tests {
         /// `import_key` creates alongside each principal.
         fn cleanup(&self) -> TestCleanup {
             TestCleanup::new()
-                .track_exact("models", "name", self.granted_model.clone())
-                .track_exact("models", "name", self.ungranted_model.clone())
+                .track_exact("provider_models", "name", self.granted_model.clone())
+                .track_exact("provider_models", "name", self.ungranted_model.clone())
                 .track_exact("principals", "name", self.named_principal.clone())
                 .track_exact("principals", "name", self.wildcard_principal.clone())
                 .track_exact("roles", "name", import_role_name(&self.named_principal))
@@ -1327,8 +1331,8 @@ mod tests {
         let principal = unique_name("narrowing-principal");
         let key = unique_name("sk-narrowing-key-long-enough-to-prefix");
         let _cleanup = TestCleanup::new()
-            .track_exact("models", "name", a.clone())
-            .track_exact("models", "name", b.clone())
+            .track_exact("provider_models", "name", a.clone())
+            .track_exact("provider_models", "name", b.clone())
             .track_exact("principals", "name", principal.clone())
             .track_exact("roles", "name", import_role_name(&principal));
 
@@ -1494,7 +1498,8 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let key = test_key();
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "legacy-plaintext-");
+        let _cleanup =
+            TestCleanup::new().track_prefix("provider_models", "name", "legacy-plaintext-");
 
         let name = unique_name("legacy-plaintext");
 

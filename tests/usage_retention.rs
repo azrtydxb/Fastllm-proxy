@@ -81,7 +81,7 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
     let model = unique_name("retention-model");
     let principal = unique_name("retention-principal");
     let _cleanup = TestCleanup::new()
-        .track_prefix("models", "name", "retention-model")
+        .track_prefix("provider_models", "name", "retention-model")
         .track_prefix("principals", "name", "retention-principal");
 
     let provider_model_id: i64 =
@@ -274,7 +274,7 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
     // The model is deleted by the test itself; only the principal needs
     // cleaning up, and the usage rows go with it.
     let _cleanup = TestCleanup::new()
-        .track_prefix("models", "name", "deleted-model")
+        .track_prefix("provider_models", "name", "deleted-model")
         .track_prefix("principals", "name", "deleted-model-principal");
 
     let provider: i64 = sqlx::query_scalar(

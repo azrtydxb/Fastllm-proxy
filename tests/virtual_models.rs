@@ -247,7 +247,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     // simply never run in that case, which is exactly how this shared
     // database accumulated hundreds of leftover rows before.
     let _cleanup = TestCleanup::new()
-        .track_suffix("models", "name", suffix.clone())
+        .track_suffix("provider_models", "name", suffix.clone())
         .track_suffix("frontend_models", "name", suffix.clone())
         .track_suffix("principals", "name", suffix.clone())
         .track_suffix("roles", "name", suffix.clone());

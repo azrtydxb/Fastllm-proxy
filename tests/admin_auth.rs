@@ -704,7 +704,7 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
     let model = unique_name("audit-model");
     let _cleanup = TestCleanup::new()
         .track_exact("principals", "name", name.clone())
-        .track_exact("models", "name", model.clone());
+        .track_exact("provider_models", "name", model.clone());
     let principal_id = user_with_roles(&pool, &name, &["admin"]).await;
     let _ = principal_id;
 

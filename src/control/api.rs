@@ -5900,7 +5900,7 @@ mod tests {
         // reach: any `assert!`/`unwrap()` above them panicking first.
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "route-principal-")
-            .track_prefix("models", "name", "route-model-");
+            .track_prefix("provider_models", "name", "route-model-");
         let principal_name = unique_name("route-principal");
         let model_name = unique_name("route-model");
 
@@ -6184,8 +6184,8 @@ mod tests {
     async fn frontend_model_routes_publish_rules_and_targets_to_the_snapshot() {
         let (ctx, cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "vm-route-primary-")
-            .track_prefix("models", "name", "vm-route-secondary-")
+            .track_prefix("provider_models", "name", "vm-route-primary-")
+            .track_prefix("provider_models", "name", "vm-route-secondary-")
             .track_prefix("frontend_models", "name", "vm-route-canary-");
         let primary_name = unique_name("vm-route-primary");
         let secondary_name = unique_name("vm-route-secondary");
@@ -6326,7 +6326,7 @@ mod tests {
     async fn a_provider_model_and_a_frontend_model_may_share_a_name() {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "vm-collision-")
+            .track_prefix("provider_models", "name", "vm-collision-")
             .track_prefix("frontend_models", "name", "vm-collision-");
         let name = unique_name("vm-collision");
 
@@ -6403,7 +6403,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
         let cache: Arc<dyn SnapshotSink> = Arc::new(ArcSwap::from_pointee(Snapshot::default()));
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "rebuild-test-");
+        let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "rebuild-test-");
 
         // Establish a baseline as of right now.
         rebuild_once(&pool, cache.as_ref(), &test_key())
@@ -6598,7 +6598,7 @@ mod tests {
         // run concurrently under `cargo test`.
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "usage-basic-principal-")
-            .track_prefix("models", "name", "usage-basic-model-");
+            .track_prefix("provider_models", "name", "usage-basic-model-");
         let principal_name = unique_name("usage-basic-principal");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -6701,7 +6701,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "usage-latency-")
-            .track_prefix("models", "name", "usage-latency-model-");
+            .track_prefix("provider_models", "name", "usage-latency-model-");
         let principal_name = unique_name("usage-latency");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -6783,7 +6783,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "usage-principal-survives-")
-            .track_prefix("models", "name", "usage-model-survives-");
+            .track_prefix("provider_models", "name", "usage-model-survives-");
         let principal_name = unique_name("usage-principal-survives");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -7159,7 +7159,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "budget-usage-principal-")
-            .track_prefix("models", "name", "budget-usage-model-");
+            .track_prefix("provider_models", "name", "budget-usage-model-");
         let principal_id = make_principal(&ctx, &unique_name("budget-usage-principal")).await;
         let model_name = unique_name("budget-usage-model");
         let _ = post_model(
@@ -7232,7 +7232,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "cost-src-")
-            .track_prefix("models", "name", "cost-src-model-");
+            .track_prefix("provider_models", "name", "cost-src-model-");
         let principal_name = unique_name("cost-src");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -7317,7 +7317,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn the_audit_log_can_be_read_back_and_filtered() {
         let (ctx, _cache) = test_ctx().await;
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "audit-read-");
+        let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "audit-read-");
         let name = unique_name("audit-read");
 
         sqlx::query(
@@ -7381,7 +7381,7 @@ mod tests {
         let model = unique_name("grant-model");
         let _cleanup = TestCleanup::new()
             .track_prefix("roles", "name", "grant-role-")
-            .track_prefix("models", "name", "grant-model-")
+            .track_prefix("provider_models", "name", "grant-model-")
             .track_prefix("permissions", "resource", "model/grant-model-");
         sqlx::query("INSERT INTO roles (name) VALUES ($1)")
             .bind(&role)
@@ -7454,7 +7454,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "agg-")
-            .track_prefix("models", "name", "agg-model-");
+            .track_prefix("provider_models", "name", "agg-model-");
         let principal_name = unique_name("agg");
         let (_, created) = post_principal(
             State(ctx.clone()),
@@ -7556,7 +7556,7 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn a_models_price_can_be_corrected_without_recreating_it() {
         let (ctx, _cache) = test_ctx().await;
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "patch-model-");
+        let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "patch-model-");
         let name = unique_name("patch-model");
         let (_, created) = post_model(
             State(ctx.clone()),
@@ -7646,7 +7646,7 @@ mod tests {
     async fn a_service_account_credential_is_validated_when_the_backend_is_created() {
         let (ctx, _cache) = test_ctx().await;
         // Backends cascade from the model, so tracking the model is enough.
-        let _cleanup = TestCleanup::new().track_prefix("models", "name", "gcp-validate-");
+        let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "gcp-validate-");
         let model_name = unique_name("gcp-validate");
         let (_, model) = post_model(
             State(ctx.clone()),
@@ -7770,7 +7770,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "no-budget-usage-principal-")
-            .track_prefix("models", "name", "no-budget-usage-model-");
+            .track_prefix("provider_models", "name", "no-budget-usage-model-");
         let principal_id = make_principal(&ctx, &unique_name("no-budget-usage-principal")).await;
         let model_name = unique_name("no-budget-usage-model");
         let _ = post_model(
@@ -7821,8 +7821,8 @@ mod tests {
     async fn a_dry_run_names_the_rule_that_decided_and_falls_back_to_the_defaults() {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
-            .track_prefix("models", "name", "dry-fast-")
-            .track_prefix("models", "name", "dry-slow-")
+            .track_prefix("provider_models", "name", "dry-fast-")
+            .track_prefix("provider_models", "name", "dry-slow-")
             .track_prefix("frontend_models", "name", "dry-vm-");
 
         let model = |name: String| {
@@ -8136,7 +8136,7 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new()
             .track_prefix("principals", "name", "vgroup-p-")
-            .track_prefix("models", "name", "vgroup-m-");
+            .track_prefix("provider_models", "name", "vgroup-m-");
         let principal_id = make_principal(&ctx, &unique_name("vgroup-p")).await;
         let model_name = unique_name("vgroup-m");
         let (_, model) = post_model(
