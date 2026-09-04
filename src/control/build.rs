@@ -1242,7 +1242,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position) VALUES ($1, $2, 70, 0)",
+            "INSERT INTO rule_targets (rule_id, provider_model_id, target_model_name, weight, \
+              position) SELECT $1, id, name, 70, 0 FROM provider_models WHERE id = $2",
         )
         .bind(rule_id)
         .bind(provider_model_id[&primary])
@@ -1250,7 +1251,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO rule_targets (rule_id, provider_model_id, weight, position) VALUES ($1, $2, 30, 1)",
+            "INSERT INTO rule_targets (rule_id, provider_model_id, target_model_name, weight, \
+              position) SELECT $1, id, name, 30, 1 FROM provider_models WHERE id = $2",
         )
         .bind(rule_id)
         .bind(provider_model_id[&secondary])
@@ -1258,8 +1260,9 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, weight, position)
-             VALUES ($1, $2, 100, 0)",
+            "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
+              target_model_name, weight, position)
+             SELECT $1, id, name, 100, 0 FROM provider_models WHERE id = $2",
         )
         .bind(vm_id)
         .bind(provider_model_id[&fallback])
