@@ -140,8 +140,20 @@ ALTER TABLE models ADD CONSTRAINT models_provider_name UNIQUE (provider_id, name
 -- directly. The name is available for the frontend model because model names
 -- just became provider-scoped.
 CREATE TEMP TABLE split_models ON COMMIT DROP AS
-SELECT b.model_id AS original_id, m.name, b.id AS backend_id, p.id AS provider_id,
-       b.upstream_model, b.default_max_tokens,
+SELECT b.model_id AS original_id,
+       m.name     AS original_name,
+       -- Almost always the name the provider exposes, unchanged. The
+       -- exception is a model that had two backends on the *same* endpoint
+       -- differing only in `upstream_model`: both would land on one provider
+       -- under one name and collide, so the second and later ones carry the
+       -- upstream name that distinguishes them. Rare, and better than a
+       -- migration that fails on a database nobody thought was unusual.
+       CASE WHEN COUNT(*) OVER (PARTITION BY b.model_id, p.id) > 1
+                 AND ROW_NUMBER() OVER (PARTITION BY b.model_id ORDER BY b.id) > 1
+            THEN m.name || '#' || b.upstream_model
+            ELSE m.name
+       END AS name,
+       p.id AS provider_id, b.upstream_model, b.default_max_tokens,
        ROW_NUMBER() OVER (PARTITION BY b.model_id ORDER BY b.id) AS n
 FROM model_backends b
 JOIN models m ON m.id = b.model_id
@@ -161,26 +173,26 @@ WHERE b.model_id IN (SELECT model_id FROM model_backends GROUP BY model_id HAVIN
 INSERT INTO models (name, description, input_price_per_mtok, output_price_per_mtok,
                     cache_ttl_seconds, context_length, policy,
                     provider_id, upstream_model, default_max_tokens)
-SELECT m.name, m.description, m.input_price_per_mtok, m.output_price_per_mtok,
+SELECT s.name, m.description, m.input_price_per_mtok, m.output_price_per_mtok,
        m.cache_ttl_seconds, m.context_length, m.policy,
        s.provider_id, s.upstream_model, s.default_max_tokens
 FROM split_models s JOIN models m ON m.id = s.original_id
 WHERE s.n > 1;
 
 INSERT INTO virtual_models (name, description)
-SELECT DISTINCT m.name,
-       'Balances ' || m.name || ' across the providers it was split over when '
-       || 'providers became records (migration 0029).'
-FROM split_models s JOIN models m ON m.id = s.original_id;
+SELECT DISTINCT s.original_name,
+       'Balances ' || s.original_name || ' across the providers it was split '
+       || 'over when providers became records (migration 0029).'
+FROM split_models s;
 
 -- Equal weight, because the single model these came from had no way to express
 -- a preference between its backends -- inventing one here would be a change of
 -- behaviour disguised as a migration.
 INSERT INTO virtual_model_defaults (virtual_model_id, model_id, weight, position)
 SELECT v.id, m.id, 1, ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY m.id) - 1
-FROM virtual_models v
-JOIN split_models s ON s.name = v.name
-JOIN models m ON m.name = v.name AND m.provider_id = s.provider_id
+FROM split_models s
+JOIN virtual_models v ON v.name = s.original_name
+JOIN models m ON m.name = s.name AND m.provider_id = s.provider_id
 GROUP BY v.id, m.id;
 
 DROP TABLE model_backends;
