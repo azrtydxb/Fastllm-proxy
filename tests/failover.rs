@@ -917,11 +917,16 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     .send_json(serde_json::json!({"provider_model_id": serde_json::Value::Null}))
     .expect("clearing the fallback model");
     std::thread::sleep(Duration::from_secs(3));
+    // Through the frontend model, since that is the only name a client has.
+    // 502 rather than 503: the chain is not *empty* — its targets exist and
+    // are simply unhealthy, and an unhealthy pool is kept as a last resort so
+    // the upstream's own error reaches the client. 503 is for a frontend model
+    // whose targets resolve to nothing at all.
     let (status, _) = chat(
         port,
         &fx.key,
         serde_json::json!({
-            "model": fx.primary,
+            "model": fx.frontend_name,
             "messages": [{"role": "user", "content": "hello"}],
         }),
     );
