@@ -2310,6 +2310,12 @@ async fn post_model(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchModel {
+    /// A display name, since migration 0036 gave targets an id to hold and
+    /// this route the grants to carry. It stays globally unique because a
+    /// frontend model resolves a target by it, so two models of one name would
+    /// make which one a target meant arbitrary.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -2322,6 +2328,97 @@ struct PatchModel {
     /// is not the same as zero — see `ModelDef::context_length`.
     #[serde(default, deserialize_with = "double_option")]
     context_length: Option<Option<i64>>,
+}
+
+/// Rename a provider model, carrying everything that names it.
+///
+/// Three things record this name, and each is a different kind of link:
+///
+/// - **Targets** hold the model's id and only fall back to the name when that
+///   id is gone, so routing follows a rename by itself. The stored name is
+///   updated anyway, because it is what would be used if the model were later
+///   deleted, and leaving the old one there would reattach the wrong thing.
+/// - **Grants** are `model/<name>` strings in `permissions.resource`, matched
+///   against the name a caller asked for. These have to move, or a rename
+///   revokes access — which is exactly what migration 0034 found the hard way.
+/// - **Usage history** deliberately does not move. `usage_events.model_name`
+///   records what the model was called when the request was served (migration
+///   0031); rewriting it would make past spend look as though it had always
+///   been billed under the new name.
+///
+/// One transaction, so a rename cannot half-apply and leave a model nobody has
+/// a grant for.
+async fn rename_provider_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), ApiError> {
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_error("starting a rename", &e))?;
+
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT name FROM provider_models WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_error("reading a model's name", &e))?;
+    let Some(previous) = previous else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no model with id {id}"),
+        ));
+    };
+    if previous == name {
+        return Ok(());
+    }
+
+    sqlx::query("UPDATE provider_models SET name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                api_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "a model named {name:?} already exists; names are globally unique because                          a frontend model's targets resolve by them"
+                    ),
+                )
+            } else {
+                db_error("renaming a model", &e)
+            }
+        })?;
+
+    for table in ["frontend_model_defaults", "rule_targets"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET target_model_name = $1               WHERE provider_model_id = $2 OR target_model_name = $3"
+        ))
+        .bind(name)
+        .bind(id)
+        .bind(&previous)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_error("moving a model's targets", &e))?;
+    }
+
+    // A grant on the old name would stop matching, and a 403 is how the caller
+    // would find out. `ON CONFLICT DO NOTHING` because the new name may
+    // already be granted to somebody: the row is shared between roles, so
+    // merging into it is right, and the old row is left for any grant that
+    // still refers to a different model of that name.
+    sqlx::query(
+        "UPDATE permissions SET resource = $1           WHERE verb = 'model:invoke' AND resource = $2             AND NOT EXISTS (SELECT 1 FROM permissions p2                              WHERE p2.verb = 'model:invoke' AND p2.resource = $1)",
+    )
+    .bind(format!("model/{name}"))
+    .bind(format!("model/{previous}"))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| db_error("moving a model's grants", &e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| db_error("committing a rename", &e))?;
+    Ok(())
 }
 
 /// Tells "absent" apart from "present and null".
@@ -2368,6 +2465,15 @@ async fn patch_model(
             StatusCode::BAD_REQUEST,
             "cache_ttl_seconds cannot be negative; 0 or null turns caching off",
         ));
+    }
+    if let Some(name) = body.name.as_deref().map(str::trim) {
+        if name.is_empty() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "name cannot be empty".to_string(),
+            ));
+        }
+        rename_provider_model(&ctx, id, name).await?;
     }
     // Refused rather than coerced to "undeclared": a model that accepts no
     // tokens is not a thing, and silently reinterpreting the number would
@@ -3073,6 +3179,11 @@ async fn post_frontend_model(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchFrontendModel {
+    /// The name clients ask for. Renaming one is therefore a change to the
+    /// deployment's public API, not an internal relabel — which is the whole
+    /// difference between this and renaming a provider model.
+    #[serde(default)]
+    name: Option<String>,
     /// `null` clears it back to the weighted split; omitting it leaves the
     /// policy alone.
     #[serde(default, deserialize_with = "double_option")]
@@ -3094,6 +3205,15 @@ async fn patch_frontend_model(
         Some(inner) => validated_policy(inner.as_deref())?,
         None => None,
     };
+    if let Some(name) = body.name.as_deref().map(str::trim) {
+        if name.is_empty() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "name cannot be empty".to_string(),
+            ));
+        }
+        rename_frontend_model(&ctx, id, name).await?;
+    }
     let done = sqlx::query(
         "UPDATE frontend_models \
             SET policy = CASE WHEN $2 THEN $3 ELSE policy END \
@@ -3113,6 +3233,70 @@ async fn patch_frontend_model(
     }
     refresh(&ctx).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Rename a frontend model, carrying the grants that name it.
+///
+/// This is the name on the wire, so a rename *is* meant to change what clients
+/// ask for — that part is the feature. What must not change is who may ask:
+/// grants are `model/<name>` strings matched against the name a caller sent,
+/// so leaving them behind would revoke everyone's access at the moment of the
+/// rename and report it as a 403 they could not explain.
+///
+/// Rules, defaults and targets hang off the frontend model's id and need
+/// nothing done to them.
+async fn rename_frontend_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), ApiError> {
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_error("starting a rename", &e))?;
+
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT name FROM frontend_models WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_error("reading a frontend model's name", &e))?;
+    let Some(previous) = previous else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no frontend model with id {id}"),
+        ));
+    };
+    if previous == name {
+        return Ok(());
+    }
+
+    sqlx::query("UPDATE frontend_models SET name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                api_error(
+                    StatusCode::CONFLICT,
+                    format!("a frontend model named {name:?} already exists"),
+                )
+            } else {
+                db_error("renaming a frontend model", &e)
+            }
+        })?;
+
+    sqlx::query(
+        "UPDATE permissions SET resource = $1           WHERE verb = 'model:invoke' AND resource = $2             AND NOT EXISTS (SELECT 1 FROM permissions p2                              WHERE p2.verb = 'model:invoke' AND p2.resource = $1)",
+    )
+    .bind(format!("model/{name}"))
+    .bind(format!("model/{previous}"))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| db_error("moving a frontend model's grants", &e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| db_error("committing a rename", &e))?;
+    Ok(())
 }
 
 async fn delete_virtual_model(
@@ -4899,6 +5083,12 @@ async fn post_reconcile(
 /// turns "silently wrong until someone notices by accident" into something
 /// an operator (or an alert on that endpoint) can actually see.
 async fn refresh(ctx: &Ctx) {
+    // Before the build reads them: a model created a moment ago may be the one
+    // a target has been waiting for by name since it was deleted, and the id
+    // is what keeps that target attached across a later rename.
+    if let Err(e) = crate::control::registry_agent::relink_targets(&ctx.pool).await {
+        tracing::warn!(error = %e, "re-attaching targets to their models failed");
+    }
     match build_snapshot(&ctx.pool, &ctx.key).await {
         Ok(snap) => {
             ctx.cache.store_snapshot(snap);
@@ -5112,6 +5302,11 @@ pub fn spawn_provider_sweep(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            // The registrar is the other thing that creates models, and the
+            // one that deletes them in the first place.
+            if let Err(e) = crate::control::registry_agent::relink_targets(&pool).await {
+                tracing::warn!(error = %e, "re-attaching targets to their models failed");
+            }
             match crate::control::registry_agent::sweep(&pool, &client).await {
                 Ok(r) => {
                     if !r.mismatched.is_empty() {
@@ -7238,6 +7433,154 @@ mod tests {
         .await
         .unwrap();
         delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
+            .await
+            .unwrap();
+    }
+
+    /// A rename must not revoke anybody, and must not repoint anything.
+    ///
+    /// Both halves have bitten this project already: migration 0034 found that
+    /// giving models new names silently revoked the grants naming the old
+    /// ones, and 0036 exists because targets bound to a name lost their model
+    /// entirely when it went away.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn renaming_a_model_carries_its_grants_and_its_targets() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("provider_models", "name", "rename-model-")
+            .track_prefix("provider_models", "name", "renamed-model-")
+            .track_prefix("frontend_models", "name", "rename-frontend-")
+            .track_prefix("roles", "name", "rename-role-");
+
+        let before = unique_name("rename-model");
+        let after = unique_name("renamed-model");
+        let (_, model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewModel {
+                name: before.clone(),
+                description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let model_id = model.0["id"].as_i64().unwrap();
+
+        // A frontend model pointing at it, and a role granted the old name.
+        let fm_name = unique_name("rename-frontend");
+        let (_, fm) = post_frontend_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewFrontendModel {
+                name: fm_name.clone(),
+                description: String::new(),
+                policy: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let fm_id = fm.0["id"].as_i64().unwrap();
+        post_default_target(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(fm_id),
+            Json(NewTarget {
+                provider_model_id: model_id,
+                weight: default_target_weight(),
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let role = unique_name("rename-role");
+        post_role(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewRole {
+                name: role.clone(),
+                description: None,
+            }),
+        )
+        .await
+        .unwrap();
+        grant_permission(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(role.clone()),
+            Json(GrantPermission {
+                verb: "model:invoke".into(),
+                resource: Some(format!("model/{before}")),
+            }),
+        )
+        .await
+        .unwrap();
+
+        patch_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(model_id),
+            Json(PatchModel {
+                name: Some(after.clone()),
+                description: None,
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // The grant followed, so nobody was revoked by the rename.
+        let granted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM permissions p \
+               JOIN role_permissions rp ON rp.permission_id = p.id \
+               JOIN roles r ON r.id = rp.role_id \
+              WHERE r.name = $1 AND p.verb = 'model:invoke' AND p.resource = $2)",
+        )
+        .bind(&role)
+        .bind(format!("model/{after}"))
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(granted, "the rename revoked the grant naming the old name");
+
+        // And the target followed, by id rather than by the string.
+        let (target_name, target_id): (String, Option<i64>) = sqlx::query_as(
+            "SELECT target_model_name, provider_model_id FROM frontend_model_defaults \
+              WHERE frontend_model_id = $1",
+        )
+        .bind(fm_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(target_name, after);
+        assert_eq!(target_id, Some(model_id));
+
+        // What the proxies would actually be told.
+        let snap = build_snapshot(&ctx.pool, &ctx.key).await.unwrap();
+        let vm = snap.frontend_models.get(&fm_name).expect("frontend model");
+        assert!(
+            vm.defaults.iter().any(|t| t.model == after),
+            "the snapshot still routes {fm_name} to the old name: {:?}",
+            vm.defaults
+        );
+
+        // Usage history is deliberately left alone: it records what the model
+        // was called when the request was served.
+        delete_model(State(ctx.clone()), RequireConfigWrite, Path(model_id))
+            .await
+            .unwrap();
+        delete_virtual_model(State(ctx.clone()), RequireConfigWrite, Path(fm_id))
+            .await
+            .unwrap();
+        delete_role(State(ctx.clone()), RequireConfigWrite, Path(role))
             .await
             .unwrap();
     }

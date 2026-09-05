@@ -865,27 +865,38 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // straight to `Registry::pool_has_healthy` with no id-to-name lookup on
     // the hot path.
     //
-    // Read from `target_model_name` rather than joined from
-    // `provider_model_id`, and that is the whole of what makes a frontend
-    // model survive its target being deleted. The id is a cache of "which row
-    // is that name right now" and goes NULL when the model does; the name
-    // stays, so a model re-registered under the same name on the same provider
-    // is picked up by the next snapshot with nothing to reattach by hand.
+    // The id when it resolves, the recorded name when it does not. Each half
+    // covers a failure the other cannot.
     //
-    // A target naming a model that does not currently exist yields no pool and
-    // is simply not routable, which is the same state the request path already
-    // handles for a model whose every backend is down.
+    // The id is the binding, so **renaming a provider model does not break the
+    // frontend models pointing at it**: the join finds the same row and yields
+    // its new name. Binding on the stored name alone would have every target
+    // silently stop routing the moment somebody renamed a model, which is why
+    // nothing could be renamed before this.
+    //
+    // The stored name is what survives *deletion*, which is migration 0036's
+    // reason for existing: `provider_model_id` is `ON DELETE SET NULL`, so a
+    // model deleted by the registrar leaves the target row intact and naming
+    // what it wants. Re-register that name on that provider and the next
+    // snapshot routes to it again, with nothing to reattach by hand.
+    //
+    // A target that resolves to neither yields no pool and is simply not
+    // routable, which is the state the request path already handles for a
+    // model whose every backend is down.
     type TargetRow = (i64, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
     let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT rt.rule_id, rt.target_model_name, rt.weight, rt.position
+        "SELECT rt.rule_id, COALESCE(pm.name, rt.target_model_name), rt.weight, rt.position
          FROM rule_targets rt
+         LEFT JOIN provider_models pm ON pm.id = rt.provider_model_id
          ORDER BY rt.rule_id, rt.position",
     )
     .fetch_all(pool)
     .await?;
     let default_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.frontend_model_id, vd.target_model_name, vd.weight, vd.position
+        "SELECT vd.frontend_model_id, COALESCE(pm.name, vd.target_model_name), vd.weight, \
+                vd.position
          FROM frontend_model_defaults vd
+         LEFT JOIN provider_models pm ON pm.id = vd.provider_model_id
          ORDER BY vd.frontend_model_id, vd.position",
     )
     .fetch_all(pool)

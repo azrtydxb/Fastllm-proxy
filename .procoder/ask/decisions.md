@@ -404,3 +404,44 @@ destroyed — but the provider models themselves go.
   reconcile, then do the rest.
 - Leave them static. The agents keep registering *new* endpoints as dynamic,
   and the five hand-made ones stay under human control.
+
+## Stable identity: fix the name-bound links, change the key type, or both?
+
+Asked for: "internally use uuid for providers, models, frontend models, users
+and so on... I don't want renames to break links. What we see is just a display
+name we can edit."
+
+What the survey found: **the key type is not what breaks on rename.** All 17
+tables already have a `BIGSERIAL id` with 19 real foreign keys between them, so
+every id-based link already survives a rename. Renames break things because a
+few links deliberately bind by *name*, and because almost nothing can be
+renamed at all — only `providers` has a `name` on its PATCH route.
+
+The name-bound links, and whether they should stay that way:
+
+- `permissions.resource = 'model/<name>'` — a grant stops matching when the
+  model is renamed. Fails closed (403), and is the reason `PatchModel` has
+  never had a `name` field. Should become id-bound.
+- `rule_targets.target_model_name`, `frontend_model_defaults.target_model_name`
+  — routing. Deliberately name-bound by migration 0036 so a deleted and
+  re-registered model reattaches by itself. Wants id *and* name: id while the
+  row exists, name to reattach after it does not.
+- `target_provider_name` — descriptive only; routing never reads it.
+- `usage_events.model_name` / `provider_name`, `usage_rollup_hourly.model_name`
+  — deliberate (0031). History must record what a thing was called *at the
+  time*; these should stay names.
+- `frontend_models.name` — the name on the wire. Renaming it is *meant* to
+  change what clients ask for; that is the feature, not a broken link.
+
+Options:
+
+- A only: make grants id-bound, give targets an id binding with the name kept
+  as the reattachment fallback, and add `name` to the PATCH routes for provider
+  models, frontend models, principals, roles, MCP servers and agents. Delivers
+  "renames don't break links" in full. No key-type change.
+- A then B: A, then migrate all 17 primary keys and 19 foreign keys from
+  `BIGSERIAL` to UUID, touching 23 admin routes and ~117 i64 id sites, the
+  snapshot, the UI and every test. Adds non-enumerable ids now that ids are a
+  stable public contract; adds nothing to rename-safety beyond A.
+- B only: key type now, name-bound links later. Rejected in the writing — it is
+  the expensive half with none of the benefit the request asked for.

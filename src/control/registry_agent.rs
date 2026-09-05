@@ -113,6 +113,37 @@ pub async fn probe(client: &Upstream, api_base: &str, registered: &[String]) -> 
 /// Idempotent by address: an agent heartbeating every thirty seconds calls
 /// this every thirty seconds, and it must be the same operation each time.
 /// Returns the provider's id.
+/// Re-attach targets whose model has come back.
+///
+/// `provider_model_id` is `ON DELETE SET NULL`, so a model the registrar
+/// removed leaves its targets naming what they want with no id. Routing still
+/// finds them by that name — that is migration 0036's whole point — but a
+/// target held together by a string is one a later rename would break. Putting
+/// the id back closes that window, so "renames do not break links" holds for a
+/// model that has been away and come back, not only for one that never left.
+///
+/// Matched on provider *and* model name together: the same model name on two
+/// hosts is the normal case, and re-attaching to whichever row was found first
+/// would silently repoint a frontend model at a different host. A target whose
+/// provider name was never recorded is left alone rather than guessed at.
+pub async fn relink_targets(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut relinked = 0;
+    for table in ["frontend_model_defaults", "rule_targets"] {
+        relinked += sqlx::query(&format!(
+            "UPDATE {table} t SET provider_model_id = pm.id
+               FROM provider_models pm
+               JOIN providers p ON p.id = pm.provider_id
+              WHERE t.provider_model_id IS NULL
+                AND t.target_model_name = pm.name
+                AND t.target_provider_name = p.name"
+        ))
+        .execute(pool)
+        .await?
+        .rows_affected();
+    }
+    Ok(relinked)
+}
+
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
