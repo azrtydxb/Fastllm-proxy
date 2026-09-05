@@ -491,12 +491,20 @@ export function Models({ onUnauthorised }) {
                     <select
                       style={{ flex: 1.6 }}
                       value={draftFor(m.id).provider_id || ""}
-                      onChange={(e) =>
+                      onChange={(e) => {
                         setDraft(m.id, {
                           provider_id: e.target.value,
                           upstream_model: "",
-                        })
-                      }
+                        });
+                        // Asked for on selection rather than behind a button:
+                        // choosing a provider is the question "what does it
+                        // have", and the answer is cached per provider, so
+                        // this is one request however many models are being
+                        // attached to it.
+                        if (e.target.value && !served[e.target.value]) {
+                          browse(e.target.value);
+                        }
+                      }}
                     >
                       <option value="">a new endpoint…</option>
                       {(data.providers || []).map((p) => (
