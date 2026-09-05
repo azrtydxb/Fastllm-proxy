@@ -94,6 +94,20 @@ What registration deliberately cannot do is convert a provider a human typed in
 into one that expires — a static provider stays static, so an agent cannot take
 over an endpoint someone configured by hand.
 
+That leaves a gap worth knowing about: put an agent on a host whose endpoints
+were already configured by hand, and it will register them happily and change
+nothing. Every line will read `kind=static leased=False`, and the lease, the
+degradation and the model reconciliation will all be doing nothing. The
+handover is an operator's explicit act:
+
+```bash
+curl -sk -b /tmp/ck -X PATCH https://control:4001/admin/providers/4 \
+  -H 'content-type: application/json' -d '{"kind":"dynamic"}'
+```
+
+and `{"kind":"static"}` takes it back, clearing the lease and any degradation
+with it.
+
 ## Any engine, in a container or not
 
 Every engine worth naming answers `GET /v1/models` — vLLM, SGLang,

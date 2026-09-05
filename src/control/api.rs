@@ -1307,6 +1307,11 @@ fn encrypt_upstream_key(ctx: &Ctx, key: Option<&str>) -> Result<Option<Vec<u8>>,
 struct PatchProvider {
     #[serde(default)]
     name: Option<String>,
+    /// Hand an endpoint over to the node agent registering it, or take it
+    /// back. `static`/`cloud` are a human's and are never removed
+    /// automatically; `dynamic` takes a lease and is swept.
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default)]
     api_base: Option<String>,
     #[serde(default)]
@@ -1326,10 +1331,17 @@ struct PatchProvider {
     credential_kind: Option<String>,
 }
 
-/// `PATCH /admin/providers/{id}` — rename it, move it, or rotate its key.
+/// `PATCH /admin/providers/{id}` — rename it, move it, rotate its key, or hand
+/// it over to an agent.
 ///
 /// Rotation is the reason this exists: one credential serves every model on a
 /// provider, so replacing it should be one write rather than one per model.
+///
+/// `kind` is the other one that cannot be done any other way. Registration
+/// deliberately never converts a static provider into one that can expire, so
+/// an endpoint someone typed in before putting an agent on the host would stay
+/// unmanaged for ever with no way out. This is that way out, and it is an
+/// operator's explicit act rather than something a host can do to itself.
 async fn patch_provider(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
@@ -1371,6 +1383,34 @@ async fn patch_provider(
                     db_error("renaming a provider", &e)
                 }
             })?;
+    }
+    if let Some(kind) = body.kind.as_deref().map(str::trim) {
+        if !matches!(kind, "static" | "cloud" | "dynamic") {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("kind {kind:?} is not one of: static, cloud, dynamic"),
+            ));
+        }
+        // Leaving `dynamic` clears the lease and the degradation with it. A
+        // static provider carrying a lease that has already expired would be
+        // reported unreachable by every sweep for ever, since the sweep reads
+        // that column whatever the kind — and a stale `degraded_reason` on a
+        // provider nothing is maintaining describes a problem that no longer
+        // exists.
+        //
+        // Becoming `dynamic` deliberately leaves the lease NULL rather than
+        // inventing one: the sweep treats a missing lease as "not lapsed", so
+        // the provider is probed on its merits until its agent takes a real
+        // lease on the next beat. Inventing a TTL here would be guessing at an
+        // agent's `--ttl` from the wrong side.
+        sqlx::query(
+            "UPDATE providers SET kind = $1,              lease_expires_at = CASE WHEN $1 = 'dynamic' THEN lease_expires_at ELSE NULL END,              degraded_since = CASE WHEN $1 = 'dynamic' THEN degraded_since ELSE NULL END,              degraded_reason = CASE WHEN $1 = 'dynamic' THEN degraded_reason ELSE NULL END              WHERE id = $2",
+        )
+        .bind(kind)
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("changing a provider's kind", &e))?;
     }
     if let Some(base) = body.api_base.as_deref() {
         let api_base = normalise_api_base(base)?;
@@ -6889,6 +6929,7 @@ mod tests {
                 Path(id),
                 Json(PatchProvider {
                     name: None,
+                    kind: None,
                     api_base: None,
                     protocol: None,
                     auth_header: None,
@@ -6911,6 +6952,128 @@ mod tests {
             crate::control::secrets::decrypt(&ctx.key, &stored).unwrap(),
             "sk-ant-rotated"
         );
+
+        delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
+            .await
+            .unwrap();
+    }
+
+    /// Handing an endpoint to the agent on its host, and taking it back.
+    ///
+    /// The round trip matters more than either direction: a provider that has
+    /// been dynamic carries a lease and possibly a degraded reason, and
+    /// leaving those on it when it becomes static again would have every sweep
+    /// report it unreachable for ever — the sweep reads `lease_expires_at`
+    /// whatever the kind.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn an_endpoint_can_be_handed_to_an_agent_and_taken_back() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("providers", "name", "handover-provider-");
+
+        let (_, created) = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("handover-provider")),
+                kind: None,
+                catalogue_key: None,
+                api_base: Some(format!("http://10.8.8.8:{}/v1", std::process::id())),
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = created.0["id"].as_i64().unwrap();
+        assert_eq!(created.0["kind"], "static");
+
+        let patch = |kind: &str| PatchProvider {
+            name: None,
+            kind: Some(kind.to_string()),
+            api_base: None,
+            protocol: None,
+            auth_header: None,
+            auth_scheme: None,
+            upstream_api_key: None,
+            credential_kind: None,
+        };
+
+        patch_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(id),
+            Json(patch("dynamic")),
+        )
+        .await
+        .unwrap();
+
+        // A lease it did not take is left NULL rather than invented: the sweep
+        // reads a missing lease as "not lapsed", so it is probed on its merits
+        // until its agent beats.
+        let (kind, lease): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as("SELECT kind, lease_expires_at FROM providers WHERE id = $1")
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, "dynamic");
+        assert!(lease.is_none());
+
+        // Now give it the state a lapsed agent would leave behind...
+        sqlx::query(
+            "UPDATE providers SET lease_expires_at = now() - interval '1 hour', \
+             degraded_since = now(), degraded_reason = 'lease lapsed' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        // ...and take it back.
+        patch_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(id),
+            Json(patch("static")),
+        )
+        .await
+        .unwrap();
+
+        type Row = (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        );
+        let (kind, lease, since, reason): Row = sqlx::query_as(
+            "SELECT kind, lease_expires_at, degraded_since, degraded_reason \
+             FROM providers WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(kind, "static");
+        assert!(
+            lease.is_none(),
+            "an expired lease would degrade it for ever"
+        );
+        assert!(since.is_none());
+        assert!(reason.is_none());
+
+        let err = patch_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(id),
+            Json(patch("nonsense")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
 
         delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
             .await

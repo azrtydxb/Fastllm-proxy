@@ -379,3 +379,28 @@ holding it, with no new grant on record.
 - Keep per-target filtering in addition to the frontend-model grant, and accept
   that provider-model names stay load-bearing — which means the registrar
   cannot churn them and #13 needs a different design.
+
+## Should the five Spark endpoints become dynamic providers?
+
+The node agent now runs on both DGX Sparks and registers all five endpoints,
+but every one comes back `kind=static leased=False`: they were configured by
+hand first, and registration deliberately never converts a static provider into
+one that can expire. So the lease, the health-based degradation and the model
+reconciliation currently do nothing for them — they are probed advisorily and
+that is all.
+
+The original ask was "we swap models regularly, register the backends and
+delete them when they stop running", and that needs `kind = dynamic`.
+
+Consequence of converting: a dynamic provider that stays degraded for 30
+minutes is deleted along with its provider models, and `reconcile_models` will
+add and remove provider models on every sweep to match what the host serves.
+Usage survives (migration 0031) and frontend model targets bind by name (0036),
+so a frontend model keeps its target as a dangling name rather than being
+destroyed — but the provider models themselves go.
+
+- Convert all five now, in a migration rather than a hand-written UPDATE.
+- Convert one host first (dgx-spark2, 2 endpoints), watch a real model swap
+  reconcile, then do the rest.
+- Leave them static. The agents keep registering *new* endpoints as dynamic,
+  and the five hand-made ones stay under human control.

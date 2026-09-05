@@ -10,6 +10,21 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **An endpoint can be handed to the agent on its host, and taken back.**
+  `kind` on `PATCH /admin/providers/{id}`. Registration never converts a static
+  provider into one that can expire, which is right — an agent must not be able
+  to take over an endpoint a human typed in — but it left no way to opt in
+  either: putting an agent on a host whose endpoints were already configured by
+  hand registered them and changed nothing. Leaving `dynamic` clears the lease
+  and any degradation with it, since the sweep reads `lease_expires_at`
+  whatever the kind and an expired one would report the provider unreachable
+  for ever.
+- **The node agent can be told which CA to trust.** `--ca-cert`, and
+  deliberately no `--insecure`: the bearer token it presents goes over that
+  connection. Found by installing it on this project's own DGX Sparks, where
+  the control plane's certificate comes from an internal CA and every
+  registration failed on `CERTIFICATE_VERIFY_FAILED`. `agent/fastllm-node-agent.service`
+  is the systemd unit those hosts now run.
 - **Adding a model starts from the provider that serves it.** An **Add model**
   dialog on the Provider models screen: pick a provider, and it reads that
   endpoint's `GET /v1/models` and offers what it serves, filling the local name
