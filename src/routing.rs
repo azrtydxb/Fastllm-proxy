@@ -1755,12 +1755,12 @@ mod tests {
 
         // Comfortably inside both: the declared weights decide, and `small`
         // carries almost all of them.
-        let small_request = order_candidates(&targets, 0, &registry, 1_000);
+        let small_request = order_candidates(&targets, 0, &registry, 1_000, None);
         assert_eq!(small_request[0], "small");
 
         // Past what `small` can hold: `big` leads, and `small` is still
         // present as a last resort rather than removed.
-        let big_request = order_candidates(&targets, 0, &registry, 100_000);
+        let big_request = order_candidates(&targets, 0, &registry, 100_000, None);
         assert_eq!(big_request[0], "big", "the model that fits must lead");
         assert!(
             big_request.contains(&"small".to_string()),
@@ -1785,7 +1785,7 @@ mod tests {
                 weight: 1,
             },
         ];
-        let ordered = order_candidates(&targets, 0, &registry, 100_000);
+        let ordered = order_candidates(&targets, 0, &registry, 100_000, None);
         assert_eq!(
             ordered[0], "unknown",
             "undeclared must not be treated as too small"
