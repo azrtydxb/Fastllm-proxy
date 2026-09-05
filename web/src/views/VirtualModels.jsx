@@ -409,6 +409,17 @@ export function VirtualModels({ onUnauthorised }) {
                           <Dot tone="ok" size={6} />
                           <Mono style={{ font: "400 12px var(--mono)" }}>
                             {t.model}
+                            {t.provider ? (
+                              <span style={{ color: "var(--fg-5)" }}>
+                                {" · "}
+                                {t.provider}
+                              </span>
+                            ) : null}
+                            {t.provider_model_id === null ? (
+                              <span style={{ color: "var(--warn)" }}>
+                                {" · unavailable"}
+                              </span>
+                            ) : null}
                           </Mono>
                           <span
                             style={{
@@ -501,6 +512,17 @@ export function VirtualModels({ onUnauthorised }) {
                     <Dot tone="ok" size={6} />
                     <Mono style={{ font: "400 12px var(--mono)" }}>
                       {t.model}
+                      {t.provider ? (
+                        <span style={{ color: "var(--fg-5)" }}>
+                          {" · "}
+                          {t.provider}
+                        </span>
+                      ) : null}
+                      {t.provider_model_id === null ? (
+                        <span style={{ color: "var(--warn)" }}>
+                          {" · unavailable"}
+                        </span>
+                      ) : null}
                     </Mono>
                     <span
                       style={{
@@ -619,9 +641,13 @@ function AddTarget({ models, onAdd }) {
         style={{ fontSize: 12 }}
       >
         <option value="">model…</option>
+        {/* The provider is part of the identity now: two hosts serving the
+            same model are two provider models, and a name alone does not say
+            which one this target means. */}
         {models.map((m) => (
           <option key={m.id} value={m.id}>
             {m.name}
+            {m.provider_name ? ` · ${m.provider_name}` : " · no provider"}
           </option>
         ))}
       </select>
@@ -804,6 +830,7 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
+                {m.provider_name ? ` · ${m.provider_name}` : " · no provider"}
               </option>
             ))}
           </select>

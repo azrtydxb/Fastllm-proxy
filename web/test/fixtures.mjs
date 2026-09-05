@@ -321,7 +321,24 @@ const FIXTURES = {
       ],
       policy: null,
       default_targets: [
-        { id: 22, model_id: 3, model: "local-qwen", weight: 100, position: 0 },
+        {
+          id: 22,
+          provider_model_id: 3,
+          model: "local-qwen",
+          provider: "10.42.1.7:8000",
+          weight: 100,
+          position: 0,
+        },
+        // Its model has been deleted; the target survives, bound by name, and
+        // reattaches if that name comes back.
+        {
+          id: 23,
+          provider_model_id: null,
+          model: "local-qwen@10.42.1.8:8000",
+          provider: "10.42.1.8:8000",
+          weight: 100,
+          position: 1,
+        },
       ],
     },
   ],
