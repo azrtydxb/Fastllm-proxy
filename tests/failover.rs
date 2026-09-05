@@ -891,7 +891,11 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
     assert_eq!(served_by(&body), "rescue");
     assert!(rescue.hits() > before);
 
-    // It applies to a provider model name too, not only a virtual one.
+    // A provider model named directly does *not* reach the fallback, because
+    // it does not reach anything: it is not a client-facing name at all. The
+    // fallback catches a frontend model whose chain ran out, which is the case
+    // an operator cannot anticipate; it is not a way to make inventory
+    // addressable.
     let (status, body) = chat(
         port,
         &fx.key,
@@ -900,11 +904,9 @@ async fn a_fallback_model_catches_a_chain_that_ran_out() {
             "messages": [{"role": "user", "content": "hello"}],
         }),
     );
-    assert_eq!(status, 200, "{body}");
     assert_eq!(
-        served_by(&body),
-        "rescue",
-        "a dead provider model should also reach the fallback"
+        status, 404,
+        "a provider model is not a name a client may use, fallback or not: {body}"
     );
 
     // Clearing it restores the previous behaviour, so this is not a one-way door.
