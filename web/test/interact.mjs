@@ -372,38 +372,34 @@ await goto("models");
     document.getElementById("root").textContent.includes("is not a number"),
   );
 
-  // Load balancing, per backend model. The flag it overrides is
-  // deployment-wide, so a pool of two identical replicas and a pool of three
-  // hosted providers could not both be right before this existed.
+  // Load balancing, on the frontend model — where the things being balanced
+  // are. It sat on the provider model until migration 0038, and after the
+  // provider split that meant choosing between one backend.
   sent.length = 0;
-  await goto("models");
-  await click(containing("edit"));
-  const lb = $("label")
-    .find((l) => l.textContent.includes("LOAD BALANCING"))
-    ?.querySelector("select");
+  await goto("routing");
+  const lb = $("select").find((el) =>
+    [...el.options].some((o) => o.value === "lowest-latency"),
+  );
   await fill(lb, "lowest-latency");
-  await click(byText("Save"));
-  const lbCall = lastCall("PATCH", "/admin/provider-models/");
+  const lbCall = lastCall("PATCH", "/admin/frontend-models/");
   check(
-    "a per-model policy is sent as policy",
+    "a frontend model's policy is sent as policy",
     lbCall?.body?.policy === "lowest-latency",
     `sent ${JSON.stringify(lbCall?.body?.policy)}`,
   );
 
-  // And clearing it means "follow the deployment default" — an explicit null,
-  // because PATCH treats an absent field as "leave alone".
+  // And clearing it means the weighted split — an explicit null, because
+  // PATCH treats an absent field as "leave alone".
   sent.length = 0;
-  await goto("models");
-  await click(containing("edit"));
-  const lb2 = $("label")
-    .find((l) => l.textContent.includes("LOAD BALANCING"))
-    ?.querySelector("select");
+  await goto("routing");
+  const lb2 = $("select").find((el) =>
+    [...el.options].some((o) => o.value === "lowest-latency"),
+  );
   await fill(lb2, "");
-  await click(byText("Save"));
   check(
     "clearing it sends an explicit null",
-    lastCall("PATCH", "/admin/provider-models/")?.body?.policy === null,
-    `sent ${JSON.stringify(lastCall("PATCH", "/admin/provider-models/")?.body?.policy)}`,
+    lastCall("PATCH", "/admin/frontend-models/")?.body?.policy === null,
+    `sent ${JSON.stringify(lastCall("PATCH", "/admin/frontend-models/")?.body?.policy)}`,
   );
 
   // Price sync: the preview, then the override that makes an already-priced

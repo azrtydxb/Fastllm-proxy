@@ -319,6 +319,7 @@ const FIXTURES = {
           ],
         },
       ],
+      policy: null,
       default_targets: [
         { id: 22, model_id: 3, model: "local-qwen", weight: 100, position: 0 },
       ],

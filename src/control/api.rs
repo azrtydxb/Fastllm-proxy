@@ -2266,6 +2266,51 @@ async fn post_frontend_model(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchFrontendModel {
+    /// `null` clears it back to the weighted split; omitting it leaves the
+    /// policy alone.
+    #[serde(default, deserialize_with = "double_option")]
+    policy: Option<Option<String>>,
+}
+
+/// `PATCH /admin/frontend-models/{id}` — change how targets are chosen between.
+///
+/// The policy lives here rather than on a provider model because a provider
+/// model has one provider and therefore one backend; the targets are what need
+/// choosing between (migration 0038).
+async fn patch_frontend_model(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchFrontendModel>,
+) -> Result<StatusCode, ApiError> {
+    let policy = match &body.policy {
+        Some(inner) => validated_policy(inner.as_deref())?,
+        None => None,
+    };
+    let done = sqlx::query(
+        "UPDATE frontend_models \
+            SET policy = CASE WHEN $2 THEN $3 ELSE policy END \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.policy.is_some())
+    .bind(policy)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("frontend model update", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no frontend model with id {id}"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn delete_virtual_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
@@ -5694,7 +5739,10 @@ pub async fn serve(
             "/admin/frontend-models",
             get(list_virtual_models).post(post_frontend_model),
         )
-        .route("/admin/frontend-models/{id}", delete(delete_virtual_model))
+        .route(
+            "/admin/frontend-models/{id}",
+            delete(delete_virtual_model).patch(patch_frontend_model),
+        )
         .route(
             "/admin/prompt-classes",
             get(list_prompt_classes).post(post_prompt_class),

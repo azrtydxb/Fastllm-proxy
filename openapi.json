@@ -1804,6 +1804,35 @@
       }
     },
     "/admin/frontend-models/{id}": {
+      "patch": {
+        "summary": "Change how a frontend model chooses between its targets",
+        "operationId": "patch_admin_frontend_models_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "400": {
+            "description": "Unknown policy"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No frontend model with that id"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
       "delete": {
         "summary": "Delete frontend-models id",
         "operationId": "delete_admin_frontend_models_id",

@@ -556,17 +556,6 @@ const SYNC_COLS = [
  * silently cleared a price would turn a typo into a model that reports its
  * spend as unpriced.
  */
-// The same four the router implements and the CRD spells, in the same
-// vocabulary — a value chosen here is stored verbatim and read by `--policy`.
-const POLICIES = [
-  [
-    "cache-affinity",
-    "cache affinity — a shared prefix returns to the node holding its KV cache",
-  ],
-  ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
-  ["lowest-latency", "lowest latency — for backends that are not equally fast"],
-  ["round-robin", "round robin — strict rotation, cache-blind"],
-];
 
 function PriceEditor({ model, onSave }) {
   const [input, setInput] = useState(
@@ -582,10 +571,6 @@ function PriceEditor({ model, onSave }) {
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [context, setContext] = useState(model.context_length ?? "");
   const [description, setDescription] = useState(model.description || "");
-  // "" is not a policy, it is the absence of one — the deployment's --policy
-  // decides. Kept distinct from a chosen value so clearing the field means
-  // "go back to the default" rather than "leave whatever was there".
-  const [policy, setPolicy] = useState(model.policy || "");
 
   // Absent, cleared and mistyped are three different things and only the
   // first two are intentional. `JSON.stringify` renders NaN as `null`, and to
@@ -657,23 +642,6 @@ function PriceEditor({ model, onSave }) {
             placeholder="262144"
           />
         </Field>
-        <Field
-          label="LOAD BALANCING"
-          hint={
-            (model.backends || []).length > 1
-              ? `how requests are spread across this model's ${model.backends.length} backends`
-              : "only takes effect once this model has more than one backend"
-          }
-        >
-          <select value={policy} onChange={(e) => setPolicy(e.target.value)}>
-            <option value="">deployment default</option>
-            {POLICIES.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
         <Field label="DESCRIPTION">
           <input
             value={description}
@@ -707,8 +675,6 @@ function PriceEditor({ model, onSave }) {
                 context_length:
                   context === "" ? null : positive(context, "context length"),
                 // Empty is an explicit null: it clears the override so the
-                // model follows the deployment's --policy again.
-                policy: policy === "" ? null : policy,
                 description,
               });
             } catch (e) {

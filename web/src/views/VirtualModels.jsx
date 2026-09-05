@@ -74,6 +74,24 @@ function conditionChips(rule) {
   return out;
 }
 
+// How a frontend model chooses between its targets. It used to live on the
+// provider model, where after the provider split it chose between one thing —
+// a provider model has one provider and therefore one backend. The targets are
+// what need choosing between.
+//
+// "" is the weighted split, which is what a target list has always meant: a
+// deterministic pick on the request prefix, so a conversation stays on one
+// side of a split rather than flipping per request.
+const POLICIES = [
+  [
+    "cache-affinity",
+    "cache affinity — a shared prefix returns to the node holding its KV cache",
+  ],
+  ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
+  ["lowest-latency", "lowest latency — for backends that are not equally fast"],
+  ["round-robin", "round robin — strict rotation, cache-blind"],
+];
+
 export function VirtualModels({ onUnauthorised }) {
   const [selected, setSelected] = useState(null);
   const [creating, setCreating] = useState("");
@@ -97,6 +115,15 @@ export function VirtualModels({ onUnauthorised }) {
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const vm = data.vms.find((v) => v.id === selected) || data.vms[0] || null;
+
+  const savePolicy = async (id, policy) => {
+    const ok = await attempt(
+      () => api.patch(`/admin/frontend-models/${id}`, { policy }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) reload();
+  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -202,7 +229,47 @@ export function VirtualModels({ onUnauthorised }) {
                     }}
                   >
                     First rule whose conditions match wins · conditions
-                    AND&rsquo;d · targets weighted and ordered
+                    AND&rsquo;d · targets ordered as a fallback chain
+                  </div>
+                  {/* Load balancing, named. The weights were always a load
+                      balancer; nothing said so, and there was no way to ask
+                      for anything but a weighted split. */}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginTop: 8,
+                    }}
+                  >
+                    <span
+                      style={{
+                        font: "600 10px var(--sans)",
+                        color: "var(--fg-5)",
+                        letterSpacing: "0.04em",
+                      }}
+                    >
+                      LOAD BALANCING
+                    </span>
+                    <select
+                      value={vm.policy || ""}
+                      onChange={(e) =>
+                        savePolicy(
+                          vm.id,
+                          e.target.value === "" ? null : e.target.value,
+                        )
+                      }
+                    >
+                      <option value="">
+                        weighted split — by target weight, deterministic per
+                        conversation
+                      </option>
+                      {POLICIES.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
                 <Spacer />
