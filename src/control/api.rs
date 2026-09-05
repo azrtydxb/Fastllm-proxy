@@ -789,6 +789,10 @@ async fn provider_available_models(
     // System roots, because the provider being browsed is as likely to be a
     // hosted one over TLS as a vLLM on the LAN. Falls back to the bundled
     // Mozilla set, matching what the proxy itself does for upstreams.
+    // Idempotent, and not left to whoever ran first: `ClientConfig::builder`
+    // panics if no provider is installed, and depending on `main`'s ordering
+    // would make this endpoint's correctness a property of the call sequence.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     if native.certs.is_empty() {
