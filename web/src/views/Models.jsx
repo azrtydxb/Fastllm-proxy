@@ -44,15 +44,22 @@ export function Models({ onUnauthorised }) {
   // exactly the case somebody wants to fix.
   const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState(false);
+  // What each provider answered `GET /v1/models` with, keyed by provider id.
+  // Kept per provider rather than per model form so browsing once serves every
+  // model being attached to the same endpoint — OpenRouter answers with
+  // several hundred, and asking it again per form would be a page of requests
+  // for a list that does not change.
+  const [served, setServed] = useState({});
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [models, fleet, catalogue] = await Promise.all([
+      const [models, fleet, catalogue, providers] = await Promise.all([
         api.get("/admin/provider-models"),
         api.get("/admin/fleet"),
         api.get("/admin/provider-catalogue"),
+        api.get("/admin/providers"),
       ]);
-      return { models, fleet, catalogue };
+      return { models, fleet, catalogue, providers };
     },
     { onUnauthorised },
   );
@@ -86,14 +93,22 @@ export function Models({ onUnauthorised }) {
 
   const addBackend = async (modelId) => {
     const d = draftFor(modelId);
-    if (!d.api_base) return;
+    if (!d.provider_id && !d.api_base) return;
+    // Naming a provider settles the endpoint and the credential, so the fields
+    // that describe one are not sent — the API refuses them alongside a
+    // provider_id rather than quietly preferring one source over the other.
+    const body = d.provider_id
+      ? { provider_id: Number(d.provider_id) }
+      : {
+          api_base: d.api_base.trim(),
+          upstream_api_key: d.upstream_api_key || undefined,
+          protocol: d.protocol || undefined,
+        };
     const ok = await attempt(
       () =>
         api.post(`/admin/provider-models/${modelId}/backends`, {
-          api_base: d.api_base.trim(),
+          ...body,
           upstream_model: d.upstream_model?.trim() || undefined,
-          upstream_api_key: d.upstream_api_key || undefined,
-          protocol: d.protocol || undefined,
           default_max_tokens: d.default_max_tokens
             ? Number(d.default_max_tokens)
             : undefined,
@@ -104,6 +119,29 @@ export function Models({ onUnauthorised }) {
     if (ok) {
       setDrafts({ ...drafts, [modelId]: {} });
       reload();
+    }
+  };
+
+  /**
+   * Ask a provider what it serves.
+   *
+   * Nothing is created by this — it is the same `GET /v1/models` the sweep
+   * runs, so the list is what that endpoint will actually answer to rather
+   * than what a catalogue believes it offers.
+   */
+  const browse = async (providerId) => {
+    setServed({ ...served, [providerId]: { loading: true } });
+    try {
+      const resp = await api.get(
+        `/admin/providers/${providerId}/available-models`,
+      );
+      setServed({ ...served, [providerId]: { models: resp.models } });
+      setError(null);
+    } catch (e) {
+      // Reported in place rather than in the page's error slot: a provider
+      // that does not implement /v1/models is a fact about that row, and the
+      // name can still be typed.
+      setServed({ ...served, [providerId]: { error: e.message } });
     }
   };
 
@@ -444,84 +482,183 @@ export function Models({ onUnauthorised }) {
                   </Muted>
                 </div>
               ) : (
-                <Row gap={8} style={{ marginTop: 12, flexWrap: "nowrap" }}>
-                  {/* Picking a known provider fills in the base URL and the
-                      header its vendor wants the key in. The catalogue is not
-                      a limit — anything speaking the OpenAI API works whether
-                      or not it is listed — so the address stays typeable. */}
-                  <select
-                    style={{ flex: 0.9 }}
-                    value={draftFor(m.id).catalogue_key || ""}
-                    onChange={(e) => {
-                      const entry = (data.catalogue || []).find(
-                        (c) => c.key === e.target.value,
-                      );
-                      setDraft(m.id, {
-                        catalogue_key: e.target.value,
-                        ...(entry
-                          ? {
-                              api_base: entry.base_url,
-                              protocol: entry.protocol,
-                            }
-                          : {}),
-                      });
-                    }}
-                  >
-                    <option value="">provider…</option>
-                    {(data.catalogue || []).map((c) => (
-                      <option key={c.key} value={c.key}>
-                        {c.display_name}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    placeholder="api_base"
-                    style={{ flex: 1.8 }}
-                    value={draftFor(m.id).api_base || ""}
-                    onChange={(e) =>
-                      setDraft(m.id, { api_base: e.target.value })
-                    }
-                  />
-                  <input
-                    placeholder="upstream_model"
-                    style={{ flex: 1.1 }}
-                    value={draftFor(m.id).upstream_model || ""}
-                    onChange={(e) =>
-                      setDraft(m.id, { upstream_model: e.target.value })
-                    }
-                  />
-                  <select
-                    style={{ flex: 0.7 }}
-                    value={draftFor(m.id).protocol || "openai"}
-                    onChange={(e) =>
-                      setDraft(m.id, { protocol: e.target.value })
-                    }
-                  >
-                    <option value="openai">openai</option>
-                    <option value="anthropic">anthropic</option>
-                    <option value="gemini">gemini</option>
-                  </select>
-                  <input
-                    placeholder="default_max_tokens"
-                    style={{ flex: 0.8 }}
-                    value={draftFor(m.id).default_max_tokens || ""}
-                    onChange={(e) =>
-                      setDraft(m.id, { default_max_tokens: e.target.value })
-                    }
-                  />
-                  <input
-                    type="password"
-                    placeholder="api key"
-                    style={{ flex: 0.8 }}
-                    value={draftFor(m.id).upstream_api_key || ""}
-                    onChange={(e) =>
-                      setDraft(m.id, { upstream_api_key: e.target.value })
-                    }
-                  />
-                  <Button variant="secondary" onClick={() => addBackend(m.id)}>
-                    Attach provider
-                  </Button>
-                </Row>
+                <Stack gap={8} style={{ marginTop: 12 }}>
+                  {/* Which provider serves it comes first, because it settles
+                      everything else: an existing provider already carries the
+                      address, the protocol and the credential, and can be
+                      asked what it serves. */}
+                  <Row gap={8} style={{ flexWrap: "nowrap" }}>
+                    <select
+                      style={{ flex: 1.6 }}
+                      value={draftFor(m.id).provider_id || ""}
+                      onChange={(e) =>
+                        setDraft(m.id, {
+                          provider_id: e.target.value,
+                          upstream_model: "",
+                        })
+                      }
+                    >
+                      <option value="">a new endpoint…</option>
+                      {(data.providers || []).map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} — {p.api_base}
+                        </option>
+                      ))}
+                    </select>
+
+                    {draftFor(m.id).provider_id ? (
+                      (() => {
+                        const pid = draftFor(m.id).provider_id;
+                        const list = served[pid];
+                        return (
+                          <>
+                            {list?.models ? (
+                              <select
+                                style={{ flex: 1.6 }}
+                                value={draftFor(m.id).upstream_model || ""}
+                                onChange={(e) =>
+                                  setDraft(m.id, {
+                                    upstream_model: e.target.value,
+                                  })
+                                }
+                              >
+                                <option value="">
+                                  upstream model… ({list.models.length} served)
+                                </option>
+                                {list.models.map((x) => (
+                                  <option
+                                    key={x.upstream_model}
+                                    value={x.upstream_model}
+                                  >
+                                    {x.upstream_model}
+                                    {x.registered
+                                      ? " · already registered"
+                                      : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                placeholder="upstream_model"
+                                style={{ flex: 1.6 }}
+                                value={draftFor(m.id).upstream_model || ""}
+                                onChange={(e) =>
+                                  setDraft(m.id, {
+                                    upstream_model: e.target.value,
+                                  })
+                                }
+                              />
+                            )}
+                            <Button
+                              variant="secondary"
+                              disabled={list?.loading}
+                              onClick={() => browse(pid)}
+                            >
+                              {list?.loading
+                                ? "Asking…"
+                                : list?.models
+                                  ? "Refresh list"
+                                  : "Browse models"}
+                            </Button>
+                          </>
+                        );
+                      })()
+                    ) : (
+                      <>
+                        {/* Picking a known provider fills in the base URL and
+                            the header its vendor wants the key in. The
+                            catalogue is not a limit — anything speaking the
+                            OpenAI API works whether or not it is listed — so
+                            the address stays typeable. */}
+                        <select
+                          style={{ flex: 0.9 }}
+                          value={draftFor(m.id).catalogue_key || ""}
+                          onChange={(e) => {
+                            const entry = (data.catalogue || []).find(
+                              (c) => c.key === e.target.value,
+                            );
+                            setDraft(m.id, {
+                              catalogue_key: e.target.value,
+                              ...(entry
+                                ? {
+                                    api_base: entry.base_url,
+                                    protocol: entry.protocol,
+                                  }
+                                : {}),
+                            });
+                          }}
+                        >
+                          <option value="">provider…</option>
+                          {(data.catalogue || []).map((c) => (
+                            <option key={c.key} value={c.key}>
+                              {c.display_name}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          placeholder="api_base"
+                          style={{ flex: 1.8 }}
+                          value={draftFor(m.id).api_base || ""}
+                          onChange={(e) =>
+                            setDraft(m.id, { api_base: e.target.value })
+                          }
+                        />
+                        <input
+                          placeholder="upstream_model"
+                          style={{ flex: 1.1 }}
+                          value={draftFor(m.id).upstream_model || ""}
+                          onChange={(e) =>
+                            setDraft(m.id, { upstream_model: e.target.value })
+                          }
+                        />
+                        <select
+                          style={{ flex: 0.7 }}
+                          value={draftFor(m.id).protocol || "openai"}
+                          onChange={(e) =>
+                            setDraft(m.id, { protocol: e.target.value })
+                          }
+                        >
+                          <option value="openai">openai</option>
+                          <option value="anthropic">anthropic</option>
+                          <option value="gemini">gemini</option>
+                        </select>
+                        <input
+                          type="password"
+                          placeholder="api key"
+                          style={{ flex: 0.8 }}
+                          value={draftFor(m.id).upstream_api_key || ""}
+                          onChange={(e) =>
+                            setDraft(m.id, {
+                              upstream_api_key: e.target.value,
+                            })
+                          }
+                        />
+                      </>
+                    )}
+
+                    <input
+                      placeholder="default_max_tokens"
+                      style={{ flex: 0.8 }}
+                      value={draftFor(m.id).default_max_tokens || ""}
+                      onChange={(e) =>
+                        setDraft(m.id, { default_max_tokens: e.target.value })
+                      }
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={() => addBackend(m.id)}
+                    >
+                      Attach provider
+                    </Button>
+                  </Row>
+
+                  {served[draftFor(m.id).provider_id]?.error && (
+                    <Muted>
+                      {served[draftFor(m.id).provider_id].error} — type the
+                      upstream model name instead.
+                    </Muted>
+                  )}
+                </Stack>
               )}
               {draftFor(m.id).protocol === "anthropic" &&
                 !draftFor(m.id).default_max_tokens && (

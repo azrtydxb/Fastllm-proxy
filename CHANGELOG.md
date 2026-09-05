@@ -10,6 +10,23 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Providers can be added, edited and credentialled from the UI.** `POST
+  /admin/providers` and `PATCH /admin/providers/{id}`, and an **Add provider**
+  form on the Providers screen with two ways in: a cloud vendor picked from the
+  catalogue, which fills in its base URL and the header it wants its key in, or
+  a typed address for anything else. Before this a provider could only appear
+  as a side effect of attaching a backend, so the endpoint's credential had to
+  be typed on a model form, and a provider with no models yet — the state you
+  are in while deciding which of its models to serve — could not be expressed
+  at all. Rotating a key is one write on the provider card.
+- **Attaching a model starts from its provider, and offers what that provider
+  serves.** `POST /admin/provider-models/{id}/backends` takes a `provider_id`,
+  and the Provider models screen browses `GET /v1/models` on the chosen
+  provider so an upstream name is picked from what the endpoint actually
+  answers with rather than typed from memory. Already-registered models are
+  marked. Endpoint fields alongside a `provider_id` are refused rather than
+  ignored: the caller would otherwise believe they had set a credential there
+  while the provider's is what gets sent.
 - **A provider is a record.** It was a grouping the UI invented at render time,
   so nothing could register, count or refer to one, and the 80 providers in
   `docs/providers.md` had nothing to attach to. `providers` now owns the

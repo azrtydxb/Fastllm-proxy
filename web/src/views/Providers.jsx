@@ -1,20 +1,23 @@
 import React, { useState } from "react";
 import { api } from "../api.js";
-import { useLoader } from "../load.js";
+import { attempt, useLoader } from "../load.js";
 import { mergeBackends, backendKey } from "../fleet.js";
 import {
+  Button,
   Chip,
   Card,
   Dot,
   Ellipsis,
   Empty,
   ErrorNote,
+  Field,
   Grid,
   Loading,
   Mono,
   Muted,
   Pill,
   Row,
+  Spacer,
   Stack,
   fmtInt,
 } from "../ui.jsx";
@@ -39,18 +42,32 @@ import {
 
 const FILTERS = ["All", "Hosted", "Self-hosted", "Native protocol"];
 
+const BLANK = {
+  mode: "cloud",
+  catalogue_key: "",
+  name: "",
+  api_base: "",
+  protocol: "openai",
+  upstream_api_key: "",
+  credential_kind: "static",
+};
+
 export function Providers({ onUnauthorised, go }) {
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
+  const [draft, setDraft] = useState(null);
+  const [rotating, setRotating] = useState(null);
+  const [key, setKey] = useState("");
 
-  const { data, error, loading, setError } = useLoader(
+  const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [providers, models, fleet] = await Promise.all([
+      const [providers, models, fleet, catalogue] = await Promise.all([
         api.get("/admin/providers"),
         api.get("/admin/provider-models"),
         api.get("/admin/fleet"),
+        api.get("/admin/provider-catalogue"),
       ]);
-      return { providers, models, fleet };
+      return { providers, models, fleet, catalogue };
     },
     { onUnauthorised },
   );
@@ -60,12 +77,73 @@ export function Providers({ onUnauthorised, go }) {
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const health = new Map(mergeBackends(data.fleet).map((b) => [b.key, b]));
+  const entry = (data.catalogue || []).find(
+    (c) => c.key === draft?.catalogue_key,
+  );
+
+  const create = async (e) => {
+    e.preventDefault();
+    const cloud = draft.mode === "cloud";
+    if (cloud && !draft.catalogue_key) return;
+    if (!draft.api_base.trim()) return;
+    const ok = await attempt(
+      () =>
+        api.post("/admin/providers", {
+          // Absent lets the control plane derive host:port, which is what the
+          // card has always been labelled with.
+          name: draft.name.trim() || undefined,
+          kind: cloud ? "cloud" : undefined,
+          catalogue_key: cloud ? draft.catalogue_key : undefined,
+          api_base: draft.api_base.trim(),
+          // A catalogue entry carries its vendor's protocol and header; only
+          // a typed endpoint has to be told.
+          protocol: cloud ? undefined : draft.protocol,
+          upstream_api_key: draft.upstream_api_key.trim() || undefined,
+          credential_kind:
+            draft.credential_kind === "static"
+              ? undefined
+              : draft.credential_kind,
+        }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) {
+      setDraft(null);
+      reload();
+    }
+  };
+
+  const rotate = async (id) => {
+    const ok = await attempt(
+      () => api.patch(`/admin/providers/${id}`, { upstream_api_key: key }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) {
+      setRotating(null);
+      setKey("");
+      reload();
+    }
+  };
+
+  const remove = async (g) => {
+    // The API refuses while models remain rather than cascading, so the
+    // confirmation only has to cover the case it will actually allow.
+    if (!window.confirm(`Delete provider ${g.host}?`)) return;
+    const ok = await attempt(
+      () => api.del(`/admin/providers/${g.id}`),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) reload();
+  };
 
   // One card per provider row. The models query still supplies the names and
   // the health lookup, both of which hang off a model rather than a provider.
   const groups = new Map();
   for (const p of data.providers) {
     groups.set(p.id, {
+      id: p.id,
       origin: p.api_base,
       host: p.name,
       kind: p.kind,
@@ -139,7 +217,181 @@ export function Providers({ onUnauthorised, go }) {
             {f}
           </Chip>
         ))}
+        <Spacer />
+        <Button
+          variant="primary"
+          onClick={() => setDraft(draft ? null : { ...BLANK })}
+        >
+          {draft ? "Cancel" : "Add provider"}
+        </Button>
       </Row>
+
+      {draft && (
+        <Card title="Add a provider">
+          <form onSubmit={create}>
+            <Stack gap={12}>
+              <Row gap={8}>
+                {/* The two ways in differ only in where the address comes
+                    from: a catalogue entry knows the vendor's URL and which
+                    header it wants its key in, a typed one does not. */}
+                <Chip
+                  type="button"
+                  active={draft.mode === "cloud"}
+                  onClick={() =>
+                    setDraft({ ...BLANK, mode: "cloud", name: draft.name })
+                  }
+                >
+                  Cloud provider
+                </Chip>
+                <Chip
+                  type="button"
+                  active={draft.mode === "custom"}
+                  onClick={() =>
+                    setDraft({ ...BLANK, mode: "custom", name: draft.name })
+                  }
+                >
+                  Custom endpoint
+                </Chip>
+              </Row>
+
+              {draft.mode === "cloud" && (
+                <Field
+                  label="Provider"
+                  hint="Fills in the address and the header this vendor wants its key in. Not a limit — anything speaking the OpenAI API works whether or not it is listed."
+                >
+                  <select
+                    value={draft.catalogue_key}
+                    onChange={(e) => {
+                      const c = (data.catalogue || []).find(
+                        (x) => x.key === e.target.value,
+                      );
+                      setDraft({
+                        ...draft,
+                        catalogue_key: e.target.value,
+                        api_base: c ? c.base_url : "",
+                        protocol: c ? c.protocol : "openai",
+                      });
+                    }}
+                  >
+                    <option value="">choose…</option>
+                    {(data.catalogue || []).map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+
+              <Row gap={10} style={{ alignItems: "flex-start" }}>
+                <Field
+                  label="API base"
+                  style={{ flex: 2 }}
+                  hint={
+                    draft.api_base.includes("<")
+                      ? "This address still has a placeholder in it — fill it in, or it will resolve nowhere."
+                      : undefined
+                  }
+                >
+                  <input
+                    placeholder="https://host:port/v1"
+                    value={draft.api_base}
+                    onChange={(e) =>
+                      setDraft({ ...draft, api_base: e.target.value })
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Name"
+                  style={{ flex: 1 }}
+                  hint="Optional — defaults to the endpoint's host:port."
+                >
+                  <input
+                    placeholder="host:port"
+                    value={draft.name}
+                    onChange={(e) =>
+                      setDraft({ ...draft, name: e.target.value })
+                    }
+                  />
+                </Field>
+                {draft.mode === "custom" && (
+                  <Field label="Protocol" style={{ flex: 0.8 }}>
+                    <select
+                      value={draft.protocol}
+                      onChange={(e) =>
+                        setDraft({ ...draft, protocol: e.target.value })
+                      }
+                    >
+                      <option value="openai">openai</option>
+                      <option value="anthropic">anthropic</option>
+                      <option value="gemini">gemini</option>
+                    </select>
+                  </Field>
+                )}
+              </Row>
+
+              <Row gap={10} style={{ alignItems: "flex-start" }}>
+                <Field
+                  label="Credential"
+                  style={{ flex: 2 }}
+                  hint={
+                    entry?.auth_header
+                      ? `Sent as ${entry.auth_header}. Encrypted at rest and never readable back.`
+                      : "Encrypted at rest and never readable back through this API."
+                  }
+                >
+                  <input
+                    type="password"
+                    placeholder={
+                      draft.credential_kind === "gcp_service_account"
+                        ? "service-account JSON key file"
+                        : "api key"
+                    }
+                    value={draft.upstream_api_key}
+                    onChange={(e) =>
+                      setDraft({ ...draft, upstream_api_key: e.target.value })
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Credential kind"
+                  style={{ flex: 1 }}
+                  hint="Vertex AI is the one provider that cannot use a static secret."
+                >
+                  <select
+                    value={draft.credential_kind}
+                    onChange={(e) =>
+                      setDraft({ ...draft, credential_kind: e.target.value })
+                    }
+                  >
+                    <option value="static">static</option>
+                    <option value="gcp_service_account">
+                      gcp_service_account
+                    </option>
+                  </select>
+                </Field>
+              </Row>
+
+              {entry?.notes && <Muted>{entry.notes}</Muted>}
+
+              <Row>
+                <Muted>
+                  A provider carries the endpoint and its credential. Which of
+                  its models to serve is decided on the{" "}
+                  <a href="#/models" onClick={() => go("models")}>
+                    Provider models
+                  </a>{" "}
+                  screen, so nothing is registered by adding one.
+                </Muted>
+                <Spacer />
+                <Button type="submit" variant="primary">
+                  Add provider
+                </Button>
+              </Row>
+            </Stack>
+          </form>
+        </Card>
+      )}
 
       <Muted>
         A provider is a row in a table, not a code change — anything speaking
@@ -164,7 +416,7 @@ export function Providers({ onUnauthorised, go }) {
           {shown.map((g) => {
             const native = [...g.protocols].filter((p) => p !== "openai");
             return (
-              <Card key={g.origin}>
+              <Card key={g.id}>
                 <Stack gap={12}>
                   <Row style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
                     <Row gap={10} style={{ flexWrap: "nowrap", minWidth: 0 }}>
@@ -268,6 +520,58 @@ export function Providers({ onUnauthorised, go }) {
                       </Pill>
                     )}
                   </Row>
+
+                  {rotating === g.id ? (
+                    <Row gap={8} style={{ flexWrap: "nowrap" }}>
+                      <input
+                        type="password"
+                        placeholder="new api key"
+                        style={{ flex: 1 }}
+                        value={key}
+                        onChange={(e) => setKey(e.target.value)}
+                      />
+                      <Button
+                        variant="small"
+                        onClick={() => {
+                          setRotating(null);
+                          setKey("");
+                        }}
+                      >
+                        cancel
+                      </Button>
+                      <Button variant="primary" onClick={() => rotate(g.id)}>
+                        Save
+                      </Button>
+                    </Row>
+                  ) : (
+                    <Row gap={8}>
+                      <Button
+                        variant="small"
+                        onClick={() => {
+                          setRotating(g.id);
+                          setKey("");
+                        }}
+                      >
+                        {/* One credential per provider, so this is one write
+                            however many models ride on it — the reason the
+                            key lives here and not on a model. */}
+                        {g.credentialled ? "rotate key" : "set key"}
+                      </Button>
+                      <Spacer />
+                      <Button
+                        variant="smallDanger"
+                        onClick={() => remove(g)}
+                        disabled={g.backends > 0}
+                        title={
+                          g.backends > 0
+                            ? "Delete its models first — removing the provider would take their routing targets with them"
+                            : undefined
+                        }
+                      >
+                        delete
+                      </Button>
+                    </Row>
+                  )}
                 </Stack>
               </Card>
             );

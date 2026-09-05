@@ -745,9 +745,70 @@
             "session": []
           }
         ]
+      },
+      "post": {
+        "summary": "Add a provider: an endpoint and the credential that reaches it",
+        "operationId": "post_admin_providers",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad api_base, protocol, kind or credential_kind, or a catalogue base URL with a placeholder still in it"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "409": {
+            "description": "A provider with that name, or that address and auth, already exists"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/admin/providers/{id}": {
+      "patch": {
+        "summary": "Rename a provider, move it, or rotate its credential. An absent upstream_api_key leaves the stored one alone; \"\" clears it",
+        "operationId": "patch_admin_providers_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "400": {
+            "description": "Bad api_base, protocol, auth_header or credential_kind"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No provider with that id"
+          },
+          "409": {
+            "description": "A provider with that name already exists"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
       "delete": {
         "summary": "Delete a provider that serves no models",
         "operationId": "delete_admin_providers_id",

@@ -947,6 +947,511 @@ async fn list_providers(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewProvider {
+    /// What to call it. Absent derives one from the endpoint's host and port —
+    /// what the Providers screen displayed back when a provider was something
+    /// that screen invented rather than a row.
+    #[serde(default)]
+    name: Option<String>,
+    /// `static` or `cloud`. Absent picks `cloud` for a catalogue entry or a
+    /// public address and `static` for one on our own network. Never
+    /// `dynamic`: a lease is something a registering host takes out and keeps
+    /// refreshing, so handing one to a provider nobody is refreshing would
+    /// delete it half an hour later.
+    #[serde(default)]
+    kind: Option<String>,
+    /// A `provider_catalogue` key. Fills in the address, the protocol and the
+    /// header that vendor wants its key in — all of which stay overridable,
+    /// because the catalogue is a convenience and not a limit.
+    #[serde(default)]
+    catalogue_key: Option<String>,
+    /// Required unless `catalogue_key` supplies one with no `<placeholder>`
+    /// left in it. Bedrock and Vertex both encode a region, so for those the
+    /// catalogue gets you most of the way and a human finishes the address.
+    #[serde(default)]
+    api_base: Option<String>,
+    #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default)]
+    auth_header: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    /// Encrypted before it reaches Postgres and never readable back through
+    /// this API. One credential per provider, however many models ride on it.
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+    #[serde(default)]
+    credential_kind: Option<String>,
+}
+
+/// Trim, normalise and check an address the way every writer of `api_base`
+/// here does, so the four of them cannot drift apart.
+fn normalise_api_base(raw: &str) -> Result<String, ApiError> {
+    let api_base = raw.trim().trim_end_matches('/').to_string();
+    if !(api_base.starts_with("http://") || api_base.starts_with("https://")) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("api_base {api_base:?} must start with http:// or https://"),
+        ));
+    }
+    Ok(api_base)
+}
+
+fn host_of(api_base: &str) -> String {
+    api_base
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+        .unwrap_or(api_base)
+        .to_string()
+}
+
+/// `POST /admin/providers` — add an endpoint and its credential.
+///
+/// The counterpart to `/admin/providers/register`: that one is a host saying
+/// "I am serving here" under a lease, this one is an operator saying "here is
+/// a provider I want to keep". Both end up in the same table, and the `kind`
+/// column is what keeps the sweep from expiring the second sort.
+///
+/// Before this existed a provider could only be created as a side effect of
+/// attaching a backend, which meant the credential had to be typed on a model
+/// form even though it belongs to the endpoint, and a provider with no models
+/// yet — the state you are in while deciding which of its models to register —
+/// could not be expressed at all.
+async fn post_provider(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewProvider>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    type CatRow = (String, String, String, Option<String>);
+    let entry: Option<CatRow> = match body.catalogue_key.as_deref().map(str::trim) {
+        Some(key) if !key.is_empty() => {
+            let row: Option<CatRow> = sqlx::query_as(
+                "SELECT base_url, protocol, auth_header, auth_scheme \
+                 FROM provider_catalogue WHERE key = $1",
+            )
+            .bind(key)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("catalogue lookup", &e))?;
+            if row.is_none() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no catalogue entry {key:?}; GET /admin/provider-catalogue lists the keys. \
+                         A provider that is not in it is added by typing its api_base"
+                    ),
+                ));
+            }
+            row
+        }
+        _ => None,
+    };
+
+    let raw_base = body
+        .api_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| entry.as_ref().map(|e| e.0.clone()));
+    let Some(raw_base) = raw_base else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "api_base is required, or a catalogue_key that supplies one".to_string(),
+        ));
+    };
+    let api_base = normalise_api_base(&raw_base)?;
+    // A catalogue base_url with a `<region>` still in it is not an address.
+    // Storing it would produce a provider that resolves nowhere and reports
+    // itself as unreachable, which describes the operator's typo as a fault of
+    // the endpoint.
+    if api_base.contains('<') {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "api_base {api_base:?} still has a placeholder in it; fill it in before saving"
+            ),
+        ));
+    }
+
+    let protocol = body
+        .protocol
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| entry.as_ref().map(|e| e.1.clone()))
+        .unwrap_or_else(|| "openai".into());
+    if crate::protocol::Protocol::parse(&protocol).is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("protocol {protocol:?} is not one of: openai, anthropic, gemini"),
+        ));
+    }
+
+    // The catalogue's header only applies while its protocol does: overriding
+    // the protocol and inheriting the other vendor's header would build an
+    // endpoint that authenticates the wrong way round.
+    let from_catalogue = entry.as_ref().filter(|e| e.1 == protocol);
+    let (default_header, default_scheme) = auth_defaults_for(&protocol);
+    let auth_header = body
+        .auth_header
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| from_catalogue.map(|e| e.2.clone()))
+        .unwrap_or_else(|| default_header.to_string());
+    let auth_scheme = match body.auth_scheme {
+        // An explicitly empty scheme means "send the raw key"; only an absent
+        // one falls back.
+        Some(ref s) if s.trim().is_empty() => None,
+        Some(s) => Some(s),
+        None => match from_catalogue {
+            Some(e) => e.3.clone(),
+            None => default_scheme.map(str::to_string),
+        },
+    };
+
+    let credential_kind = body
+        .credential_kind
+        .clone()
+        .unwrap_or_else(|| "static".into());
+    if !matches!(credential_kind.as_str(), "static" | "gcp_service_account") {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account"
+            ),
+        ));
+    }
+    if credential_kind == "gcp_service_account"
+        && !body
+            .upstream_api_key
+            .as_deref()
+            .is_some_and(crate::control::gcp::ServiceAccount::looks_like_one)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credential_kind gcp_service_account needs upstream_api_key to be the service \
+             account's JSON key file, with `client_email` and `private_key`"
+                .to_string(),
+        ));
+    }
+    let encrypted = encrypt_upstream_key(&ctx, body.upstream_api_key.as_deref())?;
+
+    let host = host_of(&api_base);
+    let kind = match body.kind.as_deref().map(str::trim) {
+        Some("dynamic") => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "kind dynamic is taken out by a host registering itself, not created here; \
+                 use static or cloud"
+                    .to_string(),
+            ));
+        }
+        Some(k) if !k.is_empty() => {
+            if !matches!(k, "static" | "cloud") {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("kind {k:?} is not one of: static, cloud"),
+                ));
+            }
+            k.to_string()
+        }
+        _ if entry.is_some() => "cloud".to_string(),
+        _ if is_private_host(&host) => "static".to_string(),
+        _ => "cloud".to_string(),
+    };
+
+    // `post_backend` finds an existing provider by exactly this tuple, so a
+    // second row carrying it would make which one a model lands on arbitrary.
+    let clash: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM providers WHERE api_base = $1 AND protocol = $2 \
+         AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
+    )
+    .bind(&api_base)
+    .bind(&protocol)
+    .bind(&auth_header)
+    .bind(&auth_scheme)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| db_error("provider lookup", &e))?;
+    if let Some(existing) = clash {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "provider {existing:?} already speaks {protocol} at {api_base} with the same \
+                 auth; rotate its credential with PATCH /admin/providers/{{id}} instead"
+            ),
+        ));
+    }
+
+    let name = match body.name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => {
+            let taken: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE name = $1)")
+                    .bind(n)
+                    .fetch_one(&ctx.pool)
+                    .await
+                    .map_err(|e| db_error("provider name check", &e))?;
+            if taken {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    format!("a provider named {n:?} already exists"),
+                ));
+            }
+            n.to_string()
+        }
+        // Derived names dedupe rather than fail: nobody chose this one, so
+        // refusing would report a collision the caller cannot see.
+        _ => unique_provider_name(&ctx, &host).await?,
+    };
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO providers (name, kind, api_base, protocol, auth_header, auth_scheme, \
+         upstream_api_key, credential_kind, catalogue_key) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+    )
+    .bind(&name)
+    .bind(&kind)
+    .bind(&api_base)
+    .bind(&protocol)
+    .bind(&auth_header)
+    .bind(&auth_scheme)
+    .bind(&encrypted)
+    .bind(&credential_kind)
+    .bind(body.catalogue_key.as_deref().filter(|k| !k.is_empty()))
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("provider creation", &e))?;
+
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": id,
+            "name": name,
+            "kind": kind,
+            "api_base": api_base,
+            "protocol": protocol,
+            "auth_header": auth_header,
+            "auth_scheme": auth_scheme,
+            "has_upstream_api_key": encrypted.is_some(),
+            "catalogue_key": body.catalogue_key,
+            "model_count": 0,
+        })),
+    ))
+}
+
+/// `host:port`, suffixed only when that is already taken.
+async fn unique_provider_name(ctx: &Ctx, host: &str) -> Result<String, ApiError> {
+    let mut name = host.to_string();
+    for n in 2..100 {
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE name = $1)")
+                .bind(&name)
+                .fetch_one(&ctx.pool)
+                .await
+                .map_err(|e| db_error("provider name check", &e))?;
+        if !taken {
+            break;
+        }
+        name = format!("{host}#{n}");
+    }
+    Ok(name)
+}
+
+/// Encrypt a credential on its way to Postgres, reporting a failure as ours
+/// rather than the caller's — the key material is the deployment's, not
+/// anything they supplied.
+fn encrypt_upstream_key(ctx: &Ctx, key: Option<&str>) -> Result<Option<Vec<u8>>, ApiError> {
+    key.map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| crate::control::secrets::encrypt(&ctx.key, k))
+        .transpose()
+        .map_err(|e| {
+            tracing::error!(error = %e, "encrypting upstream_api_key failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not encrypt upstream_api_key; nothing was written",
+            )
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchProvider {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    api_base: Option<String>,
+    #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default)]
+    auth_header: Option<String>,
+    /// An empty string clears it — that is how you say "send the key raw",
+    /// which is what Anthropic and Gemini want.
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    /// An empty string removes the stored credential. Absent leaves whatever
+    /// is there, so a form that cannot read the key back does not have to
+    /// re-send it to save a name change.
+    #[serde(default)]
+    upstream_api_key: Option<String>,
+    #[serde(default)]
+    credential_kind: Option<String>,
+}
+
+/// `PATCH /admin/providers/{id}` — rename it, move it, or rotate its key.
+///
+/// Rotation is the reason this exists: one credential serves every model on a
+/// provider, so replacing it should be one write rather than one per model.
+async fn patch_provider(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchProvider>,
+) -> Result<StatusCode, ApiError> {
+    let current: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT api_base, protocol, auth_scheme FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider lookup", &e))?;
+    if current.is_none() {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no provider with id {id}; GET /admin/providers lists the ids that exist"),
+        ));
+    }
+
+    if let Some(name) = body.name.as_deref().map(str::trim) {
+        if name.is_empty() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "name cannot be empty".to_string(),
+            ));
+        }
+        sqlx::query("UPDATE providers SET name = $1 WHERE id = $2")
+            .bind(name)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    api_error(
+                        StatusCode::CONFLICT,
+                        format!("a provider named {name:?} already exists"),
+                    )
+                } else {
+                    db_error("renaming a provider", &e)
+                }
+            })?;
+    }
+    if let Some(base) = body.api_base.as_deref() {
+        let api_base = normalise_api_base(base)?;
+        if api_base.contains('<') {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("api_base {api_base:?} still has a placeholder in it"),
+            ));
+        }
+        sqlx::query("UPDATE providers SET api_base = $1 WHERE id = $2")
+            .bind(&api_base)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("moving a provider", &e))?;
+    }
+    if let Some(protocol) = body.protocol.as_deref().map(str::trim) {
+        if crate::protocol::Protocol::parse(protocol).is_none() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("protocol {protocol:?} is not one of: openai, anthropic, gemini"),
+            ));
+        }
+        sqlx::query("UPDATE providers SET protocol = $1 WHERE id = $2")
+            .bind(protocol)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("changing a provider's protocol", &e))?;
+    }
+    if let Some(header) = body.auth_header.as_deref().map(str::trim) {
+        if header.is_empty() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "auth_header cannot be empty; it is the header the key is sent in".to_string(),
+            ));
+        }
+        sqlx::query("UPDATE providers SET auth_header = $1 WHERE id = $2")
+            .bind(header)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("changing a provider's auth header", &e))?;
+    }
+    if let Some(scheme) = body.auth_scheme.as_deref() {
+        let scheme = scheme.trim();
+        sqlx::query("UPDATE providers SET auth_scheme = $1 WHERE id = $2")
+            .bind((!scheme.is_empty()).then_some(scheme))
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("changing a provider's auth scheme", &e))?;
+    }
+    if let Some(kind) = body.credential_kind.as_deref().map(str::trim) {
+        if !matches!(kind, "static" | "gcp_service_account") {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("credential_kind {kind:?} is not one of: static, gcp_service_account"),
+            ));
+        }
+        sqlx::query("UPDATE providers SET credential_kind = $1 WHERE id = $2")
+            .bind(kind)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("changing a provider's credential kind", &e))?;
+    }
+    if let Some(key) = body.upstream_api_key.as_deref() {
+        // Read back rather than trusting the body: `credential_kind` may have
+        // been set in this same call or in a previous one, and a service
+        // account checked against the wrong kind is the failure that shows up
+        // only as an upstream 401 hours later.
+        let kind: String =
+            sqlx::query_scalar("SELECT credential_kind FROM providers WHERE id = $1")
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .map_err(|e| db_error("reading a provider's credential kind", &e))?;
+        if kind == "gcp_service_account"
+            && !key.trim().is_empty()
+            && !crate::control::gcp::ServiceAccount::looks_like_one(key)
+        {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "credential_kind gcp_service_account needs upstream_api_key to be the service \
+                 account's JSON key file, with `client_email` and `private_key`"
+                    .to_string(),
+            ));
+        }
+        let encrypted = encrypt_upstream_key(&ctx, Some(key))?;
+        sqlx::query("UPDATE providers SET upstream_api_key = $1 WHERE id = $2")
+            .bind(&encrypted)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("rotating a provider credential", &e))?;
+    }
+
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// A model's link to its provider, kept in the shape the UI already reads.
 ///
 /// Since migration 0029 a provider model has exactly one provider, so this is
@@ -1807,7 +2312,18 @@ async fn delete_model(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewBackend {
-    api_base: String,
+    /// Which existing provider serves this model. The way to attach a model
+    /// to a provider that is already configured — its address, protocol and
+    /// credential come from the row, so none of the fields below that describe
+    /// an endpoint may be sent alongside it.
+    #[serde(default)]
+    provider_id: Option<i64>,
+    /// Where it lives, for a provider that does not exist yet. One of this and
+    /// `provider_id` is required. Given this, a provider with the same address
+    /// and auth is reused and a new one created otherwise, which is how every
+    /// backend was attached before providers were records.
+    #[serde(default)]
+    api_base: Option<String>,
     /// Absent means "the model's own name", matching what `File` mode does
     /// with a `litellm_params` entry that names no `model`.
     upstream_model: Option<String>,
@@ -1850,7 +2366,8 @@ impl NewBackend {
     #[cfg(test)]
     fn openai(api_base: &str, upstream_api_key: Option<String>) -> Self {
         Self {
-            api_base: api_base.into(),
+            provider_id: None,
+            api_base: Some(api_base.into()),
             upstream_model: None,
             upstream_api_key,
             protocol: None,
@@ -1899,16 +2416,6 @@ async fn post_backend(
     Path(provider_model_id): Path<i64>,
     Json(body): Json<NewBackend>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let api_base = body.api_base.trim().trim_end_matches('/').to_string();
-    if !(api_base.starts_with("http://") || api_base.starts_with("https://")) {
-        // Same rule `FileConfig::validate` applies, and for the same reason:
-        // accepting the URL and then failing every request against it is the
-        // worst of both.
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            format!("api_base {api_base:?} must start with http:// or https://"),
-        ));
-    }
     // Fetched rather than assumed so a bad `provider_model_id` is reported as such,
     // and so `upstream_model` can default to the model's own name.
     let model_name: Option<String> =
@@ -1933,22 +2440,149 @@ async fn post_backend(
         .unwrap_or(&model_name)
         .to_string();
 
-    let encrypted = body
-        .upstream_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .map(|k| crate::control::secrets::encrypt(&ctx.key, k))
-        .transpose()
-        .map_err(|e| {
-            tracing::error!(error = %e, "encrypting upstream_api_key failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not encrypt upstream_api_key; the backend was not created",
-            )
-        })?;
+    if body.default_max_tokens.is_some_and(|n| n <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "default_max_tokens must be greater than zero".to_string(),
+        ));
+    }
 
-    let protocol = body.protocol.unwrap_or_else(|| "openai".into());
+    // A provider model has exactly one provider, so attaching a second is a
+    // conflict rather than an addition. Refusing is the honest answer: the
+    // caller wanted two upstreams for one name, and that is now a frontend
+    // model with two targets, not a model with two backends.
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT provider_id FROM provider_models WHERE id = $1")
+            .bind(provider_model_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider lookup", &e))?;
+    if existing.is_some() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "model {model_name:?} already has a provider; a provider model has exactly one. \
+                 Detach it first, or create a frontend model with both as targets to balance \
+                 across them"
+            ),
+        ));
+    }
+
+    let attached = match body.provider_id {
+        // Naming a provider settles the endpoint, so anything here that also
+        // describes one is a contradiction. Ignoring it would be worse than
+        // refusing: the caller would believe they had set a credential on this
+        // attachment, and the provider's own would be what actually gets sent.
+        Some(pid) => {
+            let contradictions: Vec<&str> = [
+                body.api_base.as_ref().map(|_| "api_base"),
+                body.protocol.as_ref().map(|_| "protocol"),
+                body.auth_header.as_ref().map(|_| "auth_header"),
+                body.auth_scheme.as_ref().map(|_| "auth_scheme"),
+                body.upstream_api_key.as_ref().map(|_| "upstream_api_key"),
+                body.credential_kind.as_ref().map(|_| "credential_kind"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !contradictions.is_empty() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{contradictions:?} describe the provider, not this model's link to it; \
+                         with provider_id they come from the provider row. Change them with \
+                         PATCH /admin/providers/{pid}"
+                    ),
+                ));
+            }
+            let row: Option<(String, String, String, Option<String>, String)> = sqlx::query_as(
+                "SELECT api_base, protocol, auth_header, auth_scheme, credential_kind \
+                 FROM providers WHERE id = $1",
+            )
+            .bind(pid)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider lookup", &e))?;
+            let Some((api_base, protocol, auth_header, auth_scheme, credential_kind)) = row else {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no provider with id {pid}; GET /admin/providers lists the ids that exist"
+                    ),
+                ));
+            };
+            AttachedProvider {
+                id: pid,
+                api_base,
+                protocol,
+                auth_header,
+                auth_scheme,
+                credential_kind,
+            }
+        }
+        None => attach_by_address(&ctx, &body).await?,
+    };
+
+    sqlx::query(
+        "UPDATE provider_models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
+         WHERE id = $4",
+    )
+    .bind(attached.id)
+    .bind(&upstream_model)
+    .bind(body.default_max_tokens)
+    .bind(provider_model_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("attaching provider", &e))?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": provider_model_id,
+            "provider_id": attached.id,
+            "provider_model_id": provider_model_id,
+            "api_base": attached.api_base,
+            "upstream_model": upstream_model,
+            "protocol": attached.protocol,
+            "auth_header": attached.auth_header,
+            "auth_scheme": attached.auth_scheme,
+            "default_max_tokens": body.default_max_tokens,
+            "credential_kind": attached.credential_kind,
+        })),
+    ))
+}
+
+/// The provider a model ends up on, however it was named.
+struct AttachedProvider {
+    id: i64,
+    api_base: String,
+    protocol: String,
+    auth_header: String,
+    auth_scheme: Option<String>,
+    credential_kind: String,
+}
+
+/// Find or create a provider from an address and the auth that goes with it.
+///
+/// This is how every backend was attached before providers were records, and
+/// it stays because a great many callers — the CLI, the skills, `File` mode
+/// imports and every existing script — say where a model lives rather than
+/// which provider row it belongs to.
+async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvider, ApiError> {
+    let Some(raw) = body.api_base.as_deref() else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "one of provider_id or api_base is required".to_string(),
+        ));
+    };
+    // Same rule `FileConfig::validate` applies, and for the same reason:
+    // accepting the URL and then failing every request against it is the
+    // worst of both.
+    let api_base = normalise_api_base(raw)?;
+
+    let encrypted = encrypt_upstream_key(ctx, body.upstream_api_key.as_deref())?;
+
+    let protocol = body.protocol.clone().unwrap_or_else(|| "openai".into());
     // Rejected here rather than left to the column's CHECK constraint so the
     // caller gets the list of valid values instead of a Postgres error, and
     // before an unusable row exists.
@@ -1958,13 +2592,10 @@ async fn post_backend(
             format!("protocol {protocol:?} is not one of: openai, anthropic, gemini"),
         ));
     }
-    if body.default_max_tokens.is_some_and(|n| n <= 0) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "default_max_tokens must be greater than zero".to_string(),
-        ));
-    }
-    let credential_kind = body.credential_kind.unwrap_or_else(|| "static".into());
+    let credential_kind = body
+        .credential_kind
+        .clone()
+        .unwrap_or_else(|| "static".into());
     if !matches!(credential_kind.as_str(), "static" | "gcp_service_account") {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -1991,41 +2622,21 @@ async fn post_backend(
     let (default_header, default_scheme) = auth_defaults_for(&protocol);
     let auth_header = body
         .auth_header
+        .clone()
         .unwrap_or_else(|| default_header.to_string());
     // An explicitly empty scheme means "send the raw key"; only an absent one
     // falls back to the protocol's default.
-    let auth_scheme = match body.auth_scheme {
+    let auth_scheme = match body.auth_scheme.clone() {
         Some(s) if s.trim().is_empty() => None,
         Some(s) => Some(s),
         None => default_scheme.map(str::to_string),
     };
 
-    // A provider model has exactly one provider, so attaching a second is a
-    // conflict rather than an addition. Refusing is the honest answer: the
-    // caller wanted two upstreams for one name, and that is now a frontend
-    // model with two targets, not a model with two backends.
-    let existing: Option<i64> =
-        sqlx::query_scalar("SELECT provider_id FROM provider_models WHERE id = $1")
-            .bind(provider_model_id)
-            .fetch_one(&ctx.pool)
-            .await
-            .map_err(|e| db_error("provider lookup", &e))?;
-    if existing.is_some() {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            format!(
-                "model {model_name:?} already has a provider; a provider model has exactly one. \
-                 Detach it first, or create a frontend model with both as targets to balance \
-                 across them"
-            ),
-        ));
-    }
-
     // Same endpoint and auth means the same provider, which is the whole point
     // of the split: one credential shared by every model on it, so rotating it
     // is one write. A credential supplied here updates the provider's, since
     // the caller has just demonstrated a newer one.
-    let provider_id: i64 = match sqlx::query_scalar::<_, i64>(
+    let id: i64 = match sqlx::query_scalar::<_, i64>(
         "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
          AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
     )
@@ -2055,29 +2666,13 @@ async fn post_backend(
             // host:port is what the Providers screen already called this
             // thing, so an operator sees the name they were reading before it
             // was a record. The suffix only appears when that is ambiguous.
-            let host = api_base
-                .split_once("://")
-                .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
-                .unwrap_or(&api_base)
-                .to_string();
+            let host = host_of(&api_base);
             let kind = if is_private_host(&host) {
                 "static"
             } else {
                 "cloud"
             };
-            let mut name = host.clone();
-            for n in 2..100 {
-                let taken: bool =
-                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE name = $1)")
-                        .bind(&name)
-                        .fetch_one(&ctx.pool)
-                        .await
-                        .map_err(|e| db_error("provider name check", &e))?;
-                if !taken {
-                    break;
-                }
-                name = format!("{host}#{n}");
-            }
+            let name = unique_provider_name(ctx, &host).await?;
             sqlx::query_scalar(
                 "INSERT INTO providers (name, kind, api_base, protocol, auth_header, \
                  auth_scheme, upstream_api_key, credential_kind) \
@@ -2097,33 +2692,14 @@ async fn post_backend(
         }
     };
 
-    sqlx::query(
-        "UPDATE provider_models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
-         WHERE id = $4",
-    )
-    .bind(provider_id)
-    .bind(&upstream_model)
-    .bind(body.default_max_tokens)
-    .bind(provider_model_id)
-    .execute(&ctx.pool)
-    .await
-    .map_err(|e| db_error("attaching provider", &e))?;
-    refresh(&ctx).await;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": provider_model_id,
-            "provider_id": provider_id,
-            "provider_model_id": provider_model_id,
-            "api_base": api_base,
-            "upstream_model": upstream_model,
-            "protocol": protocol,
-            "auth_header": auth_header,
-            "auth_scheme": auth_scheme,
-            "default_max_tokens": body.default_max_tokens,
-            "credential_kind": credential_kind,
-        })),
-    ))
+    Ok(AttachedProvider {
+        id,
+        api_base,
+        protocol,
+        auth_header,
+        auth_scheme,
+        credential_kind,
+    })
 }
 
 async fn delete_backend(
@@ -5827,8 +6403,11 @@ pub async fn serve(
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
         .route("/admin/provider-catalogue", get(list_provider_catalogue))
-        .route("/admin/providers", get(list_providers))
-        .route("/admin/providers/{id}", delete(delete_provider))
+        .route("/admin/providers", get(list_providers).post(post_provider))
+        .route(
+            "/admin/providers/{id}",
+            axum::routing::patch(patch_provider).delete(delete_provider),
+        )
         .route(
             "/admin/providers/{id}/available-models",
             get(provider_available_models),
@@ -6205,6 +6784,281 @@ mod tests {
             webhook: Arc::new(crate::webhook::WebhookSender::disabled()),
         };
         (ctx, cache)
+    }
+
+    /// Creating a provider is the thing you do *before* deciding which of its
+    /// models to serve. Nothing about that flow existed until this route did:
+    /// a provider could only appear as a side effect of attaching a backend,
+    /// which put the endpoint's credential on a model form.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_cloud_provider_comes_from_the_catalogue_with_its_vendors_auth() {
+        let (ctx, _cache) = test_ctx().await;
+        let name = unique_name("cat-provider");
+        let _cleanup = TestCleanup::new().track_prefix("providers", "name", "cat-provider-");
+
+        let (status, created) = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(name.clone()),
+                kind: None,
+                catalogue_key: Some("anthropic".into()),
+                // Deliberately absent: the point of the catalogue is that the
+                // operator does not have to go and find this.
+                api_base: None,
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: Some("sk-ant-test".into()),
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.0["api_base"], "https://api.anthropic.com/v1");
+        assert_eq!(created.0["protocol"], "anthropic");
+        // Anthropic wants the key raw in `x-api-key`; getting this wrong is
+        // an upstream 401 an operator cannot see from here.
+        assert_eq!(created.0["auth_header"], "x-api-key");
+        assert!(created.0["auth_scheme"].is_null());
+        assert_eq!(created.0["kind"], "cloud");
+        assert_eq!(created.0["has_upstream_api_key"], true);
+
+        let id = created.0["id"].as_i64().unwrap();
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_ne!(stored, b"sk-ant-test");
+        assert_eq!(
+            crate::control::secrets::decrypt(&ctx.key, &stored).unwrap(),
+            "sk-ant-test"
+        );
+
+        // A second row with the same address and auth would make which one a
+        // model lands on arbitrary, because that tuple is how `post_backend`
+        // finds one.
+        let err = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("cat-provider")),
+                kind: None,
+                catalogue_key: Some("anthropic".into()),
+                api_base: None,
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        assert_eq!(
+            patch_provider(
+                State(ctx.clone()),
+                RequireConfigWrite,
+                Path(id),
+                Json(PatchProvider {
+                    name: None,
+                    api_base: None,
+                    protocol: None,
+                    auth_header: None,
+                    auth_scheme: None,
+                    upstream_api_key: Some("sk-ant-rotated".into()),
+                    credential_kind: None,
+                }),
+            )
+            .await
+            .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            crate::control::secrets::decrypt(&ctx.key, &stored).unwrap(),
+            "sk-ant-rotated"
+        );
+
+        delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
+            .await
+            .unwrap();
+    }
+
+    /// Vertex and Bedrock both encode a region the catalogue cannot know.
+    /// Storing the entry as-is would produce a provider that resolves nowhere
+    /// and then reports itself unreachable, describing a typo as a fault of
+    /// the endpoint.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_catalogue_address_with_a_placeholder_left_in_it_is_refused() {
+        let (ctx, _cache) = test_ctx().await;
+        let err = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("placeholder-provider")),
+                kind: None,
+                catalogue_key: Some("vertex".into()),
+                api_base: None,
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0["error"].as_str().unwrap().contains("placeholder"));
+    }
+
+    /// A lease is something a registering host takes out and keeps refreshing.
+    /// Handing one to a provider nobody is refreshing would have the sweep
+    /// delete it half an hour later.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_provider_created_by_hand_cannot_be_given_a_lease() {
+        let (ctx, _cache) = test_ctx().await;
+        let err = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("leased-provider")),
+                kind: Some("dynamic".into()),
+                catalogue_key: None,
+                api_base: Some("http://10.0.0.9:8000/v1".into()),
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// The other half of the flow the UI needs: pick a provider that is
+    /// already configured, and attach a model to it without retyping — or
+    /// re-supplying — anything the provider row already carries.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_model_attaches_to_a_provider_that_already_exists() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new()
+            .track_prefix("providers", "name", "byid-provider-")
+            .track_prefix("provider_models", "name", "byid-model-");
+
+        let (_, provider) = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("byid-provider")),
+                kind: None,
+                catalogue_key: None,
+                api_base: Some(format!("http://10.9.9.9:{}/v1", std::process::id())),
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: Some("sk-on-the-provider".into()),
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let provider_id = provider.0["id"].as_i64().unwrap();
+
+        let model_name = unique_name("byid-model");
+        let (_, model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewModel {
+                name: model_name.clone(),
+                description: String::new(),
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let model_id = model.0["id"].as_i64().unwrap();
+
+        // Endpoint fields alongside a provider_id are a contradiction.
+        // Ignoring them would leave the caller believing they had set a
+        // credential here while the provider's is what actually gets sent.
+        let err = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(model_id),
+            Json(NewBackend {
+                provider_id: Some(provider_id),
+                api_base: Some("http://somewhere-else:8000/v1".into()),
+                upstream_model: None,
+                upstream_api_key: None,
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                default_max_tokens: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        let (status, attached) = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(model_id),
+            Json(NewBackend {
+                provider_id: Some(provider_id),
+                api_base: None,
+                upstream_model: Some("llama-3.1-8b".into()),
+                upstream_api_key: None,
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                default_max_tokens: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(attached.0["provider_id"], provider_id);
+        assert_eq!(attached.0["api_base"], provider.0["api_base"]);
+        assert_eq!(attached.0["upstream_model"], "llama-3.1-8b");
+
+        // Deleting a provider that still serves something would take the
+        // model's routing targets with it, so it is refused rather than
+        // cascaded.
+        let err = delete_provider(State(ctx.clone()), RequireConfigWrite, Path(provider_id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        delete_model(State(ctx.clone()), RequireConfigWrite, Path(model_id))
+            .await
+            .unwrap();
+        delete_provider(State(ctx.clone()), RequireConfigWrite, Path(provider_id))
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -7989,7 +8843,8 @@ mod tests {
 
         let vertex = |key: Option<String>, kind: Option<&str>| {
             NewBackend {
-            api_base: "https://europe-west1-aiplatform.googleapis.com/v1/projects/p/locations/europe-west1/endpoints/openapi".into(),
+            provider_id: None,
+            api_base: Some("https://europe-west1-aiplatform.googleapis.com/v1/projects/p/locations/europe-west1/endpoints/openapi".into()),
             upstream_model: None,
             upstream_api_key: key,
             protocol: None,

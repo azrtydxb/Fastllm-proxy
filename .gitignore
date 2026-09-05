@@ -28,3 +28,4 @@ mermaid-init.js
 # procoder regenerates these per checkout, and its own gate rejects the
 # handoff file it just wrote — tracking them makes every commit fail.
 .procoder/state/
+__pycache__/

@@ -6,13 +6,27 @@ the list below; the list exists so you do not have to go and find the base URL.
 
 ![The Providers screen: backends grouped by api_base, each card showing model and backend counts, whether a credential is set, and how many are up](images/ui-providers.png)
 
-The **Providers** screen groups what you are actually talking to, by host. A
-provider is a grouping this screen invents rather than a record the API
-models — the database has models and backends, and "OpenRouter" is what a
-human calls every backend pointing at `openrouter.ai`. What each card answers
-is the question you actually have: how many models ride on it, whether a
-credential is set (never the credential itself), and how many of its models
-are up.
+The **Providers** screen is where an endpoint and its credential are added and
+kept. A provider is a row in `providers` — since migration 0029 it is a record
+rather than a grouping the screen used to invent by bucketing backends on their
+`api_base`. Each card answers the question you actually have: how many models
+ride on it, whether a credential is set (never the credential itself), and how
+many of its models are up.
+
+**Add provider** offers two ways in, which differ only in where the address
+comes from:
+
+- **Cloud provider** — pick a vendor from the catalogue. Its base URL, wire
+  protocol and the header it wants its key in are filled in for you; you supply
+  the token.
+- **Custom endpoint** — type the address of anything else: a vLLM on the LAN,
+  an Ollama on a workstation, a gateway of your own. Protocol defaults to
+  `openai`, which is what almost everything speaks.
+
+Nothing is served by adding a provider. It carries the endpoint and the
+credential; which of its models to expose is a separate, deliberate step on
+**Provider models** — because a cloud provider can front hundreds, and
+registering all of them is not what anyone means by adding one.
 
 ## The catalogue
 
@@ -78,19 +92,48 @@ prefilled with something that cannot resolve.
 
 ## Adding one
 
-Two ways, same result. A backend belongs to the model it serves, so you add a
-model first and then a backend under it.
+A provider model is one model name on one provider, so there are two steps: the
+endpoint, then what you want off it.
 
-In the UI, on **Models**:
+In the UI, on **Providers**, press **Add provider** and give it a credential.
+Then on **Provider models**:
 
 ![The Provider models screen: each model with its provider, credential state, prices, cache TTL and context window](images/ui-models.png)
 
-By API:
+pick that provider from the dropdown and press **Browse models**. The list is
+what the endpoint answers `GET /v1/models` with — not what a catalogue believes
+it offers — with the ones you have already registered marked. Choose one and
+attach.
+
+A provider that does not implement `/v1/models` says so in place, and the
+upstream name stays typeable.
+
+By API, the same three calls:
 
 ```bash
-curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models \
-  -H 'content-type: application/json' -d '{"name":"kimi-k2"}'    # -> {"id":7}
+# The endpoint and its key, once. A catalogue_key fills in the rest.
+curl -sk -b /tmp/ck -X POST https://control:4001/admin/providers \
+  -H 'content-type: application/json' \
+  -d '{"catalogue_key":"openrouter","upstream_api_key":"sk-or-..."}'   # -> {"id":3}
 
+curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models \
+  -H 'content-type: application/json' -d '{"name":"kimi-k2"}'          # -> {"id":7}
+
+curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models/7/backends \
+  -H 'content-type: application/json' \
+  -d '{"provider_id":3,"upstream_model":"moonshotai/kimi-k2"}'
+```
+
+Naming a `provider_id` settles the address, the protocol and the credential, so
+none of them may be sent alongside it — the API refuses rather than quietly
+preferring one source, which would leave you believing you had set a key here
+while the provider's is what actually gets sent.
+
+Attaching by address still works, and still finds or creates a provider from
+it. That is how every backend was attached before providers were records, and
+it is what a LiteLLM import and every existing script does:
+
+```bash
 curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models/7/backends \
   -H 'content-type: application/json' -d '{
     "api_base": "https://api.moonshot.ai/v1",
@@ -113,6 +156,13 @@ for routing between _different_ models.
 `upstream_api_key` is encrypted at rest with `FASTLLM_ENCRYPTION_KEY` before it
 reaches Postgres, and the admin API never reads one back — the UI shows
 _whether_ a credential is set, never what it is.
+
+**One credential per provider, however many models ride on it.** That is the
+point of the split: rotating a key is one write, from the provider card's
+**rotate key**, or `PATCH /admin/providers/{id}` with a new
+`upstream_api_key` — not one write per model. An absent `upstream_api_key`
+there leaves the stored one alone, so renaming a provider does not require
+re-sending a key nothing can read back; `""` clears it.
 
 Two knobs exist because not every vendor puts the key in `authorization:
 Bearer`:
