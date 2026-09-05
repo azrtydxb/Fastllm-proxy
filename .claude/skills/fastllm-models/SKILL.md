@@ -26,7 +26,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `GET` | `/admin/provider-catalogue` | Known providers and how to reach them | — |
 | `GET` | `/admin/provider-models` | Read provider models | — |
 | `POST` | `/admin/provider-models` | Create provider models | `name`, `description`*, `unpriced`, `input_price_per_mtok`*, `output_price_per_mtok`*, `default`, `cache_ttl_seconds`*, `context_length`* |
-| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`* |
+| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `name`*, `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`* |
 | `DELETE` | `/admin/provider-models/{id}` | Delete models id | — |
 | `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `provider_id`*, `api_base`*, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
 | `GET` | `/admin/providers` | Read providers | — |
