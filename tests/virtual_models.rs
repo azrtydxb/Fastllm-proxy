@@ -445,13 +445,14 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "a grant on the frontend model is what authorises a request naming it"
     );
 
-    // And it unlocks *that frontend model*, not the provider models behind it.
-    // Naming one directly still needs a grant on it, so the frontend model
-    // cannot be used as a way in to something it happens to route to.
+    // And a provider model is not a client-facing name at all — 404, not 403.
+    // It is not that this caller may not use it; it is that no caller names a
+    // provider model. Frontend models are the only surface, so one cannot be
+    // bypassed by naming what it routes to.
     let (status, _) = chat(port, &virtual_only_key, &model_a_name);
     assert_eq!(
-        status, 403,
-        "a grant on the frontend model must not unlock a provider model named directly"
+        status, 404,
+        "a provider model is not a name a client may use"
     );
 
     // An unknown model — virtual or concrete — is still a 404 regardless of

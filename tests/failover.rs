@@ -663,16 +663,19 @@ async fn a_frontend_model_grant_covers_the_chain_it_routes_to() {
     );
     assert_eq!(served_by(&body), "secondary");
 
-    // What it must *not* do is unlock the secondary when named directly. The
-    // frontend model is the grant; it is not a skeleton key for its targets.
+    // And a provider model is not a name a client may use at all — not
+    // refused for lack of a grant, but absent from the surface. Frontend
+    // models are the only thing this gateway answers to, so a provider
+    // model's name cannot be used as a way around the frontend model in
+    // front of it.
     let direct = serde_json::json!({
         "model": fx.secondary,
         "messages": [{"role": "user", "content": "hello"}],
     });
     let (status, body) = chat(port, &narrow_key, direct);
     assert_eq!(
-        status, 403,
-        "a frontend model grant must not unlock a target named directly: {body}"
+        status, 404,
+        "a provider model is not a client-facing name: {body}"
     );
 }
 

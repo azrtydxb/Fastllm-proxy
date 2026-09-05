@@ -314,7 +314,45 @@ fn resolve_target_models(
     registry: &Registry,
 ) -> Result<Vec<String>, Response<ResBody>> {
     let Some(vm) = snapshot.frontend_models.get(requested_model) else {
-        return Ok(vec![requested_model.to_string()]);
+        // `File` mode has no frontend models at all — routing is a control
+        // plane feature, and a config file defines models directly. So a
+        // deployment with none is one where the model *is* the client-facing
+        // name, and refusing it would leave such a deployment unable to serve
+        // anything. The surface tightens only where there is a surface to
+        // tighten.
+        //
+        // A database-backed deployment always has frontend models: migration
+        // 0034 gives every provider model one. So this is the File-mode
+        // carve-out and not a hole in the rule below.
+        if snapshot.frontend_models.is_empty() {
+            return Ok(vec![requested_model.to_string()]);
+        }
+        // A frontend model is the only name a client may use.
+        //
+        // Naming a provider model used to work and resolve to itself. That is
+        // what made a provider model's *name* part of the client contract, and
+        // therefore what made renaming one a breaking change for callers as
+        // well as a silent revocation of every grant on it — which migration
+        // 0029 demonstrated in production. A registration service creating and
+        // deleting provider models on a lease would do it continuously.
+        //
+        // Nothing became unreachable when this landed: migration 0034 gives
+        // every provider model a frontend model of the same name, which
+        // shadows it here, so the same request takes one more lookup and ends
+        // in the same place. What is refused is a name that was never meant to
+        // be client-facing — a split model's qualified name, or one a host
+        // has just started serving and nobody has exposed yet.
+        //
+        // 404 rather than 403: it is not that the caller may not use it, it is
+        // that it is not a name this gateway answers to.
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            &format!(
+                "{requested_model:?} is not a frontend model. Clients name frontend \
+                 models; provider models are inventory and are reached through one"
+            ),
+        ));
     };
     let candidates = vm.resolve_candidates(facts, prefix, registry);
     if candidates.is_empty() {
@@ -2230,27 +2268,28 @@ fn models_response(
     snapshot: &Snapshot,
     principal: Option<&Principal>,
 ) -> Response<ResBody> {
+    // Frontend models only. They are the sole name a client may use, so
+    // listing a provider model would offer something that 404s the moment it
+    // is chosen — which is the exact failure this endpoint was changed to stop
+    // producing when it listed everything configured rather than everything
+    // the caller can reach.
     let registry = state.registry.load();
-    let mut names: Vec<&str> = registry.model_names();
-    names.extend(snapshot.frontend_models.keys().map(String::as_str));
+    let mut names: Vec<&str> = if snapshot.frontend_models.is_empty() {
+        // `File` mode, where the model is the client-facing name. See
+        // `resolve_target_models` for why the two cases differ.
+        registry.model_names()
+    } else {
+        snapshot
+            .frontend_models
+            .keys()
+            .map(String::as_str)
+            .collect()
+    };
     names.sort_unstable();
     names.dedup();
 
     if let Some(p) = principal {
-        names.retain(|name| {
-            if p.may_invoke(name) {
-                return true;
-            }
-            // Not a concrete grant — but it may be a frontend model whose
-            // chain reaches something this caller does hold.
-            snapshot.frontend_models.get(*name).is_some_and(|vm| {
-                vm.rules
-                    .iter()
-                    .flat_map(|r| r.targets.iter())
-                    .chain(vm.default_targets.iter())
-                    .any(|t| p.may_invoke(&t.model))
-            })
-        });
+        names.retain(|name| p.may_invoke(name));
     }
     let data: Vec<serde_json::Value> = names
         .into_iter()
