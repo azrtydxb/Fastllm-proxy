@@ -227,11 +227,14 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
             </>
           )}
 
-          <Row>
-            <Muted>
-              Registering a model does not expose it. A frontend model is what
-              clients can ask for.
-            </Muted>
+          {/* The note on its own line: beside the buttons it wrapped them
+              onto two rows in a dialog this narrow, which read as two
+              separate actions rather than a choice between them. */}
+          <Muted>
+            Registering a model does not expose it. A frontend model is what
+            clients can ask for.
+          </Muted>
+          <Row gap={8} style={{ flexWrap: "nowrap" }}>
             <Spacer />
             <Button type="button" onClick={onClose}>
               Cancel
