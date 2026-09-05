@@ -10,6 +10,13 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **The catalogue says which credentials a vendor takes.**
+  `provider_catalogue.credential_kinds` (migration 0040), returned by
+  `GET /admin/provider-catalogue`. Only Vertex AI accepts anything but a static
+  key, so the Add provider form asks that question only where there is an
+  answer to give rather than putting a Google-shaped dropdown in front of
+  someone adding Groq — and the UI reads that from the catalogue instead of
+  naming a vendor in a component.
 - **Providers can be added, edited and credentialled from the UI.** `POST
   /admin/providers` and `PATCH /admin/providers/{id}`, and an **Add provider**
   form on the Providers screen with two ways in: a cloud vendor picked from the

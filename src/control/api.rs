@@ -708,6 +708,10 @@ struct CatalogueEntry {
     auth_header: String,
     auth_scheme: Option<String>,
     notes: Option<String>,
+    /// Which `credential_kind` values this entry accepts, first one first.
+    /// Only Vertex AI has more than `static`, and the form asks the question
+    /// only where there is a choice — see migration 0040.
+    credential_kinds: Vec<String>,
 }
 
 /// `GET /admin/provider-catalogue` — known providers and how to reach them.
@@ -731,9 +735,11 @@ async fn list_provider_catalogue(
         String,
         Option<String>,
         Option<String>,
+        String,
     );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT key, display_name, base_url, protocol, auth_header, auth_scheme, notes \
+        "SELECT key, display_name, base_url, protocol, auth_header, auth_scheme, notes, \
+             credential_kinds \
          FROM provider_catalogue ORDER BY display_name",
     )
     .fetch_all(&ctx.pool)
@@ -742,7 +748,16 @@ async fn list_provider_catalogue(
     Ok(Json(
         rows.into_iter()
             .map(
-                |(key, display_name, base_url, protocol, auth_header, auth_scheme, notes)| {
+                |(
+                    key,
+                    display_name,
+                    base_url,
+                    protocol,
+                    auth_header,
+                    auth_scheme,
+                    notes,
+                    credential_kinds,
+                )| {
                     CatalogueEntry {
                         key,
                         display_name,
@@ -751,6 +766,12 @@ async fn list_provider_catalogue(
                         auth_header,
                         auth_scheme,
                         notes,
+                        credential_kinds: credential_kinds
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|k| !k.is_empty())
+                            .map(str::to_string)
+                            .collect(),
                     }
                 },
             )

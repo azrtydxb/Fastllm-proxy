@@ -42,6 +42,21 @@ import {
 
 const FILTERS = ["All", "Hosted", "Self-hosted", "Native protocol"];
 
+/**
+ * The name an address will get if the Name box is left empty.
+ *
+ * Shown as the placeholder rather than described, because "host:port" reads as
+ * a format the operator is being asked to follow instead of the default they
+ * are about to accept. Mirrors `host_of` in `src/control/api.rs`; being wrong
+ * here shows a placeholder that differs from the name the row ends up with,
+ * which is why the rule is one line in both places rather than a parse.
+ */
+function derivedName(apiBase) {
+  const rest = apiBase.split("://")[1];
+  if (!rest) return "";
+  return rest.split("/")[0];
+}
+
 const BLANK = {
   mode: "cloud",
   catalogue_key: "",
@@ -80,6 +95,16 @@ export function Providers({ onUnauthorised, go }) {
   const entry = (data.catalogue || []).find(
     (c) => c.key === draft?.catalogue_key,
   );
+  // A typed address could be any endpoint, Vertex included, so it keeps both.
+  // A catalogue entry offers what it declares — one value for all but Vertex,
+  // which is why the control disappears rather than showing a dropdown with a
+  // single option in it.
+  const kinds =
+    draft?.mode === "custom"
+      ? ["static", "gcp_service_account"]
+      : entry
+        ? entry.credential_kinds
+        : ["static"];
 
   const create = async (e) => {
     e.preventDefault();
@@ -270,6 +295,11 @@ export function Providers({ onUnauthorised, go }) {
                         catalogue_key: e.target.value,
                         api_base: c ? c.base_url : "",
                         protocol: c ? c.protocol : "openai",
+                        // Reset with the entry, or switching away from Vertex
+                        // would leave a service-account kind selected behind a
+                        // control that is no longer on screen — and the save
+                        // would fail on a key that is not a key file.
+                        credential_kind: c ? c.credential_kinds[0] : "static",
                       });
                     }}
                   >
@@ -304,10 +334,10 @@ export function Providers({ onUnauthorised, go }) {
                 <Field
                   label="Name"
                   style={{ flex: 1 }}
-                  hint="Optional — defaults to the endpoint's host:port."
+                  hint="Optional — what the card will be called."
                 >
                   <input
-                    placeholder="host:port"
+                    placeholder={derivedName(draft.api_base) || "host:port"}
                     value={draft.name}
                     onChange={(e) =>
                       setDraft({ ...draft, name: e.target.value })
@@ -353,23 +383,34 @@ export function Providers({ onUnauthorised, go }) {
                     }
                   />
                 </Field>
-                <Field
-                  label="Credential kind"
-                  style={{ flex: 1 }}
-                  hint="Vertex AI is the one provider that cannot use a static secret."
-                >
-                  <select
-                    value={draft.credential_kind}
-                    onChange={(e) =>
-                      setDraft({ ...draft, credential_kind: e.target.value })
-                    }
+                {/* Asked only where there is something to answer. Thirteen of
+                    the fourteen catalogue entries take a static key and so
+                    does every self-hosted endpoint; putting a Google-shaped
+                    question on the form for someone adding Groq is noise. The
+                    catalogue says which kinds an entry accepts (migration
+                    0040) rather than this file naming a vendor. A typed
+                    address gets the choice because Vertex can be reached that
+                    way too. */}
+                {kinds.length > 1 && (
+                  <Field
+                    label="Credential kind"
+                    style={{ flex: 1 }}
+                    hint="Vertex AI mints a token from a service-account key file; it cannot use a static secret."
                   >
-                    <option value="static">static</option>
-                    <option value="gcp_service_account">
-                      gcp_service_account
-                    </option>
-                  </select>
-                </Field>
+                    <select
+                      value={draft.credential_kind}
+                      onChange={(e) =>
+                        setDraft({ ...draft, credential_kind: e.target.value })
+                      }
+                    >
+                      {kinds.map((k) => (
+                        <option key={k} value={k}>
+                          {k}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
               </Row>
 
               {entry?.notes && <Muted>{entry.notes}</Muted>}
