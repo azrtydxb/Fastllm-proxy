@@ -63,11 +63,22 @@ full admin, because nothing checked past "is this a valid session".
 
 ![The permission matrix: roles down the side, the four admin permissions across, click a cell to grant or revoke](images/ui-permission-matrix.png)
 
-**A grant on a frontend model does not unlock the concrete models behind it**,
-and failover drops any candidate the caller lacks `model:invoke` on —
-including the deployment-wide fallback. Routing can never widen a caller's
-reach, which is the property that makes it safe to let routing be
-configuration.
+**A grant on a frontend model covers the chain it routes to.** A frontend model
+is how a model is exposed, so it is what gets granted, and a request naming one
+is authorised against it.
+
+The trade that comes with it, stated plainly: adding a target to a frontend
+model extends the reach of everyone holding it, with no new grant on record.
+What makes that acceptable is that editing a frontend model requires
+`config:write`, which is all-or-nothing and already lets its holder grant
+themselves any model outright — so it is not a route to anything they could not
+take directly.
+
+The rule it replaced required a grant on the resolved provider model. That
+pinned every grant to a provider model's *name*, so renaming one revoked access
+with nothing reporting it — which migration 0029 did on the dev cluster, to two
+live roles. Provider models are not client-facing names at all now, so a
+frontend model cannot be bypassed by naming what it routes to.
 
 ## What is stored, and in what form
 

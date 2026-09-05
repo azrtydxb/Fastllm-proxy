@@ -2239,7 +2239,7 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
 /// OpenAI-shaped model list, filtered to what this caller may actually
 /// invoke.
 ///
-/// **Lists both concrete and frontend models**, and only the ones the
+/// **Lists frontend models**, and only the ones the
 /// caller's grants cover. It used to enumerate everything *configured*, on
 /// the reasoning that listing is not access control — a caller with no grant
 /// already gets 403 from `/v1/chat/completions`, so hiding the name added

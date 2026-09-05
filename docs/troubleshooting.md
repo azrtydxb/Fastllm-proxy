@@ -28,16 +28,19 @@ curl -sk -b /tmp/ck https://host:4001/admin/principals   # which roles it holds
 curl -sk -b /tmp/ck https://host:4001/admin/roles        # what those roles grant
 ```
 
-Grants are per model: `model:invoke` on `model/<name>`, or `model/*` for all.
-A grant on a _virtual_ model does not unlock the concrete models it routes to —
-that is deliberate, so a failover chain can never widen someone's reach.
+Grants are per model: `model:invoke` on `model/<name>`, or `model/*` for all,
+and the name is a **frontend model's** — that is what a client asks for and
+therefore what is granted.
 
-### `403` for a frontend model that works sometimes
+A grant on a frontend model covers the whole chain it routes to. Adding a
+target to it extends the reach of everyone holding it, which is acceptable only
+because editing one needs `config:write`, itself enough to grant any model
+outright.
 
-The rule matched a target you hold, and the default did not. A frontend model
-resolves per request, so a caller granted only some of its targets succeeds on
-the prompts that route to those and fails on the rest. Either grant the whole
-chain or point the client at a concrete model.
+### `404` for a provider model
+
+Provider models are inventory, not names a client may use. Ask for the frontend
+model in front of it — `GET /v1/models` lists exactly what this key can name.
 
 ### `404 no route for POST /v1/...`
 

@@ -36,6 +36,8 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 a set lookup, not a graph walk — so a role change takes effect only once the
 proxies pick up the next snapshot.
 
-**A caller is authorised against the resolved concrete model, never the virtual
-name.** A frontend model routes access; it cannot grant it. Adding a frontend model
-in front of existing models never widens anyone's reach.
+**A caller is authorised against the name it used, which is a frontend model's.**
+Provider models are inventory and cannot be named by a client at all, so grants
+are written on frontend models. A grant on one covers the chain it routes to —
+adding a target therefore extends the reach of everyone holding it, and editing
+a frontend model needs `config:write`.
