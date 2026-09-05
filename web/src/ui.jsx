@@ -15,7 +15,7 @@
 // exist, and here is why — which is the difference between a dashboard an
 // operator can trust and one they learn to second-guess.
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 // --- layout -----------------------------------------------------------------
 
@@ -532,6 +532,50 @@ export function Modal({ label, width = 720, onClose, children }) {
         {children}
       </div>
     </div>
+  );
+}
+
+/**
+ * A name you can click to change.
+ *
+ * Renaming used to be impossible here, and not by oversight: grants, routing
+ * targets and usage history all recorded the name. They are carried by the
+ * PATCH route now, so the affordance can exist — but the two names differ in
+ * what a rename *means*, which is why each caller passes its own hint rather
+ * than this component inventing one.
+ */
+export function Renamable({ value, hint, style, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  if (!editing) {
+    return (
+      <Mono
+        style={{ ...style, cursor: "text" }}
+        title={hint}
+        onClick={() => {
+          setDraft(value);
+          setEditing(true);
+        }}
+      >
+        {value}
+      </Mono>
+    );
+  }
+  return (
+    <input
+      autoFocus
+      value={draft}
+      style={{ ...style, font: "500 13px var(--mono)" }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => setEditing(false)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") setEditing(false);
+        if (e.key === "Enter" && draft.trim() && draft !== value) {
+          setEditing(false);
+          onSave(draft.trim());
+        }
+      }}
+    />
   );
 }
 

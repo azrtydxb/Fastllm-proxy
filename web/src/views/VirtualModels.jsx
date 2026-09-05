@@ -14,6 +14,7 @@ import {
   Mono,
   Muted,
   Pill,
+  Renamable,
   Row,
   Spacer,
   Stack,
@@ -218,9 +219,21 @@ export function VirtualModels({ onUnauthorised }) {
             <Card>
               <Row style={{ flexWrap: "nowrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <Mono style={{ font: "500 15px/1.2 var(--mono)" }}>
-                    {vm.name}
-                  </Mono>
+                  <Renamable
+                    value={vm.name}
+                    style={{ font: "500 15px/1.2 var(--mono)" }}
+                    hint="Click to rename. This is the name clients ask for, so renaming it changes your public API — grants follow, callers do not."
+                    onSave={(name) =>
+                      attempt(
+                        () =>
+                          api.patch(`/admin/frontend-models/${vm.id}`, {
+                            name,
+                          }),
+                        setError,
+                        onUnauthorised,
+                      ).then((ok) => ok && reload())
+                    }
+                  />
                   <div
                     style={{
                       font: "400 11px var(--sans)",

@@ -10,6 +10,11 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Names are editable in the UI.** Click one on Provider models or Frontend
+  models. The hint differs between them on purpose: renaming a provider model
+  is an internal relabel, while a frontend model's name is what clients ask
+  for, so renaming it changes the deployment's public API — grants follow,
+  callers do not.
 - **Everything with a name can be renamed, and a rename no longer breaks
   links.** Provider models, frontend models, MCP servers, A2A agents,
   principals and roles all take a `name` on their PATCH route; principals and

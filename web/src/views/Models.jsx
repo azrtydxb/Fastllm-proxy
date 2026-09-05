@@ -16,6 +16,7 @@ import {
   Mono,
   Muted,
   Pill,
+  Renamable,
   Row,
   Spacer,
   Stack,
@@ -287,7 +288,18 @@ export function Models({ onUnauthorised }) {
                 flexWrap: "nowrap",
               }}
             >
-              <Mono style={{ font: "500 13px var(--mono)" }}>{m.name}</Mono>
+              <Renamable
+                value={m.name}
+                style={{ font: "500 13px var(--mono)" }}
+                hint="Click to rename. Grants and routing targets follow; usage history keeps the name it was billed under."
+                onSave={(name) =>
+                  attempt(
+                    () => api.patch(`/admin/provider-models/${m.id}`, { name }),
+                    setError,
+                    onUnauthorised,
+                  ).then((ok) => ok && reload())
+                }
+              />
               <Pill tone="quiet" mono>
                 id {m.id}
               </Pill>
