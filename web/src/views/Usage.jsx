@@ -41,7 +41,7 @@ const RANGES = [
 const GROUPS = [
   ["principal", "By principal"],
   ["model", "By model"],
-  ["virtual_model", "By frontend model"],
+  ["frontend_model", "By frontend model"],
   ["day", "By day"],
 ];
 

@@ -60,7 +60,7 @@ export function Overview({ onUnauthorised, config, go }) {
         // free self-hosted model carrying most of the traffic sorts last and a
         // limit of 6 would drop it out of a panel about *traffic*.
         api.get(
-          "/admin/usage" + query({ group_by: "virtual_model", limit: 100 }),
+          "/admin/usage" + query({ group_by: "frontend_model", limit: 100 }),
         ),
         api.get("/admin/audit" + query({ limit: 6 })),
       ]);
