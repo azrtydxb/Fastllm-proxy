@@ -44,7 +44,25 @@ agent that needs a virtualenv to start is one more thing to be broken at 3am.
 | `--api-base` | Register an endpoint outright, repeatable. Use when the address is not a port on `--advertise`. |
 | `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease. |
 | `--engine` | A hint, carried as metadata. Nothing depends on it. |
+| `--token` | A principal API key. It authenticates the agent; there is no permission to grant beyond that. |
 | `--once` | Register and exit, for a cron or a smoke test. |
+
+## There is no RBAC on providers
+
+A provider is an endpoint and a credential for reaching it. The credential is
+the *provider's* own — an OpenRouter key, a vLLM server's auth — defined by the
+provider rather than by us, and it is the whole of what a provider needs to
+work.
+
+Registering one needs a token and nothing more. That is safe because
+registering is not an exposure: a model learned from a registered host reaches
+nobody until an operator points a frontend model at it, and a frontend model is
+where access is actually granted. A permission guarding registration would be
+guarding a door that opens onto nothing.
+
+What registration deliberately cannot do is convert a provider a human typed in
+into one that expires — a static provider stays static, so an agent cannot take
+over an endpoint someone configured by hand.
 
 ## Any engine, in a container or not
 

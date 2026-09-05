@@ -642,7 +642,7 @@ struct ProviderRegistration {
 /// `.procoder/adr/0003-the-control-plane-enumerates-a-providers-models.md`.
 async fn post_provider_register(
     State(ctx): State<Ctx>,
-    perm: RequireProviderRegister,
+    _perm: RequireProviderRegister,
     Json(body): Json<ProviderRegistration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let api_base = body.api_base.trim().trim_end_matches('/').to_string();
@@ -663,27 +663,6 @@ async fn post_provider_register(
             StatusCode::BAD_REQUEST,
             "node must name the host registering this provider".to_string(),
         ));
-    }
-
-    // The scope, actually enforced. A key held by `spark-246` may register
-    // providers for `spark-246` and no other node; `node/*` is the unscoped
-    // form, and a session with `config:write` bypasses this because it can
-    // already do anything.
-    if let Some(principal_id) = perm.0 {
-        let scopes = principal_permission_resources(&ctx.pool, principal_id, "provider:register")
-            .await
-            .map_err(|e| db_error("reading register scopes", &e))?;
-        let wanted = format!("node/{}", body.node.trim());
-        let scoped_ok = scopes.iter().any(|r| r == "node/*" || r == &wanted);
-        if !scopes.is_empty() && !scoped_ok {
-            return Err(api_error(
-                StatusCode::FORBIDDEN,
-                format!(
-                    "this key may register providers for {scopes:?}, not {wanted:?}. A \
-                     registration agent holds provider:register on its own node"
-                ),
-            ));
-        }
     }
 
     let id = crate::control::registry_agent::register(
@@ -3307,11 +3286,6 @@ const GRANTABLE_VERBS: &[&str] = &[
     "model:invoke",
     "mcp:invoke",
     "agent:invoke",
-    // Held by a registration agent, scoped to the node it speaks for
-    // (`node/spark-246`, or `node/*`). Deliberately not `config:write`: that
-    // is all-or-nothing and would let a GPU host rewrite principals and
-    // passwords, when all it needs is to say which addresses it is serving on.
-    "provider:register",
 ];
 
 #[derive(Deserialize)]
@@ -3427,7 +3401,6 @@ fn validate_grant(verb: &str, resource: &str) -> Result<(), ApiError> {
         "model:invoke" => Some("model/"),
         "mcp:invoke" => Some("mcp/"),
         "agent:invoke" => Some("agent/"),
-        "provider:register" => Some("node/"),
         _ => None,
     } {
         if !resource.starts_with(prefix) {
@@ -4731,9 +4704,8 @@ async fn require_session(
     // which is the thing having machine credentials exists to avoid.
     //
     // This authenticates only. What a key may *do* is still decided by
-    // `check_permission` per route, and the verb an agent holds
-    // (`provider:register` on `node/...`) grants nothing else — a key without
-    // it gets a 403 from every other admin route exactly as before.
+    // `check_permission` per route, so a key without `config:write` gets a 403
+    // from every admin route that mutates configuration, exactly as before.
     // Only when there is no session cookie. A request carrying both — a
     // browser session plus some unrelated Authorization header — must still
     // authenticate as the session it has, and treating a bearer token as
@@ -4852,31 +4824,6 @@ mod admin_permission {
 /// admin permission migration 0001 seeds is scoped to `'*'`, unlike
 /// `model:invoke` (`model/*`), so there is nothing finer to match against
 /// resource here the way `Principal::may_invoke` matches model names.
-/// The resources a principal holds a verb on.
-///
-/// `principal_has_permission` deliberately ignores resources: every admin verb
-/// migration 0001 seeds is scoped to `'*'`, so there was nothing to match
-/// against. `provider:register` is the first admin verb that is not — a
-/// registration agent holds it on `node/<its own name>` — and a scope that is
-/// stored but never checked is worse than no scope, because it reads on a
-/// permission matrix as though it were enforced.
-async fn principal_permission_resources(
-    pool: &PgPool,
-    principal_id: i64,
-    verb: &str,
-) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT p.resource FROM principal_roles pr
-           JOIN role_permissions rp ON rp.role_id = pr.role_id
-           JOIN permissions p ON p.id = rp.permission_id
-          WHERE pr.principal_id = $1 AND p.verb = $2",
-    )
-    .bind(principal_id)
-    .bind(verb)
-    .fetch_all(pool)
-    .await
-}
-
 async fn principal_has_permission(
     pool: &PgPool,
     principal_id: i64,
@@ -4980,41 +4927,37 @@ impl FromRequestParts<Ctx> for RequireKeyRevoke {
     }
 }
 
-/// An agent may register providers and do nothing else.
+/// Registering a provider needs a credential, not a permission.
 ///
-/// `config:write` would have worked and is what the first cut used, but it is
-/// all-or-nothing — it would let a GPU host rewrite principals, roles and
-/// passwords when all it needs is to say which addresses it is serving on. A
-/// registration agent runs unattended on a machine whose main job is running
-/// other people's model weights; it should hold the least thing that works.
+/// There is no RBAC on providers. A provider is an endpoint and a credential
+/// for reaching it; the credential is the provider's own (an OpenRouter key, a
+/// vLLM server's auth), defined by the provider rather than by us.
 ///
-/// A session with `config:write` is accepted too, so an operator can register
-/// a provider by hand without minting a key first.
-/// Carries the caller's principal id, because the scope this verb is granted
-/// on (`node/<name>`) can only be checked against the node in the request
-/// body, which an extractor cannot see.
-struct RequireProviderRegister(Option<i64>);
+/// Registering one is not an exposure, which is what makes this safe: a
+/// provider model learned from a registered host reaches nobody until an
+/// operator points a frontend model at it, and *that* is where access is
+/// granted. Gating registration behind its own verb would guard a door that
+/// opens onto nothing.
+///
+/// `require_session` has already authenticated the caller — a session or a
+/// principal API key — so reaching this handler is the whole check.
+struct RequireProviderRegister;
 
 impl FromRequestParts<Ctx> for RequireProviderRegister {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Ctx) -> Result<Self, Self::Rejection> {
-        let principal = parts
-            .extensions
-            .get::<AdminPrincipal>()
-            .copied()
-            .map(|AdminPrincipal(id)| id);
-        if check_permission(parts, state, "provider:register")
-            .await
-            .is_ok()
-        {
-            return Ok(Self(principal));
+    async fn from_request_parts(parts: &mut Parts, _state: &Ctx) -> Result<Self, Self::Rejection> {
+        if parts.extensions.get::<AdminPrincipal>().is_some() {
+            return Ok(Self);
         }
-        // A session that can do anything does not need the scoped verb, and
-        // `None` tells the handler not to apply a node scope to it.
-        check_permission(parts, state, admin_permission::CONFIG_WRITE)
-            .await
-            .map(|()| Self(None))
+        tracing::error!(
+            "provider registration ran with no AdminPrincipal; is the route mounted \
+             outside require_session?"
+        );
+        Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "authorisation check misconfigured; see server logs",
+        ))
     }
 }
 
