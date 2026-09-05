@@ -7485,7 +7485,7 @@ mod tests {
         .await
         .unwrap();
         let fm_id = fm.0["id"].as_i64().unwrap();
-        post_default_target(
+        let _ = post_default_target(
             State(ctx.clone()),
             RequireConfigWrite,
             Path(fm_id),
@@ -7499,7 +7499,7 @@ mod tests {
         .unwrap();
 
         let role = unique_name("rename-role");
-        post_role(
+        let _ = post_role(
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewRole {
