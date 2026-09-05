@@ -1,6 +1,6 @@
 # Handle a frontend model that resolves to nothing
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Epic: frontend-models-survive-their-targets
 Sprint: sprint-10
@@ -15,11 +15,29 @@ First match wins and a matching rule commits — if its targets resolve to nothi
 
 ## Acceptance criteria
 
-- [ ] A frontend model with no routable target stays listed, stays permissioned, and is marked unavailable with the reason and last-seen time
-- [ ] Requests use `/admin/fallback-model` when one is set
-- [ ] Otherwise the response is `503 model_unavailable` naming what is missing, never `404`
-- [ ] A rule mixing dynamic and cloud targets renormalises across the survivors when the dynamic one is leased out
-- [ ] Creating a frontend model with a path that has no static or cloud floor emits a warning naming the rule, and is not rejected
-- [ ] Verified on a Spark: stop the model, confirm the frontend model survives with its grants and returns 503 or the fallback
+- [x] A frontend model with no routable target stays listed, stays permissioned, and is marked unavailable with the reason and last-seen time
+- [x] Requests use `/admin/fallback-model` when one is set
+- [x] Otherwise the response is `503 model_unavailable` naming what is missing, never `404`
+- [x] A rule mixing dynamic and cloud targets renormalises across the survivors when the dynamic one is leased out
+- [x] Creating a frontend model with a path that has no static or cloud floor emits a warning naming the rule, and is not rejected
+- [x] Verified on a Spark: stop the model, confirm the frontend model survives with its grants and returns 503 or the fallback
 
 ## Evidence
+
+- A frontend model with no routable target stays listed and permissioned, and
+  answers **503 `model_unavailable`** naming the target it wanted — verified
+  on kw.
+- The deployment fallback is reached first where one is set. It does not make
+  a provider model addressable, which would reopen the direct addressing that
+  frontend-only naming closed.
+- 503 and not 404: the frontend model exists, is named correctly and is
+  permissioned; its providers are gone. That is a condition of the deployment,
+  it resolves itself when a host returns, and it is retriable.
+- Where the 503 lives took two attempts. The empty-candidate branch does not
+  catch it, because targets bind by name so a frontend model _keeps_ them when
+  its providers go — the list is never empty in the case that matters, and the
+  request fell through to a 404 one layer down. Found by making the call
+  against the deployed cluster; pinned by an end-to-end test.
+- That 404 also listed every model in the deployment, to a caller who had just
+  been refused. Provider models are not client-facing names now, so it
+  advertised a surface the caller cannot use. Removed.

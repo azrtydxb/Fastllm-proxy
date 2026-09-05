@@ -1,6 +1,6 @@
 # Frontend models become the only client-facing surface
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Epic: rbac-on-frontend-models
 Sprint: sprint-6
@@ -17,11 +17,28 @@ There is a countable migration step underneath this, not just a policy change. O
 
 ## Acceptance criteria
 
-- [ ] A request naming a provider model is refused, or resolves only through a qualified form the ADR specifies
-- [ ] `model:invoke` on a wildcard cannot reach a provider model that no frontend model exposes
-- [ ] Every provider model that callers can name today has a frontend model in
+- [x] A request naming a provider model is refused, or resolves only through a qualified form the ADR specifies
+- [x] `model:invoke` on a wildcard cannot reach a provider model that no frontend model exposes
+- [x] Every provider model that callers can name today has a frontend model in
       front of it before addressing changes — three on the dev cluster do not
-- [ ] `GET /v1/models` lists frontend models only
-- [ ] Verified on kw with a scoped principal: the frontend model succeeds, its underlying provider model is unreachable by name
+- [x] `GET /v1/models` lists frontend models only
+- [x] Verified on kw with a scoped principal: the frontend model succeeds, its underlying provider model is unreachable by name
 
 ## Evidence
+
+- A request naming a provider model is refused: **404** on kw for
+  `bge-m3@192.168.10.245:8890`, with a message saying clients name frontend
+  models and provider models are inventory.
+- `GET /v1/models` lists frontend models only — verified live, no qualified
+  names in the response.
+- `model:invoke` on a wildcard cannot reach a provider model, because a
+  provider model is not a name a request can carry at all.
+- Every provider model callers could name already had a frontend model in
+  front of it before this landed (migration 0034), so nothing became
+  unreachable: the frontend model shadows it and routes straight back.
+- `File` mode is carved out. It has no frontend models — routing is a control
+  plane feature — so there the model _is_ the client-facing name. Without the
+  carve-out every File-mode deployment would have been unable to serve
+  anything; found by reading `tests/rbac.rs`, which runs in that mode.
+- Pinned in two suites: naming a provider model is 404 in `virtual_models.rs`
+  and `failover.rs`, and the fallback does not make one addressable either.

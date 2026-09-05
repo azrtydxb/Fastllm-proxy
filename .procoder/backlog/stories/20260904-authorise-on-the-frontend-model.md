@@ -1,6 +1,6 @@
 # Authorise on the frontend model
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Epic: rbac-on-frontend-models
 Sprint: sprint-6

@@ -35,7 +35,7 @@ The migration derives one provider per distinct (`api_base`, protocol, auth trip
   three. Verified structurally rather than by rotating the live key, which
   would have broken real traffic to prove a schema fact.
 - The credential is still encrypted at rest and never returned: `GET
-  /admin/providers` reports `has_upstream_api_key` as a boolean and no route
+/admin/providers` reports `has_upstream_api_key` as a boolean and no route
   returns the column; pinned by the api.rs test that asserts the plaintext is
   absent from `list_models` and that the stored bytes differ from it.
 - The snapshot carries it unchanged and a cloud request succeeds: a real

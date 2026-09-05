@@ -1,6 +1,6 @@
 # Load balancing on the frontend model
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Milestone: providers-become-records
 Issue: #11
@@ -15,7 +15,7 @@ targets now live.
 
 The mechanism is mostly already there and unlabelled. `VirtualModels.jsx:204`
 tells the user "targets weighted and ordered" and renders each weight as a share
-of the total; those weights *are* a load balancer. But spreading traffic across
+of the total; those weights _are_ a load balancer. But spreading traffic across
 two providers is currently an emergent property of adding a second target to a
 rule, so the screen reads as routing rules and nothing announces that this is
 where you do it.

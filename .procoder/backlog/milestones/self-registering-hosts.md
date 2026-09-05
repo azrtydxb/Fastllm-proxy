@@ -1,6 +1,6 @@
 # Self-registering hosts
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 
 ## Goal

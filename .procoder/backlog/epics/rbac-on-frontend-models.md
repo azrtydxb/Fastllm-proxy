@@ -1,6 +1,6 @@
 # RBAC on frontend models
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Milestone: self-registering-hosts
 Issue: #8

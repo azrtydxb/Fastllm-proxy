@@ -38,7 +38,7 @@ Denormalising the name also fixes something the current schema cannot express â€
   `coalesce(u.model_name, m.name)`, so a deleted model keeps its own bucket
   instead of collapsing into one nameless row.
 - The hourly rollup is keyed by name, not id. This was the sharper half â€”
-  `usage_rollup_hourly.model_id` is `NOT NULL` *and* in the primary key, so a
+  `usage_rollup_hourly.model_id` is `NOT NULL` _and_ in the primary key, so a
   deleted model would have failed the entire retention batch rather than losing
   a name. PK on kw is now `(hour, model_name, principal_id)`.
 - Verified on kw with live traffic: a request shows

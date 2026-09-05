@@ -1,6 +1,6 @@
 # The provider catalogue becomes data
 
-Status: open
+Status: done 2026-09-05
 Created: 2026-09-04
 Milestone: providers-become-records
 Issue: #12
