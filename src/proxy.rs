@@ -621,15 +621,46 @@ async fn proxy_request(
         .collect();
     if served.is_empty() {
         state.requests_failed.fetch_add(1, Ordering::Relaxed);
-        let known = registry.model_names().join(", ");
         let wanted = candidates.first().map(String::as_str).unwrap_or("");
+
+        // A frontend model whose targets exist by name but resolve to no pool.
+        //
+        // Since targets bind by name (migration 0036) rather than by foreign
+        // key, a frontend model keeps its targets when the provider models go
+        // — which is what lets routing reattach by itself when they come back.
+        // So the candidate list is *not* empty here; the names are simply not
+        // serving. That is the case this reports, and it is why the empty-list
+        // check in `resolve_target_models` is not enough on its own.
+        //
+        // 503 rather than 404, for the reason given there: the frontend model
+        // exists and is named correctly, its providers are down or gone, and
+        // the condition resolves itself when they return.
+        if snapshot.frontend_models.contains_key(&requested_model) {
+            state
+                .telemetry
+                .record_rejection(crate::telemetry::Rejection::ModelNotFound);
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "model_unavailable",
+                &format!(
+                    "frontend model {requested_model:?} has no target serving right now \
+                     (wanted {wanted:?}) — a provider may be down, degraded, or not yet \
+                     registered"
+                ),
+            );
+        }
+
+        // Deliberately not listing what *is* served. Provider models are not
+        // client-facing names, so naming them here would advertise a surface
+        // the caller cannot use — and would do it to a caller who has just
+        // been refused, which is the wrong audience for an inventory list.
         state
             .telemetry
             .record_rejection(crate::telemetry::Rejection::ModelNotFound);
         return error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
-            &format!("model {wanted:?} is not served here; available: [{known}]"),
+            &format!("model {wanted:?} is not served here"),
         );
     }
 
