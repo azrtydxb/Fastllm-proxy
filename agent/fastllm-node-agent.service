@@ -1,0 +1,30 @@
+[Unit]
+Description=FastLLM node agent — registers this host's model endpoints
+Documentation=https://github.com/azrtydxb/Fastllm-proxy/blob/main/docs/operations/registering-hosts.md
+# Not After=docker.service: the agent registers whatever is serving, container
+# or bare process, and must come up on a host with no container runtime at all.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/fastllm/agent.env
+ExecStart=/usr/local/bin/fastllm-node-agent \
+  --ca-cert /etc/fastllm/ca.crt \
+  --advertise ${FASTLLM_ADVERTISE} \
+  --scan-ports 8000 8001 8002 8003 8080 8888 8890 8891 8892 8893 11434 30000
+# Always come back. A host that serves models is not a host that should stop
+# telling the control plane so because one registration failed.
+Restart=always
+RestartSec=10
+User=fastllm-agent
+Group=fastllm-agent
+# It reads one env file and talks to two addresses; nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

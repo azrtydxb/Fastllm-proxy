@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -76,6 +77,29 @@ def discover(args):
     return found
 
 
+def tls_context(args):
+    """How to verify the control plane, or None for plain HTTP.
+
+    A control plane on a private network is very often behind a certificate
+    from an internal CA -- this project's own dev cluster is -- and Python
+    trusts the system store, which has never heard of it. Without a way to
+    name that CA the agent cannot register at all, which is the state this
+    was found in: discovery worked, every registration failed on
+    CERTIFICATE_VERIFY_FAILED.
+
+    The answer is a CA to trust, not a switch to stop checking. The bearer key
+    this agent presents is a live credential on the wire, and an agent that
+    skips verification hands it to whoever answers. A single self-signed
+    certificate with no CA above it works here too: pass the certificate
+    itself, since it is its own issuer.
+    """
+    if not args.control.lower().startswith("https://"):
+        return None
+    if args.ca_cert:
+        return ssl.create_default_context(cafile=args.ca_cert)
+    return ssl.create_default_context()
+
+
 def register(args, api_base):
     body = json.dumps(
         {
@@ -94,7 +118,9 @@ def register(args, api_base):
             "authorization": f"Bearer {args.token}",
         },
     )
-    with urllib.request.urlopen(req, timeout=args.probe_timeout) as r:
+    with urllib.request.urlopen(
+        req, timeout=args.probe_timeout, context=tls_context(args)
+    ) as r:
         return json.load(r)
 
 
@@ -121,6 +147,13 @@ def main():
     ap.add_argument("--interval", type=int, default=30,
                     help="how often to re-register. Well inside --ttl, so one "
                          "missed beat is not an expiry")
+    ap.add_argument("--ca-cert", default=os.environ.get("FASTLLM_CA_CERT"),
+                    help="PEM bundle to verify the control plane against, for "
+                         "a certificate from an internal CA. The CA's "
+                         "certificate, or a lone self-signed one, which is its "
+                         "own issuer. There is deliberately no way to skip "
+                         "verification: the token below goes over this "
+                         "connection")
     ap.add_argument("--probe-timeout", type=float, default=5.0)
     ap.add_argument("--once", action="store_true",
                     help="register and exit, for a cron or a smoke test")

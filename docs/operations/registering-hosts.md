@@ -45,7 +45,37 @@ agent that needs a virtualenv to start is one more thing to be broken at 3am.
 | `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease. |
 | `--engine` | A hint, carried as metadata. Nothing depends on it. |
 | `--token` | A principal API key. It authenticates the agent; there is no permission to grant beyond that. |
+| `--ca-cert` | PEM bundle to verify the control plane against, when its certificate comes from an internal CA. There is deliberately no way to skip verification — the token above goes over this connection, and an agent that stops checking hands it to whoever answers. Pass the CA's certificate, or a lone self-signed certificate, which is its own issuer. |
 | `--once` | Register and exit, for a cron or a smoke test. |
+
+## Running it under systemd
+
+`agent/fastllm-node-agent.service` is the unit this project's own DGX Sparks
+run. It expects the script at `/usr/local/bin/fastllm-node-agent` and its
+configuration in `/etc/fastllm/agent.env`:
+
+```ini
+FASTLLM_CONTROL_URL=https://control:4001
+FASTLLM_AGENT_TOKEN=fllm_...
+FASTLLM_NODE=dgx-spark
+FASTLLM_ADVERTISE=192.168.10.246
+```
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin fastllm-agent
+sudo install -m 0755 agent/fastllm-node-agent.py /usr/local/bin/fastllm-node-agent
+sudo install -d -m 0755 /etc/fastllm
+sudo install -m 0644 ca.crt /etc/fastllm/ca.crt
+# The token is a live credential: the agent's user, and nobody else.
+sudo install -m 0640 -o root -g fastllm-agent agent.env /etc/fastllm/agent.env
+sudo install -m 0644 agent/fastllm-node-agent.service /etc/systemd/system/
+sudo systemctl enable --now fastllm-node-agent
+```
+
+`Restart=always`, because a host that serves models is not a host that should
+stop saying so over one failed registration. The unit has no `After=docker`:
+the agent registers whatever is serving, container or bare process, and must
+come up on a host with no container runtime at all.
 
 ## There is no RBAC on providers
 
