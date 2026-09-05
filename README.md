@@ -105,7 +105,7 @@ Route on any of these:
 {"position": 0, "min_budget_used_percent": 80, "targets": ["local-qwen"]}
 ```
 
-**One model catches everything.** `PUT /admin/fallback-model` names a deployment-wide last resort, appended to every chain — virtual or concrete — for the case a rule author did not anticipate. It is authorised like any other candidate, so it cannot widen anyone's access.
+**One model catches everything.** `PUT /admin/fallback-model` names a deployment-wide last resort for the case a rule author did not anticipate: a frontend model whose chain has run out reaches it rather than answering `503`. It does not make a provider model addressable — those are never client-facing names — so it cannot be used to reach around a frontend model.
 
 **Failover is part of routing, not a separate retry layer.** A rule's targets are tried in order on `5xx`, on `429`, and on an unreachable upstream — before any byte reaches the client. `429` counts because a hosted provider refusing a request is not the same as being unhealthy. Failover never widens reach: a candidate the caller lacks a grant on is dropped from the chain. Details in [docs/api.md](docs/api/routing-rules.md).
 

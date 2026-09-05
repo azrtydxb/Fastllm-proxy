@@ -44,7 +44,7 @@ The frontend model wins during resolution, and migration 0034 gives every
 provider model one of the same name so it stays callable. This used to be a
 409 in both create paths; it no longer is.
 
-**The fallback model is appended to every chain, virtual or concrete.** It is the
+**The fallback model catches a frontend model whose chain ran out.** It is the
 last resort when a rule author could not anticipate a failure mode; it is skipped
 when already present in the chain, so naming it explicitly does not double it.
 
