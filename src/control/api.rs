@@ -6159,7 +6159,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6420,7 +6419,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: primary_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6437,7 +6435,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: secondary_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6456,6 +6453,7 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: vm_name.clone(),
+                policy: None,
                 description: String::new(),
             }),
         )
@@ -6560,7 +6558,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6578,6 +6575,7 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: name.clone(),
+                policy: None,
                 description: String::new(),
             }),
         )
@@ -6592,6 +6590,7 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: other_name.clone(),
+                policy: None,
                 description: String::new(),
             }),
         )
@@ -6603,7 +6602,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: other_name,
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6844,7 +6842,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -6947,7 +6944,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7029,7 +7025,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7392,7 +7387,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7478,7 +7472,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 // $1 per Mtok in and out, so 3 tokens would price at 3 micros
@@ -7703,7 +7696,6 @@ mod tests {
                 State(ctx.clone()),
                 RequireConfigWrite,
                 Json(NewModel {
-                    policy: None,
                     name: name.clone(),
                     description: String::new(),
                     input_price_per_mtok: price,
@@ -7788,7 +7780,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: name.clone(),
                 description: "before".into(),
                 input_price_per_mtok: Some(3_000_000),
@@ -7878,7 +7869,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -7968,7 +7958,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: unique_name("gcp-validate"),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -8003,7 +7992,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
@@ -8058,7 +8046,6 @@ mod tests {
                     State(ctx),
                     RequireConfigWrite,
                     Json(NewModel {
-                        policy: None,
                         name,
                         description: String::new(),
                         input_price_per_mtok: None,
@@ -8086,6 +8073,7 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: vm_name.clone(),
+                policy: None,
                 description: String::new(),
             }),
         )
@@ -8369,7 +8357,6 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
-                policy: None,
                 name: model_name.clone(),
                 description: String::new(),
                 input_price_per_mtok: None,
