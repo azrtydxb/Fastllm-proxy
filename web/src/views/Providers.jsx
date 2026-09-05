@@ -57,6 +57,10 @@ function derivedName(apiBase) {
   return rest.split("/")[0];
 }
 
+// `dynamic` is the one that reads as a state rather than a label: it holds a
+// lease, and losing that lease is what eventually removes it.
+const KIND_TONE = { dynamic: "accent", cloud: "violet", static: "quiet" };
+
 const BLANK = {
   mode: "cloud",
   catalogue_key: "",
@@ -73,6 +77,8 @@ export function Providers({ onUnauthorised, go }) {
   const [draft, setDraft] = useState(null);
   const [rotating, setRotating] = useState(null);
   const [key, setKey] = useState("");
+  const [renaming, setRenaming] = useState(null);
+  const [newName, setNewName] = useState("");
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
@@ -151,6 +157,20 @@ export function Providers({ onUnauthorised, go }) {
     }
   };
 
+  const rename = async (id) => {
+    if (!newName.trim()) return;
+    const ok = await attempt(
+      () => api.patch(`/admin/providers/${id}`, { name: newName.trim() }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) {
+      setRenaming(null);
+      setNewName("");
+      reload();
+    }
+  };
+
   const remove = async (g) => {
     // The API refuses while models remain rather than cascading, so the
     // confirmation only has to cover the case it will actually allow.
@@ -172,6 +192,7 @@ export function Providers({ onUnauthorised, go }) {
       origin: p.api_base,
       host: p.name,
       kind: p.kind,
+      node: p.node,
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -461,33 +482,43 @@ export function Providers({ onUnauthorised, go }) {
                 <Stack gap={12}>
                   <Row style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
                     <Row gap={10} style={{ flexWrap: "nowrap", minWidth: 0 }}>
-                      <div
-                        style={{
-                          width: 30,
-                          height: 30,
-                          flex: "none",
-                          borderRadius: 8,
-                          background: "#1a1e24",
-                          border: "1px solid var(--line)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          font: "600 11px var(--mono)",
-                          color: "var(--accent-soft)",
-                        }}
-                      >
-                        {g.host
-                          .replace(/^www\./, "")
-                          .slice(0, 2)
-                          .toUpperCase()}
-                      </div>
                       <div style={{ minWidth: 0 }}>
-                        <Ellipsis
-                          style={{ font: "600 13px/1.2 var(--sans)" }}
-                          title={g.host}
-                        >
-                          {g.host}
-                        </Ellipsis>
+                        {renaming === g.id ? (
+                          <input
+                            autoFocus
+                            value={newName}
+                            style={{ font: "600 13px/1.2 var(--sans)" }}
+                            onChange={(e) => setNewName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") rename(g.id);
+                              if (e.key === "Escape") setRenaming(null);
+                            }}
+                          />
+                        ) : (
+                          <Ellipsis
+                            style={{
+                              font: "600 13px/1.2 var(--sans)",
+                              // Only where a rename sticks. A dynamic
+                              // provider's name comes from the agent on every
+                              // heartbeat, so editing it here would be undone
+                              // within the beat and look like the UI losing
+                              // the change.
+                              cursor: g.kind === "dynamic" ? "default" : "text",
+                            }}
+                            title={
+                              g.kind === "dynamic"
+                                ? `${g.host} — named by the agent on ${g.node || "its host"}`
+                                : `${g.host} — click to rename`
+                            }
+                            onClick={() => {
+                              if (g.kind === "dynamic") return;
+                              setRenaming(g.id);
+                              setNewName(g.host);
+                            }}
+                          >
+                            {g.host}
+                          </Ellipsis>
+                        )}
                         <div
                           style={{
                             font: "400 10px/1.4 var(--sans)",
@@ -496,13 +527,22 @@ export function Providers({ onUnauthorised, go }) {
                         >
                           {fmtInt(g.backends)} model
                           {g.backends === 1 ? "" : "s"}
+                          {g.node ? ` · registered by ${g.node}` : ""}
                         </div>
                       </div>
                     </Row>
                     <div style={{ flex: 1 }} />
-                    <Pill tone={native.length ? "violet" : "neutral"} mono>
-                      {native.length ? native.join(" · ") : "openai"}
-                    </Pill>
+                    <Row gap={6} style={{ flexWrap: "nowrap" }}>
+                      {/* What kind of thing this is, which decides whether
+                          anything may remove it: only `dynamic` is swept, and
+                          the other two are here because a human said so. */}
+                      <Pill tone={KIND_TONE[g.kind] || "neutral"} mono>
+                        {g.kind}
+                      </Pill>
+                      <Pill tone={native.length ? "violet" : "neutral"} mono>
+                        {native.length ? native.join(" · ") : "openai"}
+                      </Pill>
+                    </Row>
                   </Row>
 
                   {[...g.bases].slice(0, 2).map((base) => (
@@ -562,7 +602,18 @@ export function Providers({ onUnauthorised, go }) {
                     )}
                   </Row>
 
-                  {rotating === g.id ? (
+                  {renaming === g.id ? (
+                    <Row gap={8} style={{ flexWrap: "nowrap" }}>
+                      <Muted>Enter to save, Escape to cancel.</Muted>
+                      <Spacer />
+                      <Button variant="small" onClick={() => setRenaming(null)}>
+                        cancel
+                      </Button>
+                      <Button variant="primary" onClick={() => rename(g.id)}>
+                        Rename
+                      </Button>
+                    </Row>
+                  ) : rotating === g.id ? (
                     <Row gap={8} style={{ flexWrap: "nowrap" }}>
                       <input
                         type="password"

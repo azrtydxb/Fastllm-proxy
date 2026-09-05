@@ -10,6 +10,19 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Providers have names chosen by whoever knows what they are.** A cloud
+  provider takes the vendor's name from the catalogue (`OpenRouter`, not
+  `openrouter.ai`); a dynamic one is named by the agent registering it, sent on
+  every heartbeat so changing `--provider-name` renames it; a static one is
+  named by whoever adds it and can be renamed in place on the Providers screen.
+  Safe because routing resolves a target by its **model's** name — the rename
+  is carried onto `target_provider_name` so nothing is left naming a provider
+  that no longer exists.
+- **The Providers screen shows what kind each provider is.** A `static` /
+  `cloud` / `dynamic` badge, which is the thing that decides whether anything
+  may remove it. The two-letter tile that used to sit on each card is gone; it
+  was the first two characters of a hostname, so every LAN provider showed
+  `19`.
 - **An endpoint can be handed to the agent on its host, and taken back.**
   `kind` on `PATCH /admin/providers/{id}`. Registration never converts a static
   provider into one that can expire, which is right — an agent must not be able

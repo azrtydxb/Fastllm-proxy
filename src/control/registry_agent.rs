@@ -113,10 +113,36 @@ pub async fn probe(client: &Upstream, api_base: &str, registered: &[String]) -> 
 /// Idempotent by address: an agent heartbeating every thirty seconds calls
 /// this every thirty seconds, and it must be the same operation each time.
 /// Returns the provider's id.
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// Carry a renamed provider onto the targets that describe it.
+///
+/// Routing resolves by the *model's* name, so this changes nothing about where
+/// requests go. It keeps `target_provider_name` — what the Frontend models
+/// screen shows, and what disambiguates two providers serving a model of the
+/// same name — from naming a provider that no longer exists.
+async fn rename_on_targets(pool: &PgPool, provider_id: i64, name: &str) -> Result<(), sqlx::Error> {
+    for table in ["frontend_model_defaults", "rule_targets"] {
+        sqlx::query(&format!(
+            "UPDATE {table} t SET target_provider_name = $2 \
+               FROM provider_models pm \
+              WHERE pm.id = t.provider_model_id AND pm.provider_id = $1"
+        ))
+        .bind(provider_id)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn register(
     pool: &PgPool,
     api_base: &str,
     node: &str,
+    name: Option<&str>,
     engine: Option<&str>,
     ttl_seconds: i64,
 ) -> Result<i64, sqlx::Error> {
@@ -144,6 +170,37 @@ pub async fn register(
             .bind(ttl_seconds as f64)
             .execute(pool)
             .await?;
+            // The agent owns a dynamic provider's name, so a changed one
+            // renames it. Best-effort on purpose: a name another provider
+            // already holds must not fail the heartbeat, because the lease is
+            // what keeps the endpoint routable and a naming collision is not a
+            // reason to let it lapse. The provider keeps the name it has and
+            // the operator sees the old one, which is visible and recoverable
+            // — unlike a host that quietly stopped renewing.
+            if let Some(name) = name {
+                let renamed = sqlx::query(
+                    "UPDATE providers SET name = $2 WHERE id = $1 AND name IS DISTINCT FROM $2",
+                )
+                .bind(id)
+                .bind(name)
+                .execute(pool)
+                .await;
+                match renamed {
+                    Ok(done) if done.rows_affected() > 0 => {
+                        rename_on_targets(pool, id, name).await?;
+                    }
+                    Ok(_) => {}
+                    Err(e) if is_unique_violation(&e) => {
+                        tracing::warn!(
+                            provider = id,
+                            requested = name,
+                            "agent asked for a provider name another provider already holds; \
+                             keeping the current one"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         }
         return Ok(id);
     }
@@ -152,7 +209,8 @@ pub async fn register(
         .split_once("://")
         .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
         .unwrap_or(api_base);
-    let mut name = host.to_string();
+    // The agent's name if it gave one, the address if it did not.
+    let mut name = name.unwrap_or(host).to_string();
     for n in 2..100 {
         let taken: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE name=$1)")

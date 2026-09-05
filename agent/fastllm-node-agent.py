@@ -100,11 +100,29 @@ def tls_context(args):
     return ssl.create_default_context()
 
 
+def provider_name(args, api_base):
+    """What to call this endpoint in FastLLM.
+
+    The name lives here rather than on the control plane, which only ever sees
+    an address. `dgx-spark-8000` beats `192.168.10.246:8000` on a screen, and
+    an operator who renames the host's agent renames what they are looking at.
+
+    The port is always appended, never only when a host happens to serve more
+    than one endpoint: a name that changes shape as a second model is started
+    would rename the first one behind the operator's back.
+    """
+    base = args.provider_name or args.node
+    tail = api_base.split("://", 1)[-1].split("/")[0]
+    port = tail.rsplit(":", 1)[-1] if ":" in tail else ""
+    return f"{base}-{port}" if port else base
+
+
 def register(args, api_base):
     body = json.dumps(
         {
             "api_base": api_base,
             "node": args.node,
+            "name": provider_name(args, api_base),
             "engine": args.engine,
             "ttl_seconds": args.ttl,
         }
@@ -140,6 +158,11 @@ def main():
                     help="an endpoint to register outright; repeatable")
     ap.add_argument("--scan-ports", type=int, nargs="*", default=[8000, 8001, 8080, 8890],
                     help="ports on --advertise to probe")
+    ap.add_argument("--provider-name", default=os.environ.get("FASTLLM_PROVIDER_NAME"),
+                    help="what to call this host's providers in FastLLM; the "
+                         "endpoint's port is appended, so one host's endpoints "
+                         "are distinguishable. Defaults to --node. Sent on "
+                         "every heartbeat, so changing it renames them")
     ap.add_argument("--engine", default=os.environ.get("FASTLLM_ENGINE"),
                     help="hint only; nothing depends on it")
     ap.add_argument("--ttl", type=int, default=90,
@@ -179,7 +202,8 @@ def main():
             try:
                 r = register(args, base)
                 log(f"registered {base} -> provider {r.get('id')} "
-                    f"kind={r.get('kind')} leased={r.get('leased')}")
+                    f"{r.get('name')!r} kind={r.get('kind')} "
+                    f"leased={r.get('leased')}")
             except urllib.error.HTTPError as e:
                 log(f"registering {base} failed: {e.code} {e.read()[:200]!r}")
             except Exception as e:

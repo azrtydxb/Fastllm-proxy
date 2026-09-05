@@ -608,6 +608,9 @@ struct ProviderView {
     has_upstream_api_key: bool,
     /// Which catalogue entry this came from, absent for a hand-typed address.
     catalogue_key: Option<String>,
+    /// The host vouching for a dynamic provider, and the one whose agent owns
+    /// its name. NULL for static and cloud, which nothing is maintaining.
+    node: Option<String>,
     /// How many provider models this provider serves. The count rather than
     /// the models themselves: `GET /admin/provider-models` already carries those, and a
     /// provider fronting a few hundred models would make this response the
@@ -625,6 +628,17 @@ struct ProviderRegistration {
     /// Which host is vouching for it. One principal per node scopes a
     /// compromised host to its own providers.
     node: String,
+    /// What to call this provider. The agent names its own: it is the thing
+    /// that knows what the endpoint *is*, where the control plane only ever
+    /// saw an address. Absent falls back to the host and port, which is what
+    /// every provider was called before names could be chosen.
+    ///
+    /// Sent on every heartbeat, so changing it on the agent renames the
+    /// provider. That is the point — the name lives on the client — and it is
+    /// safe because routing resolves a target by its model's name, never its
+    /// provider's.
+    #[serde(default)]
+    name: Option<String>,
     /// Metadata only — see `registry_agent::served_models` for why nothing
     /// depends on it.
     #[serde(default)]
@@ -669,6 +683,10 @@ async fn post_provider_register(
         &ctx.pool,
         &api_base,
         body.node.trim(),
+        body.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty()),
         body.engine.as_deref(),
         body.ttl_seconds,
     )
@@ -677,17 +695,19 @@ async fn post_provider_register(
 
     // A provider registered by hand keeps the kind it was given: registration
     // must never quietly convert a static provider into one that can expire.
-    let kind: String = sqlx::query_scalar("SELECT kind FROM providers WHERE id = $1")
-        .bind(id)
-        .fetch_one(&ctx.pool)
-        .await
-        .map_err(|e| db_error("reading the provider back", &e))?;
+    let (kind, name): (String, String) =
+        sqlx::query_as("SELECT kind, name FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("reading the provider back", &e))?;
 
     refresh(&ctx).await;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
             "id": id,
+            "name": name,
             "api_base": api_base,
             "kind": kind,
             "leased": kind == "dynamic",
@@ -927,11 +947,12 @@ async fn list_providers(
         String,
         bool,
         Option<String>,
+        Option<String>,
         i64,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, \
-             p.upstream_api_key IS NOT NULL, p.catalogue_key, \
+             p.upstream_api_key IS NOT NULL, p.catalogue_key, p.node, \
              (SELECT count(*) FROM provider_models m WHERE m.provider_id = p.id) \
          FROM providers p ORDER BY p.name",
     )
@@ -951,6 +972,7 @@ async fn list_providers(
                     auth_header,
                     has_upstream_api_key,
                     catalogue_key,
+                    node,
                     model_count,
                 )| ProviderView {
                     id,
@@ -961,6 +983,7 @@ async fn list_providers(
                     auth_header,
                     has_upstream_api_key,
                     catalogue_key,
+                    node,
                     model_count,
                 },
             )
@@ -1045,11 +1068,11 @@ async fn post_provider(
     _perm: RequireConfigWrite,
     Json(body): Json<NewProvider>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    type CatRow = (String, String, String, Option<String>);
+    type CatRow = (String, String, String, Option<String>, String);
     let entry: Option<CatRow> = match body.catalogue_key.as_deref().map(str::trim) {
         Some(key) if !key.is_empty() => {
             let row: Option<CatRow> = sqlx::query_as(
-                "SELECT base_url, protocol, auth_header, auth_scheme \
+                "SELECT base_url, protocol, auth_header, auth_scheme, display_name \
                  FROM provider_catalogue WHERE key = $1",
             )
             .bind(key)
@@ -1228,7 +1251,15 @@ async fn post_provider(
         }
         // Derived names dedupe rather than fail: nobody chose this one, so
         // refusing would report a collision the caller cannot see.
-        _ => unique_provider_name(&ctx, &host).await?,
+        //
+        // A catalogue entry supplies the vendor's own name — "OpenRouter",
+        // not "openrouter.ai". The host was only ever a stand-in for a name
+        // nobody had given, and for the one case where the vendor's name is
+        // known, using the hostname instead is just worse.
+        _ => match entry.as_ref() {
+            Some(e) => unique_provider_name(&ctx, &e.4).await?,
+            None => unique_provider_name(&ctx, &host).await?,
+        },
     };
 
     let id: i64 = sqlx::query_scalar(
@@ -1265,6 +1296,30 @@ async fn post_provider(
             "model_count": 0,
         })),
     ))
+}
+
+/// Carry a provider's new name onto the targets that describe it.
+///
+/// Routing resolves a target by `target_model_name` alone, so this changes
+/// nothing about where requests go — which is exactly why it is easy to
+/// forget. `target_provider_name` is what the Frontend models screen shows and
+/// what says *which* provider a target meant when two serve a model of the same
+/// name; left behind, it would name a provider that no longer exists.
+async fn rename_provider_on_targets(
+    pool: &PgPool,
+    previous: &str,
+    name: &str,
+) -> Result<(), sqlx::Error> {
+    for table in ["frontend_model_defaults", "rule_targets"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET target_provider_name = $1 WHERE target_provider_name = $2"
+        ))
+        .bind(name)
+        .bind(previous)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 /// `host:port`, suffixed only when that is already taken.
@@ -1368,6 +1423,11 @@ async fn patch_provider(
                 "name cannot be empty".to_string(),
             ));
         }
+        let previous: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .map_err(|e| db_error("reading a provider's name", &e))?;
         sqlx::query("UPDATE providers SET name = $1 WHERE id = $2")
             .bind(name)
             .bind(id)
@@ -1383,6 +1443,11 @@ async fn patch_provider(
                     db_error("renaming a provider", &e)
                 }
             })?;
+        if previous != name {
+            rename_provider_on_targets(&ctx.pool, &previous, name)
+                .await
+                .map_err(|e| db_error("renaming a provider on its targets", &e))?;
+        }
     }
     if let Some(kind) = body.kind.as_deref().map(str::trim) {
         if !matches!(kind, "static" | "cloud" | "dynamic") {
@@ -7075,6 +7140,103 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
 
+        delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
+            .await
+            .unwrap();
+    }
+
+    /// The agent owns a dynamic provider's name, and a renamed provider stays
+    /// described correctly by the targets that point into it.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn an_agent_names_its_own_provider_and_can_rename_it() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("providers", "name", "named-by-agent-");
+        let api_base = format!("http://10.7.7.7:{}/v1", std::process::id());
+        let first = unique_name("named-by-agent");
+        let second = unique_name("named-by-agent");
+
+        let id = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "some-node",
+            Some(&first),
+            Some("vllm"),
+            120,
+        )
+        .await
+        .unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(name, first, "the agent's name, not the address");
+
+        // Heartbeating under a new name renames it: the name lives on the
+        // client, so this is the mechanism rather than an edge case.
+        crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "some-node",
+            Some(&second),
+            None,
+            120,
+        )
+        .await
+        .unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(name, second);
+
+        // A name another provider already holds must not fail the heartbeat —
+        // the lease is what keeps the endpoint routable, and a collision is no
+        // reason to let it lapse.
+        let (_, other) = post_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewProvider {
+                name: Some(unique_name("named-by-agent")),
+                kind: None,
+                catalogue_key: None,
+                api_base: Some(format!("http://10.7.7.6:{}/v1", std::process::id())),
+                protocol: None,
+                auth_header: None,
+                auth_scheme: None,
+                upstream_api_key: None,
+                credential_kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let taken = other.0["name"].as_str().unwrap().to_string();
+        crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "some-node",
+            Some(&taken),
+            None,
+            120,
+        )
+        .await
+        .expect("a naming collision must not fail the heartbeat");
+        let name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(name, second, "it keeps the name it had");
+
+        delete_provider(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(other.0["id"].as_i64().unwrap()),
+        )
+        .await
+        .unwrap();
         delete_provider(State(ctx.clone()), RequireConfigWrite, Path(id))
             .await
             .unwrap();

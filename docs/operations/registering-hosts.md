@@ -43,6 +43,7 @@ agent that needs a virtualenv to start is one more thing to be broken at 3am.
 | `--scan-ports` | Ports to probe on that address. Catches a bare process started by hand or by a launcher, with no container runtime present. |
 | `--api-base` | Register an endpoint outright, repeatable. Use when the address is not a port on `--advertise`. |
 | `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease. |
+| `--provider-name` | What this host's providers are called in FastLLM. The endpoint's port is appended, so one host's endpoints stay distinguishable — always, not only when a second one appears, since a name that changed shape as a model was started would rename the first one behind you. Defaults to `--node`, and is sent on every heartbeat, so changing it renames them. |
 | `--engine` | A hint, carried as metadata. Nothing depends on it. |
 | `--token` | A principal API key. It authenticates the agent; there is no permission to grant beyond that. |
 | `--ca-cert` | PEM bundle to verify the control plane against, when its certificate comes from an internal CA. There is deliberately no way to skip verification — the token above goes over this connection, and an agent that stops checking hands it to whoever answers. Pass the CA's certificate, or a lone self-signed certificate, which is its own issuer. |
@@ -76,6 +77,29 @@ sudo systemctl enable --now fastllm-node-agent
 stop saying so over one failed registration. The unit has no `After=docker`:
 the agent registers whatever is serving, container or bare process, and must
 come up on a host with no container runtime at all.
+
+## The name lives on the agent
+
+A dynamic provider is named by the host registering it, not by the control
+plane, which only ever sees an address. `dgx-spark-8000` is a better thing to
+read on a screen than `192.168.10.246:8000`, and the agent is what knows which
+is which.
+
+Renaming is therefore a matter of changing `--provider-name` and letting the
+next heartbeat carry it. That is safe: routing resolves a target by its
+**model's** name, so a provider's name is descriptive. The rename is carried
+onto the targets that describe it, so nothing is left naming a provider that no
+longer exists.
+
+A name another provider already holds is declined — with a warning in the
+control plane's log — and the heartbeat still succeeds. A collision is not a
+reason to let a lease lapse, and an operator seeing the old name is visible and
+recoverable in a way that a host which quietly stopped renewing is not.
+
+Static and cloud providers are named the other way round: a cloud provider
+takes the vendor's own name from the catalogue (`OpenRouter`, not
+`openrouter.ai`), and a static one is named by whoever adds it — on the
+Providers screen, or with `PATCH /admin/providers/{id}`.
 
 ## There is no RBAC on providers
 
