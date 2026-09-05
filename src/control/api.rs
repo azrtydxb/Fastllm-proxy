@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// 32 bytes of OS randomness. High entropy is what makes SHA-256 the right
 /// hash for these; do not shorten it.
@@ -93,11 +94,11 @@ pub fn safe_display_prefix(key: &str) -> String {
 pub async fn create_key(
     pool: &PgPool,
     name: &str,
-    principal_id: i64,
+    principal_id: Uuid,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> Result<(String, i64), sqlx::Error> {
+) -> Result<(String, Uuid), sqlx::Error> {
     let plaintext = generate_key();
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO api_keys (hash, prefix, name, principal_id, expires_at)
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -191,13 +192,13 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 #[serde(deny_unknown_fields)]
 struct NewKey {
     name: String,
-    principal_id: i64,
+    principal_id: Uuid,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Serialize)]
 struct NewKeyResponse {
-    id: i64,
+    id: Uuid,
     /// Returned exactly once. There is no way to retrieve it again.
     key: String,
 }
@@ -221,7 +222,10 @@ async fn post_key(
 /// especially now that a fresh install ships exactly one principal (see
 /// `migrations/0003_bootstrap_principal_and_operator_grants.sql`) and every
 /// other id really is a typo.
-fn key_creation_error(e: &sqlx::Error, principal_id: i64) -> (StatusCode, Json<serde_json::Value>) {
+fn key_creation_error(
+    e: &sqlx::Error,
+    principal_id: Uuid,
+) -> (StatusCode, Json<serde_json::Value>) {
     let is_missing_principal = matches!(
         e,
         sqlx::Error::Database(db) if db.is_foreign_key_violation()
@@ -238,7 +242,7 @@ fn key_creation_error(e: &sqlx::Error, principal_id: i64) -> (StatusCode, Json<s
             })),
         )
     } else {
-        tracing::error!(error = %e, principal_id, "key creation failed");
+        tracing::error!(error = %e, principal_id = %principal_id, "key creation failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "key creation failed; see server logs" })),
@@ -249,7 +253,7 @@ fn key_creation_error(e: &sqlx::Error, principal_id: i64) -> (StatusCode, Json<s
 async fn revoke_key(
     State(ctx): State<Ctx>,
     _perm: RequireKeyRevoke,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("UPDATE api_keys SET disabled = TRUE WHERE id = $1")
         .bind(id)
@@ -281,10 +285,10 @@ async fn revoke_key(
 /// process did not mint.
 #[derive(Serialize)]
 struct KeyView {
-    id: i64,
+    id: Uuid,
     prefix: String,
     name: String,
-    principal_id: i64,
+    principal_id: Uuid,
     principal: String,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     disabled: bool,
@@ -293,10 +297,10 @@ struct KeyView {
 }
 
 type KeyListRow = (
-    i64,
+    Uuid,
     String,
     String,
-    i64,
+    Uuid,
     String,
     Option<chrono::DateTime<chrono::Utc>>,
     bool,
@@ -348,7 +352,7 @@ async fn list_keys(
 
 #[derive(Serialize)]
 struct PrincipalView {
-    id: i64,
+    id: Uuid,
     kind: String,
     name: String,
     email: Option<String>,
@@ -362,7 +366,7 @@ struct PrincipalView {
 }
 
 type PrincipalRow = (
-    i64,
+    Uuid,
     String,
     String,
     Option<String>,
@@ -446,7 +450,7 @@ async fn post_principal(
              imported grants",
         ));
     }
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO principals (kind, name, email) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(&kind)
@@ -493,7 +497,7 @@ struct PatchPrincipal {
 async fn patch_principal(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchPrincipal>,
 ) -> Result<StatusCode, ApiError> {
     if let Some(name) = body.name.as_deref() {
@@ -537,7 +541,7 @@ async fn patch_role(
     Path(current): Path<String>,
     Json(body): Json<PatchRole>,
 ) -> Result<StatusCode, ApiError> {
-    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(&current)
         .fetch_optional(&ctx.pool)
         .await
@@ -566,7 +570,7 @@ async fn patch_role(
 async fn delete_principal(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     // ON DELETE CASCADE takes this principal's keys and role grants with it
     // (migrations/0001), which is the point: a principal left behind with
@@ -596,14 +600,14 @@ struct RoleGrant {
 async fn grant_role(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(principal_id): Path<i64>,
+    Path(principal_id): Path<Uuid>,
     Json(body): Json<RoleGrant>,
 ) -> Result<StatusCode, ApiError> {
     // Resolved by name before the insert, rather than folded into one
     // `INSERT ... SELECT ... WHERE r.name = $2`, so "no such role", "no such
     // principal" and "already granted" stay three distinct answers instead
     // of collapsing into one zero-rows-affected.
-    let role_id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(&body.role)
         .fetch_optional(&ctx.pool)
         .await
@@ -653,7 +657,7 @@ async fn grant_role(
 async fn revoke_role(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path((principal_id, role)): Path<(i64, String)>,
+    Path((principal_id, role)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query(
         "DELETE FROM principal_roles pr USING roles r
@@ -679,7 +683,7 @@ async fn revoke_role(
 
 #[derive(Serialize)]
 struct ProviderView {
-    id: i64,
+    id: Uuid,
     name: String,
     /// `static`, `cloud` or `dynamic`. Only `dynamic` providers are ever
     /// removed automatically; the other two are here because a human put them
@@ -900,7 +904,7 @@ async fn list_provider_catalogue(
 async fn provider_available_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let api_base: Option<String> =
         sqlx::query_scalar("SELECT api_base FROM providers WHERE id = $1")
@@ -986,7 +990,7 @@ async fn provider_available_models(
 async fn delete_provider(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let models: Vec<String> =
         sqlx::query_scalar("SELECT name FROM provider_models WHERE provider_id = $1 ORDER BY name")
@@ -1027,7 +1031,7 @@ async fn list_providers(
     _perm: RequireRead,
 ) -> Result<Json<Vec<ProviderView>>, ApiError> {
     type Row = (
-        i64,
+        Uuid,
         String,
         String,
         String,
@@ -1350,7 +1354,7 @@ async fn post_provider(
         },
     };
 
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO providers (name, kind, api_base, protocol, auth_header, auth_scheme, \
          upstream_api_key, credential_kind, catalogue_key) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
@@ -1488,7 +1492,7 @@ struct PatchProvider {
 async fn patch_provider(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchProvider>,
 ) -> Result<StatusCode, ApiError> {
     let current: Option<(String, String, Option<String>)> =
@@ -1674,7 +1678,7 @@ async fn patch_provider(
 /// that model from its provider and takes the same id.
 #[derive(Serialize)]
 struct BackendView {
-    id: i64,
+    id: Uuid,
     api_base: String,
     upstream_model: String,
     /// Whether a credential is configured — never the credential itself, in
@@ -1695,7 +1699,7 @@ struct BackendView {
 
 #[derive(Serialize)]
 struct ModelView {
-    id: i64,
+    id: Uuid,
     name: String,
     description: String,
     /// Micro-units per million tokens. `None` is unpriced — usage is still
@@ -1714,7 +1718,7 @@ struct ModelView {
     /// provider, and before migration 0029 the same condition was "a model
     /// with no backends". It is not routable, and the UI shows it as needing
     /// attention rather than hiding it.
-    provider_id: Option<i64>,
+    provider_id: Option<Uuid>,
     provider_name: Option<String>,
     /// Zero or one entry, never more. Kept as a list so existing clients and
     /// the UI keep parsing; the one-provider rule is enforced by the schema.
@@ -1728,22 +1732,24 @@ async fn list_models(
     // `upstream_api_key IS NOT NULL` rather than the column: this query must
     // not be able to return a credential even by accident, so the ciphertext
     // never leaves Postgres on this path at all.
+    // Positional, and long enough that a mis-slotted type is easy to write and
+    // hard to see, so each one is named after the column it reads.
     type ModelRow = (
-        i64,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-        Option<i32>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<bool>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
+        Uuid,           // m.id
+        String,         // m.name
+        String,         // m.description
+        Option<i64>,    // m.input_price_per_mtok
+        Option<i64>,    // m.output_price_per_mtok
+        Option<i32>,    // m.cache_ttl_seconds
+        Option<i64>,    // m.context_length
+        Option<Uuid>,   // p.id
+        Option<String>, // p.name
+        Option<String>, // p.api_base
+        Option<String>, // m.upstream_model
+        Option<bool>,   // p.upstream_api_key IS NOT NULL
+        Option<String>, // p.protocol
+        Option<String>, // p.auth_header
+        Option<i32>,    // m.default_max_tokens
     );
     let models: Vec<ModelRow> = sqlx::query_as(
         "SELECT m.id, m.name, m.description, m.input_price_per_mtok, \
@@ -1981,7 +1987,7 @@ async fn post_a2a_agent(
             )
         })?;
 
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO a2a_agents
            (name, url, description, protocol_version, auth_header, auth_scheme,
             upstream_api_key, enabled)
@@ -2041,7 +2047,7 @@ struct PatchA2aAgent {
 async fn patch_a2a_agent(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchA2aAgent>,
 ) -> Result<StatusCode, ApiError> {
     if let Some(name) = body.name.as_deref() {
@@ -2106,7 +2112,7 @@ async fn patch_a2a_agent(
 async fn delete_a2a_agent(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let result = sqlx::query("DELETE FROM a2a_agents WHERE id = $1")
         .bind(id)
@@ -2224,7 +2230,7 @@ async fn post_mcp_server(
             )
         })?;
 
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO mcp_servers
            (name, url, transport, description, auth_header, auth_scheme, upstream_api_key, enabled)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
@@ -2285,7 +2291,7 @@ struct PatchMcpServer {
 async fn patch_mcp_server(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchMcpServer>,
 ) -> Result<StatusCode, ApiError> {
     if let Some(name) = body.name.as_deref() {
@@ -2338,7 +2344,7 @@ async fn patch_mcp_server(
 async fn delete_mcp_server(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let result = sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
         .bind(id)
@@ -2374,7 +2380,7 @@ async fn post_model(
     // callable once frontend models are the only addressable surface, and
     // renaming the provider model out of the way instead would revoke every
     // grant naming it (migration 0029 did that in production).
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO provider_models (name, description, input_price_per_mtok, output_price_per_mtok, \
              cache_ttl_seconds, context_length) \
              VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
@@ -2479,7 +2485,7 @@ async fn move_grant(
 async fn rename_named_row(
     ctx: &Ctx,
     table: &str,
-    id: i64,
+    id: Uuid,
     name: &str,
     grant: Option<(&str, &str)>,
 ) -> Result<(), ApiError> {
@@ -2559,7 +2565,7 @@ async fn rename_named_row(
 ///
 /// One transaction, so a rename cannot half-apply and leave a model nobody has
 /// a grant for.
-async fn rename_provider_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), ApiError> {
+async fn rename_provider_model(ctx: &Ctx, id: Uuid, name: &str) -> Result<(), ApiError> {
     let mut tx = ctx
         .pool
         .begin()
@@ -2649,7 +2655,7 @@ where
 async fn patch_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchModel>,
 ) -> Result<StatusCode, ApiError> {
     for (name, value) in [
@@ -2730,7 +2736,7 @@ async fn patch_model(
 async fn delete_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM provider_models WHERE id = $1")
         .bind(id)
@@ -2755,7 +2761,7 @@ struct NewBackend {
     /// credential come from the row, so none of the fields below that describe
     /// an endpoint may be sent alongside it.
     #[serde(default)]
-    provider_id: Option<i64>,
+    provider_id: Option<Uuid>,
     /// Where it lives, for a provider that does not exist yet. One of this and
     /// `provider_id` is required. Given this, a provider with the same address
     /// and auth is reused and a new one created otherwise, which is how every
@@ -2851,7 +2857,7 @@ fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
 async fn post_backend(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(provider_model_id): Path<i64>,
+    Path(provider_model_id): Path<Uuid>,
     Json(body): Json<NewBackend>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Fetched rather than assumed so a bad `provider_model_id` is reported as such,
@@ -2992,7 +2998,7 @@ async fn post_backend(
 
 /// The provider a model ends up on, however it was named.
 struct AttachedProvider {
-    id: i64,
+    id: Uuid,
     api_base: String,
     protocol: String,
     auth_header: String,
@@ -3074,7 +3080,7 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
     // of the split: one credential shared by every model on it, so rotating it
     // is one write. A credential supplied here updates the provider's, since
     // the caller has just demonstrated a newer one.
-    let id: i64 = match sqlx::query_scalar::<_, i64>(
+    let id: Uuid = match sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
          AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
     )
@@ -3143,7 +3149,7 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
 async fn delete_backend(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     // The id is the model's, because since migration 0029 the model *is* the
     // link to its provider. Detaching leaves the model, its price, its usage
@@ -3182,10 +3188,10 @@ async fn delete_backend(
 
 #[derive(Serialize)]
 struct TargetView {
-    id: i64,
+    id: Uuid,
     /// `None` once the provider model it names has been deleted. The target
     /// itself remains, bound by name, and reattaches if that name comes back.
-    provider_model_id: Option<i64>,
+    provider_model_id: Option<Uuid>,
     model: String,
     /// The provider this target wants. Part of the identity: two hosts serving
     /// the same model are two provider models, so a name alone does not say
@@ -3197,7 +3203,7 @@ struct TargetView {
 
 #[derive(Serialize)]
 struct RuleView {
-    id: i64,
+    id: Uuid,
     position: i32,
     #[serde(flatten)]
     match_condition: MatchConditionJson,
@@ -3206,7 +3212,7 @@ struct RuleView {
 
 #[derive(Serialize)]
 struct FrontendModelView {
-    id: i64,
+    id: Uuid,
     name: String,
     description: String,
     rules: Vec<RuleView>,
@@ -3229,18 +3235,18 @@ struct FrontendModelView {
 /// (migration 0036) — that is what lets routing reattach when the model comes
 /// back. An inner join here would drop exactly the targets an operator most
 /// needs to see.
-type TargetRow = (i64, i64, Option<i64>, String, Option<String>, i32, i32);
+type TargetRow = (Uuid, Uuid, Option<Uuid>, String, Option<String>, i32, i32);
 
 async fn list_virtual_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<FrontendModelView>>, ApiError> {
-    let vms: Vec<(i64, String, String, Option<String>)> =
+    let vms: Vec<(Uuid, String, String, Option<String>)> =
         sqlx::query_as("SELECT id, name, description, policy FROM frontend_models ORDER BY name")
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing frontend models", &e))?;
-    let rules: Vec<(i64, i64, i32, serde_json::Value)> = sqlx::query_as(
+    let rules: Vec<(Uuid, Uuid, i32, serde_json::Value)> = sqlx::query_as(
         "SELECT id, frontend_model_id, position, match_json FROM routing_rules
          ORDER BY frontend_model_id, position",
     )
@@ -3266,7 +3272,7 @@ async fn list_virtual_models(
     .await
     .map_err(|e| db_error("listing frontend model defaults", &e))?;
 
-    let to_targets = |owner: i64, rows: &[TargetRow]| -> Vec<TargetView> {
+    let to_targets = |owner: Uuid, rows: &[TargetRow]| -> Vec<TargetView> {
         rows.iter()
             .filter(|(_, o, ..)| *o == owner)
             .map(
@@ -3356,7 +3362,7 @@ async fn post_frontend_model(
     // it does not know, which is right for forward compatibility and wrong as
     // a response to a typo.
     let policy = validated_policy(body.policy.as_deref())?;
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO frontend_models (name, description, policy) VALUES ($1, $2, $3) \
          RETURNING id",
     )
@@ -3404,7 +3410,7 @@ struct PatchFrontendModel {
 async fn patch_frontend_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<PatchFrontendModel>,
 ) -> Result<StatusCode, ApiError> {
     let policy = match &body.policy {
@@ -3451,7 +3457,7 @@ async fn patch_frontend_model(
 ///
 /// Rules, defaults and targets hang off the frontend model's id and need
 /// nothing done to them.
-async fn rename_frontend_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), ApiError> {
+async fn rename_frontend_model(ctx: &Ctx, id: Uuid, name: &str) -> Result<(), ApiError> {
     let mut tx = ctx
         .pool
         .begin()
@@ -3503,7 +3509,7 @@ async fn rename_frontend_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), Api
 async fn delete_virtual_model(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     // ON DELETE CASCADE (migrations/0008) takes this frontend model's rules
     // and defaults with it, same reasoning as a principal's keys/grants.
@@ -3537,7 +3543,7 @@ struct NewRule {
 async fn post_rule(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(frontend_model_id): Path<i64>,
+    Path(frontend_model_id): Path<Uuid>,
     Json(body): Json<NewRule>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Validated at write time so a malformed `"25:00"` or a `days: [8]` is a
@@ -3548,7 +3554,7 @@ async fn post_rule(
         .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO routing_rules (frontend_model_id, position, match_json)
          VALUES ($1, $2, $3) RETURNING id",
     )
@@ -3590,7 +3596,7 @@ async fn post_rule(
 async fn delete_rule(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM routing_rules WHERE id = $1")
         .bind(id)
@@ -3610,7 +3616,7 @@ async fn delete_rule(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewTarget {
-    provider_model_id: i64,
+    provider_model_id: Uuid,
     #[serde(default = "default_target_weight")]
     weight: i32,
     /// Failover order within the chain — see
@@ -3628,10 +3634,10 @@ fn default_target_weight() -> i32 {
 async fn post_rule_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(rule_id): Path<i64>,
+    Path(rule_id): Path<Uuid>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         // The name is copied from the model at write time and is what the
         // target is really bound to — the id only records which row carries
         // that name today, and goes NULL if it is deleted.
@@ -3676,7 +3682,7 @@ async fn post_rule_target(
 async fn delete_rule_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM rule_targets WHERE id = $1")
         .bind(id)
@@ -3696,10 +3702,10 @@ async fn delete_rule_target(
 async fn post_default_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(frontend_model_id): Path<i64>,
+    Path(frontend_model_id): Path<Uuid>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         // Same as a rule's target: bound by name, with the id as a cache.
         "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
                                               target_provider_name, target_model_name, \
@@ -3744,7 +3750,7 @@ async fn post_default_target(
 async fn delete_default_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM frontend_model_defaults WHERE id = $1")
         .bind(id)
@@ -3771,7 +3777,7 @@ struct PermissionView {
 
 #[derive(Serialize)]
 struct RoleView {
-    id: i64,
+    id: Uuid,
     name: String,
     description: String,
     permissions: Vec<PermissionView>,
@@ -3846,7 +3852,7 @@ struct DryRunRequest {
     /// interesting case; a concrete one resolves to itself.
     model: String,
     #[serde(default)]
-    principal_id: Option<i64>,
+    principal_id: Option<Uuid>,
     #[serde(default)]
     streaming: bool,
     #[serde(default)]
@@ -3919,7 +3925,7 @@ async fn routing_dry_run(
 
     let principal = body
         .principal_id
-        .and_then(|id| snapshot.principals.values().find(|p| p.id as i64 == id));
+        .and_then(|id| snapshot.principals.values().find(|p| p.id == id));
     let mut headers = HeaderMap::new();
     for (name, value) in &body.headers {
         if let (Ok(n), Ok(v)) = (
@@ -4215,7 +4221,7 @@ struct TimeseriesQuery {
     model: Option<String>,
     /// Restrict to one principal, by id.
     #[serde(default)]
-    principal_id: Option<i64>,
+    principal_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -4309,7 +4315,7 @@ async fn timeseries_rows(
     until: chrono::DateTime<chrono::Utc>,
     bucket_seconds: i64,
     model: Option<String>,
-    principal_id: Option<i64>,
+    principal_id: Option<Uuid>,
 ) -> Result<Vec<TimeseriesPoint>, sqlx::Error> {
     let rows: Vec<TimeseriesRow> = sqlx::query_as(
         "WITH grid AS (
@@ -4467,7 +4473,7 @@ pub async fn timeseries_for_test(
     pool: &PgPool,
     bucket_seconds: i64,
     model: Option<&str>,
-    principal_id: Option<i64>,
+    principal_id: Option<Uuid>,
 ) -> Result<Vec<TimeseriesPoint>, sqlx::Error> {
     let until = chrono::Utc::now();
     let since = until - chrono::Duration::hours(24);
@@ -4644,7 +4650,7 @@ async fn grant_permission(
     let resource = body.resource.unwrap_or_else(|| "*".into());
     validate_grant(&body.verb, &resource)?;
 
-    let role_id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(&role)
         .fetch_optional(&ctx.pool)
         .await
@@ -4659,7 +4665,7 @@ async fn grant_permission(
     // The permission row is created on demand: `model:invoke` on a specific
     // model is one row per model, and an operator granting access to a new
     // model should not have to create the permission first.
-    let permission_id: i64 = sqlx::query_scalar(
+    let permission_id: Uuid = sqlx::query_scalar(
         "INSERT INTO permissions (verb, resource) VALUES ($1, $2)
          ON CONFLICT (verb, resource) DO UPDATE SET verb = EXCLUDED.verb
          RETURNING id",
@@ -4758,7 +4764,7 @@ struct AuditView {
     /// principal is deleted — a trail that disappears with the account that
     /// did the thing is not a trail.
     actor_name: String,
-    actor_id: Option<i64>,
+    actor_id: Option<Uuid>,
     action: String,
     target: String,
     detail: serde_json::Value,
@@ -4777,7 +4783,7 @@ struct AuditQuery {
     #[serde(default)]
     before: Option<i64>,
     #[serde(default)]
-    actor_id: Option<i64>,
+    actor_id: Option<Uuid>,
     /// Substring, so `/admin/keys` finds every route under it.
     #[serde(default)]
     target: Option<String>,
@@ -4804,7 +4810,7 @@ async fn list_audit(
     let limit = q.limit.clamp(1, 1000);
     type AuditRow = (
         i64,
-        Option<i64>,
+        Option<Uuid>,
         String,
         String,
         String,
@@ -4851,12 +4857,12 @@ async fn list_roles(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<RoleView>>, ApiError> {
-    let roles: Vec<(i64, String, String)> =
+    let roles: Vec<(Uuid, String, String)> =
         sqlx::query_as("SELECT id, name, description FROM roles ORDER BY name")
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing roles", &e))?;
-    let perms: Vec<(i64, String, String)> = sqlx::query_as(
+    let perms: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT rp.role_id, p.verb, p.resource FROM permissions p
          JOIN role_permissions rp ON rp.permission_id = p.id
          ORDER BY p.verb, p.resource",
@@ -4895,7 +4901,7 @@ async fn list_roles(
 
 #[derive(Serialize)]
 struct LimitView {
-    principal_id: i64,
+    principal_id: Uuid,
     principal: String,
     requests_per_min: Option<i32>,
     tokens_per_min: Option<i32>,
@@ -4905,7 +4911,7 @@ async fn list_limits(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<LimitView>>, ApiError> {
-    let rows: Vec<(i64, String, Option<i32>, Option<i32>)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, Option<i32>, Option<i32>)> = sqlx::query_as(
         "SELECT l.principal_id, p.name, l.requests_per_min, l.tokens_per_min
          FROM limits l JOIN principals p ON p.id = l.principal_id
          ORDER BY l.principal_id",
@@ -4943,7 +4949,7 @@ struct PutLimits {
 async fn put_limits(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(principal_id): Path<i64>,
+    Path(principal_id): Path<Uuid>,
     Json(body): Json<PutLimits>,
 ) -> Result<StatusCode, ApiError> {
     if body.requests_per_min.is_none() && body.tokens_per_min.is_none() {
@@ -4997,7 +5003,7 @@ async fn put_limits(
 async fn delete_limits(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(principal_id): Path<i64>,
+    Path(principal_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM limits WHERE principal_id = $1")
         .bind(principal_id)
@@ -5027,7 +5033,7 @@ const BUDGET_WINDOWS: [&str; 3] = ["daily", "weekly", "monthly"];
 
 #[derive(Serialize)]
 struct BudgetView {
-    principal_id: i64,
+    principal_id: Uuid,
     principal: String,
     /// `None` for a budget that caps only spend.
     tokens_total: Option<i64>,
@@ -5046,7 +5052,7 @@ async fn list_budgets(
     // cap only spend. Decoding it as `i64` made this route fail outright the
     // moment anyone created one — the whole listing, not just that row.
     type BudgetRow = (
-        i64,
+        Uuid,
         String,
         Option<i64>,
         i64,
@@ -5117,7 +5123,7 @@ struct PutBudget {
 async fn put_budget(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(principal_id): Path<i64>,
+    Path(principal_id): Path<Uuid>,
     Json(body): Json<PutBudget>,
 ) -> Result<StatusCode, ApiError> {
     if body.tokens_total.is_none() && body.cost_total_micros.is_none() {
@@ -5184,7 +5190,7 @@ async fn put_budget(
 async fn delete_budget(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(principal_id): Path<i64>,
+    Path(principal_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM budgets WHERE principal_id = $1")
         .bind(principal_id)
@@ -5204,7 +5210,7 @@ async fn delete_budget(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconcileCountWire {
-    principal_id: u64,
+    principal_id: Uuid,
     requests: u64,
     tokens: u64,
 }
@@ -5218,7 +5224,7 @@ struct ReconcileRequest {
 
 #[derive(Serialize)]
 struct AllowanceWire {
-    principal_id: u64,
+    principal_id: Uuid,
     requests_share: f64,
     tokens_share: f64,
 }
@@ -5731,7 +5737,7 @@ async fn post_usage(
     let mut usage_reported: Vec<bool> = Vec::with_capacity(submitted);
     let mut refusal: Vec<Option<String>> = Vec::with_capacity(submitted);
     for e in &body.events {
-        principal_ids.push(e.principal_id as i64);
+        principal_ids.push(e.principal_id);
         models.push(e.model.clone());
         prompt_tokens.push(e.prompt_tokens as i64);
         completion_tokens.push(e.completion_tokens as i64);
@@ -5769,9 +5775,9 @@ async fn post_usage(
     // A row that misses gets no `provider_model_id` and no price, so its cost is NULL —
     // unknown rather than a confident zero — and `model_name` still says what
     // the caller asked for.
-    let accepted_rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+    let accepted_rows: Vec<(i64, Uuid, i64, i64, i64)> = sqlx::query_as(
         "WITH input AS (
-            SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::bigint[], $4::bigint[], \
+            SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
                 $10::bigint[], $11::boolean[], $12::text[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
@@ -5872,11 +5878,11 @@ async fn post_usage(
 /// missed budget increment only means enforcement is stale until the next
 /// successful one — not that billing data was lost. This mirrors `refresh`'s
 /// same reasoning a few lines below.
-async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, i64, i64, i64, i64)]) {
+async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, Uuid, i64, i64, i64)]) {
     // Tokens and cost accrue together, in one statement per principal: they
     // describe the same requests, and updating them separately would leave a
     // window where a budget had spent the money but not the tokens.
-    let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
+    let mut totals: HashMap<Uuid, (i64, i64)> = HashMap::new();
     for (_id, principal_id, prompt_tokens, completion_tokens, cost_micros) in accepted_rows {
         let entry = totals.entry(*principal_id).or_insert((0, 0));
         entry.0 += prompt_tokens + completion_tokens;
@@ -5899,7 +5905,7 @@ async fn apply_usage_to_budgets(pool: &PgPool, accepted_rows: &[(i64, i64, i64, 
         {
             tracing::error!(
                 error = %e,
-                principal_id,
+                principal_id = %principal_id,
                 total,
                 "could not apply reported usage to that principal's budget; usage_events is \
                  unaffected, but budget enforcement is now stale for this principal until the \
@@ -6062,7 +6068,7 @@ async fn require_session(
             .and_then(|v| v.strip_prefix("Bearer ")),
     ) {
         let hash = hash_key(bearer.trim()).to_vec();
-        let principal_id: Option<i64> = sqlx::query_scalar(
+        let principal_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT principal_id FROM api_keys \
               WHERE hash = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
@@ -6113,7 +6119,7 @@ async fn require_session(
 /// route adds, and so it is not `Clone`-and-forgettable the way threading a
 /// raw id through would be.
 #[derive(Debug, Clone, Copy)]
-struct AdminPrincipal(i64);
+struct AdminPrincipal(Uuid);
 
 /// Extractable directly, so a handler that only needs to know *who* is asking
 /// does not have to go through a permission marker to find out.
@@ -6169,7 +6175,7 @@ mod admin_permission {
 /// resource here the way `Principal::may_invoke` matches model names.
 async fn principal_has_permission(
     pool: &PgPool,
-    principal_id: i64,
+    principal_id: Uuid,
     verb: &str,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -6195,7 +6201,7 @@ async fn principal_has_permission(
 /// as a handler argument runs this once axum already knows which handler —
 /// and therefore which permission — applies, and the `Rejection = ApiError`
 /// turns a missing grant into 403 automatically, the same way a bad
-/// `Path<i64>` already turns into 400 without every handler writing that
+/// `Path<Uuid>` already turns into 400 without every handler writing that
 /// check by hand.
 async fn check_permission(parts: &Parts, state: &Ctx, verb: &str) -> Result<(), ApiError> {
     // `require_session` (the `from_fn` layer every `/admin/*` route is
@@ -6355,7 +6361,7 @@ async fn post_role(
             "a role needs a name".to_string(),
         ));
     }
-    let id: i64 =
+    let id: Uuid =
         sqlx::query_scalar("INSERT INTO roles (name, description) VALUES ($1, $2) RETURNING id")
             .bind(name)
             .bind(body.description.unwrap_or_default())
@@ -6662,7 +6668,7 @@ async fn audit_changes(
         return response;
     }
 
-    let actor_id = actor.unwrap_or(0);
+    let actor_id = actor.unwrap_or_else(Uuid::nil);
     let actor_name: String = sqlx::query_scalar("SELECT name FROM principals WHERE id = $1")
         .bind(actor_id)
         .fetch_optional(&ctx.pool)
@@ -6725,7 +6731,7 @@ struct SetPassword {
 async fn put_password(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
     Json(body): Json<SetPassword>,
 ) -> Result<StatusCode, ApiError> {
     if body.password.is_empty() {
@@ -7229,7 +7235,7 @@ mod tests {
         let pool = crate::control::db::connect(&url).await.unwrap();
         let _cleanup =
             TestCleanup::new().track_prefix("principals", "name", "task6-test-principal-");
-        let principal_id: i64 = sqlx::query_scalar(
+        let principal_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(format!(
@@ -8646,7 +8652,7 @@ mod tests {
         assert!(bucket_seconds(None, 0) >= 1);
     }
 
-    fn usage_event(principal_id: i64, model: &str) -> UsageEvent {
+    fn usage_event(principal_id: Uuid, model: &str) -> UsageEvent {
         UsageEvent {
             principal_id: principal_id as u64,
             model: model.to_string(),
@@ -10351,7 +10357,7 @@ mod tests {
 
 #[derive(Serialize)]
 struct PromptClassView {
-    id: i64,
+    id: Uuid,
     name: String,
     description: String,
     tier: String,
@@ -10369,19 +10375,19 @@ async fn list_prompt_classes(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<PromptClassView>>, ApiError> {
-    let rows: Vec<(i64, String, String, String, Option<f32>)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, String, String, Option<f32>)> = sqlx::query_as(
         "SELECT id, name, description, tier, min_margin FROM prompt_classes ORDER BY name",
     )
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("listing prompt classes", &e))?;
 
-    let counts: Vec<(i64, i64)> =
+    let counts: Vec<(Uuid, i64)> =
         sqlx::query_as("SELECT class_id, count(*) FROM prompt_class_examples GROUP BY class_id")
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("counting class examples", &e))?;
-    let refines: Vec<(i64, String)> =
+    let refines: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT class_id, refines FROM prompt_class_refines")
             .fetch_all(&ctx.pool)
             .await
@@ -10481,7 +10487,7 @@ async fn post_prompt_class(
         .begin()
         .await
         .map_err(|e| db_error("prompt class creation", &e))?;
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO prompt_classes (name, description, tier, min_margin)
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
@@ -10546,10 +10552,10 @@ struct NewExample {
 async fn post_prompt_class_example(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(class_id): Path<i64>,
+    Path(class_id): Path<Uuid>,
     Json(body): Json<NewExample>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id: i64 = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO prompt_class_examples (class_id, prompt) VALUES ($1, $2) RETURNING id",
     )
     .bind(class_id)
@@ -10575,7 +10581,7 @@ async fn post_prompt_class_example(
 async fn delete_prompt_class(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
-    Path(id): Path<i64>,
+    Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let done = sqlx::query("DELETE FROM prompt_classes WHERE id = $1")
         .bind(id)
@@ -10802,7 +10808,7 @@ async fn get_fallback_model(
 #[serde(deny_unknown_fields)]
 struct FallbackModel {
     /// `null` clears it, leaving no deployment-wide last resort.
-    provider_model_id: Option<i64>,
+    provider_model_id: Option<Uuid>,
 }
 
 /// Set (or clear) the model every routing chain falls back to.

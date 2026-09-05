@@ -30,7 +30,7 @@ use std::time::Duration;
 
 #[derive(Serialize)]
 struct ReportedCount {
-    principal_id: u64,
+    principal_id: crate::snapshot::PrincipalId,
     requests: u64,
     tokens: u64,
 }
@@ -48,7 +48,7 @@ struct ReconcileRequestBody {
 
 #[derive(Deserialize)]
 struct AllowanceWire {
-    principal_id: u64,
+    principal_id: crate::snapshot::PrincipalId,
     requests_share: f64,
     tokens_share: f64,
 }

@@ -55,7 +55,7 @@ pin-project-lite = "0.2"
 smallvec = "1"
 sha2 = "0.10"
 humantime = "2"
-sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "macros", "migrate", "chrono"] }
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "macros", "migrate", "chrono", "uuid"] }
 axum = { version = "0.8", optional = true }
 argon2 = { version = "0.5", optional = true }
 # Unconditional: the wire snapshot format (src/snapshot.rs) is the contract
@@ -63,6 +63,10 @@ argon2 = { version = "0.5", optional = true }
 # src/source/http.rs) needs it even in a --no-default-features build that has
 # no database driver at all.
 chrono = { version = "0.4", features = ["serde"] }
+# Identifiers. `serde` so an id crosses the API as a string rather than a byte
+# array, and `v4` because a random id is the point -- a v7 would carry the
+# creation time of the row it names.
+uuid = { version = "1", features = ["serde", "v4", "v5"] }
 hex = "0.4"
 rand = { version = "0.9", optional = true }
 # Already pulled in transitively by rustls/tokio-rustls (see the `ring`
@@ -113,7 +117,7 @@ ureq = { version = "2", features = ["json"] }
 # admin route grants (see that file's doc comment). Dev-dependencies are
 # never compiled by a plain `cargo build`, so this does not affect the
 # `--no-default-features` library/binary build.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono", "uuid"] }
 
 [profile.release]
 opt-level = 3

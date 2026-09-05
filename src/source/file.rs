@@ -22,6 +22,14 @@ pub struct FileSource {
     legacy_master_key: Option<String>,
 }
 
+/// Namespace for `File` mode's derived principal ids.
+///
+/// A fixed v4 uuid, generated once and pasted here: the point of a v5 uuid is
+/// that the same name in the same namespace always gives the same id, which
+/// requires the namespace to be a constant rather than something generated at
+/// startup.
+const FILE_PRINCIPAL_NAMESPACE: uuid::Uuid = uuid::uuid!("6f1a9e1c-6b5f-4b6a-9a3e-0f0b6e8d2c47");
+
 impl FileSource {
     pub fn new(path: PathBuf) -> Self {
         Self {
@@ -101,8 +109,15 @@ impl SnapshotSource for FileSource {
 
         let mut keys = HashMap::new();
         let mut principals = HashMap::new();
-        for (i, k) in cfg.auth.keys.iter().enumerate() {
-            let id = i as u64 + 1;
+        for k in cfg.auth.keys.iter() {
+            // Derived from the name rather than counted, so it survives a
+            // reload. `File` mode has no ids to read, and a counter would hand
+            // the same principal a different id every time the file was
+            // re-read — resetting the in-memory rate-limit and budget counters
+            // keyed by it, and detaching usage mid-window. Position would be
+            // worse still: inserting a key at the top would renumber everyone
+            // below it.
+            let id = uuid::Uuid::new_v5(&FILE_PRINCIPAL_NAMESPACE, k.name.as_bytes());
             let allow_all = k.models.iter().any(|m| m == "*");
             principals.insert(
                 id,

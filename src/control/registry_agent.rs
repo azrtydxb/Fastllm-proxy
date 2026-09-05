@@ -14,6 +14,7 @@
 
 use crate::upstream::Upstream;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// What one provider is currently serving, by the only question every engine
 /// answers the same way.
@@ -154,7 +155,11 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 /// requests go. It keeps `target_provider_name` — what the Frontend models
 /// screen shows, and what disambiguates two providers serving a model of the
 /// same name — from naming a provider that no longer exists.
-async fn rename_on_targets(pool: &PgPool, provider_id: i64, name: &str) -> Result<(), sqlx::Error> {
+async fn rename_on_targets(
+    pool: &PgPool,
+    provider_id: Uuid,
+    name: &str,
+) -> Result<(), sqlx::Error> {
     for table in ["frontend_model_defaults", "rule_targets"] {
         sqlx::query(&format!(
             "UPDATE {table} t SET target_provider_name = $2 \
@@ -176,13 +181,13 @@ pub async fn register(
     name: Option<&str>,
     engine: Option<&str>,
     ttl_seconds: i64,
-) -> Result<i64, sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
     let api_base = api_base.trim_end_matches('/');
     // A provider is its endpoint, so an address already registered by hand
     // stays what it was: this must never quietly convert a static provider
     // into one that can expire.
     if let Some((id, kind)) =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, kind FROM providers WHERE api_base = $1")
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, kind FROM providers WHERE api_base = $1")
             .bind(api_base)
             .fetch_optional(pool)
             .await?
@@ -223,7 +228,7 @@ pub async fn register(
                     Ok(_) => {}
                     Err(e) if is_unique_violation(&e) => {
                         tracing::warn!(
-                            provider = id,
+                            provider = %id,
                             requested = name,
                             "agent asked for a provider name another provider already holds; \
                              keeping the current one"
@@ -331,11 +336,11 @@ mod tests {
 /// (`.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`).
 pub async fn reconcile_models(
     pool: &PgPool,
-    provider_id: i64,
+    provider_id: Uuid,
     provider_name: &str,
     served: &[String],
 ) -> Result<(usize, usize), sqlx::Error> {
-    let known: Vec<(i64, String)> = sqlx::query_as(
+    let known: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, upstream_model FROM provider_models \
          WHERE provider_id = $1 AND upstream_model IS NOT NULL",
     )
@@ -418,7 +423,7 @@ const DEGRADED_GRACE: chrono::Duration = chrono::Duration::minutes(30);
 pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepReport> {
     let mut report = SweepReport::default();
 
-    let providers: Vec<(i64, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
+    let providers: Vec<(Uuid, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as("SELECT id, name, api_base, lease_expires_at FROM providers ORDER BY id")
             .fetch_all(pool)
             .await?;

@@ -11,6 +11,7 @@ use anyhow::Context;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use uuid::Uuid;
 
 /// What an import run actually did — every field is a per-run delta, the
 /// same way `backends` always was. A prior revision reported `models` as the
@@ -173,7 +174,7 @@ pub async fn import(
         // to the description of the same provider, not a second one -- keying
         // on them too would fork a new provider on every such edit, which is
         // the opposite of the convergence import exists to give.
-        let existing_provider: Option<i64> =
+        let existing_provider: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM providers WHERE api_base = $1")
                 .bind(api_base)
                 .fetch_optional(&mut *tx)
@@ -220,7 +221,7 @@ pub async fn import(
                     }
                     provider_name = format!("{host}#{n}");
                 }
-                let id: i64 = sqlx::query_scalar(
+                let id: Uuid = sqlx::query_scalar(
                     "INSERT INTO providers (name, api_base, protocol, auth_header, auth_scheme, \
                      upstream_api_key) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
                 )
@@ -434,7 +435,7 @@ async fn import_key(
     };
 
     let role_name = import_role_name(principal_name);
-    let role_id: i64 = match sqlx::query_scalar(
+    let role_id: Uuid = match sqlx::query_scalar(
         "INSERT INTO roles (name, description) VALUES ($1, $2)
          ON CONFLICT (name) DO NOTHING RETURNING id",
     )
@@ -477,7 +478,7 @@ async fn import_key(
     };
 
     for resource in &wanted {
-        let permission_id: i64 = match sqlx::query_scalar(
+        let permission_id: Uuid = match sqlx::query_scalar(
             "INSERT INTO permissions (verb, resource) VALUES ('model:invoke', $1)
              ON CONFLICT (verb, resource) DO NOTHING RETURNING id",
         )
@@ -702,7 +703,7 @@ where
     A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
 {
     let mut conn = conn.acquire().await?;
-    let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
         "SELECT id, upstream_api_key FROM providers
          WHERE upstream_api_key IS NOT NULL
            AND ($1::bigint IS NULL
@@ -1050,7 +1051,7 @@ mod tests {
         // created on the second run, so it reports zero, not the table total.
         assert_eq!(second.models, 0, "re-import must not report a new model");
 
-        let provider_model_id: i64 =
+        let provider_model_id: Uuid =
             sqlx::query_scalar("SELECT id FROM provider_models WHERE name = $1")
                 .bind(&name)
                 .fetch_one(&pool)
@@ -1434,7 +1435,7 @@ mod tests {
         let victim_principal = unique_name("hand-created-admin-principal");
         let _cleanup =
             TestCleanup::new().track_exact("principals", "name", victim_principal.clone());
-        let principal_id: i64 = sqlx::query_scalar(
+        let principal_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&victim_principal)
@@ -1518,7 +1519,7 @@ mod tests {
         // plaintext bytes, exactly as the old `import` stored them. The
         // credential lives on the provider since migration 0029, so that is
         // where the legacy shape has to be reproduced.
-        let provider_id: i64 = sqlx::query_scalar(
+        let provider_id: Uuid = sqlx::query_scalar(
             "INSERT INTO providers (name, api_base, upstream_api_key) \
              VALUES ($1, 'http://legacy:8000/v1', $2) RETURNING id",
         )
@@ -1527,7 +1528,7 @@ mod tests {
         .fetch_one(&mut *tx)
         .await
         .unwrap();
-        let provider_model_id: i64 = sqlx::query_scalar(
+        let provider_model_id: Uuid = sqlx::query_scalar(
             "INSERT INTO provider_models (name, provider_id, upstream_model) \
              VALUES ($1, $2, 'legacy-model') RETURNING id",
         )

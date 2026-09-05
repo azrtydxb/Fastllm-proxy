@@ -55,7 +55,7 @@ pub struct Share {
 /// the process.
 #[derive(Default)]
 pub struct ReconcileState {
-    by_principal: RwLock<HashMap<u64, HashMap<String, ReplicaCount>>>,
+    by_principal: RwLock<HashMap<crate::snapshot::PrincipalId, HashMap<String, ReplicaCount>>>,
 }
 
 impl ReconcileState {
@@ -75,7 +75,7 @@ impl ReconcileState {
     pub fn report(
         &self,
         replica_id: &str,
-        principal_id: u64,
+        principal_id: crate::snapshot::PrincipalId,
         requests: u64,
         tokens: u64,
         now: Instant,

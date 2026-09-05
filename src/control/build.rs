@@ -12,6 +12,7 @@ use crate::snapshot::PromptClassDef;
 use crate::snapshot::{BackendDef, Budget, KeyEntry, ModelDef, Principal, Snapshot};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 /// `(name, url, transport, description, auth_header, auth_scheme,
 /// upstream_api_key)` as the row comes back, named for legibility.
@@ -338,7 +339,7 @@ pub async fn build_snapshot_with(
         });
     }
 
-    let principal_rows: Vec<(i64, String)> =
+    let principal_rows: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT id, name FROM principals WHERE NOT disabled")
             .fetch_all(pool)
             .await?;
@@ -347,11 +348,11 @@ pub async fn build_snapshot_with(
     // table has at most one row per principal (see migrations/0009) and the
     // whole point of pre-resolving into the snapshot is to spend queries
     // here, once per rebuild, rather than on the request path.
-    let limit_rows: Vec<(i64, Option<i32>, Option<i32>)> =
+    let limit_rows: Vec<(Uuid, Option<i32>, Option<i32>)> =
         sqlx::query_as("SELECT principal_id, requests_per_min, tokens_per_min FROM limits")
             .fetch_all(pool)
             .await?;
-    let limits_by_principal: HashMap<i64, crate::limiter::Limits> = limit_rows
+    let limits_by_principal: HashMap<Uuid, crate::limiter::Limits> = limit_rows
         .into_iter()
         .map(|(pid, requests, tokens)| {
             (
@@ -505,9 +506,9 @@ pub async fn build_snapshot_with(
         .await?;
 
         principals.insert(
-            id as u64,
+            id,
             Principal {
-                id: id as u64,
+                id,
                 name,
                 allowed_models,
                 allowed_mcp,
@@ -524,7 +525,7 @@ pub async fn build_snapshot_with(
 
     let frontend_models = build_virtual_models(pool).await?;
 
-    type KeyRow = (Vec<u8>, i64, Option<chrono::DateTime<chrono::Utc>>, bool);
+    type KeyRow = (Vec<u8>, Uuid, Option<chrono::DateTime<chrono::Utc>>, bool);
     let key_rows: Vec<KeyRow> =
         sqlx::query_as("SELECT hash, principal_id, expires_at, disabled FROM api_keys")
             .fetch_all(pool)
@@ -538,7 +539,7 @@ pub async fn build_snapshot_with(
         keys.insert(
             hash,
             KeyEntry {
-                principal: principal as u64,
+                principal,
                 expires_at: expires.map(|d| d.into()),
                 disabled,
             },
@@ -619,7 +620,7 @@ async fn build_prompt_classes(
     pool: &PgPool,
     embed: Option<&dyn PromptClassEmbedder>,
 ) -> anyhow::Result<Vec<PromptClassDef>> {
-    let rows: Vec<(i64, String, String, Option<f32>)> =
+    let rows: Vec<(Uuid, String, String, Option<f32>)> =
         sqlx::query_as("SELECT id, name, tier, min_margin FROM prompt_classes ORDER BY name")
             .fetch_all(pool)
             .await?;
@@ -627,11 +628,11 @@ async fn build_prompt_classes(
         return Ok(Vec::new());
     }
 
-    let examples: Vec<(i64, String)> =
+    let examples: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT class_id, prompt FROM prompt_class_examples ORDER BY id")
             .fetch_all(pool)
             .await?;
-    let refines: Vec<(i64, String)> =
+    let refines: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT class_id, refines FROM prompt_class_refines")
             .fetch_all(pool)
             .await?;
@@ -751,9 +752,9 @@ fn rolled_over(
 /// this module's existing N+1-is-fine rationale (see the module doc
 /// comment): rollover checks run once per snapshot rebuild against at most a
 /// few dozen budgets, not on the request path.
-async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64, Budget>> {
+async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<Uuid, Budget>> {
     type BudgetRow = (
-        i64,
+        Uuid,
         Option<i64>,
         i64,
         chrono::DateTime<chrono::Utc>,
@@ -788,7 +789,7 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
         // rule.
         let Some(window) = BudgetWindow::parse(&window_str) else {
             tracing::error!(
-                principal_id,
+                principal_id = %principal_id,
                 window = %window_str,
                 "dropping budget rollover: unrecognised window value; the budget is still \
                  published, but will never roll over until the row is corrected"
@@ -846,12 +847,12 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
 /// stay far easier to follow than one join across five tables with `weight`
 /// and `position` columns that would otherwise need disambiguating aliases.
 async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, FrontendModelDef>> {
-    let vm_rows: Vec<(i64, String, Option<String>)> =
+    let vm_rows: Vec<(Uuid, String, Option<String>)> =
         sqlx::query_as("SELECT id, name, policy FROM frontend_models")
             .fetch_all(pool)
             .await?;
 
-    type RuleRow = (i64, i64, serde_json::Value);
+    type RuleRow = (Uuid, Uuid, serde_json::Value);
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
         "SELECT id, frontend_model_id, match_json FROM routing_rules ORDER BY frontend_model_id, position",
     )
@@ -883,7 +884,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // A target that resolves to neither yields no pool and is simply not
     // routable, which is the state the request path already handles for a
     // model whose every backend is down.
-    type TargetRow = (i64, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
+    type TargetRow = (Uuid, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
     let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
         "SELECT rt.rule_id, COALESCE(pm.name, rt.target_model_name), rt.weight, rt.position
          FROM rule_targets rt
@@ -902,7 +903,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     .fetch_all(pool)
     .await?;
 
-    let targets_for = |owner_id: i64, rows: &[TargetRow]| -> Vec<WeightedTarget> {
+    let targets_for = |owner_id: Uuid, rows: &[TargetRow]| -> Vec<WeightedTarget> {
         rows.iter()
             .filter(|(id, ..)| *id == owner_id)
             .map(|(_, model, weight, _)| WeightedTarget {
@@ -937,7 +938,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                         tracing::error!(
                             error = %e,
                             frontend_model = %vm_name,
-                            rule_id,
+                            rule_id = %rule_id,
                             "dropping routing rule: match_json failed to parse; excluded from \
                              this snapshot rather than matching every request or failing the \
                              whole rebuild"
@@ -1237,7 +1238,7 @@ mod tests {
                 .unwrap();
         }
         let provider_model_id: HashMap<String, i64> = {
-            let rows: Vec<(i64, String)> =
+            let rows: Vec<(Uuid, String)> =
                 sqlx::query_as("SELECT id, name FROM provider_models WHERE name = ANY($1)")
                     .bind(vec![primary.clone(), secondary.clone(), fallback.clone()])
                     .fetch_all(&pool)
@@ -1255,7 +1256,7 @@ mod tests {
                 .unwrap();
 
         let match_json = serde_json::json!({ "roles": ["canary"] });
-        let rule_id: i64 = sqlx::query_scalar(
+        let rule_id: Uuid = sqlx::query_scalar(
             "INSERT INTO routing_rules (frontend_model_id, position, match_json)
              VALUES ($1, 0, $2) RETURNING id",
         )
@@ -1341,7 +1342,7 @@ mod tests {
             TestCleanup::new().track_prefix("principals", "name", "roles-reach-snapshot");
 
         let principal_name = unique_name("roles-reach-snapshot");
-        let principal_id: i64 = sqlx::query_scalar(
+        let principal_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&principal_name)
@@ -1441,7 +1442,7 @@ mod tests {
             TestCleanup::new().track_prefix("principals", "name", "requests-only-principal");
 
         let name = unique_name("requests-only-principal");
-        let id: i64 = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&name)
@@ -1568,7 +1569,7 @@ mod tests {
             TestCleanup::new().track_prefix("principals", "name", "stale-window-principal");
 
         let name = unique_name("stale-window-principal");
-        let id: i64 = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&name)

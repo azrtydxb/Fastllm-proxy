@@ -16,7 +16,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
-pub type PrincipalId = u64;
+/// Who a request is attributed to, on the request path.
+///
+/// A `Uuid` rather than the `u64` this was, because the database's ids became
+/// uuids and carrying a second, narrower identity would mean a mapping to keep
+/// correct. The cost is one 16-byte hash key per request instead of 8, on a
+/// lookup that already happens once per request against a `HashMap` that is
+/// rebuilt only on a snapshot swap.
+pub type PrincipalId = uuid::Uuid;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthError {
@@ -611,9 +618,9 @@ impl Snapshot {
     /// working — silently breaking it on upgrade would be worse than the
     /// deprecation warning that comes with this call.
     pub fn add_legacy_master_key(&mut self, key: &str) {
-        // Id 0 is reserved for the legacy key so it can never collide with a
-        // control-plane-assigned principal id, which starts at 1.
-        const LEGACY_PRINCIPAL: PrincipalId = 0;
+        // The nil uuid, which `gen_random_uuid()` never produces, so this
+        // can never collide with a control-plane-assigned principal.
+        const LEGACY_PRINCIPAL: PrincipalId = uuid::Uuid::nil();
         self.principals.insert(
             LEGACY_PRINCIPAL,
             Principal {

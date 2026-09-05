@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 /// definitions could.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageEvent {
-    pub principal_id: u64,
+    pub principal_id: crate::snapshot::PrincipalId,
     /// Model *name*, not an internal database id: the data plane only ever
     /// knows the model the way the snapshot named it
     /// (`snapshot::ModelDef::name`). The control plane resolves this to

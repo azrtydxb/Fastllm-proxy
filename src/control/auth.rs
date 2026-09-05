@@ -24,6 +24,7 @@ use argon2::Argon2;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// The cookie name every login sets and every `/admin/*` request is checked
 /// against.
@@ -85,7 +86,7 @@ fn hash_session_token(token: &str) -> [u8; 32] {
 /// Create a session row for `principal_id` and return the plaintext token to
 /// set as the cookie value. Like `create_key`, the plaintext is returned
 /// exactly once and never stored — only its hash is.
-pub async fn create_session(pool: &PgPool, principal_id: i64) -> Result<String, sqlx::Error> {
+pub async fn create_session(pool: &PgPool, principal_id: Uuid) -> Result<String, sqlx::Error> {
     let token = generate_session_token();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(SESSION_TTL_HOURS);
     sqlx::query("INSERT INTO sessions (token_hash, principal_id, expires_at) VALUES ($1, $2, $3)")
@@ -102,8 +103,8 @@ pub async fn create_session(pool: &PgPool, principal_id: i64) -> Result<String, 
 /// Never a database error the caller has to plumb through — a lookup that
 /// cannot resolve a session is the same "not authenticated" outcome
 /// regardless of why.
-pub async fn authenticate_session(pool: &PgPool, token: &str) -> Option<i64> {
-    let row: Option<(i64,)> = sqlx::query_as(
+pub async fn authenticate_session(pool: &PgPool, token: &str) -> Option<Uuid> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
         "SELECT s.principal_id FROM sessions s
          JOIN principals p ON p.id = s.principal_id
          WHERE s.token_hash = $1 AND s.expires_at > now() AND NOT p.disabled",
@@ -147,7 +148,7 @@ const DUMMY_LOGIN_HASH: &str =
 /// enabled `user` answers *slow* because one did, regardless of whether the
 /// password was right. Running the same KDF call on every path removes that
 /// signal.
-fn decide_login(row: Option<(i64, Option<String>, bool)>, password: &str) -> Option<i64> {
+fn decide_login(row: Option<(Uuid, Option<String>, bool)>, password: &str) -> Option<Uuid> {
     // `None` (never a login that can succeed) whenever there is no real hash
     // to check: no such principal, or a principal that is disabled, or one
     // with no password set (`kind = 'service_account'`, or a `user` that
@@ -172,8 +173,8 @@ fn decide_login(row: Option<(i64, Option<String>, bool)>, password: &str) -> Opt
 /// part was wrong" reasoning any login form follows, extended to *timing*
 /// by [`decide_login`]: every one of those reasons costs the same one
 /// Argon2id call, not zero for some and one for others.
-pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<i64> {
-    let row: Option<(i64, Option<String>, bool)> = sqlx::query_as(
+pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<Uuid> {
+    let row: Option<(Uuid, Option<String>, bool)> = sqlx::query_as(
         "SELECT id, password_hash, disabled FROM principals WHERE name = $1 AND kind = 'user'",
     )
     .bind(name)
@@ -190,7 +191,7 @@ pub async fn verify_login(pool: &PgPool, name: &str, password: &str) -> Option<i
 /// `providers.upstream_api_key` (which the proxy must present to a
 /// backend and so must be recoverable), nothing ever needs the plaintext
 /// password back.
-pub async fn set_password(pool: &PgPool, principal_id: i64, password: &str) -> anyhow::Result<()> {
+pub async fn set_password(pool: &PgPool, principal_id: Uuid, password: &str) -> anyhow::Result<()> {
     let hash = hash_password(password)?;
     sqlx::query("UPDATE principals SET kind = 'user', password_hash = $1 WHERE id = $2")
         .bind(hash)
@@ -210,9 +211,9 @@ pub async fn bootstrap_admin_user(
     pool: &PgPool,
     name: &str,
     password: &str,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<Uuid> {
     let mut tx = pool.begin().await?;
-    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM principals WHERE name = $1")
+    let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM principals WHERE name = $1")
         .bind(name)
         .fetch_optional(&mut *tx)
         .await?;
