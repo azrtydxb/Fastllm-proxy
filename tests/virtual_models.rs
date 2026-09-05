@@ -455,10 +455,60 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "a provider model is not a name a client may use"
     );
 
-    // An unknown model — virtual or concrete — is still a 404 regardless of
-    // any of this.
+    // An unknown model is still a 404 regardless of any of this.
     let (status, _) = chat(port, &canary_key, &name("vm-e2e-does-not-exist"));
     assert_eq!(status, 404);
+
+    // A frontend model whose target resolves to no pool answers 503, not 404.
+    //
+    // The distinction is the point. The frontend model exists, is named
+    // correctly and is permissioned; its provider model has no provider, so
+    // there is nothing serving. 404 would send the caller hunting for a typo
+    // in a name that is right. 503 says the deployment is short of something
+    // and the request is worth retrying, which is true — a host coming back
+    // fixes it with no configuration change, because targets bind by name.
+    //
+    // This nearly went unnoticed: the empty-candidate branch in
+    // `resolve_target_models` does not catch it, since the target is still
+    // *listed* — it just does not resolve. Found by making the call against a
+    // real deployment.
+    let orphan_model = name("vm-e2e-orphan");
+    let orphan = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/provider-models",
+        serde_json::json!({ "name": orphan_model }),
+    );
+    let orphan_frontend = name("vm-e2e-orphan-front");
+    let of = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/frontend-models",
+        serde_json::json!({ "name": orphan_frontend }),
+    );
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!("/admin/frontend-models/{}/defaults", of["id"]),
+        serde_json::json!({
+            "provider_model_id": orphan["id"],
+            "weight": 1,
+            "position": 0
+        }),
+    );
+    grant_one_model(
+        &pool,
+        canary_principal_id,
+        &orphan_frontend,
+        &name("vm-e2e-grant-orphan"),
+    )
+    .await;
+    std::thread::sleep(Duration::from_secs(2));
+    let (status, body) = chat(port, &canary_key, &orphan_frontend);
+    assert_eq!(
+        status, 503,
+        "a frontend model with nothing serving is unavailable, not missing: {body}"
+    );
 
     // `/v1/models` lists what this caller may invoke, and nothing else.
     //
