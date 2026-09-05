@@ -7567,9 +7567,9 @@ mod tests {
         let snap = build_snapshot(&ctx.pool, &ctx.key).await.unwrap();
         let vm = snap.frontend_models.get(&fm_name).expect("frontend model");
         assert!(
-            vm.defaults.iter().any(|t| t.model == after),
+            vm.default_targets.iter().any(|t| t.model == after),
             "the snapshot still routes {fm_name} to the old name: {:?}",
-            vm.defaults
+            vm.default_targets
         );
 
         // Usage history is deliberately left alone: it records what the model
