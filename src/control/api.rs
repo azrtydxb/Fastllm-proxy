@@ -695,6 +695,69 @@ async fn post_provider_register(
     ))
 }
 
+#[derive(Serialize)]
+struct CatalogueEntry {
+    key: String,
+    display_name: String,
+    /// May contain `<placeholders>` a human must fill in. Bedrock and Vertex
+    /// both encode a region; prefilling them as-is would hand the operator an
+    /// address that cannot resolve, and pretending otherwise would be worse
+    /// than saying so.
+    base_url: String,
+    protocol: String,
+    auth_header: String,
+    auth_scheme: Option<String>,
+    notes: Option<String>,
+}
+
+/// `GET /admin/provider-catalogue` — known providers and how to reach them.
+///
+/// Not a permission list and not a limit. Anything speaking the OpenAI API
+/// works whether or not it is here; this exists so an operator does not have
+/// to go and find the base URL and the header a vendor wants its key in.
+///
+/// It covers the entries `docs/providers.md` actually documents an endpoint
+/// for. The page names about a hundred providers and gives a host for
+/// thirty-odd; seeding the rest would mean inventing their base URLs.
+async fn list_provider_catalogue(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<CatalogueEntry>>, ApiError> {
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT key, display_name, base_url, protocol, auth_header, auth_scheme, notes \
+         FROM provider_catalogue ORDER BY display_name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing the provider catalogue", &e))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(key, display_name, base_url, protocol, auth_header, auth_scheme, notes)| {
+                    CatalogueEntry {
+                        key,
+                        display_name,
+                        base_url,
+                        protocol,
+                        auth_header,
+                        auth_scheme,
+                        notes,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
 /// `DELETE /admin/providers/{id}` — remove a provider that serves nothing.
 ///
 /// Refuses while provider models remain on it, rather than cascading. A
@@ -5616,6 +5679,7 @@ pub async fn serve(
             "/admin/mcp-servers/{id}",
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
+        .route("/admin/provider-catalogue", get(list_provider_catalogue))
         .route("/admin/providers", get(list_providers))
         .route("/admin/providers/{id}", delete(delete_provider))
         .route("/admin/providers/register", post(post_provider_register))

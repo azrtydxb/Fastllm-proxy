@@ -697,6 +697,31 @@
         ]
       }
     },
+    "/admin/provider-catalogue": {
+      "get": {
+        "summary": "Known providers and how to reach them",
+        "operationId": "get_admin_provider_catalogue",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/providers": {
       "get": {
         "summary": "Read providers",

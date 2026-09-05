@@ -33,7 +33,7 @@ change here — it is the only way to check a rule does what you meant.
 |---|---|---|---|
 | `DELETE` | `/admin/frontend-model-defaults/{id}` | Delete frontend-model-defaults id | — |
 | `GET` | `/admin/frontend-models` | Read frontend-models | — |
-| `POST` | `/admin/frontend-models` | Create frontend-models | `name`, `description`* |
+| `POST` | `/admin/frontend-models` | Create frontend-models | `name`, `description`*, `targets`, `policy`* |
 | `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
 | `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`, `weight`*, `position` |
 | `POST` | `/admin/frontend-models/{id}/rules` | Create frontend-models id rules | `position`, `match_condition` |

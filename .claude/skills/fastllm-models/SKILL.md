@@ -23,9 +23,10 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `DELETE` | `/admin/backends/{id}` | Delete backends id | — |
 | `GET` | `/admin/fallback-model` | Read fallback-model | — |
 | `PUT` | `/admin/fallback-model` | Set fallback-model | `provider_model_id`* |
+| `GET` | `/admin/provider-catalogue` | Known providers and how to reach them | — |
 | `GET` | `/admin/provider-models` | Read provider models | — |
-| `POST` | `/admin/provider-models` | Create provider models | `name`, `description`*, `unpriced`, `input_price_per_mtok`*, `output_price_per_mtok`*, `default`, `cache_ttl_seconds`*, `context_length`*, `backends`, `policy`* |
-| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`*, `policy`* |
+| `POST` | `/admin/provider-models` | Create provider models | `name`, `description`*, `unpriced`, `input_price_per_mtok`*, `output_price_per_mtok`*, `default`, `cache_ttl_seconds`*, `context_length`* |
+| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`* |
 | `DELETE` | `/admin/provider-models/{id}` | Delete models id | — |
 | `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `api_base`, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
 | `GET` | `/admin/providers` | Read providers | — |
