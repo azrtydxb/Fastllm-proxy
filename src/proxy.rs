@@ -318,12 +318,31 @@ fn resolve_target_models(
     };
     let candidates = vm.resolve_candidates(facts, prefix, registry);
     if candidates.is_empty() {
+        // The deployment-wide fallback, if there is one. A frontend model whose
+        // targets have all gone is exactly the case a fallback exists for, and
+        // reaching for it here is cheaper than telling the caller no.
+        if let Some(fallback) = snapshot.fallback_model.as_ref() {
+            return Ok(vec![fallback.clone()]);
+        }
+        // 503, not 404.
+        //
+        // 404 says "you asked for something that does not exist", which sends
+        // the caller looking for a typo in a name that is correct — the
+        // frontend model is there, permissioned, and named exactly right. Its
+        // targets are gone, which is a condition of the deployment and not of
+        // the request, and one that resolves itself when a host comes back.
+        // 503 says that, and is retriable.
+        //
+        // This stops being hypothetical the moment providers are registered on
+        // a lease: a host rebooting empties every frontend model pointed only
+        // at it, for as long as the reboot takes.
         return Err(error_response(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "model_unavailable",
             &format!(
-                "frontend model {requested_model:?} has no viable target for this request; \
-                 check its routing rules and defaults"
+                "frontend model {requested_model:?} has no target serving right now. Its \
+                 provider models exist but none is routable — a provider may be down, \
+                 degraded, or not yet registered"
             ),
         ));
     }

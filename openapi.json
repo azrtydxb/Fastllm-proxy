@@ -722,6 +722,37 @@
         ]
       }
     },
+    "/admin/providers/{id}": {
+      "delete": {
+        "summary": "Delete a provider that serves no models",
+        "operationId": "delete_admin_providers_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No provider with that id"
+          },
+          "409": {
+            "description": "Provider models remain on it; delete those first"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/providers/register": {
       "post": {
         "summary": "Register or refresh a provider's lease",

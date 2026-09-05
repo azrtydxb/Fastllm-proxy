@@ -695,6 +695,52 @@ async fn post_provider_register(
     ))
 }
 
+/// `DELETE /admin/providers/{id}` — remove a provider that serves nothing.
+///
+/// Refuses while provider models remain on it, rather than cascading. A
+/// cascade here would delete provider models, and with them frontend model
+/// targets and — before migration 0031 — the usage those models were billed
+/// for. Deleting a provider is a tidying-up operation; it should not be able
+/// to take routing and history with it by accident.
+///
+/// The operator deletes the models first, which is the order that makes what
+/// is being lost visible one step at a time.
+async fn delete_provider(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let models: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM provider_models WHERE provider_id = $1 ORDER BY name")
+            .bind(id)
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("checking a provider's models", &e))?;
+    if !models.is_empty() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "provider {id} still serves {n} model(s): {models:?}. Delete them first — \
+                 removing the provider would take their routing targets with them",
+                n = models.len()
+            ),
+        ));
+    }
+    let done = sqlx::query("DELETE FROM providers WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("deleting a provider", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no provider with id {id}; GET /admin/providers lists the ids that exist"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The Providers screen used to invent this by grouping backends on their
 /// `api_base` at render time, which meant a provider could not be named,
 /// counted, or referred to by anything else. Since migration 0029 it is a row.
@@ -5582,6 +5628,7 @@ pub async fn serve(
             axum::routing::patch(patch_mcp_server).delete(delete_mcp_server),
         )
         .route("/admin/providers", get(list_providers))
+        .route("/admin/providers/{id}", delete(delete_provider))
         .route("/admin/providers/register", post(post_provider_register))
         .route("/admin/provider-models", get(list_models).post(post_model))
         .route(
