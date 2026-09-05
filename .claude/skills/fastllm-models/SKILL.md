@@ -32,6 +32,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `GET` | `/admin/providers` | Read providers | — |
 | `POST` | `/admin/providers/register` | Register or refresh a provider's lease | `api_base`, `node`, `engine`*, `ttl_seconds` |
 | `DELETE` | `/admin/providers/{id}` | Delete a provider that serves no models | — |
+| `GET` | `/admin/providers/{id}/available-models` | What a provider is currently serving | — |
 
 *\* optional field*
 

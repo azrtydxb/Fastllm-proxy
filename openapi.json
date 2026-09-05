@@ -778,6 +778,37 @@
         ]
       }
     },
+    "/admin/providers/{id}/available-models": {
+      "get": {
+        "summary": "What a provider is currently serving",
+        "operationId": "get_admin_providers_id_available_models",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No provider with that id"
+          },
+          "502": {
+            "description": "The provider did not answer"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/providers/register": {
       "post": {
         "summary": "Register or refresh a provider's lease",

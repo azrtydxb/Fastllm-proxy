@@ -758,6 +758,88 @@ async fn list_provider_catalogue(
     ))
 }
 
+/// `GET /admin/providers/{id}/available-models` — what this provider serves.
+///
+/// The same `GET /v1/models` the sweep uses, run on demand so an operator can
+/// see what is on a provider before deciding what to register. Nothing is
+/// created by this: OpenRouter answers with hundreds and registering them all
+/// is not what anyone means by adding it. That is the deliberate difference
+/// from a dynamic provider, where no human is in the loop by design.
+///
+/// Already-registered models are marked, so the list reads as "what is here"
+/// rather than "what is missing".
+async fn provider_available_models(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let api_base: Option<String> =
+        sqlx::query_scalar("SELECT api_base FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("provider lookup", &e))?;
+    let Some(api_base) = api_base else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no provider with id {id}"),
+        ));
+    };
+
+    // System roots, because the provider being browsed is as likely to be a
+    // hosted one over TLS as a vLLM on the LAN. Falls back to the bundled
+    // Mozilla set, matching what the proxy itself does for upstreams.
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    if native.certs.is_empty() {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    } else {
+        for cert in native.certs {
+            let _ = roots.add(cert);
+        }
+    }
+    let client = crate::upstream::Upstream::new(
+        crate::upstream::Config {
+            max_idle_per_host: 2,
+            idle_timeout: std::time::Duration::from_secs(30),
+            connect_timeout: std::time::Duration::from_secs(5),
+        },
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let served = crate::control::registry_agent::served_models(&client, &api_base)
+        .await
+        .map_err(|e| {
+            api_error(
+                // 502: the provider answered badly or not at all, which is a
+                // fact about it rather than about this request.
+                StatusCode::BAD_GATEWAY,
+                format!("could not read {api_base}: {e}"),
+            )
+        })?;
+
+    let registered: Vec<String> = sqlx::query_scalar(
+        "SELECT upstream_model FROM provider_models \
+         WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing registered models", &e))?;
+
+    Ok(Json(serde_json::json!({
+        "api_base": api_base,
+        "models": served
+            .into_iter()
+            .map(|m| serde_json::json!({
+                "upstream_model": m.clone(),
+                "registered": registered.contains(&m),
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
 /// `DELETE /admin/providers/{id}` — remove a provider that serves nothing.
 ///
 /// Refuses while provider models remain on it, rather than cascading. A
@@ -5727,6 +5809,10 @@ pub async fn serve(
         .route("/admin/provider-catalogue", get(list_provider_catalogue))
         .route("/admin/providers", get(list_providers))
         .route("/admin/providers/{id}", delete(delete_provider))
+        .route(
+            "/admin/providers/{id}/available-models",
+            get(provider_available_models),
+        )
         .route("/admin/providers/register", post(post_provider_register))
         .route("/admin/provider-models", get(list_models).post(post_model))
         .route(
