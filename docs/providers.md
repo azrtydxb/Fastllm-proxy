@@ -60,6 +60,22 @@ move them and this file cannot notice.
 | **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
 | **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`        |
 
+## Picking one
+
+The **Provider models** screen offers a provider list: choose one and its base
+URL, protocol and auth header are filled in, so you paste a key and stop.
+
+What is in that list is what this page documents an *endpoint* for. It names
+about a hundred providers and gives a host for thirty-odd of them; the rest are
+counted rather than specified, and seeding them would mean inventing base URLs.
+A list that confidently prefills a wrong endpoint is worse than one that admits
+it does not know.
+
+So the list is a convenience, never a limit — anything speaking the OpenAI API
+works whether or not it is on it, and the address is always typeable. Two
+entries keep `<region>` placeholders (Bedrock, Vertex) rather than being
+prefilled with something that cannot resolve.
+
 ## Adding one
 
 Two ways, same result. A backend belongs to the model it serves, so you add a

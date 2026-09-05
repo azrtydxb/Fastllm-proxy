@@ -148,6 +148,26 @@ const FIXTURES = {
   // One provider per endpoint, which is what the schema allows since
   // migration 0029. `local-qwen` runs on two hosts, so it is two provider
   // models — the pair a frontend model balances across.
+  "/admin/provider-catalogue": [
+    {
+      key: "openrouter",
+      display_name: "OpenRouter",
+      base_url: "https://openrouter.ai/api/v1",
+      protocol: "openai",
+      auth_header: "authorization",
+      auth_scheme: "Bearer",
+      notes: "Fronts ~400 models behind one key",
+    },
+    {
+      key: "anthropic",
+      display_name: "Anthropic",
+      base_url: "https://api.anthropic.com/v1",
+      protocol: "anthropic",
+      auth_header: "x-api-key",
+      auth_scheme: null,
+      notes: "Messages API, translated",
+    },
+  ],
   "/admin/providers": [
     {
       id: 1,

@@ -47,11 +47,12 @@ export function Models({ onUnauthorised }) {
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [models, fleet] = await Promise.all([
+      const [models, fleet, catalogue] = await Promise.all([
         api.get("/admin/provider-models"),
         api.get("/admin/fleet"),
+        api.get("/admin/provider-catalogue"),
       ]);
-      return { models, fleet };
+      return { models, fleet, catalogue };
     },
     { onUnauthorised },
   );
@@ -444,6 +445,35 @@ export function Models({ onUnauthorised }) {
                 </div>
               ) : (
                 <Row gap={8} style={{ marginTop: 12, flexWrap: "nowrap" }}>
+                  {/* Picking a known provider fills in the base URL and the
+                      header its vendor wants the key in. The catalogue is not
+                      a limit — anything speaking the OpenAI API works whether
+                      or not it is listed — so the address stays typeable. */}
+                  <select
+                    style={{ flex: 0.9 }}
+                    value={draftFor(m.id).catalogue_key || ""}
+                    onChange={(e) => {
+                      const entry = (data.catalogue || []).find(
+                        (c) => c.key === e.target.value,
+                      );
+                      setDraft(m.id, {
+                        catalogue_key: e.target.value,
+                        ...(entry
+                          ? {
+                              api_base: entry.base_url,
+                              protocol: entry.protocol,
+                            }
+                          : {}),
+                      });
+                    }}
+                  >
+                    <option value="">provider…</option>
+                    {(data.catalogue || []).map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.display_name}
+                      </option>
+                    ))}
+                  </select>
                   <input
                     placeholder="api_base"
                     style={{ flex: 1.8 }}
