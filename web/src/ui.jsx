@@ -484,6 +484,57 @@ export function Unmeasured({ title, why, how }) {
   );
 }
 
+/**
+ * The overlay every dialog on this UI sits in.
+ *
+ * Here rather than per screen because two of them had already grown their own
+ * copy of the same fixed-inset backdrop, and the parts worth getting right —
+ * a click on the backdrop closing, a click inside not, and Escape working —
+ * are exactly the parts a second copy gets subtly wrong.
+ */
+export function Modal({ label, width = 720, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.55)",
+        zIndex: 50,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label={label}
+        style={{
+          background: "var(--panel-2)",
+          border: "1px solid var(--line-mid)",
+          borderRadius: 12,
+          width: `min(${width}px, 100%)`,
+          maxHeight: "100%",
+          overflow: "auto",
+          padding: 20,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function Empty({ children }) {
   return (
     <div

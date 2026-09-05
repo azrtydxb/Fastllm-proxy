@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { api } from "../api.js";
 import { attempt, useLoader } from "../load.js";
 import { mergeBackends, backendKey } from "../fleet.js";
+import { AddModel } from "./AddModel.jsx";
 import {
   Button,
   Card,
@@ -35,7 +36,7 @@ const BACKEND_COLS = [
 ];
 
 export function Models({ onUnauthorised }) {
-  const [newModel, setNewModel] = useState({ name: "", description: "" });
+  const [adding, setAdding] = useState(false);
   const [drafts, setDrafts] = useState({});
   const [editing, setEditing] = useState(null);
   const [sync, setSync] = useState(null);
@@ -72,24 +73,6 @@ export function Models({ onUnauthorised }) {
   const draftFor = (id) => drafts[id] || {};
   const setDraft = (id, patch) =>
     setDrafts({ ...drafts, [id]: { ...(drafts[id] || {}), ...patch } });
-
-  const create = async (e) => {
-    e.preventDefault();
-    if (!newModel.name.trim()) return;
-    const ok = await attempt(
-      () =>
-        api.post("/admin/provider-models", {
-          name: newModel.name.trim(),
-          description: newModel.description.trim(),
-        }),
-      setError,
-      onUnauthorised,
-    );
-    if (ok) {
-      setNewModel({ name: "", description: "" });
-      reload();
-    }
-  };
 
   const addBackend = async (modelId) => {
     const d = draftFor(modelId);
@@ -193,7 +176,22 @@ export function Models({ onUnauthorised }) {
         <Button onClick={() => runSync(true)} disabled={busy}>
           {busy ? "Fetching…" : "Sync prices…"}
         </Button>
+        <Button variant="primary" onClick={() => setAdding(true)}>
+          Add model
+        </Button>
       </Row>
+
+      {adding && (
+        <AddModel
+          providers={data.providers || []}
+          onClose={() => setAdding(false)}
+          onCreated={() => {
+            setAdding(false);
+            reload();
+          }}
+          onUnauthorised={onUnauthorised}
+        />
+      )}
 
       {sync && (
         <Card
@@ -265,38 +263,6 @@ export function Models({ onUnauthorised }) {
           </Stack>
         </Card>
       )}
-
-      <Card title="New model">
-        <form onSubmit={create}>
-          <Row gap={10} style={{ flexWrap: "nowrap" }}>
-            <Field label="NAME" style={{ flex: 1 }}>
-              <input
-                placeholder="local-qwen"
-                value={newModel.name}
-                onChange={(e) =>
-                  setNewModel({ ...newModel, name: e.target.value })
-                }
-              />
-            </Field>
-            <Field label="DESCRIPTION" style={{ flex: 2 }}>
-              <input
-                placeholder="what callers should know about it"
-                value={newModel.description}
-                onChange={(e) =>
-                  setNewModel({ ...newModel, description: e.target.value })
-                }
-              />
-            </Field>
-            <Button
-              variant="primary"
-              type="submit"
-              style={{ alignSelf: "flex-end" }}
-            >
-              Create
-            </Button>
-          </Row>
-        </form>
-      </Card>
 
       {data.models.length === 0 && (
         <Card>

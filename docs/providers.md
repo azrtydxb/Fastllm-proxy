@@ -100,13 +100,20 @@ Then on **Provider models**:
 
 ![The Provider models screen: each model with its provider, credential state, prices, cache TTL and context window](images/ui-models.png)
 
-pick that provider from the dropdown and press **Browse models**. The list is
-what the endpoint answers `GET /v1/models` with — not what a catalogue believes
-it offers — with the ones you have already registered marked. Choose one and
-attach.
+press **Add model**. The dialog asks for the provider first, then reads that
+endpoint's own answer to `GET /v1/models` and offers what it serves — not what
+a catalogue believes it offers — with the ones you have already registered
+marked. Pick one and the local name is filled in from it, editable before
+anything is created.
 
-A provider that does not implement `/v1/models` says so in place, and the
-upstream name stays typeable.
+The order matters: naming a model first and finding it an address afterwards
+leaves a model that routes nowhere in between, and asks you to know the
+upstream name from memory before anything has offered it.
+
+A provider that does not implement `/v1/models` says so in the dialog, and the
+upstream name stays typeable. Both writes are one intent: if attaching fails,
+the model created a moment earlier is removed rather than left behind as a
+name that routes nowhere and blocks the retry with a duplicate-name conflict.
 
 By API, the same three calls:
 

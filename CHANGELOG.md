@@ -10,6 +10,15 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Adding a model starts from the provider that serves it.** An **Add model**
+  dialog on the Provider models screen: pick a provider, and it reads that
+  endpoint's `GET /v1/models` and offers what it serves, filling the local name
+  in from the one you choose. It replaces a form that asked for a name first
+  and an address afterwards — an order that required knowing the upstream
+  model's name from memory before anything had offered it, and left a model
+  routing nowhere in between. The two writes are one intent: a failed attach
+  removes the model created a moment earlier rather than leaving a name that
+  routes nowhere and blocks the retry with a duplicate-name conflict.
 - **The catalogue says which credentials a vendor takes.**
   `provider_catalogue.credential_kinds` (migration 0040), returned by
   `GET /admin/provider-catalogue`. Only Vertex AI accepts anything but a static
