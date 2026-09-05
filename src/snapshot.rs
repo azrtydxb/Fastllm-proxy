@@ -558,6 +558,11 @@ pub struct WireFrontendModel {
     pub name: String,
     pub rules: Vec<WireRoutingRule>,
     pub default_targets: Vec<WireWeightedTarget>,
+    /// Same spelling `--policy` uses, and absent for the weighted split.
+    /// A proxy that meets a policy it does not know falls back rather than
+    /// refusing to route, so a new policy cannot stop an older proxy working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 impl Snapshot {
@@ -780,6 +785,7 @@ impl Snapshot {
                             weight: t.weight,
                         })
                         .collect(),
+                    policy: vm.policy.map(|p| p.as_str().to_string()),
                 })
                 .collect(),
             open: self.open,
@@ -970,6 +976,7 @@ impl Snapshot {
                                     weight: t.weight,
                                 })
                                 .collect(),
+                            policy: vm.policy.as_deref().and_then(crate::router::Policy::parse),
                         },
                     )
                 })

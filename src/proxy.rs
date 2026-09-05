@@ -2970,6 +2970,7 @@ model_list:
                     model: "concrete-a".into(),
                     weight: 100,
                 }],
+                policy: None,
             },
         );
         let snapshot = Snapshot {

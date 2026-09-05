@@ -615,6 +615,14 @@ pub struct FrontendModelDef {
     /// matching rule's own targets turn out to be unroutable (see
     /// [`FrontendModelDef::resolve`]'s doc comment).
     pub default_targets: Vec<WeightedTarget>,
+    /// How to choose between the targets that survive rule evaluation.
+    ///
+    /// `None` is the weighted split — a deterministic pick on the request
+    /// prefix — which is what a target list has always meant and stays the
+    /// default. The others answer the case migration 0028 was written for and
+    /// could not reach: targets that are *not* equivalent, where the right
+    /// choice depends on what they are rather than on a fixed share.
+    pub policy: Option<crate::router::Policy>,
 }
 
 impl FrontendModelDef {
@@ -673,6 +681,7 @@ impl FrontendModelDef {
                     prefix_hash,
                     registry,
                     facts.needed_tokens(),
+                    self.policy,
                 );
             }
         }
@@ -681,6 +690,7 @@ impl FrontendModelDef {
             prefix_hash,
             registry,
             facts.needed_tokens(),
+            self.policy,
         )
     }
 }
@@ -727,13 +737,71 @@ pub fn choose_weighted(targets: &[WeightedTarget], prefix_hash: u64) -> Option<&
 /// `proxy_request` retry loop is what eventually turns a truly dead target
 /// into a `502`, exactly as it does today for an ordinary (non-virtual)
 /// model with every backend down.
+/// Total in-flight requests across a target's pool, and its slowest recent
+/// mean latency.
+///
+/// Both read straight off the registry's live counters, which is why this can
+/// run on the request path: no I/O, just atomics that `Router::pick` is already
+/// maintaining for its own decisions one level down.
+///
+/// A target with no pool — a provider model that has gone — reports the worst
+/// possible figures so it sorts last, rather than being dropped. Dropping it
+/// would empty a chain that could still serve from a later target.
+fn target_load(registry: &Registry, model: &str) -> (usize, u64) {
+    match registry.pool(model) {
+        None => (usize::MAX, u64::MAX),
+        Some(pool) => {
+            let inflight = pool.iter().map(|b| b.inflight()).sum();
+            let latency = pool.iter().filter_map(|b| b.latency_us()).min();
+            (inflight, latency.unwrap_or(u64::MAX))
+        }
+    }
+}
+
+/// Pick the target this policy prefers, or `None` to fall back to the weighted
+/// split.
+///
+/// Deliberately only *chooses the head* of the chain. Everything after it stays
+/// in declaration order, because that order is the operator's stated fallback
+/// preference and a policy is about which target serves — not about rewriting
+/// what happens when it cannot.
+fn choose_by_policy<'a>(
+    targets: &'a [WeightedTarget],
+    policy: crate::router::Policy,
+    registry: &Registry,
+    prefix_hash: u64,
+) -> Option<&'a WeightedTarget> {
+    use crate::router::Policy;
+    match policy {
+        // The weighted split already *is* prefix affinity: the same
+        // conversation hashes to the same target every time, which is the
+        // property this policy exists to give.
+        Policy::CacheAffinity => None,
+        Policy::LeastLoaded => targets
+            .iter()
+            .min_by_key(|t| target_load(registry, &t.model).0),
+        Policy::LowestLatency => targets.iter().min_by_key(|t| {
+            let (inflight, latency) = target_load(registry, &t.model);
+            (latency, inflight)
+        }),
+        // Rotation without state: the prefix hash is already a well-spread
+        // number and using it keeps this function a pure one, so two proxies
+        // deciding independently still agree on a given request.
+        Policy::RoundRobin => targets.get(prefix_hash as usize % targets.len().max(1)),
+    }
+}
+
 fn order_candidates(
     targets: &[WeightedTarget],
     prefix_hash: u64,
     registry: &Registry,
     needed_tokens: u64,
+    policy: Option<crate::router::Policy>,
 ) -> Vec<String> {
-    let Some(chosen) = choose_weighted(targets, prefix_hash) else {
+    let chosen = policy
+        .and_then(|p| choose_by_policy(targets, p, registry, prefix_hash))
+        .or_else(|| choose_weighted(targets, prefix_hash));
+    let Some(chosen) = chosen else {
         return Vec::new();
     };
     // Weighted pick first, then the rest in declaration order — declaration
@@ -888,6 +956,7 @@ mod tests {
                 },
             ],
             default_targets: vec![target("default", 1)],
+            policy: None,
         };
         let reg = registry_with(&["first", "second", "default"]);
         assert_eq!(
@@ -919,6 +988,7 @@ mod tests {
                 },
             ],
             default_targets: vec![],
+            policy: None,
         };
         let reg = registry_with(&["only-for-999", "catch-all"]);
         let caller = principal(1, &[]);
@@ -1042,6 +1112,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: targets,
+            policy: None,
         };
         let prefix = 0xdead_beef_1234_5678u64;
         let first = vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), prefix, &reg);
@@ -1062,6 +1133,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: targets,
+            policy: None,
         };
         let mut a = 0u32;
         let mut b = 0u32;
@@ -1105,6 +1177,7 @@ mod tests {
             // weight 100 on primary so `choose_weighted` always picks it
             // first, isolating the failover behaviour from the split.
             default_targets: vec![target("primary", 100), target("secondary", 1)],
+            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1121,6 +1194,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
+            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1138,6 +1212,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
+            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1378,6 +1453,7 @@ mod tests {
                 rule_with(RuleConditions::default(), "cloud"),
             ],
             default_targets: vec![],
+            policy: None,
         };
         let headers = HeaderMap::new();
         assert_eq!(
@@ -1528,6 +1604,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 0)],
+            policy: None,
         };
         let headers = HeaderMap::new();
         let chain = vm.resolve_candidates(&facts_with(None, 0, None, &headers), 0, &reg);
@@ -1541,6 +1618,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("a", 1), target("a", 1)],
+            policy: None,
         };
         let headers = HeaderMap::new();
         let chain = vm.resolve_candidates(&facts_with(None, 0, None, &headers), 0, &reg);
@@ -1616,6 +1694,7 @@ mod tests {
                 targets: vec![target("only-for-999", 1)],
             }],
             default_targets: vec![target("default-model", 1)],
+            policy: None,
         };
         let reg = registry_with(&["only-for-999", "default-model"]);
         assert_eq!(
@@ -1638,6 +1717,7 @@ mod tests {
                 targets: vec![],
             }],
             default_targets: vec![target("default-model", 1)],
+            policy: None,
         };
         let reg = registry_with(&["default-model"]);
         assert_eq!(

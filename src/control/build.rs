@@ -841,9 +841,10 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<i64
 /// stay far easier to follow than one join across five tables with `weight`
 /// and `position` columns that would otherwise need disambiguating aliases.
 async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, FrontendModelDef>> {
-    let vm_rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM frontend_models")
-        .fetch_all(pool)
-        .await?;
+    let vm_rows: Vec<(i64, String, Option<String>)> =
+        sqlx::query_as("SELECT id, name, policy FROM frontend_models")
+            .fetch_all(pool)
+            .await?;
 
     type RuleRow = (i64, i64, serde_json::Value);
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
@@ -902,7 +903,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     };
 
     let mut frontend_models = HashMap::new();
-    for (vm_id, vm_name) in vm_rows {
+    for (vm_id, vm_name, vm_policy) in vm_rows {
         let rules = rule_rows
             .iter()
             .filter(|(_, frontend_model_id, _)| *frontend_model_id == vm_id)
@@ -941,6 +942,12 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                 name: vm_name,
                 rules,
                 default_targets,
+                // Parsed here rather than constrained in the database, same
+                // reasoning migration 0028 gave: a proxy meeting a policy it
+                // does not know falls back to the weighted split instead of
+                // refusing to route, and a CHECK constraint would make adding
+                // a policy a migration.
+                policy: vm_policy.as_deref().and_then(crate::router::Policy::parse),
             },
         );
     }

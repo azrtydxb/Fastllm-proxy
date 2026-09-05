@@ -840,10 +840,6 @@ struct ModelView {
     /// Absent is a third state, not zero — routing demotes a model only when
     /// the figure is known and too small.
     context_length: Option<i64>,
-    /// How to choose between this model's backends. Absent means the
-    /// deployment's `--policy`, which is what every model meant before this
-    /// was settable.
-    policy: Option<String>,
     /// The provider serving this model, absent when none is configured.
     ///
     /// Absent is a real state and not an error: a model can outlive its
@@ -872,7 +868,6 @@ async fn list_models(
         Option<i64>,
         Option<i32>,
         Option<i64>,
-        Option<String>,
         Option<i64>,
         Option<String>,
         Option<String>,
@@ -884,7 +879,7 @@ async fn list_models(
     );
     let models: Vec<ModelRow> = sqlx::query_as(
         "SELECT m.id, m.name, m.description, m.input_price_per_mtok, \
-             m.output_price_per_mtok, m.cache_ttl_seconds, m.context_length, m.policy, \
+             m.output_price_per_mtok, m.cache_ttl_seconds, m.context_length, \
              p.id, p.name, p.api_base, m.upstream_model, \
              p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, m.default_max_tokens \
          FROM provider_models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.name",
@@ -905,7 +900,6 @@ async fn list_models(
                     output_price_per_mtok,
                     cache_ttl_seconds,
                     context_length,
-                    policy,
                     provider_id,
                     provider_name,
                     api_base,
@@ -939,7 +933,6 @@ async fn list_models(
                         output_price_per_mtok,
                         cache_ttl_seconds,
                         context_length,
-                        policy,
                         provider_id,
                         provider_name,
                         backends,
@@ -980,12 +973,6 @@ struct NewModel {
     /// the field was simply dropped.
     #[serde(default)]
     context_length: Option<i32>,
-    /// How to choose between this model's backends: `cache-affinity`,
-    /// `least-loaded`, `round-robin` or `lowest-latency`. Unset means the
-    /// deployment's `--policy`, and only matters once a model has more than
-    /// one backend.
-    #[serde(default)]
-    policy: Option<String>,
 }
 
 /// Accept only a policy this build knows, and say which ones those are.
@@ -1500,15 +1487,10 @@ async fn post_model(
     // callable once frontend models are the only addressable surface, and
     // renaming the provider model out of the way instead would revoke every
     // grant naming it (migration 0029 did that in production).
-    // Validated here rather than by a CHECK constraint (see migration 0028):
-    // the proxy tolerates an unknown policy by falling back to the default,
-    // but an operator typing one into this API deserves to be told, not to
-    // wonder later why the model ignored it.
-    let policy = validated_policy(body.policy.as_deref())?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO provider_models (name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds, context_length, policy) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+             cache_ttl_seconds, context_length) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
@@ -1516,7 +1498,6 @@ async fn post_model(
     .bind(body.output_price_per_mtok)
     .bind(body.cache_ttl_seconds)
     .bind(body.context_length)
-    .bind(policy)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1561,10 +1542,6 @@ struct PatchModel {
     /// is not the same as zero — see `ModelDef::context_length`.
     #[serde(default, deserialize_with = "double_option")]
     context_length: Option<Option<i64>>,
-    /// `null` clears it back to the deployment default; omitting it leaves
-    /// the model's policy alone.
-    #[serde(default, deserialize_with = "double_option")]
-    policy: Option<Option<String>>,
 }
 
 /// Tells "absent" apart from "present and null".
@@ -1622,12 +1599,6 @@ async fn patch_model(
         ));
     }
 
-    // Same validation as creation: an unknown policy is refused here rather
-    // than accepted and quietly ignored by every proxy that reads it.
-    let policy = match &body.policy {
-        Some(inner) => validated_policy(inner.as_deref())?,
-        None => None,
-    };
     // `COALESCE($n, column)` would make "set to null" impossible, so each field
     // carries its own "was it present" flag instead.
     let done = sqlx::query(
@@ -1636,8 +1607,7 @@ async fn patch_model(
            input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
            output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
            cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END,
-           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END,
-           policy                = CASE WHEN $12 THEN $13 ELSE policy                END
+           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END
          WHERE id = $1",
     )
     .bind(id)
@@ -1651,8 +1621,6 @@ async fn patch_model(
     .bind(body.cache_ttl_seconds.flatten())
     .bind(body.context_length.is_some())
     .bind(body.context_length.flatten())
-    .bind(body.policy.is_some())
-    .bind(policy)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("model update", &e))?;
@@ -2077,6 +2045,8 @@ struct FrontendModelView {
     /// `frontend_model_defaults` for why this is its own table rather than an
     /// always-true rule.
     default_targets: Vec<TargetView>,
+    /// How targets are chosen between. Absent is the weighted split.
+    policy: Option<String>,
 }
 
 // (id, owner_id, provider_model_id, model_name, weight, position) — `owner_id` is
@@ -2089,8 +2059,8 @@ async fn list_virtual_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<FrontendModelView>>, ApiError> {
-    let vms: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, name, description FROM frontend_models ORDER BY name")
+    let vms: Vec<(i64, String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, name, description, policy FROM frontend_models ORDER BY name")
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing frontend models", &e))?;
@@ -2135,7 +2105,7 @@ async fn list_virtual_models(
 
     Ok(Json(
         vms.into_iter()
-            .map(|(vm_id, name, description)| {
+            .map(|(vm_id, name, description, policy)| {
                 let rule_views = rules
                     .iter()
                     .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
@@ -2162,6 +2132,7 @@ async fn list_virtual_models(
                     description,
                     rules: rule_views,
                     default_targets: to_targets(vm_id, &default_targets),
+                    policy,
                 }
             })
             .collect(),
@@ -2174,6 +2145,17 @@ struct NewFrontendModel {
     name: String,
     #[serde(default)]
     description: String,
+    /// How to choose between this frontend model's targets:
+    /// `cache-affinity`, `least-loaded`, `round-robin` or `lowest-latency`.
+    /// Unset is the weighted split, which is what a target list has always
+    /// meant and stays the default.
+    ///
+    /// This lives here rather than on a provider model because a provider
+    /// model has one provider and therefore one backend — there is nothing
+    /// for a policy to choose between. Targets are the things that need
+    /// choosing between (migration 0038).
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 async fn post_frontend_model(
@@ -2190,11 +2172,18 @@ async fn post_frontend_model(
     // The same the other way round: putting a frontend model in front of a
     // provider model of the same name is the normal arrangement, not a clash.
     // See the note on the model-creation route.
+    // Refused here rather than accepted and quietly ignored by every proxy
+    // that reads it — the proxy falls back to the weighted split on a policy
+    // it does not know, which is right for forward compatibility and wrong as
+    // a response to a typo.
+    let policy = validated_policy(body.policy.as_deref())?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO frontend_models (name, description) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO frontend_models (name, description, policy) VALUES ($1, $2, $3) \
+         RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
+    .bind(policy)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
