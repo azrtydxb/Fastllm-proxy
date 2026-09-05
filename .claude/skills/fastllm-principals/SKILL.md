@@ -25,6 +25,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `DELETE` | `/admin/keys/{id}` | Revoke a key. The row stays for audit | — |
 | `GET` | `/admin/principals` | Read principals | — |
 | `POST` | `/admin/principals` | Create principals | `name`, `kind`*, `email`* |
+| `PATCH` | `/admin/principals/{id}` | Rename a principal, or correct its email | `name`*, `email`* |
 | `DELETE` | `/admin/principals/{id}` | Delete principals id | — |
 | `PUT` | `/admin/principals/{id}/budget` | Set principals id budget | `tokens_total`*, `cost_total_micros`*, `window` |
 | `DELETE` | `/admin/principals/{id}/budget` | Delete principals id budget | — |

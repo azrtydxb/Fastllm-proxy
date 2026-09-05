@@ -22,7 +22,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 |---|---|---|---|
 | `GET` | `/admin/mcp-servers` | List MCP servers. Reports whether a credential is set, never what it is | — |
 | `POST` | `/admin/mcp-servers` | Register an MCP server | `name`, `url`, `transport`*, `description`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `enabled`* |
-| `PATCH` | `/admin/mcp-servers/{id}` | Update an MCP server. An absent upstream_api_key leaves the stored credential alone; "" clears it | `url`*, `description`*, `enabled`*, `upstream_api_key`* |
+| `PATCH` | `/admin/mcp-servers/{id}` | Update an MCP server. An absent upstream_api_key leaves the stored credential alone; "" clears it | `name`*, `url`*, `description`*, `enabled`*, `upstream_api_key`* |
 | `DELETE` | `/admin/mcp-servers/{id}` | Delete an MCP server | — |
 | `GET` | `/v1/mcp/servers` | MCP servers this key may invoke | — |
 | `POST` | `/v1/mcp/tools/call` | Invoke one namespaced tool. {"name": "<server>__<tool>", "arguments": {}} | — |

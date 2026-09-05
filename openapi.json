@@ -1063,6 +1063,35 @@
       }
     },
     "/admin/principals/{id}": {
+      "patch": {
+        "summary": "Rename a principal, or correct its email",
+        "operationId": "patch_admin_principals_id",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No principal with that id"
+          },
+          "409": {
+            "description": "That name is taken"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
       "delete": {
         "summary": "Delete principals id",
         "operationId": "delete_admin_principals_id",
@@ -1508,6 +1537,35 @@
       }
     },
     "/admin/roles/{name}": {
+      "patch": {
+        "summary": "Rename a role, or change its description",
+        "operationId": "patch_admin_roles_name",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No role with that name"
+          },
+          "409": {
+            "description": "That name is taken"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
       "delete": {
         "summary": "Delete roles name",
         "operationId": "delete_admin_roles_name",

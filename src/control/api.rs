@@ -475,6 +475,94 @@ async fn post_principal(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchPrincipal {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// `PATCH /admin/principals/{id}` — rename a caller, or correct its email.
+///
+/// Safe to rename because nothing binds to a principal's name: keys, roles,
+/// limits, budgets and usage all reference the id. `usage_events` is the one
+/// place the name is *recorded* rather than referenced, and that stays as it
+/// was — it says who the request was billed to at the time it was served.
+async fn patch_principal(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<i64>,
+    Json(body): Json<PatchPrincipal>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(name) = body.name.as_deref() {
+        rename_named_row(&ctx, "principals", id, name, None).await?;
+    }
+    if let Some(email) = body.email.as_deref() {
+        let done = sqlx::query("UPDATE principals SET email = $1 WHERE id = $2")
+            .bind((!email.trim().is_empty()).then_some(email.trim()))
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("updating a principal", &e))?;
+        if done.rows_affected() == 0 {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                format!("no principal with id {id}"),
+            ));
+        }
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchRole {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// `PATCH /admin/roles/{name}` — rename a role, or change what it says it is.
+///
+/// A role's own grants and its holders reference it by id, so renaming one
+/// changes only the URL it is addressed at. It carries no grant of its own —
+/// `permissions.resource` names models, servers and agents, never roles.
+async fn patch_role(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(current): Path<String>,
+    Json(body): Json<PatchRole>,
+) -> Result<StatusCode, ApiError> {
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+        .bind(&current)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| db_error("role lookup", &e))?;
+    let Some(id) = id else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no role named {current:?}"),
+        ));
+    };
+    if let Some(name) = body.name.as_deref() {
+        rename_named_row(&ctx, "roles", id, name, None).await?;
+    }
+    if let Some(description) = body.description.as_deref() {
+        sqlx::query("UPDATE roles SET description = $1 WHERE id = $2")
+            .bind((!description.trim().is_empty()).then_some(description.trim()))
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("updating a role", &e))?;
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn delete_principal(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
@@ -1933,6 +2021,9 @@ async fn post_a2a_agent(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchA2aAgent {
+    /// Granted as `agent/<name>`, so a rename carries its grants.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -1953,6 +2044,16 @@ async fn patch_a2a_agent(
     Path(id): Path<i64>,
     Json(body): Json<PatchA2aAgent>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(name) = body.name.as_deref() {
+        rename_named_row(
+            &ctx,
+            "a2a_agents",
+            id,
+            name,
+            Some(("agent:invoke", "agent")),
+        )
+        .await?;
+    }
     if let Some(v) = body.protocol_version.as_deref() {
         if v != "0.3" && v != "1.0" {
             return Err(api_error(
@@ -2164,6 +2265,9 @@ async fn post_mcp_server(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchMcpServer {
+    /// Granted as `mcp/<name>`, so a rename carries its grants.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -2184,6 +2288,9 @@ async fn patch_mcp_server(
     Path(id): Path<i64>,
     Json(body): Json<PatchMcpServer>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(name) = body.name.as_deref() {
+        rename_named_row(&ctx, "mcp_servers", id, name, Some(("mcp:invoke", "mcp"))).await?;
+    }
     let encrypted = match body.upstream_api_key.as_deref().map(str::trim) {
         Some("") => Some(None),
         Some(k) => Some(Some(
@@ -2330,6 +2437,110 @@ struct PatchModel {
     context_length: Option<Option<i64>>,
 }
 
+/// Move a grant from one name to another, inside a caller's transaction.
+///
+/// Grants are `<prefix>/<name>` strings matched against the name a caller
+/// asked for, so a rename that left them behind would revoke everyone holding
+/// one and report it as a 403 they could not explain. Migration 0034 found
+/// exactly that by renaming models without moving them.
+///
+/// The row is shared between roles — `permissions` is deduplicated on
+/// `(verb, resource)` and joined through `role_permissions` — so when the new
+/// name is already granted, the right move is to leave the old row alone
+/// rather than collide with it. A role holding it keeps a grant on a name that
+/// no longer resolves, which fails closed and is visible on the roles screen.
+async fn move_grant(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    verb: &str,
+    prefix: &str,
+    previous: &str,
+    name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE permissions SET resource = $1 \
+          WHERE verb = $3 AND resource = $2 \
+            AND NOT EXISTS (SELECT 1 FROM permissions p2 \
+                             WHERE p2.verb = $3 AND p2.resource = $1)",
+    )
+    .bind(format!("{prefix}/{name}"))
+    .bind(format!("{prefix}/{previous}"))
+    .bind(verb)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Rename a row addressed by name, carrying its grants with it.
+///
+/// `table` and the grant's `verb`/`prefix` are the only things that differ
+/// between renaming an MCP server, an A2A agent, a role and a principal, and
+/// writing the same transaction four times is how three of them end up subtly
+/// different from the one that was reviewed.
+async fn rename_named_row(
+    ctx: &Ctx,
+    table: &str,
+    id: i64,
+    name: &str,
+    grant: Option<(&str, &str)>,
+) -> Result<(), ApiError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name cannot be empty".to_string(),
+        ));
+    }
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_error("starting a rename", &e))?;
+
+    let previous: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT name FROM {table} WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_error("reading a name", &e))?;
+    let Some(previous) = previous else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("nothing with id {id} in {table}"),
+        ));
+    };
+    if previous == name {
+        return Ok(());
+    }
+
+    sqlx::query(&format!("UPDATE {table} SET name = $1 WHERE id = $2"))
+        .bind(name)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                api_error(
+                    StatusCode::CONFLICT,
+                    format!("the name {name:?} is already taken"),
+                )
+            } else {
+                db_error("renaming", &e)
+            }
+        })?;
+
+    if let Some((verb, prefix)) = grant {
+        move_grant(&mut tx, verb, prefix, &previous, name)
+            .await
+            .map_err(|e| db_error("moving grants", &e))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| db_error("committing a rename", &e))?;
+    Ok(())
+}
+
 /// Rename a provider model, carrying everything that names it.
 ///
 /// Three things record this name, and each is a different kind of link:
@@ -2406,14 +2617,9 @@ async fn rename_provider_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), Api
     // already be granted to somebody: the row is shared between roles, so
     // merging into it is right, and the old row is left for any grant that
     // still refers to a different model of that name.
-    sqlx::query(
-        "UPDATE permissions SET resource = $1           WHERE verb = 'model:invoke' AND resource = $2             AND NOT EXISTS (SELECT 1 FROM permissions p2                              WHERE p2.verb = 'model:invoke' AND p2.resource = $1)",
-    )
-    .bind(format!("model/{name}"))
-    .bind(format!("model/{previous}"))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| db_error("moving a model's grants", &e))?;
+    move_grant(&mut tx, "model:invoke", "model", &previous, name)
+        .await
+        .map_err(|e| db_error("moving a model's grants", &e))?;
 
     tx.commit()
         .await
@@ -3284,14 +3490,9 @@ async fn rename_frontend_model(ctx: &Ctx, id: i64, name: &str) -> Result<(), Api
             }
         })?;
 
-    sqlx::query(
-        "UPDATE permissions SET resource = $1           WHERE verb = 'model:invoke' AND resource = $2             AND NOT EXISTS (SELECT 1 FROM permissions p2                              WHERE p2.verb = 'model:invoke' AND p2.resource = $1)",
-    )
-    .bind(format!("model/{name}"))
-    .bind(format!("model/{previous}"))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| db_error("moving a frontend model's grants", &e))?;
+    move_grant(&mut tx, "model:invoke", "model", &previous, name)
+        .await
+        .map_err(|e| db_error("moving a frontend model's grants", &e))?;
 
     tx.commit()
         .await
@@ -6703,7 +6904,10 @@ pub async fn serve(
             "/admin/principals",
             get(list_principals).post(post_principal),
         )
-        .route("/admin/principals/{id}", delete(delete_principal))
+        .route(
+            "/admin/principals/{id}",
+            axum::routing::patch(patch_principal).delete(delete_principal),
+        )
         .route("/admin/principals/{id}/roles", post(grant_role))
         .route("/admin/principals/{id}/roles/{role}", delete(revoke_role))
         .route("/admin/principals/{id}/password", put(put_password))
@@ -6779,7 +6983,10 @@ pub async fn serve(
             delete(delete_default_target),
         )
         .route("/admin/roles", get(list_roles).post(post_role))
-        .route("/admin/roles/{name}", delete(delete_role))
+        .route(
+            "/admin/roles/{name}",
+            axum::routing::patch(patch_role).delete(delete_role),
+        )
         .route("/admin/audit", get(list_audit))
         .route("/admin/usage", get(usage_summary))
         .route("/admin/timeseries", get(timeseries))

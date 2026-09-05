@@ -22,7 +22,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 |---|---|---|---|
 | `GET` | `/admin/a2a-agents` | List A2A agents. Reports whether a credential is set, never what it is | — |
 | `POST` | `/admin/a2a-agents` | Register an A2A agent | `name`, `url`, `description`*, `protocol_version`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `enabled`* |
-| `PATCH` | `/admin/a2a-agents/{id}` | Update an A2A agent | `url`*, `description`*, `protocol_version`*, `enabled`*, `upstream_api_key`* |
+| `PATCH` | `/admin/a2a-agents/{id}` | Update an A2A agent | `name`*, `url`*, `description`*, `protocol_version`*, `enabled`*, `upstream_api_key`* |
 | `DELETE` | `/admin/a2a-agents/{id}` | Delete an A2A agent | — |
 | `GET` | `/v1/agents` | A2A agents this key may invoke | — |
 | `POST` | `/v1/agents/{name}` | Every A2A JSON-RPC method on one path. Only the methods this gateway forwards are accepted | — |

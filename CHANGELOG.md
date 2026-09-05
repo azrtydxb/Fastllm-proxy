@@ -10,6 +10,19 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Everything with a name can be renamed, and a rename no longer breaks
+  links.** Provider models, frontend models, MCP servers, A2A agents,
+  principals and roles all take a `name` on their PATCH route; principals and
+  roles gain one. Renaming used to be impossible on purpose — three separate
+  things recorded a model's name and every one of them would have broken.
+  Targets now resolve by id and fall back to the recorded name, so a rename is
+  followed automatically while a *deleted* model still leaves a target naming
+  what it wants (migration 0036's reason for existing); `relink_targets` puts
+  the id back when that model returns. Grants move in the same transaction as
+  the rename, because a `model/<name>` left behind revokes everyone holding it
+  — which is what migration 0034 found by doing it. Usage history deliberately
+  does not move: it records what a thing was called when the request was
+  served.
 - **Providers have names chosen by whoever knows what they are.** A cloud
   provider takes the vendor's name from the catalogue (`OpenRouter`, not
   `openrouter.ai`); a dynamic one is named by the agent registering it, sent on

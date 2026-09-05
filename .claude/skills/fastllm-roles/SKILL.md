@@ -22,6 +22,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 |---|---|---|---|
 | `GET` | `/admin/roles` | Read roles | — |
 | `POST` | `/admin/roles` | Create roles | `name`, `description`* |
+| `PATCH` | `/admin/roles/{name}` | Rename a role, or change its description | `name`*, `description`* |
 | `DELETE` | `/admin/roles/{name}` | Delete roles name | — |
 | `POST` | `/admin/roles/{name}/permissions` | Create roles name permissions | `verb`, `resource`* |
 | `DELETE` | `/admin/roles/{name}/permissions` | Delete roles name permissions | `verb`, `resource`* |
