@@ -143,12 +143,12 @@ export function Providers({ onUnauthorised, go }) {
 
       <Muted>
         A provider is a row in a table, not a code change — anything speaking
-        the OpenAI API is already supported. Models are attached to a provider
+        the OpenAI API is already supported. A model is attached to a provider
         on the{" "}
         <a href="#/models" onClick={() => go("models")}>
-          Models
+          Provider models
         </a>{" "}
-        screen, where they belong to the model they serve.
+        screen.
       </Muted>
 
       {shown.length === 0 ? (
@@ -201,9 +201,7 @@ export function Providers({ onUnauthorised, go }) {
                             color: "var(--fg-4)",
                           }}
                         >
-                          {fmtInt(g.models.size)} model
-                          {g.models.size === 1 ? "" : "s"} ·{" "}
-                          {fmtInt(g.backends)} backend
+                          {fmtInt(g.backends)} model
                           {g.backends === 1 ? "" : "s"}
                         </div>
                       </div>
@@ -244,11 +242,13 @@ export function Providers({ onUnauthorised, go }) {
                     <Row gap={6} style={{ flexWrap: "nowrap" }}>
                       <Dot tone={g.credentialled > 0 ? "ok" : "muted"} />
                       <Muted>
+                        {/* One credential per provider, however many models
+                            ride on it — that is the point of the split, so
+                            "1 of 3 credentialled" would read as a shortfall
+                            where there is none. */}
                         {g.credentialled === 0
                           ? "no credential"
-                          : g.credentialled === g.backends
-                            ? "credential set"
-                            : `${g.credentialled} of ${g.backends} credentialled`}
+                          : "credential set"}
                       </Muted>
                     </Row>
                     <div style={{ flex: 1 }} />

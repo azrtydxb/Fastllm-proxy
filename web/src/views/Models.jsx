@@ -438,8 +438,8 @@ export function Models({ onUnauthorised }) {
                 <div style={{ marginTop: 12 }}>
                   <Muted>
                     Served by {m.provider_name}. A model has one provider —
-                    remove this one to point it elsewhere, or put both behind a
-                    frontend model to balance across them.
+                    remove this one to point it elsewhere, or put this and
+                    another behind a frontend model to balance across them.
                   </Muted>
                 </div>
               ) : (
