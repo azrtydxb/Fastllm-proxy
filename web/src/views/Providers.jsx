@@ -188,6 +188,7 @@ export function Providers({ onUnauthorised, go }) {
     const ok = await attempt(
       () =>
         api.patch(`/admin/providers/${id}`, {
+          name: edit.name?.trim() || undefined,
           api_base: edit.api_base?.trim() || undefined,
           protocol: edit.protocol || undefined,
           auth_header: edit.auth_header?.trim() || undefined,
@@ -658,6 +659,21 @@ export function Providers({ onUnauthorised, go }) {
 
                   {editing === g.id ? (
                     <Stack gap={8}>
+                      <Field
+                        label="Name"
+                        hint={
+                          g.kind === "dynamic"
+                            ? `Named by the agent on ${g.node || "its host"}; it will be set back on the next heartbeat.`
+                            : undefined
+                        }
+                      >
+                        <input
+                          value={edit.name ?? ""}
+                          onChange={(e) =>
+                            setEdit({ ...edit, name: e.target.value })
+                          }
+                        />
+                      </Field>
                       <Field label="API base">
                         <input
                           value={edit.api_base ?? ""}
@@ -814,6 +830,7 @@ export function Providers({ onUnauthorised, go }) {
                         onClick={() => {
                           setEditing(g.id);
                           setEdit({
+                            name: g.host,
                             api_base: g.origin,
                             protocol: [...g.protocols][0] || "openai",
                             auth_header: g.auth_header || "authorization",
