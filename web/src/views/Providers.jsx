@@ -79,6 +79,9 @@ export function Providers({ onUnauthorised, go }) {
   const [key, setKey] = useState("");
   const [renaming, setRenaming] = useState(null);
   const [newName, setNewName] = useState("");
+  // The catalogue is eighty-odd entries: long enough that finding one by
+  // scrolling is slower than typing three letters of its name.
+  const [catFilter, setCatFilter] = useState("");
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
@@ -105,6 +108,14 @@ export function Providers({ onUnauthorised, go }) {
   // A catalogue entry offers what it declares — one value for all but Vertex,
   // which is why the control disappears rather than showing a dropdown with a
   // single option in it.
+  // The chosen entry stays visible even when the filter would drop it, so a
+  // narrow filter never makes the current selection look lost.
+  const catalogue = (data.catalogue || []).filter(
+    (c) =>
+      c.key === draft?.catalogue_key ||
+      c.display_name.toLowerCase().includes(catFilter.trim().toLowerCase()),
+  );
+
   const kinds =
     draft?.mode === "custom"
       ? ["static", "gcp_service_account"]
@@ -266,7 +277,10 @@ export function Providers({ onUnauthorised, go }) {
         <Spacer />
         <Button
           variant="primary"
-          onClick={() => setDraft(draft ? null : { ...BLANK })}
+          onClick={() => {
+            setCatFilter("");
+            setDraft(draft ? null : { ...BLANK });
+          }}
         >
           {draft ? "Cancel" : "Add provider"}
         </Button>
@@ -303,10 +317,21 @@ export function Providers({ onUnauthorised, go }) {
               {draft.mode === "cloud" && (
                 <Field
                   label="Provider"
-                  hint="Fills in the address and the header this vendor wants its key in. Not a limit — anything speaking the OpenAI API works whether or not it is listed."
+                  hint={
+                    catFilter.trim()
+                      ? `${catalogue.length} of ${(data.catalogue || []).length} match. Not a limit — anything speaking the OpenAI API works whether or not it is listed.`
+                      : "Fills in the address and the header this vendor wants its key in. Not a limit — anything speaking the OpenAI API works whether or not it is listed."
+                  }
                 >
+                  <input
+                    placeholder="filter…"
+                    value={catFilter}
+                    onChange={(e) => setCatFilter(e.target.value)}
+                    style={{ marginBottom: 6 }}
+                  />
                   <select
                     value={draft.catalogue_key}
+                    size={Math.min(Math.max(catalogue.length, 2), 8)}
                     onChange={(e) => {
                       const c = (data.catalogue || []).find(
                         (x) => x.key === e.target.value,
@@ -325,7 +350,7 @@ export function Providers({ onUnauthorised, go }) {
                     }}
                   >
                     <option value="">choose…</option>
-                    {(data.catalogue || []).map((c) => (
+                    {catalogue.map((c) => (
                       <option key={c.key} value={c.key}>
                         {c.display_name}
                       </option>

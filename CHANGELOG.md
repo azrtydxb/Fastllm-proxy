@@ -66,6 +66,17 @@ source for _why_ anything is the way it is; this file is the summary.
   the control plane's certificate comes from an internal CA and every
   registration failed on `CERTIFICATE_VERIFY_FAILED`. `agent/fastllm-node-agent.service`
   is the systemd unit those hosts now run.
+- **The catalogue covers every provider the docs name.** It held fourteen of
+  the eighty `docs/providers.md` lists — the ones somebody had typed an address
+  for — which made the Add provider dropdown read as the list of what FastLLM
+  supports rather than the list of what had been seeded (migration 0042, with
+  `tests/doc_claims.rs` now guarding the two together). Entries whose address is
+  a fixed verified one carry it; the rest carry a `<placeholder>` the API
+  refuses to store, which covers self-hosted engines, account-scoped endpoints,
+  and vendors whose address this project has not checked. Five base URLs come
+  from `go-ai-sdk`, which dials them.
+- **Both dropdowns can be filtered.** The provider catalogue and the served-model
+  list are eighty and four hundred entries respectively.
 - **The model dropdown can be filtered.** A provider can serve several hundred
   models — OpenRouter answers with upwards of four hundred — and scrolling to
   one whose name you already know is the slowest way to pick it. The count

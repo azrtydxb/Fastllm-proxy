@@ -148,3 +148,45 @@ fn documented_endpoints_are_the_ones_actually_proxied() {
         );
     }
 }
+
+/// Every provider `docs/providers.md` names has a catalogue entry.
+///
+/// The catalogue used to hold fourteen of the eighty the page names — the ones
+/// somebody had got round to typing an address for — which made the Add
+/// provider dropdown read as the list of what FastLLM supports rather than the
+/// list of what had been seeded. This is the guard that keeps the two together
+/// as the page grows: seeding is a migration, and a migration is easy to
+/// forget.
+///
+/// It counts, rather than matching name for name. The page writes a provider
+/// the way a human says it ("Moonshot / Kimi", "Weights & Biases") and the
+/// catalogue writes a stable key, so pinning the mapping here would make
+/// renaming a row in either place a test failure with nothing wrong.
+#[test]
+fn the_catalogue_covers_every_provider_the_page_names() {
+    let page = providers_page();
+    let (compatible, native) = count_providers(&page);
+    let named = compatible + native;
+
+    // Both seeding migrations, since 0042 adds to what 0039 started.
+    let mut seeded = 0usize;
+    for entry in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+        let path = entry.unwrap().path();
+        let sql = fs::read_to_string(&path).unwrap_or_default();
+        if !sql.contains("INSERT INTO provider_catalogue") {
+            continue;
+        }
+        // One row per line, each opening with the key in single quotes.
+        seeded += sql
+            .lines()
+            .filter(|l| l.trim_start().starts_with("('"))
+            .count();
+    }
+
+    assert!(
+        seeded >= named,
+        "docs/providers.md names {named} providers but only {seeded} are seeded into \
+         provider_catalogue; add the missing ones in a new migration so the Add provider \
+         dropdown offers what the page promises"
+    );
+}
