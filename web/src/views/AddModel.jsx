@@ -47,6 +47,10 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
   const [named, setNamed] = useState(false);
   const [description, setDescription] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
+  // A provider can serve several hundred models — OpenRouter answers with
+  // upwards of four hundred — and scrolling a dropdown that long to find one
+  // you already know the name of is the slowest way to do it.
+  const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -56,6 +60,7 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
     setProviderId(id);
     setUpstream("");
     setServed(null);
+    setFilter("");
     if (!id) return;
     setServed({ loading: true });
     try {
@@ -109,6 +114,14 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
   };
 
   const list = served?.models;
+  // The chosen model always stays in the list even when the filter would drop
+  // it: a select whose value is not among its options renders blank, which
+  // reads as "your choice was lost" rather than "your filter is narrow".
+  const shown = list?.filter(
+    (m) =>
+      m.upstream_model === upstream ||
+      m.upstream_model.toLowerCase().includes(filter.trim().toLowerCase()),
+  );
 
   return (
     <Modal label="Add a model" width={640} onClose={onClose}>
@@ -139,25 +152,43 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
               label="Model"
               hint={
                 list
-                  ? `${list.length} served by this provider, read from it just now.`
+                  ? filter.trim()
+                    ? `${shown.length} of ${list.length} served by this provider.`
+                    : `${list.length} served by this provider, read from it just now.`
                   : served?.loading
                     ? "Asking the provider what it serves…"
                     : undefined
               }
             >
               {list ? (
-                <select
-                  value={upstream}
-                  onChange={(e) => chooseModel(e.target.value)}
-                >
-                  <option value="">choose a model…</option>
-                  {list.map((m) => (
-                    <option key={m.upstream_model} value={m.upstream_model}>
-                      {m.upstream_model}
-                      {m.registered ? " · already registered" : ""}
-                    </option>
-                  ))}
-                </select>
+                <Stack gap={6}>
+                  <input
+                    placeholder="filter…"
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                  />
+                  <select
+                    value={upstream}
+                    onChange={(e) => chooseModel(e.target.value)}
+                    // Tall enough to see the effect of narrowing the filter
+                    // without opening the dropdown, which is the whole point
+                    // of having one.
+                    size={Math.min(Math.max(shown.length, 2), 8)}
+                  >
+                    <option value="">choose a model…</option>
+                    {shown.map((m) => (
+                      <option key={m.upstream_model} value={m.upstream_model}>
+                        {m.upstream_model}
+                        {m.registered ? " · already registered" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {shown.length === 0 && (
+                    <Muted>
+                      Nothing this provider serves matches {`"${filter}"`}.
+                    </Muted>
+                  )}
+                </Stack>
               ) : (
                 <input
                   placeholder="upstream model name"

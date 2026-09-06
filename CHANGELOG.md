@@ -66,6 +66,12 @@ source for _why_ anything is the way it is; this file is the summary.
   the control plane's certificate comes from an internal CA and every
   registration failed on `CERTIFICATE_VERIFY_FAILED`. `agent/fastllm-node-agent.service`
   is the systemd unit those hosts now run.
+- **The model dropdown can be filtered.** A provider can serve several hundred
+  models — OpenRouter answers with upwards of four hundred — and scrolling to
+  one whose name you already know is the slowest way to pick it. The count
+  reads `12 of 431` while a filter is on, and the chosen model stays in the
+  list even when the filter would drop it, because a select whose value is not
+  among its options renders blank and reads as "your choice was lost".
 - **Adding a model starts from the provider that serves it.** An **Add model**
   dialog on the Provider models screen: pick a provider, and it reads that
   endpoint's `GET /v1/models` and offers what it serves, filling the local name
