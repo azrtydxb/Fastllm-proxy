@@ -313,7 +313,7 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
         "/admin/provider-models",
         serde_json::json!({ "name": model_name }),
     );
-    let provider_model_id = model["id"].as_i64().unwrap();
+    let provider_model_id = model["id"].as_str().unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -328,7 +328,11 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
         "/admin/principals",
         serde_json::json!({ "name": principal_name }),
     );
-    let principal_id = principal["id"].as_i64().unwrap();
+    let principal_id = principal["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -376,7 +380,7 @@ async fn a_principal_with_a_tiny_budget_is_refused_after_exceeding_it() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|b| b["principal_id"].as_i64() == Some(principal_id));
+            .find(|b| b["principal_id"].as_str() == Some(principal_id.to_string().as_str()));
         if let Some(b) = mine {
             if b["tokens_used"].as_i64().unwrap_or(0) >= 5 {
                 break;

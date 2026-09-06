@@ -163,7 +163,7 @@ mod tests {
     fn a_lone_replica_gets_the_full_share() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        let share = state.report("replica-a", 1, 100, 5000, now);
+        let share = state.report("replica-a", crate::snapshot::tid(1), 100, 5000, now);
         assert_eq!(
             share,
             Share {
@@ -177,8 +177,8 @@ mod tests {
     fn two_equal_replicas_split_evenly() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        let a = state.report("replica-a", 1, 50, 500, now);
-        let b = state.report("replica-b", 1, 50, 500, now);
+        let a = state.report("replica-a", crate::snapshot::tid(1), 50, 500, now);
+        let b = state.report("replica-b", crate::snapshot::tid(1), 50, 500, now);
         assert_eq!(
             a,
             Share {
@@ -196,7 +196,7 @@ mod tests {
         );
         // Ask again for `a` now that `b` has also reported: the split is
         // now visible to both.
-        let a_again = state.report("replica-a", 1, 50, 500, now);
+        let a_again = state.report("replica-a", crate::snapshot::tid(1), 50, 500, now);
         assert_eq!(
             a_again,
             Share {
@@ -213,9 +213,9 @@ mod tests {
     fn a_replica_taking_more_traffic_gets_a_larger_share() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        state.report("busy", 1, 900, 9000, now);
-        let quiet = state.report("quiet", 1, 100, 1000, now);
-        let busy_again = state.report("busy", 1, 900, 9000, now);
+        state.report("busy", crate::snapshot::tid(1), 900, 9000, now);
+        let quiet = state.report("quiet", crate::snapshot::tid(1), 100, 1000, now);
+        let busy_again = state.report("busy", crate::snapshot::tid(1), 900, 9000, now);
 
         assert_eq!(
             quiet,
@@ -242,8 +242,8 @@ mod tests {
         // The two shares must not be conflated into one number.
         let state = ReconcileState::new();
         let now = Instant::now();
-        state.report("busy", 1, 90, 10, now);
-        let quiet = state.report("quiet", 1, 10, 90, now);
+        state.report("busy", crate::snapshot::tid(1), 90, 10, now);
+        let quiet = state.report("quiet", crate::snapshot::tid(1), 10, 90, now);
         assert_eq!(
             quiet,
             Share {
@@ -257,8 +257,8 @@ mod tests {
     fn a_stale_replica_is_excluded_and_stops_diluting_the_share() {
         let state = ReconcileState::new();
         let t0 = Instant::now();
-        state.report("gone", 1, 500, 500, t0);
-        let mine_while_fresh = state.report("me", 1, 500, 500, t0);
+        state.report("gone", crate::snapshot::tid(1), 500, 500, t0);
+        let mine_while_fresh = state.report("me", crate::snapshot::tid(1), 500, 500, t0);
         assert_eq!(
             mine_while_fresh,
             Share {
@@ -268,7 +268,7 @@ mod tests {
         );
 
         let later = t0 + STALE_AFTER + Duration::from_secs(1);
-        let mine_after_gone_expired = state.report("me", 1, 500, 500, later);
+        let mine_after_gone_expired = state.report("me", crate::snapshot::tid(1), 500, 500, later);
         assert_eq!(
             mine_after_gone_expired,
             Share {
@@ -283,7 +283,7 @@ mod tests {
     fn a_principal_with_no_reported_traffic_gets_the_full_share() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        let share = state.report("only-replica", 42, 0, 0, now);
+        let share = state.report("only-replica", crate::snapshot::tid(42), 0, 0, now);
         assert_eq!(
             share,
             Share {
@@ -297,10 +297,10 @@ mod tests {
     fn principals_are_aggregated_independently() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        state.report("a", 1, 100, 100, now);
-        state.report("a", 2, 900, 900, now);
-        let share_p1 = state.report("b", 1, 100, 100, now);
-        let share_p2 = state.report("b", 2, 100, 100, now);
+        state.report("a", crate::snapshot::tid(1), 100, 100, now);
+        state.report("a", crate::snapshot::tid(2), 900, 900, now);
+        let share_p1 = state.report("b", crate::snapshot::tid(1), 100, 100, now);
+        let share_p2 = state.report("b", crate::snapshot::tid(2), 100, 100, now);
         assert_eq!(
             share_p1,
             Share {
@@ -325,8 +325,8 @@ mod tests {
     fn an_idle_replica_does_not_collapse_to_a_zero_share() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        state.report("busy", 1, 100, 100, now);
-        let idle = state.report("idle", 1, 0, 0, now);
+        state.report("busy", crate::snapshot::tid(1), 100, 100, now);
+        let idle = state.report("idle", crate::snapshot::tid(1), 0, 0, now);
         assert!(
             idle.requests > 0.0,
             "an idle replica must still get some allowance"
@@ -348,7 +348,7 @@ mod tests {
     fn an_idle_replicas_floor_does_not_shrink_a_busy_peers_share() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        let busy = state.report("busy", 1, 100, 100, now);
+        let busy = state.report("busy", crate::snapshot::tid(1), 100, 100, now);
         assert_eq!(
             busy,
             Share {
@@ -357,8 +357,8 @@ mod tests {
             },
             "busy was the only report at the time it asked"
         );
-        state.report("idle", 1, 0, 0, now);
-        let busy_again = state.report("busy", 1, 100, 100, now);
+        state.report("idle", crate::snapshot::tid(1), 0, 0, now);
+        let busy_again = state.report("busy", crate::snapshot::tid(1), 100, 100, now);
         assert_eq!(
             busy_again,
             Share {
@@ -378,14 +378,14 @@ mod tests {
     fn steady_state_shares_never_sum_above_one() {
         let state = ReconcileState::new();
         let now = Instant::now();
-        state.report("a", 1, 500, 500, now);
-        state.report("b", 1, 300, 300, now);
-        state.report("c", 1, 200, 200, now);
+        state.report("a", crate::snapshot::tid(1), 500, 500, now);
+        state.report("b", crate::snapshot::tid(1), 300, 300, now);
+        state.report("c", crate::snapshot::tid(1), 200, 200, now);
         // Re-report each now that all three are visible, to read back the
         // final, fully-aggregated share for every one of them.
-        let a = state.report("a", 1, 500, 500, now);
-        let b = state.report("b", 1, 300, 300, now);
-        let c = state.report("c", 1, 200, 200, now);
+        let a = state.report("a", crate::snapshot::tid(1), 500, 500, now);
+        let b = state.report("b", crate::snapshot::tid(1), 300, 300, now);
+        let c = state.report("c", crate::snapshot::tid(1), 200, 200, now);
 
         let total_requests = a.requests + b.requests + c.requests;
         let total_tokens = a.tokens + b.tokens + c.tokens;

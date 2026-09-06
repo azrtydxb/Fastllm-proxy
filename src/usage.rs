@@ -324,7 +324,7 @@ async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageE
 mod tests {
     use super::*;
 
-    fn event(principal_id: u64) -> UsageEvent {
+    fn event(principal_id: crate::snapshot::PrincipalId) -> UsageEvent {
         UsageEvent {
             principal_id,
             model: "m".into(),
@@ -348,9 +348,9 @@ mod tests {
     #[test]
     fn recording_past_capacity_drops_and_counts_rather_than_blocking() {
         let (reporter, mut rx) = UsageReporter::with_capacity_for_test(2);
-        reporter.record(event(1));
-        reporter.record(event(2));
-        reporter.record(event(3));
+        reporter.record(event(crate::snapshot::tid(1)));
+        reporter.record(event(crate::snapshot::tid(2)));
+        reporter.record(event(crate::snapshot::tid(3)));
 
         assert_eq!(
             reporter.dropped(),
@@ -368,10 +368,10 @@ mod tests {
     #[test]
     fn the_drop_count_is_observable_and_keeps_counting() {
         let (reporter, _rx) = UsageReporter::with_capacity_for_test(1);
-        reporter.record(event(1));
+        reporter.record(event(crate::snapshot::tid(1)));
         assert_eq!(reporter.dropped(), 0);
-        reporter.record(event(2));
-        reporter.record(event(3));
+        reporter.record(event(crate::snapshot::tid(2)));
+        reporter.record(event(crate::snapshot::tid(3)));
         assert_eq!(reporter.dropped(), 2);
     }
 
@@ -382,8 +382,8 @@ mod tests {
     #[test]
     fn a_disabled_reporter_drops_everything_and_counts_it() {
         let reporter = UsageReporter::disabled();
-        reporter.record(event(1));
-        reporter.record(event(2));
+        reporter.record(event(crate::snapshot::tid(1)));
+        reporter.record(event(crate::snapshot::tid(2)));
         assert_eq!(reporter.dropped(), 2);
     }
 }

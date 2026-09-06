@@ -80,13 +80,18 @@ fn cleanup_for(suffix: &str) -> TestCleanup {
 /// point of the RBAC model — and no admin route grants a single model this
 /// precisely, so this goes to Postgres directly, the same way
 /// `tests/frontend_models.rs` does and for the same reason.
-async fn grant_one_model(pool: &sqlx::PgPool, principal_id: i64, model: &str, role_name: &str) {
+async fn grant_one_model(
+    pool: &sqlx::PgPool,
+    principal_id: uuid::Uuid,
+    model: &str,
+    role_name: &str,
+) {
     sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT (name) DO NOTHING")
         .bind(role_name)
         .execute(pool)
         .await
         .unwrap();
-    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(role_name)
         .fetch_one(pool)
         .await
@@ -100,7 +105,7 @@ async fn grant_one_model(pool: &sqlx::PgPool, principal_id: i64, model: &str, ro
     .execute(pool)
     .await
     .unwrap();
-    let permission_id: i64 = sqlx::query_scalar(
+    let permission_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT id FROM permissions WHERE verb = 'model:invoke' AND resource = $1",
     )
     .bind(&resource)
@@ -338,7 +343,11 @@ async fn provision(
         "/admin/provider-models",
         serde_json::json!({"name": model, "description": "native protocol e2e"}),
     );
-    let provider_model_id = created["id"].as_i64().expect("model id");
+    let provider_model_id = created["id"]
+        .as_str()
+        .expect("model id")
+        .parse::<uuid::Uuid>()
+        .expect("model id");
 
     let mut backend = serde_json::json!({
         "api_base": api_base,
@@ -367,7 +376,11 @@ async fn provision(
         // why nothing ever noticed.
         serde_json::json!({"name": principal}),
     );
-    let principal_id = p["id"].as_i64().expect("principal id");
+    let principal_id = p["id"]
+        .as_str()
+        .expect("principal id")
+        .parse::<uuid::Uuid>()
+        .expect("principal id");
     grant_one_model(pool, principal_id, &model, &format!("np-role-{suffix}")).await;
     let key_name = format!("np-key-{suffix}");
     let k = admin_post(
@@ -1068,7 +1081,11 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
         "/admin/provider-models",
         serde_json::json!({"name": model, "description": "", "cache_ttl_seconds": 60}),
     );
-    let provider_model_id = created["id"].as_i64().expect("model id");
+    let provider_model_id = created["id"]
+        .as_str()
+        .expect("model id")
+        .parse::<uuid::Uuid>()
+        .expect("model id");
     // Localises a failure: a cache miss can mean the TTL never reached the
     // database, never reached the snapshot, or never reached the lookup.
     let stored: Option<i32> =
@@ -1090,7 +1107,7 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
     );
 
     let principal = format!("cache-sa-{suffix}");
-    let principal_id: i64 = sqlx::query_scalar(
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
     )
     .bind(&principal)

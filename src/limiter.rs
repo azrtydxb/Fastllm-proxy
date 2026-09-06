@@ -567,7 +567,7 @@ mod tests {
         for _ in 0..1000 {
             assert!(
                 matches!(
-                    limiter.check(1, &Limits::default(), 1, now),
+                    limiter.check(crate::snapshot::tid(1), &Limits::default(), 1, now),
                     Decision::Admitted(_)
                 ),
                 "an unconfigured principal must never be denied"
@@ -575,7 +575,11 @@ mod tests {
         }
         // No bucket was ever allocated for it: unlimited must not cost a map
         // entry every process keeps forever.
-        assert!(limiter.entries.read().get(&1).is_none());
+        assert!(limiter
+            .entries
+            .read()
+            .get(&crate::snapshot::tid(1))
+            .is_none());
     }
 
     #[test]
@@ -585,11 +589,14 @@ mod tests {
         let now = Instant::now();
         for i in 0..3 {
             assert!(
-                matches!(limiter.check(1, &lim, 1, now), Decision::Admitted(_)),
+                matches!(
+                    limiter.check(crate::snapshot::tid(1), &lim, 1, now),
+                    Decision::Admitted(_)
+                ),
                 "request {i} of 3 should be admitted"
             );
         }
-        match limiter.check(1, &lim, 1, now) {
+        match limiter.check(crate::snapshot::tid(1), &lim, 1, now) {
             Decision::Exceeded { retry_after } => assert!(retry_after > Duration::ZERO),
             Decision::Admitted(_) => panic!("the 4th request must be rejected"),
         }
@@ -605,11 +612,11 @@ mod tests {
         let now = Instant::now();
         for _ in 0..60 {
             assert!(matches!(
-                limiter.check(1, &lim, 1, now),
+                limiter.check(crate::snapshot::tid(1), &lim, 1, now),
                 Decision::Admitted(_)
             ));
         }
-        match limiter.check(1, &lim, 1, now) {
+        match limiter.check(crate::snapshot::tid(1), &lim, 1, now) {
             Decision::Exceeded { retry_after } => {
                 assert!(
                     retry_after >= Duration::from_millis(900)
@@ -628,12 +635,12 @@ mod tests {
         let now = Instant::now();
         for _ in 0..60 {
             assert!(matches!(
-                limiter.check(1, &lim, 1, now),
+                limiter.check(crate::snapshot::tid(1), &lim, 1, now),
                 Decision::Admitted(_)
             ));
         }
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Exceeded { .. }
         ));
 
@@ -641,7 +648,10 @@ mod tests {
         // than sleeping -- deterministic and instant.
         let later = now + Duration::from_secs(5);
         assert!(
-            matches!(limiter.check(1, &lim, 1, later), Decision::Admitted(_)),
+            matches!(
+                limiter.check(crate::snapshot::tid(1), &lim, 1, later),
+                Decision::Admitted(_)
+            ),
             "5 seconds at 1/sec should have refilled at least one slot"
         );
     }
@@ -654,11 +664,17 @@ mod tests {
         let now = Instant::now();
 
         assert!(
-            matches!(limiter.check(1, &lim, 5, now), Decision::Admitted(_)),
+            matches!(
+                limiter.check(crate::snapshot::tid(1), &lim, 5, now),
+                Decision::Admitted(_)
+            ),
             "exactly the token budget in one request"
         );
         assert!(
-            matches!(limiter.check(1, &lim, 1, now), Decision::Exceeded { .. }),
+            matches!(
+                limiter.check(crate::snapshot::tid(1), &lim, 1, now),
+                Decision::Exceeded { .. }
+            ),
             "tokens must be exhausted even though requests/min has huge headroom left"
         );
 
@@ -666,11 +682,14 @@ mod tests {
         let limiter2 = Limiter::new();
         let lim2 = limits(Some(1), Some(1_000_000));
         assert!(matches!(
-            limiter2.check(2, &lim2, 1, now),
+            limiter2.check(crate::snapshot::tid(2), &lim2, 1, now),
             Decision::Admitted(_)
         ));
         assert!(
-            matches!(limiter2.check(2, &lim2, 1, now), Decision::Exceeded { .. }),
+            matches!(
+                limiter2.check(crate::snapshot::tid(2), &lim2, 1, now),
+                Decision::Exceeded { .. }
+            ),
             "requests/min must reject even though tokens/min has huge headroom left"
         );
     }
@@ -685,18 +704,18 @@ mod tests {
         let lim = limits(Some(2), None);
         let now = Instant::now();
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
         // Same limit value, but a distinct `Limits` instance -- simulating a
         // snapshot rebuild that reproduced the identical configured limit.
         let lim_after_reload = limits(Some(2), None);
         assert!(matches!(
-            limiter.check(1, &lim_after_reload, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim_after_reload, 1, now),
             Decision::Exceeded { .. }
         ));
     }
@@ -708,17 +727,17 @@ mod tests {
         let now = Instant::now();
         // Touch the principal once so a bucket exists to reconcile.
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
-        assert_eq!(limiter.share_of(1), Some((1.0, 1.0)));
+        assert_eq!(limiter.share_of(crate::snapshot::tid(1)), Some((1.0, 1.0)));
 
         limiter.apply_allowances(&[Allowance {
-            principal_id: 1,
+            principal_id: crate::snapshot::tid(1),
             requests_share: 0.25,
             tokens_share: 1.0,
         }]);
-        assert_eq!(limiter.share_of(1), Some((0.25, 1.0)));
+        assert_eq!(limiter.share_of(crate::snapshot::tid(1)), Some((0.25, 1.0)));
 
         // The reduced capacity (100 * 0.25 = 25) is only applied by the next
         // `take` -- the one call above happened before `apply_allowances`
@@ -727,12 +746,12 @@ mod tests {
         // narrower capacity.
         for _ in 0..25 {
             assert!(matches!(
-                limiter.check(1, &lim, 1, now),
+                limiter.check(crate::snapshot::tid(1), &lim, 1, now),
                 Decision::Admitted(_)
             ));
         }
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Exceeded { .. }
         ));
     }
@@ -742,18 +761,24 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(1000), Some(1000));
         let now = Instant::now();
-        limiter.check(1, &lim, 7, now);
-        limiter.check(1, &lim, 3, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 7, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 3, now);
 
         let drained = limiter.drain_counts();
-        let mine = drained.iter().find(|c| c.principal_id == 1).unwrap();
+        let mine = drained
+            .iter()
+            .find(|c| c.principal_id == crate::snapshot::tid(1))
+            .unwrap();
         assert_eq!(mine.requests, 2);
         assert_eq!(mine.tokens, 10);
 
         // A second drain with no traffic in between reports zero, not the
         // same counts again.
         let drained_again = limiter.drain_counts();
-        let mine_again = drained_again.iter().find(|c| c.principal_id == 1).unwrap();
+        let mine_again = drained_again
+            .iter()
+            .find(|c| c.principal_id == crate::snapshot::tid(1))
+            .unwrap();
         assert_eq!(mine_again.requests, 0);
         assert_eq!(mine_again.tokens, 0);
     }
@@ -772,14 +797,14 @@ mod tests {
         let now = Instant::now();
         // Touch the principal once so a bucket exists to apply a share to.
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
 
         // A small but nonzero floor share, as the idle-replica fix hands
         // out -- e.g. 1/4 live replicas.
         limiter.apply_allowances(&[Allowance {
-            principal_id: 1,
+            principal_id: crate::snapshot::tid(1),
             requests_share: 0.25,
             tokens_share: 0.25,
         }]);
@@ -788,7 +813,10 @@ mod tests {
         // admitted, not zero.
         for i in 0..25 {
             assert!(
-                matches!(limiter.check(1, &lim, 1, now), Decision::Admitted(_)),
+                matches!(
+                    limiter.check(crate::snapshot::tid(1), &lim, 1, now),
+                    Decision::Admitted(_)
+                ),
                 "request {i} of 25 should be admitted under a nonzero floor share"
             );
         }
@@ -807,18 +835,21 @@ mod tests {
         let lim = limits(Some(100), None);
         let now = Instant::now();
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
 
         limiter.apply_allowances(&[Allowance {
-            principal_id: 1,
+            principal_id: crate::snapshot::tid(1),
             requests_share: 0.0,
             tokens_share: 0.0,
         }]);
 
         assert!(
-            matches!(limiter.check(1, &lim, 1, now), Decision::Exceeded { .. }),
+            matches!(
+                limiter.check(crate::snapshot::tid(1), &lim, 1, now),
+                Decision::Exceeded { .. }
+            ),
             "a literal-zero share denies every request, which is exactly why \
              control::reconcile::share_of must never produce one while total > 0"
         );
@@ -833,15 +864,18 @@ mod tests {
         let lim = limits(Some(1), None);
         let now = Instant::now();
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Admitted(_)
         ));
         assert!(matches!(
-            limiter.check(1, &lim, 1, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now),
             Decision::Exceeded { .. }
         ));
         let drained = limiter.drain_counts();
-        let mine = drained.iter().find(|c| c.principal_id == 1).unwrap();
+        let mine = drained
+            .iter()
+            .find(|c| c.principal_id == crate::snapshot::tid(1))
+            .unwrap();
         assert_eq!(
             mine.requests, 2,
             "both the admitted and the rejected attempt count as demand"
@@ -861,15 +895,18 @@ mod tests {
         let lim = limits(Some(1), Some(1_000_000));
         let now = Instant::now();
         assert!(matches!(
-            limiter.check(1, &lim, 500, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 500, now),
             Decision::Admitted(_)
         ));
         assert!(matches!(
-            limiter.check(1, &lim, 500, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 500, now),
             Decision::Exceeded { .. }
         ));
         let drained = limiter.drain_counts();
-        let mine = drained.iter().find(|c| c.principal_id == 1).unwrap();
+        let mine = drained
+            .iter()
+            .find(|c| c.principal_id == crate::snapshot::tid(1))
+            .unwrap();
         assert_eq!(mine.requests, 2, "both attempts count as request demand");
         assert_eq!(
             mine.tokens, 1000,
@@ -892,13 +929,13 @@ mod tests {
         let now = Instant::now();
         // One admitted call spends all 10 tokens and 1 of 1000 requests.
         assert!(matches!(
-            limiter.check(1, &lim, 10, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 10, now),
             Decision::Admitted(_)
         ));
         // Tokens alone rejects this one -- requests still has 999 of 1000
         // left, vast headroom.
         assert!(matches!(
-            limiter.check(1, &lim, 10, now),
+            limiter.check(crate::snapshot::tid(1), &lim, 10, now),
             Decision::Exceeded { .. }
         ));
 
@@ -911,7 +948,7 @@ mod tests {
         for i in 0..999 {
             assert!(
                 matches!(
-                    limiter.check(1, &requests_only, 1, now),
+                    limiter.check(crate::snapshot::tid(1), &requests_only, 1, now),
                     Decision::Admitted(_)
                 ),
                 "request {i} of the remaining 999 should be admitted"
@@ -919,7 +956,7 @@ mod tests {
         }
         assert!(
             matches!(
-                limiter.check(1, &requests_only, 1, now),
+                limiter.check(crate::snapshot::tid(1), &requests_only, 1, now),
                 Decision::Exceeded { .. }
             ),
             "the 1000th total request must now be rejected"
@@ -931,7 +968,7 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(10), None);
         let now = Instant::now();
-        limiter.check(1, &lim, 1, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 1, now);
         assert_eq!(limiter.entry_count(), 1);
 
         let much_later = now + Duration::from_secs(3600);
@@ -948,7 +985,7 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(10), None);
         let now = Instant::now();
-        limiter.check(1, &lim, 1, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 1, now);
 
         let soon_after = now + Duration::from_secs(5);
         limiter.evict_idle(soon_after, Duration::from_secs(60));
@@ -968,11 +1005,11 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(10), None);
         let mut now = Instant::now();
-        limiter.check(1, &lim, 1, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 1, now);
 
         for _ in 0..5 {
             now += Duration::from_secs(30);
-            limiter.check(1, &lim, 1, now);
+            limiter.check(crate::snapshot::tid(1), &lim, 1, now);
             limiter.evict_idle(now, Duration::from_secs(60));
             assert_eq!(
                 limiter.entry_count(),
@@ -987,20 +1024,20 @@ mod tests {
         let limiter = Limiter::new();
         let lim = limits(Some(10), None);
         let now = Instant::now();
-        limiter.check(1, &lim, 1, now);
+        limiter.check(crate::snapshot::tid(1), &lim, 1, now);
         let later = now + Duration::from_secs(120);
-        limiter.check(2, &lim, 1, later);
+        limiter.check(crate::snapshot::tid(2), &lim, 1, later);
 
         // Principal 1 has been idle for 120s at `later`; principal 2 was
         // just touched. A 60s cutoff must reclaim exactly principal 1.
         limiter.evict_idle(later, Duration::from_secs(60));
         assert_eq!(limiter.entry_count(), 1);
         assert!(
-            limiter.share_of(2).is_some(),
+            limiter.share_of(crate::snapshot::tid(2)).is_some(),
             "the recently-touched principal must survive"
         );
         assert!(
-            limiter.share_of(1).is_none(),
+            limiter.share_of(crate::snapshot::tid(1)).is_none(),
             "the long-idle principal must be gone"
         );
     }

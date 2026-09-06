@@ -266,7 +266,7 @@ mod tests {
 
     fn principal(mcp: &[&str], all: bool) -> Principal {
         Principal {
-            id: 1,
+            id: crate::snapshot::tid(1),
             name: "p".into(),
             allowed_models: HashSet::new(),
             allow_all: false,

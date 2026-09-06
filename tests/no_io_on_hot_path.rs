@@ -83,7 +83,7 @@ const _MAY_INVOKE_IS_SYNC_AND_TAKES_NO_HANDLE: fn(&Principal, &str) -> bool = Pr
 /// database handle, this coercion fails to compile.
 const _LIMITER_CHECK_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
     &Limiter,
-    u64,
+    fastllm_proxy::snapshot::PrincipalId,
     &Limits,
     u32,
     Instant,
@@ -278,16 +278,16 @@ fn authorisation_reads_only_the_snapshot() {
     keys.insert(
         hash_key("sk-x"),
         KeyEntry {
-            principal: 1,
+            principal: fastllm_proxy::snapshot::tid(1),
             expires_at: None,
             disabled: false,
         },
     );
     let mut principals = HashMap::new();
     principals.insert(
-        1,
+        fastllm_proxy::snapshot::tid(1),
         Principal {
-            id: 1,
+            id: fastllm_proxy::snapshot::tid(1),
             name: "p".into(),
             allowed_models: ["m".to_string()].into_iter().collect(),
             allow_all: false,

@@ -51,7 +51,7 @@ pub const TEST_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ADQjtj0AshO
 /// predates — grants its own role directly instead of using this one; see
 /// `admin_auth.rs`'s permission-mapping tests.
 pub async fn bootstrap_login_user(pool: &sqlx::PgPool, name: &str) {
-    let principal_id: i64 = sqlx::query_scalar(
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
     )
     .bind(name)

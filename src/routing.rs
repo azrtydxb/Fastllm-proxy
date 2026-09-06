@@ -975,7 +975,7 @@ mod tests {
                 RoutingRule {
                     conditions: RuleConditions {
                         caller: CallerMatch {
-                            principals: [999].into_iter().collect(),
+                            principals: [crate::snapshot::tid(999)].into_iter().collect(),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -991,7 +991,7 @@ mod tests {
             policy: None,
         };
         let reg = registry_with(&["only-for-999", "catch-all"]);
-        let caller = principal(1, &[]);
+        let caller = principal(crate::snapshot::tid(1), &[]);
         assert_eq!(
             vm.resolve(
                 &facts_with(Some(&caller), 0, None, &HeaderMap::new()),
@@ -1008,11 +1008,11 @@ mod tests {
     #[test]
     fn caller_match_by_principal_id() {
         let m = CallerMatch {
-            principals: [1].into_iter().collect(),
+            principals: [crate::snapshot::tid(1)].into_iter().collect(),
             roles: Set::new(),
         };
-        assert!(m.matches(Some(&principal(1, &[]))));
-        assert!(!m.matches(Some(&principal(2, &[]))));
+        assert!(m.matches(Some(&principal(crate::snapshot::tid(1), &[]))));
+        assert!(!m.matches(Some(&principal(crate::snapshot::tid(2), &[]))));
         assert!(
             !m.matches(None),
             "an unidentified caller cannot match a named one"
@@ -1025,14 +1025,17 @@ mod tests {
             principals: Set::new(),
             roles: ["beta".to_string()].into_iter().collect(),
         };
-        assert!(m.matches(Some(&principal(1, &["beta", "other"]))));
-        assert!(!m.matches(Some(&principal(1, &["other"]))));
+        assert!(m.matches(Some(&principal(
+            crate::snapshot::tid(1),
+            &["beta", "other"]
+        ))));
+        assert!(!m.matches(Some(&principal(crate::snapshot::tid(1), &["other"]))));
     }
 
     #[test]
     fn an_empty_caller_match_matches_anyone_including_unauthenticated() {
         let m = CallerMatch::default();
-        assert!(m.matches(Some(&principal(1, &[]))));
+        assert!(m.matches(Some(&principal(crate::snapshot::tid(1), &[]))));
         assert!(m.matches(None));
     }
 
@@ -1077,8 +1080,8 @@ mod tests {
             },
             targets: vec![target("m", 1)],
         };
-        let canary = principal(1, &["canary"]);
-        let other = principal(2, &["other"]);
+        let canary = principal(crate::snapshot::tid(1), &["canary"]);
+        let other = principal(crate::snapshot::tid(2), &["other"]);
         assert!(
             rule.matches(
                 &facts_with(Some(&canary), 500, None, &HeaderMap::new()),
@@ -1331,7 +1334,7 @@ mod tests {
     // --- budget conditions ----------------------------------------------
 
     fn principal_with_budget(used: u64, total: u64) -> Principal {
-        let mut p = principal(1, &[]);
+        let mut p = principal(crate::snapshot::tid(1), &[]);
         p.budget = Some(crate::snapshot::Budget {
             tokens_total: Some(total),
             cost_total_micros: None,
@@ -1368,7 +1371,7 @@ mod tests {
     fn a_principal_without_a_budget_fails_a_budget_condition_rather_than_reading_as_zero() {
         let reg = registry_with(&["m"]);
         let headers = HeaderMap::new();
-        let unlimited = principal(1, &[]);
+        let unlimited = principal(crate::snapshot::tid(1), &[]);
         let conserve = rule_with(
             RuleConditions {
                 budget: BudgetMatch {
@@ -1686,7 +1689,7 @@ mod tests {
             rules: vec![RoutingRule {
                 conditions: RuleConditions {
                     caller: CallerMatch {
-                        principals: [999].into_iter().collect(),
+                        principals: [crate::snapshot::tid(999)].into_iter().collect(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1699,7 +1702,12 @@ mod tests {
         let reg = registry_with(&["only-for-999", "default-model"]);
         assert_eq!(
             vm.resolve(
-                &facts_with(Some(&principal(1, &[])), 0, None, &HeaderMap::new()),
+                &facts_with(
+                    Some(&principal(crate::snapshot::tid(1), &[])),
+                    0,
+                    None,
+                    &HeaderMap::new()
+                ),
                 0,
                 &reg
             )

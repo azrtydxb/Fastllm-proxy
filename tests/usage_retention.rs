@@ -39,8 +39,8 @@ fn unique_name(tag: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn insert_event(
     pool: &sqlx::PgPool,
-    principal_id: i64,
-    provider_model_id: i64,
+    principal_id: uuid::Uuid,
+    provider_model_id: uuid::Uuid,
     days_ago: i64,
     status: i16,
     refusal: Option<&str>,
@@ -84,13 +84,13 @@ async fn rolling_up_preserves_every_count_and_can_run_twice() {
         .track_prefix("provider_models", "name", "retention-model")
         .track_prefix("principals", "name", "retention-principal");
 
-    let provider_model_id: i64 =
+    let provider_model_id: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO provider_models (name) VALUES ($1) RETURNING id")
             .bind(&model)
             .fetch_one(&pool)
             .await
             .unwrap();
-    let principal_id: i64 = sqlx::query_scalar(
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (name, kind) VALUES ($1, 'service_account') RETURNING id",
     )
     .bind(&principal)
@@ -277,14 +277,14 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
         .track_prefix("provider_models", "name", "deleted-model")
         .track_prefix("principals", "name", "deleted-model-principal");
 
-    let provider: i64 = sqlx::query_scalar(
+    let provider: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO providers (name, api_base) VALUES ($1, 'http://gone:8000/v1') RETURNING id",
     )
     .bind(&model)
     .fetch_one(&pool)
     .await
     .unwrap();
-    let provider_model_id: i64 = sqlx::query_scalar(
+    let provider_model_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO provider_models (name, provider_id, upstream_model) \
          VALUES ($1, $2, 'gone') RETURNING id",
     )
@@ -293,7 +293,7 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let principal_id: i64 = sqlx::query_scalar(
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (name, kind) VALUES ($1, 'service_account') RETURNING id",
     )
     .bind(&principal)

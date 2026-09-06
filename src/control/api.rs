@@ -4392,7 +4392,7 @@ async fn timeseries_rows(
              FROM src u
              LEFT JOIN provider_models m ON m.id = u.provider_model_id
              WHERE ($4::text IS NULL OR m.name = $4)
-               AND ($5::bigint IS NULL OR u.principal_id = $5)
+               AND ($5::uuid IS NULL OR u.principal_id = $5)
              GROUP BY 1
          ),
          rej AS (
@@ -4404,7 +4404,7 @@ async fn timeseries_rows(
                -- no model and no principal, so a filtered view that included
                -- them would attribute anonymous failures to whichever thing
                -- the operator happened to be looking at.
-               AND $4::text IS NULL AND $5::bigint IS NULL
+               AND $4::text IS NULL AND $5::uuid IS NULL
              GROUP BY 1
          )
          SELECT grid.at                                AS at,
@@ -4821,7 +4821,7 @@ async fn list_audit(
         "SELECT id, actor_id, actor_name, action, target, detail, at
          FROM audit_events
          WHERE ($1::bigint IS NULL OR id < $1)
-           AND ($2::bigint IS NULL OR actor_id = $2)
+           AND ($2::uuid IS NULL OR actor_id = $2)
            AND ($3::text   IS NULL OR target ILIKE '%' || $3 || '%')
            AND ($4::timestamptz IS NULL OR at >= $4)
          ORDER BY id DESC
@@ -5424,7 +5424,13 @@ async fn roll_up_and_prune_usage(pool: &PgPool) -> Result<(u64, u64), sqlx::Erro
              refused_authorisation, refused_rate_limit, refused_budget, refused_no_backend,
              prompt_tokens, completion_tokens, cost_micros, unpriced_requests,
              duration_ms_sum, duration_ms_count)
-         SELECT date_trunc('hour', at), min(provider_model_id), coalesce(model_name, '(unknown)'),
+         -- `min(id)` picked an arbitrary-but-deterministic member of the
+         -- group while ids were numbers; a uuid has no ordering worth
+         -- aggregating and Postgres has no min(uuid) at all. `mode()` says
+         -- the same thing honestly: the id most of this hour's rows carried.
+         SELECT date_trunc('hour', at),
+                mode() WITHIN GROUP (ORDER BY provider_model_id),
+                coalesce(model_name, '(unknown)'),
                 principal_id,
                 count(*),
                 count(*) FILTER (WHERE refusal IS NULL AND status >= 400),
@@ -7182,7 +7188,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
 
-        let bogus_principal_id = -1;
+        let bogus_principal_id = Uuid::nil();
         let err = create_key(&pool, "test-key", bogus_principal_id, None)
             .await
             .expect_err("a principal_id that does not exist must fail");
@@ -7360,7 +7366,7 @@ mod tests {
         assert_eq!(created.0["kind"], "cloud");
         assert_eq!(created.0["has_upstream_api_key"], true);
 
-        let id = created.0["id"].as_i64().unwrap();
+        let id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
         let stored: Vec<u8> =
             sqlx::query_scalar("SELECT upstream_api_key FROM providers WHERE id = $1")
                 .bind(id)
@@ -7461,7 +7467,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = created.0["id"].as_i64().unwrap();
+        let id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
         assert_eq!(created.0["kind"], "static");
 
         let patch = |kind: &str| PatchProvider {
@@ -7641,7 +7647,7 @@ mod tests {
         delete_provider(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(other.0["id"].as_i64().unwrap()),
+            Path(other.0["id"].as_str().unwrap().parse::<Uuid>().unwrap()),
         )
         .await
         .unwrap();
@@ -7682,7 +7688,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let model_id = model.0["id"].as_i64().unwrap();
+        let model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         // A frontend model pointing at it, and a role granted the old name.
         let fm_name = unique_name("rename-frontend");
@@ -7697,7 +7703,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let fm_id = fm.0["id"].as_i64().unwrap();
+        let fm_id = fm.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
         let _ = post_default_target(
             State(ctx.clone()),
             RequireConfigWrite,
@@ -7765,7 +7771,7 @@ mod tests {
         assert!(granted, "the rename revoked the grant naming the old name");
 
         // And the target followed, by id rather than by the string.
-        let (target_name, target_id): (String, Option<i64>) = sqlx::query_as(
+        let (target_name, target_id): (String, Option<Uuid>) = sqlx::query_as(
             "SELECT target_model_name, provider_model_id FROM frontend_model_defaults \
               WHERE frontend_model_id = $1",
         )
@@ -7882,7 +7888,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let provider_id = provider.0["id"].as_i64().unwrap();
+        let provider_id = provider.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("byid-model");
         let (_, model) = post_model(
@@ -7899,7 +7905,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let model_id = model.0["id"].as_i64().unwrap();
+        let model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         // Endpoint fields alongside a provider_id are a contradiction.
         // Ignoring them would leave the caller believing they had set a
@@ -7943,7 +7949,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(attached.0["provider_id"], provider_id);
+        assert_eq!(attached.0["provider_id"], provider_id.to_string());
         assert_eq!(attached.0["api_base"], provider.0["api_base"]);
         assert_eq!(attached.0["upstream_model"], "llama-3.1-8b");
 
@@ -8004,7 +8010,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         grant_role(
             State(ctx.clone()),
@@ -8031,7 +8037,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let provider_model_id = model.0["id"].as_i64().unwrap();
+        let provider_model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let upstream_credential = "sk-upstream-must-never-come-back";
         let (_, backend) = post_backend(
@@ -8048,8 +8054,12 @@ mod tests {
         // `id` is the model's — the model is its own link to a provider since
         // migration 0029 — while the credential lives on the provider, so the
         // two ids below are deliberately different.
-        let backend_id = backend.0["id"].as_i64().unwrap();
-        let provider_id = backend.0["provider_id"].as_i64().unwrap();
+        let backend_id = backend.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+        let provider_id = backend.0["provider_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
 
         // The snapshot the routes published, not one this test built.
         let snap = cache.current_snapshot();
@@ -8148,7 +8158,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let key_name = unique_name("listed-key");
         let (plaintext, id) = create_key(&ctx.pool, &key_name, principal_id, None)
@@ -8183,28 +8193,31 @@ mod tests {
         let (ctx, _cache) = test_ctx().await;
 
         for (status, body) in [
-            delete_model(State(ctx.clone()), RequireConfigWrite, Path(-1))
+            delete_model(State(ctx.clone()), RequireConfigWrite, Path(Uuid::nil()))
                 .await
                 .unwrap_err(),
-            delete_backend(State(ctx.clone()), RequireConfigWrite, Path(-1))
+            delete_backend(State(ctx.clone()), RequireConfigWrite, Path(Uuid::nil()))
                 .await
                 .unwrap_err(),
-            delete_principal(State(ctx.clone()), RequireConfigWrite, Path(-1))
+            delete_principal(State(ctx.clone()), RequireConfigWrite, Path(Uuid::nil()))
                 .await
                 .unwrap_err(),
-            revoke_key(State(ctx.clone()), RequireKeyRevoke, Path(-1))
+            revoke_key(State(ctx.clone()), RequireKeyRevoke, Path(Uuid::nil()))
                 .await
                 .unwrap_err(),
         ] {
             assert_eq!(status, StatusCode::NOT_FOUND);
             let message = body.0["error"].as_str().unwrap();
-            assert!(message.contains("-1"), "must name the id: {message}");
+            assert!(
+                message.contains(&Uuid::nil().to_string()),
+                "must name the id: {message}"
+            );
         }
 
         let (status, body) = grant_role(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(1),
+            Path(crate::snapshot::tid(1)),
             Json(RoleGrant {
                 role: "not-a-role".into(),
             }),
@@ -8221,13 +8234,16 @@ mod tests {
         let (status, body) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(-1),
+            Path(Uuid::nil()),
             Json(NewBackend::openai("http://x:8000/v1", None)),
         )
         .await
         .unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0["error"].as_str().unwrap().contains("-1"));
+        assert!(body.0["error"]
+            .as_str()
+            .unwrap()
+            .contains(&Uuid::nil().to_string()));
 
         let (status, _) = post_principal(
             State(ctx.clone()),
@@ -8291,7 +8307,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let primary_id = primary.0["id"].as_i64().unwrap();
+        let primary_id = primary.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let (_, secondary) = post_model(
             State(ctx.clone()),
@@ -8307,7 +8323,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let secondary_id = secondary.0["id"].as_i64().unwrap();
+        let secondary_id = secondary.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let vm_name = unique_name("vm-route-canary");
         let (status, vm) = post_frontend_model(
@@ -8322,7 +8338,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        let vm_id = vm.0["id"].as_i64().unwrap();
+        let vm_id = vm.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let (_, rule) = post_rule(
             State(ctx.clone()),
@@ -8338,7 +8354,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rule_id = rule.0["id"].as_i64().unwrap();
+        let rule_id = rule.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let _ = post_rule_target(
             State(ctx.clone()),
@@ -8654,7 +8670,7 @@ mod tests {
 
     fn usage_event(principal_id: Uuid, model: &str) -> UsageEvent {
         UsageEvent {
-            principal_id: principal_id as u64,
+            principal_id,
             model: model.to_string(),
             prompt_tokens: 10,
             completion_tokens: 5,
@@ -8697,7 +8713,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("usage-basic-model");
         let _ = post_model(
@@ -8799,7 +8815,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("usage-latency-model");
         let _ = post_model(
@@ -8880,7 +8896,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("usage-model-survives");
         let _ = post_model(
@@ -8900,7 +8916,9 @@ mod tests {
 
         // Comfortably outside any id a bootstrap-seeded test database will
         // ever assign.
-        let unknown_principal_id = -424_242;
+        // A principal that exists nowhere. The nil uuid is what -424_242 used
+        // to be: `gen_random_uuid()` never produces it.
+        let unknown_principal_id = Uuid::nil();
 
         let resp = post_usage(
             State(ctx.clone()),
@@ -8949,7 +8967,7 @@ mod tests {
 
     // --- Rate limits (P2) --------------------------------------------
 
-    async fn make_principal(ctx: &Ctx, name: &str) -> i64 {
+    async fn make_principal(ctx: &Ctx, name: &str) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
@@ -8986,7 +9004,7 @@ mod tests {
         let published = cache
             .current_snapshot()
             .principals
-            .get(&(principal_id as u64))
+            .get(&principal_id)
             .expect("the principal must be in the published snapshot")
             .limits;
         assert_eq!(
@@ -9009,7 +9027,7 @@ mod tests {
         let published_after_delete = cache
             .current_snapshot()
             .principals
-            .get(&(principal_id as u64))
+            .get(&principal_id)
             .expect("the principal itself is not deleted")
             .limits;
         assert_eq!(
@@ -9078,7 +9096,7 @@ mod tests {
             Json(ReconcileRequest {
                 replica_id: "r1".into(),
                 counts: vec![ReconcileCountWire {
-                    principal_id: 999,
+                    principal_id: crate::snapshot::tid(999),
                     requests: 10,
                     tokens: 100,
                 }],
@@ -9087,7 +9105,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resp.0.allowances.len(), 1);
-        assert_eq!(resp.0.allowances[0].principal_id, 999);
+        assert_eq!(resp.0.allowances[0].principal_id, crate::snapshot::tid(999));
         // The only replica that has ever reported for this principal gets
         // the full share — same property `control::reconcile`'s own tests
         // pin, exercised here through the HTTP-facing wrapper.
@@ -9125,7 +9143,7 @@ mod tests {
         let published = cache
             .current_snapshot()
             .principals
-            .get(&(principal_id as u64))
+            .get(&principal_id)
             .expect("the principal must be in the published snapshot")
             .budget;
         assert_eq!(
@@ -9172,7 +9190,7 @@ mod tests {
         let published_after_delete = cache
             .current_snapshot()
             .principals
-            .get(&(principal_id as u64))
+            .get(&principal_id)
             .expect("the principal itself is not deleted")
             .budget;
         assert_eq!(
@@ -9327,7 +9345,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("cost-src-model");
         let _ = post_model(
@@ -9548,7 +9566,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let principal_id = created.0["id"].as_i64().unwrap();
+        let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         // One priced model and one unpriced.
         let priced = unique_name("agg-model-priced");
@@ -9652,7 +9670,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = created.0["id"].as_i64().unwrap();
+        let id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         // The read path must show them, or a price can be set and never seen.
         let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
@@ -9712,7 +9730,7 @@ mod tests {
         let missing = patch_model(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(-1),
+            Path(Uuid::nil()),
             Json(serde_json::from_value(serde_json::json!({"description": "x"})).unwrap()),
         )
         .await
@@ -9741,7 +9759,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let provider_model_id = model.0["id"].as_i64().unwrap();
+        let provider_model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let vertex = |key: Option<String>, kind: Option<&str>| {
             NewBackend {
@@ -9834,7 +9852,13 @@ mod tests {
         let (_, plain) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
-            Path(plain_model.0["id"].as_i64().unwrap()),
+            Path(
+                plain_model.0["id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
+                    .unwrap(),
+            ),
             Json(NewBackend::openai("http://plain:8000/v1", None)),
         )
         .await
@@ -9921,7 +9945,9 @@ mod tests {
                 .unwrap()
                 .1
                  .0["id"]
-                    .as_i64()
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
                     .unwrap()
             }
         };
@@ -9942,7 +9968,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let vm_id = vm.0["id"].as_i64().unwrap();
+        let vm_id = vm.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         // One rule, on streaming, so the dry run can be flipped either side of
         // it without touching the database again.
@@ -9960,7 +9986,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rule_id = rule.0["id"].as_i64().unwrap();
+        let rule_id = rule.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
         let _ = post_rule_target(
             State(ctx.clone()),
             RequireConfigWrite,
@@ -10074,7 +10100,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        assert!(created.0["id"].is_i64());
+        // A uuid crosses the API as a string, which is the whole reason an
+        // id is safe to hand out: nothing about it counts.
+        assert!(created.0["id"].as_str().unwrap().parse::<Uuid>().is_ok());
 
         // The same name twice is a conflict, not a second row.
         assert_eq!(
@@ -10171,10 +10199,14 @@ mod tests {
     #[ignore = "requires postgres"]
     async fn the_config_route_reports_this_processs_own_flags() {
         let (ctx, _cache) = test_ctx().await;
-        let cfg = get_config(State(ctx.clone()), RequireRead, AdminPrincipal(1))
-            .await
-            .unwrap()
-            .0;
+        let cfg = get_config(
+            State(ctx.clone()),
+            RequireRead,
+            AdminPrincipal(crate::snapshot::tid(1)),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(cfg["role"], "all");
         assert_eq!(cfg["config_poll_seconds"], 5);
         assert_eq!(cfg["cache_max_entries"], 4096);

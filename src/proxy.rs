@@ -2570,9 +2570,9 @@ mod tests {
 
     fn snap(key: &str, models: &[&str]) -> Snapshot {
         Snapshot::for_test(
-            vec![(key.to_string(), 1, None, false)],
+            vec![(key.to_string(), crate::snapshot::tid(1), None, false)],
             vec![Principal {
-                id: 1,
+                id: crate::snapshot::tid(1),
                 name: "t".into(),
                 allowed_models: models.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
                 allow_all: false,
@@ -2737,7 +2737,7 @@ mod tests {
     fn every_attributable_request_is_worth_recording() {
         fn principal(limits: Option<crate::limiter::Limits>, budget: Option<Budget>) -> Principal {
             Principal {
-                id: 1,
+                id: crate::snapshot::tid(1),
                 name: "p".into(),
                 allowed_models: HashSet::new(),
                 allow_all: true,
@@ -2823,7 +2823,7 @@ mod tests {
         );
 
         let principal = Principal {
-            id: 1,
+            id: crate::snapshot::tid(1),
             name: "p".into(),
             allowed_models: HashSet::new(),
             allow_all: true,
@@ -3049,7 +3049,7 @@ model_list:
         };
 
         let granted_concrete_only = Principal {
-            id: 1,
+            id: crate::snapshot::tid(1),
             name: "granted-concrete".into(),
             allowed_models: ["concrete-a".to_string()].into_iter().collect(),
             allow_all: false,
@@ -3062,7 +3062,7 @@ model_list:
             budget: None,
         };
         let granted_virtual_only = Principal {
-            id: 2,
+            id: crate::snapshot::tid(2),
             name: "granted-virtual".into(),
             allowed_models: ["vm".to_string()].into_iter().collect(),
             allow_all: false,

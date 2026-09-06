@@ -303,11 +303,17 @@ mod tests {
     fn decide_login_accepts_only_a_matching_password_against_an_enabled_hashed_principal() {
         let hash = hash_password("right password").unwrap();
         assert_eq!(
-            decide_login(Some((7, Some(hash.clone()), false)), "right password"),
-            Some(7)
+            decide_login(
+                Some((crate::snapshot::tid(7), Some(hash.clone()), false)),
+                "right password"
+            ),
+            Some(Uuid::from_u128(7))
         );
         assert_eq!(
-            decide_login(Some((7, Some(hash), false)), "wrong password"),
+            decide_login(
+                Some((crate::snapshot::tid(7), Some(hash), false)),
+                "wrong password"
+            ),
             None,
             "a wrong password against a real hash must still be rejected"
         );
@@ -319,11 +325,17 @@ mod tests {
         // verify_login's own query).
         assert_eq!(decide_login(None, "anything"), None);
         // A `user` principal that exists but has never had a password set.
-        assert_eq!(decide_login(Some((1, None, false)), "anything"), None);
+        assert_eq!(
+            decide_login(Some((crate::snapshot::tid(1), None, false)), "anything"),
+            None
+        );
         // A real hash, but the principal is disabled.
         let hash = hash_password("right password").unwrap();
         assert_eq!(
-            decide_login(Some((1, Some(hash), true)), "right password"),
+            decide_login(
+                Some((crate::snapshot::tid(1), Some(hash), true)),
+                "right password"
+            ),
             None,
             "a disabled principal must be rejected even with the correct password"
         );

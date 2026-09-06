@@ -193,13 +193,13 @@ fn routed_to(port: u16, key: &str, model: &str, prompt: &str) -> String {
     body
 }
 
-async fn grant_all(pool: &sqlx::PgPool, principal_id: i64, role_name: &str) {
+async fn grant_all(pool: &sqlx::PgPool, principal_id: uuid::Uuid, role_name: &str) {
     sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT (name) DO NOTHING")
         .bind(role_name)
         .execute(pool)
         .await
         .unwrap();
-    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(role_name)
         .fetch_one(pool)
         .await
@@ -252,7 +252,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
             "/admin/provider-models",
             serde_json::json!({"name": name, "description": "semantic routing e2e"}),
         );
-        let id = m["id"].as_i64().unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
         admin_post(
             admin_port,
             cookie,
@@ -269,7 +269,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         "/admin/frontend-models",
         serde_json::json!({"name": frontend_name}),
     );
-    let vm_id = vm["id"].as_i64().unwrap();
+    let vm_id = vm["id"].as_str().unwrap();
 
     let principal = format!("sr-principal-{suffix}");
     let p = admin_post(
@@ -278,7 +278,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         "/admin/principals",
         serde_json::json!({"name": principal}),
     );
-    let principal_id = p["id"].as_i64().unwrap();
+    let principal_id = p["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap();
     grant_all(pool, principal_id, &format!("sr-role-{suffix}")).await;
     let k = admin_post(
         admin_port,
@@ -295,7 +295,7 @@ async fn provision(pool: &sqlx::PgPool, admin_port: u16, cookie: &str, suffix: &
         &format!("/admin/frontend-models/{vm_id}/rules"),
         serde_json::json!({"position": 0, "class": format!("horticulture-{suffix}")}),
     );
-    let rule_id = rule["id"].as_i64().unwrap();
+    let rule_id = rule["id"].as_str().unwrap();
     admin_post(
         admin_port,
         cookie,

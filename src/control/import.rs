@@ -254,7 +254,7 @@ pub async fn import(
         // out directly — no separate "count what changed" query needed.
         // Either spelling counts as this provider's, so a re-import converges
         // onto the row it created last time rather than adding a third.
-        let existing: Option<i64> = sqlx::query_scalar(
+        let existing: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM provider_models WHERE provider_id = $1 AND name IN ($2, $3)",
         )
         .bind(provider_id)
@@ -324,7 +324,7 @@ pub async fn import(
     // it, a config meaning "one name, two hosts" would leave callers naming
     // something that no longer exists.
     for (client_name, targets) in &pooled {
-        let vm_id: i64 = sqlx::query_scalar(
+        let vm_id: Uuid = sqlx::query_scalar(
             "INSERT INTO frontend_models (name, description) VALUES ($1, $2) \
              ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
         )
@@ -394,7 +394,7 @@ async fn import_key(
     // comment for why that is what lets the `None` branch below tell an
     // earlier import run's principal apart from one a human or the admin API
     // created that only happens to share the name.
-    let created: Option<i64> = sqlx::query_scalar(
+    let created: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO principals (kind, name, imported) VALUES ('service_account', $1, TRUE)
          ON CONFLICT (name) DO NOTHING RETURNING id",
     )
@@ -414,7 +414,7 @@ async fn import_key(
             // principal would otherwise mint a key that inherits every role
             // already granted to that principal, with nothing about the
             // config file itself asking for that.
-            let (existing_id, imported): (i64, bool) =
+            let (existing_id, imported): (Uuid, bool) =
                 sqlx::query_as("SELECT id, imported FROM principals WHERE name = $1")
                     .bind(principal_name)
                     .fetch_one(&mut **tx)
@@ -554,7 +554,7 @@ async fn import_key(
     // /admin/keys/{id}` (not editing the ConfigMap) for; a key an operator
     // truly wants gone belongs out of the file, not merely disabled while
     // import keeps re-seeding it.
-    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM api_keys WHERE hash = $1")
+    let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM api_keys WHERE hash = $1")
         .bind(hash_key(&entry.key).to_vec())
         .fetch_optional(&mut **tx)
         .await?;
@@ -697,7 +697,7 @@ where
 pub async fn reencrypt_plaintext_backends_scoped<'a, A>(
     conn: A,
     key: &EncryptionKey,
-    only_model_id: Option<i64>,
+    only_model_id: Option<Uuid>,
 ) -> anyhow::Result<usize>
 where
     A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
@@ -706,7 +706,7 @@ where
     let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
         "SELECT id, upstream_api_key FROM providers
          WHERE upstream_api_key IS NOT NULL
-           AND ($1::bigint IS NULL
+           AND ($1::uuid IS NULL
                 OR id = (SELECT provider_id FROM provider_models WHERE id = $1))",
     )
     .bind(only_model_id)
@@ -1442,7 +1442,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let admin_role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = 'admin'")
+        let admin_role_id: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = 'admin'")
             .fetch_one(&pool)
             .await
             .unwrap();

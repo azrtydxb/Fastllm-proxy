@@ -118,6 +118,8 @@ ureq = { version = "2", features = ["json"] }
 # never compiled by a plain `cargo build`, so this does not affect the
 # `--no-default-features` library/binary build.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono", "uuid"] }
+# Same reasoning: the integration tests bind ids directly, and an id is a uuid.
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [profile.release]
 opt-level = 3

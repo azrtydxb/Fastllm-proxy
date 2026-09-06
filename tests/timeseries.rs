@@ -35,7 +35,7 @@ async fn the_timeseries_query_parses_and_decodes_in_every_filter_combination() {
             .fetch_optional(&pool)
             .await
             .unwrap();
-    let principal: Option<i64> =
+    let principal: Option<uuid::Uuid> =
         sqlx::query_scalar("SELECT id FROM principals ORDER BY id LIMIT 1")
             .fetch_optional(&pool)
             .await

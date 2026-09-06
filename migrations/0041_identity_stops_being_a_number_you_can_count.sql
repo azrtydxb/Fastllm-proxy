@@ -396,7 +396,6 @@ ALTER TABLE usage_events DROP COLUMN provider_model_id;
 ALTER TABLE usage_events RENAME COLUMN provider_model_id_uuid TO provider_model_id;
 ALTER TABLE provider_models DROP COLUMN provider_id;
 ALTER TABLE provider_models RENAME COLUMN provider_id_uuid TO provider_id;
-ALTER TABLE provider_models ALTER COLUMN provider_id SET NOT NULL;
 ALTER TABLE principal_roles DROP COLUMN role_id;
 ALTER TABLE principal_roles RENAME COLUMN role_id_uuid TO role_id;
 ALTER TABLE principal_roles ALTER COLUMN role_id SET NOT NULL;
@@ -499,7 +498,15 @@ ALTER TABLE principal_roles ADD CONSTRAINT principal_roles_role_id_fkey FOREIGN 
 ALTER TABLE role_permissions ADD CONSTRAINT role_permissions_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
 ALTER TABLE rule_targets ADD CONSTRAINT rule_targets_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES routing_rules(id) ON DELETE CASCADE;
 
--- 10. The composite keys that step 8's CASCADE took with their parent's.
+-- 10. Every primary key that was dropped along with a column it was made of.
+--
+--     `budgets` and `limits` are keyed *by* the foreign key, so dropping that
+--     column in step 6 took their primary key with it -- silently, because
+--     nothing fails until an ON CONFLICT (principal_id) upsert has no unique
+--     constraint to conflict against. The rest are composite keys that step
+--     8's CASCADE took with their parent's.
+ALTER TABLE budgets             ADD PRIMARY KEY (principal_id);
+ALTER TABLE limits              ADD PRIMARY KEY (principal_id);
 ALTER TABLE role_permissions    ADD PRIMARY KEY (role_id, permission_id);
 ALTER TABLE principal_roles     ADD PRIMARY KEY (principal_id, role_id);
 -- `prompt_class_refines` is (class_id, refines) where `refines` is the parent

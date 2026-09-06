@@ -25,6 +25,21 @@ use std::time::SystemTime;
 /// rebuilt only on a snapshot swap.
 pub type PrincipalId = uuid::Uuid;
 
+/// A deterministic `PrincipalId` from a small number, for tests.
+///
+/// Test fixtures name principals `1`, `2`, `42` because the number is a label,
+/// not data — the point of the assertion is which principal, never which
+/// bytes. This keeps that readable now that the id is a uuid, and keeps it
+/// deterministic so a failure reproduces.
+/// `#[doc(hidden)]` rather than `#[cfg(test)]`: the integration tests in
+/// `tests/` are separate crates that link this one compiled *without*
+/// `cfg(test)`, so a test-only helper is invisible to exactly the tests that
+/// need it most.
+#[doc(hidden)]
+pub fn tid(n: u128) -> PrincipalId {
+    uuid::Uuid::from_u128(n)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthError {
     Unknown,
@@ -1109,7 +1124,7 @@ mod tests {
 
     fn snapshot_with(key: &str, allowed: &[&str], expires: Option<SystemTime>) -> Snapshot {
         let principal = Principal {
-            id: 1,
+            id: crate::snapshot::tid(1),
             name: "eval-team".into(),
             allowed_models: allowed.iter().map(|s| s.to_string()).collect(),
             allow_all: false,
@@ -1122,7 +1137,7 @@ mod tests {
             budget: None,
         };
         Snapshot::for_test(
-            vec![(key.to_string(), 1, expires, false)],
+            vec![(key.to_string(), crate::snapshot::tid(1), expires, false)],
             vec![principal],
             vec![],
         )
@@ -1166,7 +1181,10 @@ mod tests {
     #[test]
     fn allow_all_grants_every_model() {
         let mut snap = snapshot_with("sk-admin", &[], None);
-        snap.principals.get_mut(&1).unwrap().allow_all = true;
+        snap.principals
+            .get_mut(&crate::snapshot::tid(1))
+            .unwrap()
+            .allow_all = true;
         let p = snap.authenticate("sk-admin", SystemTime::now()).unwrap();
         assert!(p.may_invoke("anything-at-all"));
     }
@@ -1213,7 +1231,10 @@ mod tests {
         let expiry = SystemTime::now() + Duration::from_secs(3600);
         let mut snap = snapshot_with("sk-good", &["qwen3", "whisper"], Some(expiry));
         snap.version = 42;
-        snap.principals.get_mut(&1).unwrap().allow_all = false;
+        snap.principals
+            .get_mut(&crate::snapshot::tid(1))
+            .unwrap()
+            .allow_all = false;
         snap.models.push(ModelDef {
             policy: None,
             name: "qwen3".into(),
@@ -1255,8 +1276,8 @@ mod tests {
             .as_secs();
         assert_eq!(restored_secs, original_secs);
 
-        let original_principal = &snap.principals[&1];
-        let restored_principal = &round_tripped.principals[&1];
+        let original_principal = &snap.principals[&crate::snapshot::tid(1)];
+        let restored_principal = &round_tripped.principals[&crate::snapshot::tid(1)];
         assert_eq!(restored_principal.name, original_principal.name);
         assert_eq!(restored_principal.allow_all, original_principal.allow_all);
         assert_eq!(
@@ -1286,7 +1307,7 @@ mod tests {
         keys.insert(
             "not-hex-at-all!!".to_string(),
             WireKeyEntry {
-                principal: 1,
+                principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
             },
@@ -1294,7 +1315,7 @@ mod tests {
         keys.insert(
             hex::encode([0u8; 4]), // valid hex, far short of 32 bytes
             WireKeyEntry {
-                principal: 1,
+                principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
             },
@@ -1302,7 +1323,7 @@ mod tests {
         keys.insert(
             hex::encode(valid_hash),
             WireKeyEntry {
-                principal: 1,
+                principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
             },

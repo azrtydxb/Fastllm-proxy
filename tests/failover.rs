@@ -295,13 +295,18 @@ fn served_by(body: &str) -> String {
 
 /// Grant one principal `model:invoke` on a set of models, through a role made
 /// for the purpose — no admin route is this fine-grained.
-async fn grant_models(pool: &sqlx::PgPool, principal_id: i64, models: &[&str], role_name: &str) {
+async fn grant_models(
+    pool: &sqlx::PgPool,
+    principal_id: uuid::Uuid,
+    models: &[&str],
+    role_name: &str,
+) {
     sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT (name) DO NOTHING")
         .bind(role_name)
         .execute(pool)
         .await
         .unwrap();
-    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(role_name)
         .fetch_one(pool)
         .await
@@ -316,7 +321,7 @@ async fn grant_models(pool: &sqlx::PgPool, principal_id: i64, models: &[&str], r
         .execute(pool)
         .await
         .unwrap();
-        let permission_id: i64 = sqlx::query_scalar(
+        let permission_id: uuid::Uuid = sqlx::query_scalar(
             "SELECT id FROM permissions WHERE verb = 'model:invoke' AND resource = $1",
         )
         .bind(&resource)
@@ -349,7 +354,7 @@ struct Fixture {
     frontend_name: String,
     primary: String,
     secondary: String,
-    vm_id: i64,
+    vm_id: String,
     cookie: String,
     admin_port: u16,
 }
@@ -375,7 +380,7 @@ async fn provision(
             "/admin/provider-models",
             serde_json::json!({"name": name, "description": "failover e2e"}),
         );
-        let id = m["id"].as_i64().unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
         admin_post(
             admin_port,
             cookie,
@@ -395,7 +400,7 @@ async fn provision(
         "/admin/frontend-models",
         serde_json::json!({"name": frontend_name}),
     );
-    let vm_id = vm["id"].as_i64().unwrap();
+    let vm_id = vm["id"].as_str().unwrap().to_string();
 
     let principal = format!("fo-principal-{suffix}");
     let p = admin_post(
@@ -404,7 +409,7 @@ async fn provision(
         "/admin/principals",
         serde_json::json!({"name": principal}),
     );
-    let principal_id = p["id"].as_i64().unwrap();
+    let principal_id = p["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap();
     grant_models(
         pool,
         principal_id,
@@ -432,7 +437,7 @@ async fn provision(
 }
 
 impl Fixture {
-    fn provider_model_id(&self, name: &str) -> i64 {
+    fn provider_model_id(&self, name: &str) -> String {
         let models = ureq::get(&format!(
             "http://127.0.0.1:{}/admin/provider-models",
             self.admin_port
@@ -448,8 +453,9 @@ impl Fixture {
             .iter()
             .find(|m| m["name"] == name)
             .expect("model exists")["id"]
-            .as_i64()
+            .as_str()
             .unwrap()
+            .to_string()
     }
 
     /// A default chain: primary first (all the weight), secondary behind it.
@@ -609,7 +615,11 @@ async fn a_frontend_model_grant_covers_the_chain_it_routes_to() {
         "/admin/principals",
         serde_json::json!({"name": narrow_name}),
     );
-    let narrow_id = narrow["id"].as_i64().unwrap();
+    let narrow_id = narrow["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     grant_models(
         &pool,
         narrow_id,
@@ -713,7 +723,7 @@ async fn a_header_rule_routes_batch_work_to_a_different_model() {
         &format!("/admin/frontend-models/{}/rules", fx.vm_id),
         serde_json::json!({"position": 0, "headers": {"x-fastllm-tier": "batch"}}),
     );
-    let rule_id = rule["id"].as_i64().unwrap();
+    let rule_id = rule["id"].as_str().unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -785,7 +795,7 @@ async fn a_malformed_rule_condition_is_rejected_by_the_admin_api() {
         "/admin/frontend-models",
         serde_json::json!({"name": format!("vm-{suffix}")}),
     );
-    let vm_id = vm["id"].as_i64().unwrap();
+    let vm_id = vm["id"].as_str().unwrap().to_string();
 
     for (body, expect) in [
         (

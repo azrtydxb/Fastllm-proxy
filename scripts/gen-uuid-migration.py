@@ -35,7 +35,18 @@ FKS = [
  ("role_permissions","role_id","roles","CASCADE"),
  ("rule_targets","rule_id","routing_rules","CASCADE"),
 ]
-NULLABLE = {(c, col) for c, col, _p, rule in FKS if rule == "SET NULL"}
+# Read off information_schema, never inferred from the delete rule. They are
+# not the same thing: `provider_models.provider_id` cascades *and* is nullable,
+# because a model with no provider is a real state -- registered, not routable,
+# and shown as such rather than hidden. Inferring NOT NULL from CASCADE made
+# every model creation fail.
+NULLABLE = {
+ ("audit_events", "actor_id"),
+ ("frontend_model_defaults", "provider_model_id"),
+ ("provider_models", "provider_id"),
+ ("rule_targets", "provider_model_id"),
+ ("usage_events", "provider_model_id"),
+}
 
 # usage_rollup_hourly references these two by id and has no foreign key on
 # either, so nothing would have complained when they stopped resolving.
@@ -151,7 +162,15 @@ for child, col, parent, rule in FKS:
       f"FOREIGN KEY ({col}) REFERENCES {parent}(id) ON DELETE {rule};")
 
 w("""
--- 10. The composite keys that step 8's CASCADE took with their parent's.
+-- 10. Every primary key that was dropped along with a column it was made of.
+--
+--     `budgets` and `limits` are keyed *by* the foreign key, so dropping that
+--     column in step 6 took their primary key with it -- silently, because
+--     nothing fails until an ON CONFLICT (principal_id) upsert has no unique
+--     constraint to conflict against. The rest are composite keys that step
+--     8's CASCADE took with their parent's.
+ALTER TABLE budgets             ADD PRIMARY KEY (principal_id);
+ALTER TABLE limits              ADD PRIMARY KEY (principal_id);
 ALTER TABLE role_permissions    ADD PRIMARY KEY (role_id, permission_id);
 ALTER TABLE principal_roles     ADD PRIMARY KEY (principal_id, role_id);
 -- `prompt_class_refines` is (class_id, refines) where `refines` is the parent

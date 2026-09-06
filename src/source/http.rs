@@ -102,9 +102,9 @@ mod tests {
 
     fn a_snapshot() -> Snapshot {
         Snapshot::for_test(
-            vec![("sk-x".into(), 1, None, false)],
+            vec![("sk-x".into(), crate::snapshot::tid(1), None, false)],
             vec![Principal {
-                id: 1,
+                id: crate::snapshot::tid(1),
                 name: "p".into(),
                 allowed_models: ["m".to_string()].into_iter().collect(),
                 allow_all: false,

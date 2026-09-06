@@ -153,7 +153,7 @@ fn chat(port: u16, key: &str, model: &str) -> (u16, String) {
 /// to Postgres directly — see the module doc comment.
 async fn grant_one_model(
     pool: &sqlx::PgPool,
-    principal_id: i64,
+    principal_id: uuid::Uuid,
     model_name: &str,
     role_name: &str,
 ) {
@@ -162,7 +162,7 @@ async fn grant_one_model(
         .execute(pool)
         .await
         .unwrap();
-    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+    let role_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
         .bind(role_name)
         .fetch_one(pool)
         .await
@@ -176,7 +176,7 @@ async fn grant_one_model(
     .execute(pool)
     .await
     .unwrap();
-    let permission_id: i64 = sqlx::query_scalar(
+    let permission_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT id FROM permissions WHERE verb = 'model:invoke' AND resource = $1",
     )
     .bind(&resource)
@@ -268,7 +268,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/provider-models",
         serde_json::json!({ "name": model_a_name }),
     );
-    let model_a_id = model_a["id"].as_i64().unwrap();
+    let model_a_id = model_a["id"].as_str().unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -283,7 +283,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/provider-models",
         serde_json::json!({ "name": model_b_name }),
     );
-    let model_b_id = model_b["id"].as_i64().unwrap();
+    let model_b_id = model_b["id"].as_str().unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -301,7 +301,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/frontend-models",
         serde_json::json!({ "name": vm_name }),
     );
-    let vm_id = vm["id"].as_i64().unwrap();
+    let vm_id = vm["id"].as_str().unwrap();
 
     let rule = admin_post(
         admin_port,
@@ -309,7 +309,7 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         &format!("/admin/frontend-models/{vm_id}/rules"),
         serde_json::json!({ "position": 0, "roles": [canary_role] }),
     );
-    let rule_id = rule["id"].as_i64().unwrap();
+    let rule_id = rule["id"].as_str().unwrap();
     admin_post(
         admin_port,
         &cookie,
@@ -333,7 +333,11 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-canary-caller") }),
     );
-    let canary_principal_id = canary_principal["id"].as_i64().unwrap();
+    let canary_principal_id = canary_principal["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     // One role both makes `roles.matches` true (the rule's own condition)
     // and grants `model:invoke` on the frontend model these callers name.
     // The grant is on the frontend model rather than on the provider model
@@ -347,7 +351,11 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-normal-caller") }),
     );
-    let normal_principal_id = normal_principal["id"].as_i64().unwrap();
+    let normal_principal_id = normal_principal["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     grant_one_model(
         &pool,
         normal_principal_id,
@@ -362,7 +370,11 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
         "/admin/principals",
         serde_json::json!({ "name": name("vm-e2e-virtual-only-caller") }),
     );
-    let virtual_only_principal_id = virtual_only_principal["id"].as_i64().unwrap();
+    let virtual_only_principal_id = virtual_only_principal["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     grant_one_model(
         &pool,
         virtual_only_principal_id,
@@ -489,7 +501,10 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     admin_post(
         admin_port,
         &cookie,
-        &format!("/admin/frontend-models/{}/defaults", of["id"]),
+        &format!(
+            "/admin/frontend-models/{}/defaults",
+            of["id"].as_str().unwrap()
+        ),
         serde_json::json!({
             "provider_model_id": orphan["id"],
             "weight": 1,

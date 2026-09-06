@@ -158,7 +158,7 @@ pub async fn build_snapshot_with(
 ) -> anyhow::Result<Snapshot> {
     // Named, because the row grew a fifth column and an anonymous tuple that
     // wide stops being readable at the call site.
-    type ModelRow = (i64, String, Option<i32>, Option<i64>);
+    type ModelRow = (Uuid, String, Option<i32>, Option<i64>);
     let model_rows: Vec<ModelRow> = sqlx::query_as(
         "SELECT id, name, cache_ttl_seconds, context_length FROM provider_models ORDER BY name",
     )
@@ -178,7 +178,7 @@ pub async fn build_snapshot_with(
     all_names.extend(frontend_names);
 
     type BackendRow = (
-        i64,
+        Uuid,
         String,
         String,
         Option<Vec<u8>>,
@@ -1104,7 +1104,7 @@ mod tests {
         // that are not valid UTF-8 would trip that function's own
         // refuse-to-guess `bail!` if the two ever ran concurrently.
         let broken_provider = unique_name("undecryptable-provider");
-        let broken_provider_id: i64 = sqlx::query_scalar(
+        let broken_provider_id: Uuid = sqlx::query_scalar(
             "INSERT INTO providers (name, api_base, upstream_api_key) \
              VALUES ($1, 'http://broken:8000/v1', $2) RETURNING id",
         )
@@ -1115,7 +1115,7 @@ mod tests {
         .unwrap();
 
         let healthy_provider = unique_name("healthy-provider");
-        let healthy_provider_id: i64 = sqlx::query_scalar(
+        let healthy_provider_id: Uuid = sqlx::query_scalar(
             "INSERT INTO providers (name, api_base) \
              VALUES ($1, 'http://healthy:8000/v1') RETURNING id",
         )
@@ -1237,7 +1237,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let provider_model_id: HashMap<String, i64> = {
+        let provider_model_id: HashMap<String, Uuid> = {
             let rows: Vec<(Uuid, String)> =
                 sqlx::query_as("SELECT id, name FROM provider_models WHERE name = ANY($1)")
                     .bind(vec![primary.clone(), secondary.clone(), fallback.clone()])
@@ -1248,7 +1248,7 @@ mod tests {
         };
 
         let vm_name = unique_name("vm-canary");
-        let vm_id: i64 =
+        let vm_id: Uuid =
             sqlx::query_scalar("INSERT INTO frontend_models (name) VALUES ($1) RETURNING id")
                 .bind(&vm_name)
                 .fetch_one(&pool)
@@ -1361,7 +1361,7 @@ mod tests {
         let snapshot = build_snapshot(&pool, &key).await.unwrap();
         let principal = snapshot
             .principals
-            .get(&(principal_id as u64))
+            .get(&principal_id)
             .expect("the principal must be in the snapshot");
         assert!(principal.roles.contains("inference"));
     }
@@ -1379,7 +1379,7 @@ mod tests {
             .track_prefix("principals", "name", "unlimited-principal");
 
         let limited_name = unique_name("limited-principal");
-        let limited_id: i64 = sqlx::query_scalar(
+        let limited_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&limited_name)
@@ -1396,7 +1396,7 @@ mod tests {
         .unwrap();
 
         let unlimited_name = unique_name("unlimited-principal");
-        let unlimited_id: i64 = sqlx::query_scalar(
+        let unlimited_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&unlimited_name)
@@ -1408,7 +1408,7 @@ mod tests {
 
         let limited = snapshot
             .principals
-            .get(&(limited_id as u64))
+            .get(&limited_id)
             .expect("the limited principal must be in the snapshot");
         assert_eq!(
             limited.limits,
@@ -1420,7 +1420,7 @@ mod tests {
 
         let unlimited = snapshot
             .principals
-            .get(&(unlimited_id as u64))
+            .get(&unlimited_id)
             .expect("the unconfigured principal must be in the snapshot too");
         assert_eq!(
             unlimited.limits, None,
@@ -1456,7 +1456,7 @@ mod tests {
             .unwrap();
 
         let snapshot = build_snapshot(&pool, &key).await.unwrap();
-        let principal = snapshot.principals.get(&(id as u64)).unwrap();
+        let principal = snapshot.principals.get(&id).unwrap();
         assert_eq!(
             principal.limits,
             Some(crate::limiter::Limits {
@@ -1479,7 +1479,7 @@ mod tests {
             .track_prefix("principals", "name", "unbudgeted-principal");
 
         let budgeted_name = unique_name("budgeted-principal");
-        let budgeted_id: i64 = sqlx::query_scalar(
+        let budgeted_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&budgeted_name)
@@ -1496,7 +1496,7 @@ mod tests {
         .unwrap();
 
         let unbudgeted_name = unique_name("unbudgeted-principal");
-        let unbudgeted_id: i64 = sqlx::query_scalar(
+        let unbudgeted_id: Uuid = sqlx::query_scalar(
             "INSERT INTO principals (kind, name) VALUES ('service_account', $1) RETURNING id",
         )
         .bind(&unbudgeted_name)
@@ -1508,7 +1508,7 @@ mod tests {
 
         let budgeted = snapshot
             .principals
-            .get(&(budgeted_id as u64))
+            .get(&budgeted_id)
             .expect("the budgeted principal must be in the snapshot");
         assert_eq!(
             budgeted.budget,
@@ -1522,7 +1522,7 @@ mod tests {
 
         let unbudgeted = snapshot
             .principals
-            .get(&(unbudgeted_id as u64))
+            .get(&unbudgeted_id)
             .expect("the unconfigured principal must be in the snapshot too");
         assert_eq!(
             unbudgeted.budget, None,
@@ -1595,7 +1595,7 @@ mod tests {
         .unwrap();
 
         let snapshot = build_snapshot(&pool, &key).await.unwrap();
-        let principal = snapshot.principals.get(&(id as u64)).unwrap();
+        let principal = snapshot.principals.get(&id).unwrap();
         assert_eq!(
             principal.budget,
             Some(Budget {

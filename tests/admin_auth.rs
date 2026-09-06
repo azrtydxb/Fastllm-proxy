@@ -188,8 +188,8 @@ fn admin_write_with_cookie(
 /// for an empty slice) — the building block every permission-mapping test
 /// below needs: a login-capable principal whose grants are precisely
 /// controlled, unlike `support::bootstrap_login_user`'s fixed `admin` grant.
-async fn user_with_roles(pool: &sqlx::PgPool, name: &str, roles: &[&str]) -> i64 {
-    let principal_id: i64 = sqlx::query_scalar(
+async fn user_with_roles(pool: &sqlx::PgPool, name: &str, roles: &[&str]) -> uuid::Uuid {
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
     )
     .bind(name)
@@ -239,7 +239,7 @@ async fn admin_routes_require_a_session_and_login_logout_manage_one() {
     // ever *runs* against a binary built with it. The hash below is
     // `hash_password("correct horse battery staple")`'s real output —
     // regenerate it with that function if the password below ever changes.
-    let principal_id: i64 = sqlx::query_scalar(
+    let principal_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO principals (kind, name, password_hash) VALUES ('user', $1, $2) RETURNING id",
     )
     .bind(&name)
@@ -346,7 +346,7 @@ async fn setting_a_password_over_the_admin_api_requires_a_session_too() {
         .unwrap();
     let name = unique_name("admin-auth-victim");
     let _cleanup = TestCleanup::new().track_exact("principals", "name", name.clone());
-    let principal_id: i64 =
+    let principal_id: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO principals (kind, name) VALUES ('user', $1) RETURNING id")
             .bind(&name)
             .fetch_one(&pool)
@@ -761,7 +761,7 @@ async fn configuration_changes_are_audited_and_reads_are_not() {
         401
     );
 
-    let rows: Vec<(Option<i64>, String, String, String)> = sqlx::query_as(
+    let rows: Vec<(Option<uuid::Uuid>, String, String, String)> = sqlx::query_as(
         "SELECT actor_id, actor_name, action, target FROM audit_events
           WHERE actor_name = $1 ORDER BY id DESC LIMIT 5",
     )
