@@ -24,13 +24,47 @@ use uuid::Uuid;
 /// needs to know which engine it is talking to. An engine hint exists for
 /// metadata only and is never load-bearing.
 pub async fn served_models(client: &Upstream, api_base: &str) -> anyhow::Result<Vec<String>> {
+    served_models_as(client, api_base, None).await
+}
+
+/// The credential a provider presents upstream, in the shape the header wants.
+///
+/// The same three fields `registry::Backend` composes for the request path, so
+/// a probe authenticates exactly as a real request to that provider would —
+/// which is the only way a probe can answer "does this key work".
+pub struct Credential<'a> {
+    pub header: &'a str,
+    pub scheme: Option<&'a str>,
+    pub key: &'a str,
+}
+
+/// `GET /v1/models`, presenting a credential when one is given.
+///
+/// Unauthenticated was the only mode until this existed, and it made the sweep
+/// wrong for any provider whose model list needs a key: the probe got a 401,
+/// the provider was marked degraded, and nothing about it was actually wrong.
+/// It also made validating a credential impossible, since the call never
+/// carried one.
+pub async fn served_models_as(
+    client: &Upstream,
+    api_base: &str,
+    credential: Option<Credential<'_>>,
+) -> anyhow::Result<Vec<String>> {
     use http_body_util::BodyExt as _;
     let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let req = hyper::Request::builder()
+    let mut builder = hyper::Request::builder()
         .method("GET")
         .uri(&url)
-        .header(hyper::header::USER_AGENT, "fastllm-proxy")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))?;
+        .header(hyper::header::USER_AGENT, "fastllm-proxy");
+    if let Some(c) = credential {
+        let value = match c.scheme {
+            Some(s) if !s.is_empty() => format!("{s} {}", c.key),
+            // Raw key, no prefix: what `x-api-key`/`x-goog-api-key` want.
+            _ => c.key.to_string(),
+        };
+        builder = builder.header(c.header.to_ascii_lowercase(), value);
+    }
+    let req = builder.body(http_body_util::Full::new(bytes::Bytes::new()))?;
     // Short, because this runs on a schedule against every provider and a
     // hung endpoint must not hold the sweep up. A provider that cannot answer
     // in ten seconds is not one a request should be routed to either.

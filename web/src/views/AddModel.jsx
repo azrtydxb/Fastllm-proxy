@@ -170,10 +170,6 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
                   <select
                     value={upstream}
                     onChange={(e) => chooseModel(e.target.value)}
-                    // Tall enough to see the effect of narrowing the filter
-                    // without opening the dropdown, which is the whole point
-                    // of having one.
-                    size={Math.min(Math.max(shown.length, 2), 8)}
                   >
                     <option value="">choose a model…</option>
                     {shown.map((m) => (

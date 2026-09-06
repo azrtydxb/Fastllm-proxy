@@ -77,6 +77,8 @@ export function Providers({ onUnauthorised, go }) {
   const [draft, setDraft] = useState(null);
   const [rotating, setRotating] = useState(null);
   const [key, setKey] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [edit, setEdit] = useState({});
   const [renaming, setRenaming] = useState(null);
   const [newName, setNewName] = useState("");
   // The catalogue is eighty-odd entries: long enough that finding one by
@@ -182,6 +184,32 @@ export function Providers({ onUnauthorised, go }) {
     }
   };
 
+  const save = async (id) => {
+    const ok = await attempt(
+      () =>
+        api.patch(`/admin/providers/${id}`, {
+          api_base: edit.api_base?.trim() || undefined,
+          protocol: edit.protocol || undefined,
+          auth_header: edit.auth_header?.trim() || undefined,
+          // "" is meaningful here: it clears the scheme, which is how a raw
+          // key is sent. Only an untouched field is omitted.
+          auth_scheme: edit.auth_scheme,
+          kind: edit.kind || undefined,
+          // Absent leaves the stored credential alone — the form cannot read
+          // it back, so it must not send an empty one and wipe it.
+          upstream_api_key: edit.upstream_api_key || undefined,
+          skip_validation: edit.skip_validation || undefined,
+        }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) {
+      setEditing(null);
+      setEdit({});
+      reload();
+    }
+  };
+
   const remove = async (g) => {
     // The API refuses while models remain rather than cascading, so the
     // confirmation only has to cover the case it will actually allow.
@@ -204,6 +232,8 @@ export function Providers({ onUnauthorised, go }) {
       host: p.name,
       kind: p.kind,
       node: p.node,
+      protocol: p.protocol,
+      auth_header: p.auth_header,
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -331,7 +361,6 @@ export function Providers({ onUnauthorised, go }) {
                   />
                   <select
                     value={draft.catalogue_key}
-                    size={Math.min(Math.max(catalogue.length, 2), 8)}
                     onChange={(e) => {
                       const c = (data.catalogue || []).find(
                         (x) => x.key === e.target.value,
@@ -627,7 +656,125 @@ export function Providers({ onUnauthorised, go }) {
                     )}
                   </Row>
 
-                  {renaming === g.id ? (
+                  {editing === g.id ? (
+                    <Stack gap={8}>
+                      <Field label="API base">
+                        <input
+                          value={edit.api_base ?? ""}
+                          onChange={(e) =>
+                            setEdit({ ...edit, api_base: e.target.value })
+                          }
+                        />
+                      </Field>
+                      <Row gap={8} style={{ alignItems: "flex-start" }}>
+                        <Field label="Protocol" style={{ flex: 1 }}>
+                          <select
+                            value={edit.protocol ?? "openai"}
+                            onChange={(e) =>
+                              setEdit({ ...edit, protocol: e.target.value })
+                            }
+                          >
+                            <option value="openai">openai</option>
+                            <option value="anthropic">anthropic</option>
+                            <option value="gemini">gemini</option>
+                          </select>
+                        </Field>
+                        {/* Handing an endpoint to the agent on its host, or
+                            taking it back. Only `dynamic` is ever removed
+                            automatically, which is what makes this a
+                            deliberate act rather than a label. */}
+                        <Field label="Kind" style={{ flex: 1 }}>
+                          <select
+                            value={edit.kind ?? "static"}
+                            onChange={(e) =>
+                              setEdit({ ...edit, kind: e.target.value })
+                            }
+                          >
+                            <option value="static">static</option>
+                            <option value="cloud">cloud</option>
+                            <option value="dynamic">dynamic</option>
+                          </select>
+                        </Field>
+                      </Row>
+                      <Row gap={8} style={{ alignItems: "flex-start" }}>
+                        <Field label="Auth header" style={{ flex: 1 }}>
+                          <input
+                            value={edit.auth_header ?? ""}
+                            onChange={(e) =>
+                              setEdit({ ...edit, auth_header: e.target.value })
+                            }
+                          />
+                        </Field>
+                        <Field
+                          label="Auth scheme"
+                          style={{ flex: 1 }}
+                          hint="Empty sends the key raw."
+                        >
+                          <input
+                            value={edit.auth_scheme ?? ""}
+                            onChange={(e) =>
+                              setEdit({ ...edit, auth_scheme: e.target.value })
+                            }
+                          />
+                        </Field>
+                      </Row>
+                      <Field
+                        label="Credential"
+                        hint="Leave empty to keep the one already stored — this form cannot read it back."
+                      >
+                        <input
+                          type="password"
+                          placeholder={
+                            g.credentialled ? "unchanged" : "no key set"
+                          }
+                          value={edit.upstream_api_key ?? ""}
+                          onChange={(e) =>
+                            setEdit({
+                              ...edit,
+                              upstream_api_key: e.target.value,
+                            })
+                          }
+                        />
+                      </Field>
+                      <label
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          alignItems: "center",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!edit.skip_validation}
+                          onChange={(e) =>
+                            setEdit({
+                              ...edit,
+                              skip_validation: e.target.checked,
+                            })
+                          }
+                        />
+                        <Muted>
+                          Save without dialling it first. Only needed when a
+                          provider rejects a key you know is right.
+                        </Muted>
+                      </label>
+                      <Row gap={8} style={{ flexWrap: "nowrap" }}>
+                        <Spacer />
+                        <Button
+                          variant="small"
+                          onClick={() => {
+                            setEditing(null);
+                            setEdit({});
+                          }}
+                        >
+                          cancel
+                        </Button>
+                        <Button variant="primary" onClick={() => save(g.id)}>
+                          Save
+                        </Button>
+                      </Row>
+                    </Stack>
+                  ) : renaming === g.id ? (
                     <Row gap={8} style={{ flexWrap: "nowrap" }}>
                       <Muted>Enter to save, Escape to cancel.</Muted>
                       <Spacer />
@@ -662,6 +809,21 @@ export function Providers({ onUnauthorised, go }) {
                     </Row>
                   ) : (
                     <Row gap={8}>
+                      <Button
+                        variant="small"
+                        onClick={() => {
+                          setEditing(g.id);
+                          setEdit({
+                            api_base: g.origin,
+                            protocol: [...g.protocols][0] || "openai",
+                            auth_header: g.auth_header || "authorization",
+                            auth_scheme: g.auth_scheme ?? "",
+                            kind: g.kind,
+                          });
+                        }}
+                      >
+                        edit
+                      </Button>
                       <Button
                         variant="small"
                         onClick={() => {

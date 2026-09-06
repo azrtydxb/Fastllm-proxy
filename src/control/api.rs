@@ -692,6 +692,10 @@ struct ProviderView {
     api_base: String,
     protocol: String,
     auth_header: String,
+    /// The prefix before the key, `null` when it is sent raw. Not a secret —
+    /// it is `Bearer` or nothing on almost every provider — and the edit form
+    /// cannot offer to change it without being able to show it.
+    auth_scheme: Option<String>,
     /// Whether a credential is configured — never the credential itself, in
     /// either plaintext or ciphertext. `upstream_api_key` is the one secret in
     /// this schema that cannot be reduced to a hash (the proxy has to present
@@ -1037,13 +1041,14 @@ async fn list_providers(
         String,
         String,
         String,
+        Option<String>,
         bool,
         Option<String>,
         Option<String>,
         i64,
     );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, \
+        "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, p.auth_scheme, \
              p.upstream_api_key IS NOT NULL, p.catalogue_key, p.node, \
              (SELECT count(*) FROM provider_models m WHERE m.provider_id = p.id) \
          FROM providers p ORDER BY p.name",
@@ -1062,6 +1067,7 @@ async fn list_providers(
                     api_base,
                     protocol,
                     auth_header,
+                    auth_scheme,
                     has_upstream_api_key,
                     catalogue_key,
                     node,
@@ -1073,6 +1079,7 @@ async fn list_providers(
                     api_base,
                     protocol,
                     auth_header,
+                    auth_scheme,
                     has_upstream_api_key,
                     catalogue_key,
                     node,
@@ -1120,6 +1127,16 @@ struct NewProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
+    /// Save without dialling the endpoint first.
+    ///
+    /// The check refuses only a credential the provider actively *rejected*;
+    /// an endpoint that cannot be reached at all, or that serves no model
+    /// list, is reported and saved anyway. This exists for the case that
+    /// leaves: a provider that answers and rejects the key, which the operator
+    /// nonetheless knows is right — a key not yet active, or an endpoint
+    /// behind something that answers 403 to a session it has not opened.
+    #[serde(default)]
+    skip_validation: bool,
 }
 
 /// Trim, normalise and check an address the way every writer of `api_base`
@@ -1141,6 +1158,96 @@ fn host_of(api_base: &str) -> String {
         .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
         .unwrap_or(api_base)
         .to_string()
+}
+
+/// A client for dialling a provider from the control plane.
+///
+/// System roots, because the provider being reached is as likely to be a hosted
+/// one over TLS as a vLLM on the LAN. Falls back to the bundled Mozilla set,
+/// matching what the proxy itself does for upstreams. Idempotent, and not left
+/// to whoever ran first: `ClientConfig::builder` panics if no provider is
+/// installed, and depending on call ordering would make correctness a property
+/// of the sequence.
+fn upstream_client() -> crate::upstream::Upstream {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    if native.certs.is_empty() {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    } else {
+        for cert in native.certs {
+            let _ = roots.add(cert);
+        }
+    }
+    crate::upstream::Upstream::new(
+        crate::upstream::Config {
+            max_idle_per_host: 2,
+            idle_timeout: std::time::Duration::from_secs(30),
+            connect_timeout: std::time::Duration::from_secs(5),
+        },
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
+/// What dialling a provider with a given credential proved.
+enum Reachability {
+    /// It answered, with this many models.
+    Serving(usize),
+    /// It is there and the credential is not accepted. The one outcome that
+    /// is definitely the operator's mistake rather than a fact about the
+    /// endpoint, and the one worth refusing a save over.
+    Rejected(String),
+    /// Reached, but `GET /v1/models` is not something it answers. Says nothing
+    /// about the credential: plenty of endpoints serve inference and not a
+    /// model list, and an Azure deployment URL is one of them.
+    NoModelList(String),
+    /// Not reached at all — DNS, TLS, connection, timeout.
+    Unreachable(String),
+}
+
+/// Dial a provider the way a request would, and classify what came back.
+///
+/// The point is the *distinction*: a 401 is the operator's typo and should
+/// stop a save, while a 404 or a refused connection is a fact about the
+/// endpoint or the network that a save should be allowed to proceed past. A
+/// check that refused all three equally would block Azure deployments and
+/// every host that happens to be rebooting.
+async fn reach_provider(
+    api_base: &str,
+    protocol: &str,
+    auth_header: &str,
+    auth_scheme: Option<&str>,
+    key: Option<&str>,
+) -> Reachability {
+    // A native-protocol provider does not speak `GET /v1/models` at all, so
+    // there is nothing here to learn from it.
+    if protocol != "openai" {
+        return Reachability::NoModelList(format!(
+            "{protocol} providers do not serve an OpenAI-style model list"
+        ));
+    }
+    let client = upstream_client();
+    let credential = key.map(|k| crate::control::registry_agent::Credential {
+        header: auth_header,
+        scheme: auth_scheme,
+        key: k,
+    });
+    match crate::control::registry_agent::served_models_as(&client, api_base, credential).await {
+        Ok(models) => Reachability::Serving(models.len()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("401") || msg.contains("403") {
+                Reachability::Rejected(msg)
+            } else if msg.contains("404") || msg.contains("405") || msg.contains("no `data` array")
+            {
+                Reachability::NoModelList(msg)
+            } else {
+                Reachability::Unreachable(msg)
+            }
+        }
+    }
 }
 
 /// `POST /admin/providers` — add an endpoint and its credential.
@@ -1354,6 +1461,41 @@ async fn post_provider(
         },
     };
 
+    // Dialled before the row exists, so a rejected credential is a 400 while
+    // the form is still in front of the operator — rather than a provider that
+    // looks configured and fails at the first request, which is where a wrong
+    // key used to surface.
+    let mut reached = None;
+    if !body.skip_validation && credential_kind == "static" {
+        match reach_provider(
+            &api_base,
+            &protocol,
+            &auth_header,
+            auth_scheme.as_deref(),
+            body.upstream_api_key.as_deref().filter(|k| !k.is_empty()),
+        )
+        .await
+        {
+            Reachability::Rejected(why) => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{api_base} rejected that credential: {why}. Nothing was saved — send \
+                         skip_validation to store it anyway"
+                    ),
+                ));
+            }
+            // Neither of these is evidence the operator got anything wrong, so
+            // neither refuses the save; both are reported back instead.
+            Reachability::Serving(n) => reached = Some(format!("reached, serving {n} models")),
+            Reachability::NoModelList(why) => {
+                reached = Some(format!("saved, but the credential is unverified: {why}"))
+            }
+            Reachability::Unreachable(why) => {
+                reached = Some(format!("saved, but could not be reached: {why}"))
+            }
+        }
+    }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO providers (name, kind, api_base, protocol, auth_header, auth_scheme, \
          upstream_api_key, credential_kind, catalogue_key) \
@@ -1386,6 +1528,7 @@ async fn post_provider(
             "has_upstream_api_key": encrypted.is_some(),
             "catalogue_key": body.catalogue_key,
             "model_count": 0,
+            "validation": reached,
         })),
     ))
 }
@@ -1476,6 +1619,9 @@ struct PatchProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
+    /// Save without dialling the endpoint first — see `NewProvider`.
+    #[serde(default)]
+    skip_validation: bool,
 }
 
 /// `PATCH /admin/providers/{id}` — rename it, move it, rotate its key, or hand
@@ -1634,6 +1780,52 @@ async fn patch_provider(
             .execute(&ctx.pool)
             .await
             .map_err(|e| db_error("changing a provider's credential kind", &e))?;
+    }
+    // A rotated key or a moved address is checked the same way a new provider
+    // is, and against the row as it will be *after* this patch: changing the
+    // address and the key together must be validated as the pair the operator
+    // means, not as either half against the old other one.
+    if !body.skip_validation && (body.upstream_api_key.is_some() || body.api_base.is_some()) {
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<Vec<u8>>,
+        );
+        let (base, protocol, header, scheme, kind, stored): Row = sqlx::query_as(
+            "SELECT api_base, protocol, auth_header, auth_scheme, credential_kind, \
+                    upstream_api_key FROM providers WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| db_error("reading a provider back to validate it", &e))?;
+
+        // Only a static credential can be presented as-is; a service account
+        // has to be exchanged for a token first, which is the snapshot build's
+        // job and not something to duplicate here.
+        if kind == "static" {
+            let submitted = body.upstream_api_key.as_deref().filter(|k| !k.is_empty());
+            let existing = match (submitted, &stored) {
+                (Some(_), _) => None,
+                (None, Some(blob)) => crate::control::secrets::decrypt(&ctx.key, blob).ok(),
+                (None, None) => None,
+            };
+            let key = submitted.or(existing.as_deref());
+            if let Reachability::Rejected(why) =
+                reach_provider(&base, &protocol, &header, scheme.as_deref(), key).await
+            {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{base} rejected that credential: {why}. Everything but the credential \
+                         was applied; send skip_validation to store it anyway"
+                    ),
+                ));
+            }
+        }
     }
     if let Some(key) = body.upstream_api_key.as_deref() {
         // Read back rather than trusting the body: `credential_kind` may have
