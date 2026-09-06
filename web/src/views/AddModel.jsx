@@ -86,7 +86,7 @@ export function AddModel({ providers, onClose, onCreated, onUnauthorised }) {
         description: description.trim(),
       });
       await api.post(`/admin/provider-models/${created.id}/backends`, {
-        provider_id: Number(providerId),
+        provider_id: providerId,
         upstream_model: upstream.trim(),
         default_max_tokens: maxTokens ? Number(maxTokens) : undefined,
       });

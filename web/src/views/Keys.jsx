@@ -69,7 +69,7 @@ export function Keys({ onUnauthorised }) {
     try {
       const resp = await api.post("/admin/keys", {
         name: draft.name.trim(),
-        principal_id: Number(draft.principal_id),
+        principal_id: draft.principal_id,
         expires_at,
       });
       // Shown once and never retrievable again — this UI does not try, and

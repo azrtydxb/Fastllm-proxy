@@ -579,6 +579,24 @@ export function Renamable({ value, hint, style, onSave }) {
   );
 }
 
+/**
+ * An id, shown short.
+ *
+ * A uuid is 36 characters and a badge has room for about eight. The first
+ * block is what somebody reads out or greps a log for; the whole thing is on
+ * the element for a copy or a hover. Truncating is safe *because* it is only
+ * ever a label here — every screen addresses a row by the id it already holds,
+ * never by one a human retyped.
+ */
+export function ShortId({ id }) {
+  if (!id) return null;
+  return (
+    <Pill tone="quiet" mono title={id}>
+      id {String(id).slice(0, 8)}
+    </Pill>
+  );
+}
+
 export function Empty({ children }) {
   return (
     <div

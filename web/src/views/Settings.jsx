@@ -61,7 +61,7 @@ export function Settings({ onUnauthorised, config }) {
     const ok = await attempt(
       () =>
         api.put("/admin/fallback-model", {
-          model_id: selected ? Number(selected) : null,
+          model_id: selected || null,
         }),
       setError,
       onUnauthorised,

@@ -10,6 +10,16 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **An id is a uuid, and no longer a count.** All 17 tables that have an
+  identity migrate from `BIGSERIAL` to UUID v4 (migration 0041), generated from
+  the live foreign-key graph rather than hand-typed and tested by migrating a
+  restored dump of the running cluster. `/admin/provider-models/6351` used to
+  say how many models a deployment had ever had and what the next one would be
+  called; now that an id is the stable thing an operator and the API both hold
+  on to, it should not also be a count. `audit_events` and `usage_events` keep
+  a sequence id on purpose — theirs are cursors into an append-only log, and
+  the audit listing pages with `WHERE id < $1 ORDER BY id DESC`, which means
+  "newer than" only because the id is a sequence.
 - **Names are editable in the UI.** Click one on Provider models or Frontend
   models. The hint differs between them on purpose: renaming a provider model
   is an internal relabel, while a frontend model's name is what clients ask

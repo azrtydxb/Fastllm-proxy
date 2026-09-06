@@ -674,7 +674,7 @@ function AddTarget({ models, onAdd }) {
         variant="secondary"
         onClick={() => {
           if (!modelId) return;
-          onAdd(Number(modelId), Number(weight) || 100);
+          onAdd(modelId, Number(weight) || 100);
           setOpen(false);
           setModelId("");
         }}
@@ -760,7 +760,7 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
         });
         if (c.model_id) {
           await api.post(`/admin/rules/${rule.id}/targets`, {
-            model_id: Number(c.model_id),
+            model_id: c.model_id,
             weight: 100,
             position: 0,
           });
@@ -911,9 +911,7 @@ function DryRun({ vm, principals, state, setState, onError }) {
       }
       const resp = await api.post("/admin/routing/dry-run", {
         model: vm.name,
-        principal_id: state.principal_id
-          ? Number(state.principal_id)
-          : undefined,
+        principal_id: state.principal_id ? state.principal_id : undefined,
         streaming: !!state.streaming,
         prompt_tokens: Number(state.prompt_tokens) || 0,
         max_tokens: state.max_tokens ? Number(state.max_tokens) : undefined,

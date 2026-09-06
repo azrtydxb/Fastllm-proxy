@@ -18,6 +18,7 @@ import {
   Pill,
   Renamable,
   Row,
+  ShortId,
   Spacer,
   Stack,
   Table,
@@ -82,7 +83,7 @@ export function Models({ onUnauthorised }) {
     // that describe one are not sent — the API refuses them alongside a
     // provider_id rather than quietly preferring one source over the other.
     const body = d.provider_id
-      ? { provider_id: Number(d.provider_id) }
+      ? { provider_id: d.provider_id }
       : {
           api_base: d.api_base.trim(),
           upstream_api_key: d.upstream_api_key || undefined,
@@ -300,9 +301,7 @@ export function Models({ onUnauthorised }) {
                   ).then((ok) => ok && reload())
                 }
               />
-              <Pill tone="quiet" mono>
-                id {m.id}
-              </Pill>
+              <ShortId id={m.id} />
               <Pill tone={priced ? "neutral" : "warn"} mono>
                 {priced
                   ? `${fmtPrice(m.input_price_per_mtok)} / ${fmtPrice(m.output_price_per_mtok)}`
