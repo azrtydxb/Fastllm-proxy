@@ -66,6 +66,22 @@ source for _why_ anything is the way it is; this file is the summary.
   the control plane's certificate comes from an internal CA and every
   registration failed on `CERTIFICATE_VERIFY_FAILED`. `agent/fastllm-node-agent.service`
   is the systemd unit those hosts now run.
+- **Fixed: a UI deploy was invisible to anyone already using it.** `index.html`
+  was served `no-cache` — "revalidate before using me" — with no `ETag` or
+  `Last-Modified` to revalidate against, so browsers served the cached shell.
+  That shell names content-hashed assets which are, correctly, cached for a
+  year, so the old bundle kept loading and a hard reload was the only cure. The
+  shell now carries the content hash `rust_embed` already computed, and answers
+  `If-None-Match` with a 304 — which also delivers the transfer saving the old
+  comment claimed but could not provide.
+- **A provider can be edited, and is dialled before it is saved.** Add, edit and
+  remove on the Providers screen: name, address, protocol, kind, auth header and
+  scheme, and the credential, all in one form opened by clicking the card. The
+  endpoint is dialled before the row is written — a credential the provider
+  *rejects* is a 400 with nothing saved, while an endpoint that cannot be
+  reached, or serves no model list, is saved and reported, because neither is
+  evidence the operator got anything wrong. `skip_validation` covers the key
+  that is right but not yet active.
 - **The catalogue covers every provider the docs name.** It held fourteen of
   the eighty `docs/providers.md` lists — the ones somebody had typed an address
   for — which made the Add provider dropdown read as the list of what FastLLM

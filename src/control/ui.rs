@@ -64,10 +64,14 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
 /// fallback, so any real `/admin/*` route already matched before axum ever
 /// reaches here — everything that does reach here under that prefix is, by
 /// construction, not a real route.
-pub async fn serve_asset(uri: Uri) -> Response {
+pub async fn serve_asset(uri: Uri, headers: header::HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     if let Some(file) = Assets::get(path) {
-        return with_security_headers(served(file, true));
+        return with_security_headers(served(file, true, if_none_match.as_deref()));
     }
     if path == "admin" || path.starts_with("admin/") {
         return with_security_headers(
@@ -102,7 +106,7 @@ pub async fn serve_asset(uri: Uri) -> Response {
         );
     }
     match Assets::get("index.html") {
-        Some(file) => with_security_headers(served(file, false)),
+        Some(file) => with_security_headers(served(file, false, if_none_match.as_deref())),
         None => with_security_headers(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -122,23 +126,59 @@ pub async fn serve_asset(uri: Uri) -> Response {
 /// SPA-fallback copy of it) is the opposite: it is what *names* the current
 /// hashed assets, so caching it at all would pin a browser to a stale asset
 /// manifest after the next deploy. `no-cache` (revalidate every time, not
-/// `no-store`) still lets a conditional request save the transfer when
-/// nothing changed.
-fn served(file: rust_embed::EmbeddedFile, is_hashed_asset: bool) -> Response {
+/// `no-store`) lets a conditional request save the transfer when nothing has
+/// changed — but only because of the `ETag` below.
+///
+/// Without a validator, `no-cache` promises a revalidation the browser has no
+/// way to perform, and browsers resolve that by serving the cached copy. The
+/// symptom is the worst kind: the UI deploys, the server serves a new
+/// `index.html` naming new hashed assets, and anyone holding the old shell
+/// keeps loading the old bundle — which *is* still there, because hashed
+/// assets are immutable and cached for a year. Every UI change is invisible to
+/// exactly the people already using it, and a hard reload is the only cure. It
+/// took a deploy that "did nothing" to notice.
+///
+/// The tag is the content hash `rust_embed` already computed at build time, so
+/// it costs nothing and cannot drift from the bytes it names.
+fn served(
+    file: rust_embed::EmbeddedFile,
+    is_hashed_asset: bool,
+    if_none_match: Option<&str>,
+) -> Response {
     let mime = file.metadata.mimetype();
     let cache_control = if is_hashed_asset {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
     };
+    let etag = format!("\"{}\"", hex(file.metadata.sha256_hash()));
+    if if_none_match.is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::CACHE_CONTROL, cache_control.to_string()),
+                (header::ETAG, etag),
+            ],
+        )
+            .into_response();
+    }
     (
         [
             (header::CONTENT_TYPE, mime.to_string()),
             (header::CACHE_CONTROL, cache_control.to_string()),
+            (header::ETAG, etag),
         ],
         file.data,
     )
         .into_response()
+}
+
+fn hex(bytes: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// `X-Content-Type-Options: nosniff` and the CSP above, applied uniformly
@@ -171,7 +211,7 @@ mod tests {
     #[tokio::test]
     async fn the_root_serves_the_ui_or_says_why_it_cannot() {
         let uri: Uri = "/".parse().unwrap();
-        let resp = serve_asset(uri).await;
+        let resp = serve_asset(uri, header::HeaderMap::new()).await;
         // Either this repo's checkout has a built `web/dist/index.html`
         // (200, whatever the SPA's shell is) or it does not (503, the
         // explanatory body above) — both are "did not panic and said
@@ -201,7 +241,7 @@ mod tests {
             "/v1/models",
         ] {
             let uri: Uri = path.parse().unwrap();
-            let resp = serve_asset(uri).await;
+            let resp = serve_asset(uri, header::HeaderMap::new()).await;
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
@@ -221,7 +261,7 @@ mod tests {
     async fn an_unmatched_admin_path_404s_instead_of_falling_back_to_the_ui() {
         for path in ["/admin", "/admin/", "/admin/no-such-route"] {
             let uri: Uri = path.parse().unwrap();
-            let resp = serve_asset(uri).await;
+            let resp = serve_asset(uri, header::HeaderMap::new()).await;
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
@@ -246,7 +286,7 @@ mod tests {
     async fn a_hash_route_is_served_because_its_path_is_the_root() {
         // What the browser actually requests for `https://host/#/models`.
         let uri: Uri = "/".parse().unwrap();
-        let resp = serve_asset(uri).await;
+        let resp = serve_asset(uri, header::HeaderMap::new()).await;
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
@@ -261,7 +301,7 @@ mod tests {
     async fn every_response_carries_nosniff_and_a_csp() {
         for path in ["/", "/admin/no-such-route", "/some/spa/route"] {
             let uri: Uri = path.parse().unwrap();
-            let resp = serve_asset(uri).await;
+            let resp = serve_asset(uri, header::HeaderMap::new()).await;
             assert_eq!(
                 resp.headers().get(header::X_CONTENT_TYPE_OPTIONS),
                 Some(&HeaderValue::from_static("nosniff")),
@@ -281,13 +321,45 @@ mod tests {
     /// `EmbeddedFile` (rather than depending on `web/dist/` being built) is
     /// what makes this test meaningful regardless of whether this checkout
     /// has run `npm run build`.
+    /// `no-cache` without a validator is a promise the browser cannot keep.
+    ///
+    /// This is the bug that made a UI deploy invisible: the shell said
+    /// "revalidate before using me" and gave the browser nothing to revalidate
+    /// with, so browsers served the cached copy — which named hashed assets
+    /// that are, correctly, cached for a year. The new bundle was on the
+    /// server and nobody already using the UI could reach it.
+    #[test]
+    fn the_shell_carries_a_validator_and_answers_a_conditional_request() {
+        let file = rust_embed::EmbeddedFile {
+            data: std::borrow::Cow::Borrowed(b"<html></html>"),
+            metadata: rust_embed::Metadata::__rust_embed_new([7; 32], None, None, "text/html"),
+        };
+        let fresh = served(file.clone(), false, None);
+        let etag = fresh
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("index.html must carry an ETag, or `no-cache` cannot revalidate")
+            .to_string();
+        assert_eq!(fresh.status(), StatusCode::OK);
+
+        // The same tag back means the browser already has these bytes.
+        let repeat = served(file.clone(), false, Some(&etag));
+        assert_eq!(repeat.status(), StatusCode::NOT_MODIFIED);
+
+        // A tag from an older build does not, which is the case that matters:
+        // it is how a stale shell gets replaced.
+        let stale = served(file, false, Some("\"0000\""));
+        assert_eq!(stale.status(), StatusCode::OK);
+    }
+
     #[test]
     fn index_html_is_never_cached_but_a_hashed_asset_is_cached_immutably() {
         let file = rust_embed::EmbeddedFile {
             data: std::borrow::Cow::Borrowed(b"<html></html>"),
             metadata: rust_embed::Metadata::__rust_embed_new([0; 32], None, None, "text/html"),
         };
-        let index_resp = served(file.clone(), false);
+        let index_resp = served(file.clone(), false, None);
         assert_eq!(
             index_resp
                 .headers()
@@ -297,7 +369,7 @@ mod tests {
             "index.html must revalidate every time, never be cached blindly"
         );
 
-        let asset_resp = served(file, true);
+        let asset_resp = served(file, true, None);
         let cache_control = asset_resp
             .headers()
             .get(header::CACHE_CONTROL)
