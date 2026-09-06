@@ -75,8 +75,6 @@ export function Providers({ onUnauthorised, go }) {
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState(null);
-  const [rotating, setRotating] = useState(null);
-  const [key, setKey] = useState("");
   const [editing, setEditing] = useState(null);
   const [edit, setEdit] = useState({});
   const [renaming, setRenaming] = useState(null);
@@ -153,19 +151,6 @@ export function Providers({ onUnauthorised, go }) {
     );
     if (ok) {
       setDraft(null);
-      reload();
-    }
-  };
-
-  const rotate = async (id) => {
-    const ok = await attempt(
-      () => api.patch(`/admin/providers/${id}`, { upstream_api_key: key }),
-      setError,
-      onUnauthorised,
-    );
-    if (ok) {
-      setRotating(null);
-      setKey("");
       reload();
     }
   };
@@ -552,12 +537,7 @@ export function Providers({ onUnauthorised, go }) {
               <Card
                 key={g.id}
                 onClick={() => {
-                  if (
-                    editing === g.id ||
-                    rotating === g.id ||
-                    renaming === g.id
-                  )
-                    return;
+                  if (editing === g.id || renaming === g.id) return;
                   openEdit(g);
                 }}
                 style={{ cursor: "pointer" }}
@@ -809,44 +789,10 @@ export function Providers({ onUnauthorised, go }) {
                         Rename
                       </Button>
                     </Row>
-                  ) : rotating === g.id ? (
-                    <Row gap={8} style={{ flexWrap: "nowrap" }}>
-                      <input
-                        type="password"
-                        placeholder="new api key"
-                        style={{ flex: 1 }}
-                        value={key}
-                        onChange={(e) => setKey(e.target.value)}
-                      />
-                      <Button
-                        variant="small"
-                        onClick={() => {
-                          setRotating(null);
-                          setKey("");
-                        }}
-                      >
-                        cancel
-                      </Button>
-                      <Button variant="primary" onClick={() => rotate(g.id)}>
-                        Save
-                      </Button>
-                    </Row>
                   ) : (
                     <Row gap={8}>
                       <Button variant="small" onClick={() => openEdit(g)}>
                         edit
-                      </Button>
-                      <Button
-                        variant="small"
-                        onClick={() => {
-                          setRotating(g.id);
-                          setKey("");
-                        }}
-                      >
-                        {/* One credential per provider, so this is one write
-                            however many models ride on it — the reason the
-                            key lives here and not on a model. */}
-                        {g.credentialled ? "rotate key" : "set key"}
                       </Button>
                       <Spacer />
                       <Button
