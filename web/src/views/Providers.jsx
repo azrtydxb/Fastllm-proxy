@@ -211,6 +211,18 @@ export function Providers({ onUnauthorised, go }) {
     }
   };
 
+  const openEdit = (g) => {
+    setEditing(g.id);
+    setEdit({
+      name: g.host,
+      api_base: g.origin,
+      protocol: [...g.protocols][0] || "openai",
+      auth_header: g.auth_header || "authorization",
+      auth_scheme: g.auth_scheme ?? "",
+      kind: g.kind,
+    });
+  };
+
   const remove = async (g) => {
     // The API refuses while models remain rather than cascading, so the
     // confirmation only has to cover the case it will actually allow.
@@ -533,7 +545,23 @@ export function Providers({ onUnauthorised, go }) {
           {shown.map((g) => {
             const native = [...g.protocols].filter((p) => p !== "openai");
             return (
-              <Card key={g.id}>
+              // Clicking the card is the obvious way to open it, and the
+              // address it used to print here lives in that form. Ignored
+              // while the card is already showing a form, so a click on a
+              // field inside one does not re-seed it and lose what was typed.
+              <Card
+                key={g.id}
+                onClick={() => {
+                  if (
+                    editing === g.id ||
+                    rotating === g.id ||
+                    renaming === g.id
+                  )
+                    return;
+                  openEdit(g);
+                }}
+                style={{ cursor: "pointer" }}
+              >
                 <Stack gap={12}>
                   <Row style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
                     <Row gap={10} style={{ flexWrap: "nowrap", minWidth: 0 }}>
@@ -599,26 +627,6 @@ export function Providers({ onUnauthorised, go }) {
                       </Pill>
                     </Row>
                   </Row>
-
-                  {[...g.bases].slice(0, 2).map((base) => (
-                    <Ellipsis
-                      key={base}
-                      title={base}
-                      style={{
-                        font: "400 11px/1.4 var(--mono)",
-                        color: "var(--fg-3)",
-                        background: "var(--panel-2)",
-                        border: "1px solid var(--line-mid)",
-                        borderRadius: 7,
-                        padding: "8px 10px",
-                      }}
-                    >
-                      {base}
-                    </Ellipsis>
-                  ))}
-                  {g.bases.size > 2 && (
-                    <Muted>and {g.bases.size - 2} more paths</Muted>
-                  )}
 
                   <Row
                     style={{
@@ -825,20 +833,7 @@ export function Providers({ onUnauthorised, go }) {
                     </Row>
                   ) : (
                     <Row gap={8}>
-                      <Button
-                        variant="small"
-                        onClick={() => {
-                          setEditing(g.id);
-                          setEdit({
-                            name: g.host,
-                            api_base: g.origin,
-                            protocol: [...g.protocols][0] || "openai",
-                            auth_header: g.auth_header || "authorization",
-                            auth_scheme: g.auth_scheme ?? "",
-                            kind: g.kind,
-                          });
-                        }}
-                      >
+                      <Button variant="small" onClick={() => openEdit(g)}>
                         edit
                       </Button>
                       <Button
