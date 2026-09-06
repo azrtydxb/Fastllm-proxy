@@ -1131,10 +1131,10 @@ struct NewProvider {
     ///
     /// The check refuses only a credential the provider actively *rejected*;
     /// an endpoint that cannot be reached at all, or that serves no model
-    /// list, is reported and saved anyway. This exists for the case that
-    /// leaves: a provider that answers and rejects the key, which the operator
-    /// nonetheless knows is right — a key not yet active, or an endpoint
-    /// behind something that answers 403 to a session it has not opened.
+    /// list, is reported and saved anyway. This exists for the one case left
+    /// over — a provider that answers and rejects a key the operator knows is
+    /// right, such as one not yet activated, or an endpoint behind something
+    /// that answers 403 to a session it has not opened.
     #[serde(default)]
     skip_validation: bool,
 }
@@ -7544,6 +7544,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: Some("sk-ant-test".into()),
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -7587,6 +7591,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -7607,6 +7615,10 @@ mod tests {
                     auth_scheme: None,
                     upstream_api_key: Some("sk-ant-rotated".into()),
                     credential_kind: None,
+                    // api.anthropic.com is real and would reject this, which
+                    // is the check working — but this test is about the
+                    // ciphertext that lands in the column.
+                    skip_validation: true,
                 }),
             )
             .await
@@ -7655,6 +7667,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -7671,6 +7687,7 @@ mod tests {
             auth_scheme: None,
             upstream_api_key: None,
             credential_kind: None,
+            skip_validation: true,
         };
 
         patch_provider(
@@ -7814,6 +7831,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -8017,6 +8038,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -8045,6 +8070,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
@@ -8076,6 +8105,10 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: Some("sk-on-the-provider".into()),
                 credential_kind: None,
+                // The addresses here are fixtures nothing is listening on, so
+                // dialling them would spend a connect timeout per test to
+                // learn what the test does not care about.
+                skip_validation: true,
             }),
         )
         .await
