@@ -74,14 +74,24 @@ source for _why_ anything is the way it is; this file is the summary.
   shell now carries the content hash `rust_embed` already computed, and answers
   `If-None-Match` with a 304 — which also delivers the transfer saving the old
   comment claimed but could not provide.
+- **Fixed: a response from an upstream that hangs up was thrown away.**
+  `Upstream::request` drives the connection itself, and treated the connection
+  finishing as "no response came" — but polling the connection is what *reads*
+  the response, so one delivered on the way out was discarded and reported as
+  `upstream closed the connection before sending a response`. Any upstream
+  answering `Connection: close` hit it, which is legal and happens under load.
+  Found because a test stub did exactly that.
 - **A provider can be edited, and is dialled before it is saved.** Add, edit and
   remove on the Providers screen: name, address, protocol, kind, auth header and
   scheme, and the credential, all in one form opened by clicking the card. The
-  endpoint is dialled before the row is written — a credential the provider
-  *rejects* is a 400 with nothing saved, while an endpoint that cannot be
-  reached, or serves no model list, is saved and reported, because neither is
-  evidence the operator got anything wrong. `skip_validation` covers the key
-  that is right but not yet active.
+  endpoint is dialled before the row is written and nothing is stored unless it
+  answers with its models — a rejected credential, an unreachable address and a
+  path with no model list are all refused, the last because a 404 says the host
+  is there and the path is not, which is overwhelmingly a mistyped address. The
+  form shows the name, address, protocol and credential; the auth header, the
+  scheme and the kind are how the credential is transmitted and which machinery
+  maintains the row, neither of which is a question to put to whoever is adding
+  a provider.
 - **The catalogue covers every provider the docs name.** It held fourteen of
   the eighty `docs/providers.md` lists — the ones somebody had typed an address
   for — which made the Add provider dropdown read as the list of what FastLLM

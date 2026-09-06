@@ -1127,16 +1127,6 @@ struct NewProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
-    /// Save without dialling the endpoint first.
-    ///
-    /// The check refuses only a credential the provider actively *rejected*;
-    /// an endpoint that cannot be reached at all, or that serves no model
-    /// list, is reported and saved anyway. This exists for the one case left
-    /// over — a provider that answers and rejects a key the operator knows is
-    /// right, such as one not yet activated, or an endpoint behind something
-    /// that answers 403 to a session it has not opened.
-    #[serde(default)]
-    skip_validation: bool,
 }
 
 /// Trim, normalise and check an address the way every writer of `api_base`
@@ -1207,6 +1197,39 @@ enum Reachability {
     Unreachable(String),
 }
 
+/// Refuse to store a provider that does not answer with its models.
+///
+/// A provider is an address and a credential, and neither is worth storing
+/// unverified: a credential the endpoint rejects is a 401 at the first real
+/// request, and an address that answers nothing is a provider that routes
+/// nowhere. Both are the operator's to fix while the form is still open.
+///
+/// A 404 is refused too, and deliberately. It says the host is there and this
+/// path is not, which is overwhelmingly a mistyped `api_base` rather than a
+/// provider that merely declines to list its models — and reading it the
+/// generous way is how a wrong address gets saved and blamed on something else
+/// a week later.
+async fn verified(
+    api_base: &str,
+    protocol: &str,
+    auth_header: &str,
+    auth_scheme: Option<&str>,
+    key: Option<&str>,
+) -> Result<String, ApiError> {
+    let refuse = |what: &str, why: String| {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{api_base} {what}: {why}. Nothing was saved."),
+        ))
+    };
+    match reach_provider(api_base, protocol, auth_header, auth_scheme, key).await {
+        Reachability::Serving(n) => Ok(format!("reached, serving {n} models")),
+        Reachability::Rejected(why) => refuse("rejected that credential", why),
+        Reachability::NoModelList(why) => refuse("did not answer with a model list", why),
+        Reachability::Unreachable(why) => refuse("could not be reached", why),
+    }
+}
+
 /// Dial a provider the way a request would, and classify what came back.
 ///
 /// The point is the *distinction*: a 401 is the operator's typo and should
@@ -1221,13 +1244,7 @@ async fn reach_provider(
     auth_scheme: Option<&str>,
     key: Option<&str>,
 ) -> Reachability {
-    // A native-protocol provider does not speak `GET /v1/models` at all, so
-    // there is nothing here to learn from it.
-    if protocol != "openai" {
-        return Reachability::NoModelList(format!(
-            "{protocol} providers do not serve an OpenAI-style model list"
-        ));
-    }
+    let _ = protocol;
     let client = upstream_client();
     let credential = key.map(|k| crate::control::registry_agent::Credential {
         header: auth_header,
@@ -1466,35 +1483,17 @@ async fn post_provider(
     // looks configured and fails at the first request, which is where a wrong
     // key used to surface.
     let mut reached = None;
-    if !body.skip_validation && credential_kind == "static" {
-        match reach_provider(
-            &api_base,
-            &protocol,
-            &auth_header,
-            auth_scheme.as_deref(),
-            body.upstream_api_key.as_deref().filter(|k| !k.is_empty()),
-        )
-        .await
-        {
-            Reachability::Rejected(why) => {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "{api_base} rejected that credential: {why}. Nothing was saved — send \
-                         skip_validation to store it anyway"
-                    ),
-                ));
-            }
-            // Neither of these is evidence the operator got anything wrong, so
-            // neither refuses the save; both are reported back instead.
-            Reachability::Serving(n) => reached = Some(format!("reached, serving {n} models")),
-            Reachability::NoModelList(why) => {
-                reached = Some(format!("saved, but the credential is unverified: {why}"))
-            }
-            Reachability::Unreachable(why) => {
-                reached = Some(format!("saved, but could not be reached: {why}"))
-            }
-        }
+    if credential_kind == "static" {
+        reached = Some(
+            verified(
+                &api_base,
+                &protocol,
+                &auth_header,
+                auth_scheme.as_deref(),
+                body.upstream_api_key.as_deref().filter(|k| !k.is_empty()),
+            )
+            .await?,
+        );
     }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO providers (name, kind, api_base, protocol, auth_header, auth_scheme, \
@@ -1619,9 +1618,6 @@ struct PatchProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
-    /// Save without dialling the endpoint first — see `NewProvider`.
-    #[serde(default)]
-    skip_validation: bool,
 }
 
 /// `PATCH /admin/providers/{id}` — rename it, move it, rotate its key, or hand
@@ -1785,7 +1781,7 @@ async fn patch_provider(
     // is, and against the row as it will be *after* this patch: changing the
     // address and the key together must be validated as the pair the operator
     // means, not as either half against the old other one.
-    if !body.skip_validation && (body.upstream_api_key.is_some() || body.api_base.is_some()) {
+    if body.upstream_api_key.is_some() || body.api_base.is_some() {
         type Row = (
             String,
             String,
@@ -1814,17 +1810,7 @@ async fn patch_provider(
                 (None, None) => None,
             };
             let key = submitted.or(existing.as_deref());
-            if let Reachability::Rejected(why) =
-                reach_provider(&base, &protocol, &header, scheme.as_deref(), key).await
-            {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "{base} rejected that credential: {why}. Everything but the credential \
-                         was applied; send skip_validation to store it anyway"
-                    ),
-                ));
-            }
+            verified(&base, &protocol, &header, scheme.as_deref(), key).await?;
         }
     }
     if let Some(key) = body.upstream_api_key.as_deref() {
@@ -7478,6 +7464,87 @@ mod tests {
         )
     }
 
+    /// A listener that answers `GET /v1/models` like a provider, for tests
+    /// that need a provider to exist.
+    ///
+    /// Creating one dials it now, so a fixture address nothing listens on is
+    /// correctly refused. Standing up a real socket rather than adding a way
+    /// to skip the check keeps the tests exercising the path production takes
+    /// — the alternative was a bypass flag that only tests ever set, which is
+    /// how a check quietly stops being tested at all.
+    fn stub_provider() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read as _, Write as _};
+                // Read the whole request before answering. Closing a socket
+                // with unread bytes still buffered makes the kernel send an
+                // RST, which the client reports as "closed before sending a
+                // response" — the response having been written is not enough.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 512];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                eprintln!("STUB GOT >>>{}<<<", String::from_utf8_lossy(&request));
+                let body = br#"{"object":"list","data":[{"id":"stub-model"}]}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// The stub above is only useful if it actually speaks HTTP, and a bug in
+    /// it would look exactly like the validation check failing.
+    #[test]
+    fn the_stub_provider_answers_a_plain_http_request() {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        let base = stub_provider();
+        let addr = base.trim_start_matches("http://").trim_end_matches("/v1");
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        s.write_all(format!("GET /v1/models HTTP/1.1\r\nhost: {addr}\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut reader = std::io::BufReader::new(s);
+        let mut status = String::new();
+        reader.read_line(&mut status).unwrap();
+        assert!(status.starts_with("HTTP/1.1 200"), "got {status:?}");
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        assert!(rest.contains("stub-model"), "got {rest:?}");
+    }
+
+    #[tokio::test]
+    async fn reaching_the_stub_reports_it_as_serving() {
+        let base = stub_provider();
+        match reach_provider(&base, "openai", "authorization", Some("Bearer"), Some("k")).await {
+            Reachability::Serving(n) => assert_eq!(n, 1),
+            other => panic!(
+                "expected the stub to be reachable, got {}",
+                match other {
+                    Reachability::Rejected(w) => format!("Rejected({w})"),
+                    Reachability::NoModelList(w) => format!("NoModelList({w})"),
+                    Reachability::Unreachable(w) => format!("Unreachable({w})"),
+                    Reachability::Serving(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+
     async fn test_ctx() -> (Ctx, Arc<dyn SnapshotSink>) {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = crate::control::db::connect(&url).await.unwrap();
@@ -7536,24 +7603,33 @@ mod tests {
                 name: Some(name.clone()),
                 kind: None,
                 catalogue_key: Some("anthropic".into()),
-                // Deliberately absent: the point of the catalogue is that the
-                // operator does not have to go and find this.
-                api_base: None,
+                // The catalogue's own address is api.anthropic.com, and saving
+                // now dials it — with a fake key it would be refused, which is
+                // the check doing its job rather than anything this test is
+                // about. The entry still supplies the protocol and the header,
+                // which is what is being asserted; that the catalogue carries
+                // the right *address* is asserted below, off the catalogue
+                // itself, where no network is involved.
+                api_base: Some(stub_provider()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: Some("sk-ant-test".into()),
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
         .unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(created.0["api_base"], "https://api.anthropic.com/v1");
+        let catalogue = list_provider_catalogue(State(ctx.clone()), RequireRead)
+            .await
+            .unwrap();
+        let anthropic = catalogue
+            .0
+            .iter()
+            .find(|c| c.key == "anthropic")
+            .expect("the catalogue lists Anthropic");
+        assert_eq!(anthropic.base_url, "https://api.anthropic.com/v1");
         assert_eq!(created.0["protocol"], "anthropic");
         // Anthropic wants the key raw in `x-api-key`; getting this wrong is
         // an upstream 401 an operator cannot see from here.
@@ -7585,16 +7661,12 @@ mod tests {
                 name: Some(unique_name("cat-provider")),
                 kind: None,
                 catalogue_key: Some("anthropic".into()),
-                api_base: None,
+                api_base: Some(created.0["api_base"].as_str().unwrap().to_string()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
@@ -7615,10 +7687,6 @@ mod tests {
                     auth_scheme: None,
                     upstream_api_key: Some("sk-ant-rotated".into()),
                     credential_kind: None,
-                    // api.anthropic.com is real and would reject this, which
-                    // is the check working — but this test is about the
-                    // ciphertext that lands in the column.
-                    skip_validation: true,
                 }),
             )
             .await
@@ -7661,16 +7729,12 @@ mod tests {
                 name: Some(unique_name("handover-provider")),
                 kind: None,
                 catalogue_key: None,
-                api_base: Some(format!("http://10.8.8.8:{}/v1", std::process::id())),
+                api_base: Some(stub_provider()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
@@ -7687,7 +7751,6 @@ mod tests {
             auth_scheme: None,
             upstream_api_key: None,
             credential_kind: None,
-            skip_validation: true,
         };
 
         patch_provider(
@@ -7825,16 +7888,12 @@ mod tests {
                 name: Some(unique_name("named-by-agent")),
                 kind: None,
                 catalogue_key: None,
-                api_base: Some(format!("http://10.7.7.6:{}/v1", std::process::id())),
+                api_base: Some(stub_provider()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
@@ -8038,10 +8097,6 @@ mod tests {
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
@@ -8064,16 +8119,12 @@ mod tests {
                 name: Some(unique_name("leased-provider")),
                 kind: Some("dynamic".into()),
                 catalogue_key: None,
-                api_base: Some("http://10.0.0.9:8000/v1".into()),
+                api_base: Some(stub_provider()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: None,
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await
@@ -8099,16 +8150,12 @@ mod tests {
                 name: Some(unique_name("byid-provider")),
                 kind: None,
                 catalogue_key: None,
-                api_base: Some(format!("http://10.9.9.9:{}/v1", std::process::id())),
+                api_base: Some(stub_provider()),
                 protocol: None,
                 auth_header: None,
                 auth_scheme: None,
                 upstream_api_key: Some("sk-on-the-provider".into()),
                 credential_kind: None,
-                // The addresses here are fixtures nothing is listening on, so
-                // dialling them would spend a connect timeout per test to
-                // learn what the test does not care about.
-                skip_validation: true,
             }),
         )
         .await

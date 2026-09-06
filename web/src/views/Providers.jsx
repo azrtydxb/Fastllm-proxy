@@ -176,15 +176,9 @@ export function Providers({ onUnauthorised, go }) {
           name: edit.name?.trim() || undefined,
           api_base: edit.api_base?.trim() || undefined,
           protocol: edit.protocol || undefined,
-          auth_header: edit.auth_header?.trim() || undefined,
-          // "" is meaningful here: it clears the scheme, which is how a raw
-          // key is sent. Only an untouched field is omitted.
-          auth_scheme: edit.auth_scheme,
-          kind: edit.kind || undefined,
           // Absent leaves the stored credential alone — the form cannot read
           // it back, so it must not send an empty one and wipe it.
           upstream_api_key: edit.upstream_api_key || undefined,
-          skip_validation: edit.skip_validation || undefined,
         }),
       setError,
       onUnauthorised,
@@ -202,9 +196,6 @@ export function Providers({ onUnauthorised, go }) {
       name: g.host,
       api_base: g.origin,
       protocol: [...g.protocols][0] || "openai",
-      auth_header: g.auth_header || "authorization",
-      auth_scheme: g.auth_scheme ?? "",
-      kind: g.kind,
     });
   };
 
@@ -231,7 +222,6 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
-      auth_header: p.auth_header,
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -437,11 +427,7 @@ export function Providers({ onUnauthorised, go }) {
                 <Field
                   label="Credential"
                   style={{ flex: 2 }}
-                  hint={
-                    entry?.auth_header
-                      ? `Sent as ${entry.auth_header}. Encrypted at rest and never readable back.`
-                      : "Encrypted at rest and never readable back through this API."
-                  }
+                  hint="Encrypted at rest and never readable back through this API."
                 >
                   <input
                     type="password"
@@ -670,58 +656,18 @@ export function Providers({ onUnauthorised, go }) {
                           }
                         />
                       </Field>
-                      <Row gap={8} style={{ alignItems: "flex-start" }}>
-                        <Field label="Protocol" style={{ flex: 1 }}>
-                          <select
-                            value={edit.protocol ?? "openai"}
-                            onChange={(e) =>
-                              setEdit({ ...edit, protocol: e.target.value })
-                            }
-                          >
-                            <option value="openai">openai</option>
-                            <option value="anthropic">anthropic</option>
-                            <option value="gemini">gemini</option>
-                          </select>
-                        </Field>
-                        {/* Handing an endpoint to the agent on its host, or
-                            taking it back. Only `dynamic` is ever removed
-                            automatically, which is what makes this a
-                            deliberate act rather than a label. */}
-                        <Field label="Kind" style={{ flex: 1 }}>
-                          <select
-                            value={edit.kind ?? "static"}
-                            onChange={(e) =>
-                              setEdit({ ...edit, kind: e.target.value })
-                            }
-                          >
-                            <option value="static">static</option>
-                            <option value="cloud">cloud</option>
-                            <option value="dynamic">dynamic</option>
-                          </select>
-                        </Field>
-                      </Row>
-                      <Row gap={8} style={{ alignItems: "flex-start" }}>
-                        <Field label="Auth header" style={{ flex: 1 }}>
-                          <input
-                            value={edit.auth_header ?? ""}
-                            onChange={(e) =>
-                              setEdit({ ...edit, auth_header: e.target.value })
-                            }
-                          />
-                        </Field>
-                        <Field
-                          label="Auth scheme"
-                          style={{ flex: 1 }}
-                          hint="Empty sends the key raw."
+                      <Field label="Protocol">
+                        <select
+                          value={edit.protocol ?? "openai"}
+                          onChange={(e) =>
+                            setEdit({ ...edit, protocol: e.target.value })
+                          }
                         >
-                          <input
-                            value={edit.auth_scheme ?? ""}
-                            onChange={(e) =>
-                              setEdit({ ...edit, auth_scheme: e.target.value })
-                            }
-                          />
-                        </Field>
-                      </Row>
+                          <option value="openai">openai</option>
+                          <option value="anthropic">anthropic</option>
+                          <option value="gemini">gemini</option>
+                        </select>
+                      </Field>
                       <Field
                         label="Credential"
                         hint="Leave empty to keep the one already stored — this form cannot read it back."
@@ -740,28 +686,6 @@ export function Providers({ onUnauthorised, go }) {
                           }
                         />
                       </Field>
-                      <label
-                        style={{
-                          display: "flex",
-                          gap: 8,
-                          alignItems: "center",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={!!edit.skip_validation}
-                          onChange={(e) =>
-                            setEdit({
-                              ...edit,
-                              skip_validation: e.target.checked,
-                            })
-                          }
-                        />
-                        <Muted>
-                          Save without dialling it first. Only needed when a
-                          provider rejects a key you know is right.
-                        </Muted>
-                      </label>
                       <Row gap={8} style={{ flexWrap: "nowrap" }}>
                         <Spacer />
                         <Button

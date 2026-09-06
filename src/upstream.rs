@@ -196,11 +196,28 @@ impl Upstream {
                 // Nothing else drives this connection, so the request body is
                 // written and the response parsed from right here.
                 match conn.as_mut().poll(cx) {
-                    // Ended before a response arrived. A pooled connection the
-                    // peer had already closed lands here; the caller retries.
-                    Poll::Ready(Ok(())) => Poll::Ready(Err(anyhow::anyhow!(
-                        "upstream closed the connection before sending a response"
-                    ))),
+                    Poll::Ready(Ok(())) => {
+                        // Polling `conn` is what *reads* the response, so a
+                        // connection that finished in this very poll may have
+                        // delivered one on the way out. Ask again before
+                        // concluding there was none.
+                        //
+                        // `Connection: close` is the case that matters, and it
+                        // is not exotic: an upstream is entitled to answer and
+                        // hang up in the same breath, and several do under
+                        // load. Reporting that as "closed before sending a
+                        // response" threw away a perfectly good response and
+                        // blamed the upstream for it.
+                        if let Poll::Ready(r) = send.as_mut().poll(cx) {
+                            return Poll::Ready(r.map_err(anyhow::Error::from));
+                        }
+                        // Genuinely nothing came back. A pooled connection the
+                        // peer had already closed lands here; the caller
+                        // retries.
+                        Poll::Ready(Err(anyhow::anyhow!(
+                            "upstream closed the connection before sending a response"
+                        )))
+                    }
                     Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::Error::from(e))),
                     Poll::Pending => Poll::Pending,
                 }

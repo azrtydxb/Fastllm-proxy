@@ -30,9 +30,9 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `DELETE` | `/admin/provider-models/{id}` | Delete models id | — |
 | `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `provider_id`*, `api_base`*, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
 | `GET` | `/admin/providers` | Read providers | — |
-| `POST` | `/admin/providers` | Add a provider: an endpoint and the credential that reaches it | `name`*, `kind`*, `catalogue_key`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`*, `skip_validation`* |
+| `POST` | `/admin/providers` | Add a provider: an endpoint and the credential that reaches it | `name`*, `kind`*, `catalogue_key`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`* |
 | `POST` | `/admin/providers/register` | Register or refresh a provider's lease | `api_base`, `node`, `name`*, `engine`*, `ttl_seconds` |
-| `PATCH` | `/admin/providers/{id}` | Rename a provider, move it, or rotate its credential. An absent upstream_api_key leaves the stored one alone; "" clears it | `name`*, `kind`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`*, `skip_validation`* |
+| `PATCH` | `/admin/providers/{id}` | Rename a provider, move it, or rotate its credential. An absent upstream_api_key leaves the stored one alone; "" clears it | `name`*, `kind`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`* |
 | `DELETE` | `/admin/providers/{id}` | Delete a provider that serves no models | — |
 | `GET` | `/admin/providers/{id}/available-models` | What a provider is currently serving | — |
 

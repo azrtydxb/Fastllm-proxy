@@ -82,13 +82,22 @@ pub async fn served_models_as(
         anyhow::bail!("{url} answered {status}");
     }
     let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+    // `data` is OpenAI's shape and `models` is Gemini's. Accepting both is
+    // what lets one probe answer for every protocol here, rather than the
+    // native ones being unverifiable.
     let data = parsed
         .get("data")
+        .or_else(|| parsed.get("models"))
         .and_then(|d| d.as_array())
-        .ok_or_else(|| anyhow::anyhow!("{url} returned no `data` array"))?;
+        .ok_or_else(|| anyhow::anyhow!("{url} returned no model list"))?;
     Ok(data
         .iter()
-        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_owned))
+        .filter_map(|m| {
+            m.get("id")
+                .or_else(|| m.get("name"))
+                .and_then(|i| i.as_str())
+                .map(str::to_owned)
+        })
         .collect())
 }
 
