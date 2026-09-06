@@ -507,8 +507,11 @@ await goto("keys");
   await click(byText("Create key"));
   const call = lastCall("POST", "/admin/keys");
   check(
-    "key POST sends a numeric principal_id",
-    typeof call?.body?.principal_id === "number",
+    // A uuid, sent as the string it is. It used to be coerced with Number(),
+    // which now yields NaN — the reason this check is here at all.
+    "key POST sends the principal_id as a uuid string",
+    typeof call?.body?.principal_id === "string" &&
+      /^[0-9a-f-]{36}$/.test(call.body.principal_id),
   );
   check(
     "key POST sends an ISO expiry",

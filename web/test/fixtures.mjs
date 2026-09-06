@@ -170,7 +170,7 @@ const FIXTURES = {
   ],
   "/admin/providers": [
     {
-      id: 1,
+      id: "00000000-0000-4000-8000-000000000001",
       name: "10.42.1.7:8000",
       kind: "static",
       api_base: "http://10.42.1.7:8000/v1",
@@ -181,7 +181,7 @@ const FIXTURES = {
       model_count: 1,
     },
     {
-      id: 2,
+      id: "00000000-0000-4000-8000-000000000002",
       name: "10.42.1.8:8000",
       kind: "static",
       api_base: "http://10.42.1.8:8000/v1",
@@ -192,7 +192,7 @@ const FIXTURES = {
       model_count: 1,
     },
     {
-      id: 3,
+      id: "00000000-0000-4000-8000-000000000003",
       name: "api.anthropic.com",
       kind: "cloud",
       api_base: "https://api.anthropic.com/v1",
@@ -205,7 +205,7 @@ const FIXTURES = {
   ],
   "/admin/provider-models": [
     {
-      id: 3,
+      id: "00000000-0000-4000-8000-000000000003",
       name: "local-qwen",
       description: "self-hosted",
       input_price_per_mtok: 0,
@@ -215,11 +215,11 @@ const FIXTURES = {
       // No policy of its own: the state ("deployment default") the
       // load-balancing control starts in.
       policy: null,
-      provider_id: 1,
+      provider_id: "00000000-0000-4000-8000-000000000001",
       provider_name: "10.42.1.7:8000",
       backends: [
         {
-          id: 3,
+          id: "00000000-0000-4000-8000-000000000003",
           api_base: "http://10.42.1.7:8000/v1",
           upstream_model: "qwen2.5-32b",
           has_upstream_api_key: false,
@@ -230,7 +230,7 @@ const FIXTURES = {
       ],
     },
     {
-      id: 4,
+      id: "00000000-0000-4000-8000-000000000004",
       name: "local-qwen@10.42.1.8:8000",
       description: "self-hosted",
       input_price_per_mtok: 0,
@@ -238,11 +238,11 @@ const FIXTURES = {
       cache_ttl_seconds: 300,
       context_length: 262144,
       policy: null,
-      provider_id: 2,
+      provider_id: "00000000-0000-4000-8000-000000000002",
       provider_name: "10.42.1.8:8000",
       backends: [
         {
-          id: 4,
+          id: "00000000-0000-4000-8000-000000000004",
           api_base: "http://10.42.1.8:8000/v1",
           upstream_model: "qwen2.5-32b",
           has_upstream_api_key: false,
@@ -256,7 +256,7 @@ const FIXTURES = {
       // No provider: not routable, and the state the attach form exists for.
       // It is also the drift this work exists to end, so the UI has to show it
       // rather than hide it.
-      id: 6,
+      id: "00000000-0000-4000-8000-000000000006",
       name: "orphaned-model",
       description: "",
       input_price_per_mtok: null,
@@ -267,17 +267,17 @@ const FIXTURES = {
       backends: [],
     },
     {
-      id: 5,
+      id: "00000000-0000-4000-8000-000000000005",
       name: "claude-sonnet",
       description: "",
       input_price_per_mtok: null,
       output_price_per_mtok: null,
       cache_ttl_seconds: null,
-      provider_id: 3,
+      provider_id: "00000000-0000-4000-8000-000000000003",
       provider_name: "api.anthropic.com",
       backends: [
         {
-          id: 5,
+          id: "00000000-0000-4000-8000-000000000005",
           api_base: "https://api.anthropic.com/v1",
           upstream_model: "claude-sonnet-4-5",
           has_upstream_api_key: true,
@@ -290,12 +290,12 @@ const FIXTURES = {
   ],
   "/admin/frontend-models": [
     {
-      id: 2,
+      id: "00000000-0000-4000-8000-000000000002",
       name: "gpt-router",
       description: "",
       rules: [
         {
-          id: 7,
+          id: "00000000-0000-4000-8000-000000000007",
           position: 0,
           // Flattened, exactly as `RuleView` serialises it — there is no
           // `match_condition` key on the wire. The first version of this
@@ -310,8 +310,8 @@ const FIXTURES = {
           class: "coding",
           targets: [
             {
-              id: 21,
-              model_id: 5,
+              id: "00000000-0000-4000-8000-000000000021",
+              model_id: "00000000-0000-4000-8000-000000000005",
               model: "claude-sonnet",
               weight: 80,
               position: 0,
@@ -322,8 +322,8 @@ const FIXTURES = {
       policy: null,
       default_targets: [
         {
-          id: 22,
-          provider_model_id: 3,
+          id: "00000000-0000-4000-8000-000000000022",
+          provider_model_id: "00000000-0000-4000-8000-000000000003",
           model: "local-qwen",
           provider: "10.42.1.7:8000",
           weight: 100,
@@ -332,7 +332,7 @@ const FIXTURES = {
         // Its model has been deleted; the target survives, bound by name, and
         // reattaches if that name comes back.
         {
-          id: 23,
+          id: "00000000-0000-4000-8000-000000000023",
           provider_model_id: null,
           model: "local-qwen@10.42.1.8:8000",
           provider: "10.42.1.8:8000",
@@ -344,7 +344,7 @@ const FIXTURES = {
   ],
   "/admin/principals": [
     {
-      id: 1,
+      id: "00000000-0000-4000-8000-000000000001",
       kind: "user",
       name: "ops@kryton",
       email: "ops@kryton",
@@ -353,7 +353,7 @@ const FIXTURES = {
       roles: ["admin"],
     },
     {
-      id: 2,
+      id: "00000000-0000-4000-8000-000000000002",
       kind: "service_account",
       name: "batch-etl",
       email: null,
@@ -364,7 +364,7 @@ const FIXTURES = {
   ],
   "/admin/roles": [
     {
-      id: 1,
+      id: "00000000-0000-4000-8000-000000000001",
       name: "admin",
       description: "",
       permissions: [
@@ -377,7 +377,7 @@ const FIXTURES = {
       ],
     },
     {
-      id: 2,
+      id: "00000000-0000-4000-8000-000000000002",
       name: "inference",
       description: "",
       permissions: [{ verb: "model:invoke", resource: "model/local-qwen" }],
@@ -385,10 +385,10 @@ const FIXTURES = {
   ],
   "/admin/keys": [
     {
-      id: 31,
+      id: "00000000-0000-4000-8000-000000000031",
       prefix: "sk-abcd1234",
       name: "ci-runner",
-      principal_id: 2,
+      principal_id: "00000000-0000-4000-8000-000000000002",
       principal: "batch-etl",
       expires_at: "2026-12-01T00:00:00Z",
       disabled: false,
@@ -396,10 +396,10 @@ const FIXTURES = {
       last_used_at: "2026-08-09T10:00:00Z",
     },
     {
-      id: 32,
+      id: "00000000-0000-4000-8000-000000000032",
       prefix: "sk-dead0000",
       name: "old",
-      principal_id: 2,
+      principal_id: "00000000-0000-4000-8000-000000000002",
       principal: "batch-etl",
       expires_at: null,
       disabled: true,
@@ -409,7 +409,7 @@ const FIXTURES = {
   ],
   "/admin/limits": [
     {
-      principal_id: 2,
+      principal_id: "00000000-0000-4000-8000-000000000002",
       principal: "batch-etl",
       requests_per_min: 600,
       tokens_per_min: 400000,
@@ -417,7 +417,7 @@ const FIXTURES = {
   ],
   "/admin/budgets": [
     {
-      principal_id: 2,
+      principal_id: "00000000-0000-4000-8000-000000000002",
       principal: "batch-etl",
       tokens_total: 12000000,
       tokens_used: 10100000,
@@ -427,7 +427,7 @@ const FIXTURES = {
       window_start: "2026-08-09T00:00:00Z",
     },
     {
-      principal_id: 1,
+      principal_id: "00000000-0000-4000-8000-000000000001",
       principal: "ops@kryton",
       tokens_total: null,
       tokens_used: 4,
@@ -440,7 +440,7 @@ const FIXTURES = {
   "/admin/a2a-agents": {
     data: [
       {
-        id: 1,
+        id: "00000000-0000-4000-8000-000000000001",
         name: "planner",
         url: "https://planner.agents.internal/a2a",
         description: "breaks a goal into steps",
@@ -451,7 +451,7 @@ const FIXTURES = {
         credential_set: true,
       },
       {
-        id: 2,
+        id: "00000000-0000-4000-8000-000000000002",
         name: "deployer",
         url: "https://deployer.agents.internal/a2a",
         description: "",
@@ -466,7 +466,7 @@ const FIXTURES = {
   "/admin/mcp-servers": {
     data: [
       {
-        id: 1,
+        id: "00000000-0000-4000-8000-000000000001",
         name: "github",
         url: "https://mcp.github.example/mcp",
         transport: "http",
@@ -477,7 +477,7 @@ const FIXTURES = {
         credential_set: true,
       },
       {
-        id: 2,
+        id: "00000000-0000-4000-8000-000000000002",
         name: "internal-wiki",
         url: "https://wiki.internal/mcp",
         transport: "sse",
@@ -491,7 +491,7 @@ const FIXTURES = {
   },
   "/admin/prompt-classes": [
     {
-      id: 1,
+      id: "00000000-0000-4000-8000-000000000001",
       name: "coding",
       description: "",
       tier: "fast",
@@ -501,7 +501,7 @@ const FIXTURES = {
       routable: true,
     },
     {
-      id: 2,
+      id: "00000000-0000-4000-8000-000000000002",
       name: "summarise",
       description: "",
       tier: "refined",
@@ -511,19 +511,22 @@ const FIXTURES = {
       routable: false,
     },
   ],
-  "/admin/fallback-model": { id: 3, name: "local-qwen" },
+  "/admin/fallback-model": {
+    id: "00000000-0000-4000-8000-000000000003",
+    name: "local-qwen",
+  },
   "/admin/audit": [
     {
-      id: 1361,
+      id: "00000000-0000-4000-8000-000000001361",
       actor_name: "ops@kryton",
-      actor_id: 1,
+      actor_id: "00000000-0000-4000-8000-000000000001",
       action: "POST",
       target: "/admin/keys",
       detail: { status: 200 },
       at: "2026-08-09T09:00:00Z",
     },
     {
-      id: 1360,
+      id: "00000000-0000-4000-8000-000000001360",
       actor_name: "proxy-token",
       actor_id: null,
       action: "DELETE",
