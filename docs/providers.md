@@ -22,14 +22,20 @@ comes from:
   its key in are filled in for you, and its base URL where that is a fixed,
   verified address.
 
-  About half the entries deliberately carry a `<placeholder>` instead, and
-  `POST /admin/providers` refuses to store one with a placeholder still in it.
-  Three different reasons: a self-hosted engine has no public address at all, an
-  account-scoped endpoint encodes a resource or region only you know, and for a
-  handful of hosted vendors this project has not verified the address — and as
-  the tables above say, vendors move them and this page cannot notice. The entry
-  still earns its place: it says the provider is supported and fills in the auth
-  shape, which is the part that is easy to get wrong.
+  Fifty-eight of the eighty-one carry a fixed address, each read off a source
+  that dials it — LiteLLM's `openai_compatible_endpoints` and provider configs,
+  `go-ai-sdk`, or the vendor's own documentation — and the catalogue's `notes`
+  records which, so that when a vendor moves one there is somewhere to go and
+  check.
+
+  The other twenty-three carry a `<placeholder>`, and `POST /admin/providers`
+  refuses to store an address with one still in it. Those are the cases nobody
+  but you can fill in: a self-hosted engine runs wherever you started it, and an
+  account-scoped endpoint encodes a resource, region, workspace or app that only
+  your account knows (Azure, Bedrock, Vertex, Databricks, Snowflake, Cloudflare,
+  Heroku). The entry still earns its place — it fills in the protocol and the
+  header that vendor wants its key in, which is the half that is easy to get
+  wrong.
 - **Custom endpoint** — type the address of anything else: a vLLM on the LAN,
   an Ollama on a workstation, a gateway of your own. Protocol defaults to
   `openai`, which is what almost everything speaks.

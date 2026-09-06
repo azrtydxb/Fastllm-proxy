@@ -72,9 +72,13 @@ source for _why_ anything is the way it is; this file is the summary.
   supports rather than the list of what had been seeded (migration 0042, with
   `tests/doc_claims.rs` now guarding the two together). Entries whose address is
   a fixed verified one carry it; the rest carry a `<placeholder>` the API
-  refuses to store, which covers self-hosted engines, account-scoped endpoints,
-  and vendors whose address this project has not checked. Five base URLs come
-  from `go-ai-sdk`, which dials them.
+  refuses to store, which covers self-hosted engines and account-scoped
+  endpoints. Five base URLs come
+  from `go-ai-sdk` and thirteen from LiteLLM's own `openai_compatible_endpoints`,
+  with the rest read off the vendor's documentation; `notes` records the source
+  for each, so a moved endpoint has somewhere to go and check. The twenty-three
+  placeholders that remain are the ones nobody but the operator can fill in:
+  self-hosted engines and account-scoped endpoints.
 - **Both dropdowns can be filtered.** The provider catalogue and the served-model
   list are eighty and four hundred entries respectively.
 - **The model dropdown can be filtered.** A provider can serve several hundred

@@ -13,12 +13,15 @@
 --
 --   * a self-hosted engine has no public address at all -- vLLM, Ollama,
 --     llama.cpp, TEI and the rest run whereever the operator put them;
---   * an account-scoped endpoint encodes a resource, region or workspace that
---     only the operator knows (Azure, Databricks, Snowflake, Cloudflare);
---   * and for a handful of hosted vendors the address is one this project has
---     not verified. `docs/providers.md` already warns that vendors move them
---     and the page cannot notice, so a confidently prefilled wrong URL is
---     worse than a box that asks.
+--   * and an account-scoped endpoint encodes a resource, region, workspace or
+--     app that only the operator knows (Azure, Databricks, Snowflake,
+--     Cloudflare, Heroku).
+--
+-- Every hosted address here was read off a source that dials it -- LiteLLM's
+-- `openai_compatible_endpoints` and provider configs, `go-ai-sdk`, or the
+-- vendor's own documentation -- and the `notes` column records which, because
+-- `docs/providers.md` warns that vendors move these and the page cannot
+-- notice. When one moves, `notes` says where to go and check.
 --
 -- The entry still earns its place in all three cases: it says the provider is
 -- supported, and it fills in the protocol and the header that vendor wants its
@@ -32,7 +35,7 @@ INSERT INTO provider_catalogue (key, display_name, base_url, protocol, auth_head
   ('deepinfra',       'DeepInfra',             'https://api.deepinfra.com/v1/openai',            'openai', 'authorization', 'Bearer', NULL),
   ('novita',          'Novita AI',             'https://api.novita.ai/v3/openai',                'openai', 'authorization', 'Bearer', NULL),
   ('hyperbolic',      'Hyperbolic',            'https://api.hyperbolic.xyz/v1',                  'openai', 'authorization', 'Bearer', NULL),
-  ('lambda',          'Lambda',                'https://api.lambdalabs.com/v1',                  'openai', 'authorization', 'Bearer', NULL),
+  ('lambda',          'Lambda',                'https://api.lambda.ai/v1',                       'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints; api.lambdalabs.com was the older host'),
   ('moonshot',        'Moonshot / Kimi',       'https://api.moonshot.ai/v1',                     'openai', 'authorization', 'Bearer', 'Base URL from go-ai-sdk providers/moonshot; api.moonshot.cn for the mainland endpoint'),
   ('dashscope',       'Aliyun DashScope',      'https://dashscope.aliyuncs.com/compatible-mode/v1', 'openai', 'authorization', 'Bearer', NULL),
   ('volcengine',      'Volcengine Ark',        'https://ark.cn-beijing.volces.com/api/v3',       'openai', 'authorization', 'Bearer', NULL),
@@ -42,39 +45,38 @@ INSERT INTO provider_catalogue (key, display_name, base_url, protocol, auth_head
   ('ai21',            'AI21',                  'https://api.ai21.com/studio/v1',                 'openai', 'authorization', 'Bearer', NULL),
   ('github_models',   'GitHub Models',         'https://models.inference.ai.azure.com',          'openai', 'authorization', 'Bearer', 'A GitHub PAT is the key'),
 
-  -- Hosted, address not verified by this project. Listed so the vendor is
-  -- discoverable and the auth shape is prefilled; the address is asked for.
-  ('atlascloud',      'AtlasCloud',            'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('zai',             'Z.ai',                  'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('bigmodel',        'BigModel',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
+  -- Hosted. Each `notes` records the source the address came from.
+  ('atlascloud',      'AtlasCloud',            'https://api.atlascloud.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: atlascloud.ai docs'),
+  ('zai',             'Z.ai',                  'https://api.z.ai/api/paas/v4',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm ZAI_API_BASE'),
+  ('bigmodel',        'BigModel',              'https://open.bigmodel.cn/api/paas/v4',                          'openai', 'authorization', 'Bearer', 'Base URL: docs.bigmodel.cn; the mainland endpoint'),
   ('qwen_cloud',      'Qwen Cloud',            'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',                          'openai', 'authorization', 'Bearer', 'Base URL from go-ai-sdk providers/qwen; the international DashScope endpoint'),
-  ('qianfan',         'Baidu Qianfan',         'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('aihubmix',        'AIHubMix',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
+  ('qianfan',         'Baidu Qianfan',         'https://qianfan.baidubce.com/v2',                          'openai', 'authorization', 'Bearer', 'Base URL: Baidu Qianfan docs'),
+  ('aihubmix',        'AIHubMix',              'https://aihubmix.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: docs.aihubmix.com'),
   ('minimax',         'MiniMax',               'https://api.minimax.io/v1',                          'openai', 'authorization', 'Bearer', 'Base URL from go-ai-sdk providers/minimax'),
-  ('hunyuan',         'Tencent Hunyuan',       'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('sarvam',          'Sarvam',                'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
+  ('hunyuan',         'Tencent Hunyuan',       'https://api.hunyuan.cloud.tencent.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: Tencent Cloud OpenAI-compatible docs'),
+  ('sarvam',          'Sarvam',                'https://api.sarvam.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: docs.sarvam.ai'),
   ('baseten',         'Baseten',               'https://inference.baseten.co/v1',                          'openai', 'authorization', 'Bearer', 'Base URL from go-ai-sdk providers/baseten'),
-  ('featherless',     'Featherless',           'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('friendliai',      'FriendliAI',            'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('chutes',          'Chutes',                'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('nscale',          'Nscale',                'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('gmi_cloud',       'GMI Cloud',             'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('scaleway',        'Scaleway',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('ovhcloud',        'OVHcloud',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
+  ('featherless',     'Featherless',           'https://api.featherless.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('friendliai',      'FriendliAI',            'https://api.friendli.ai/serverless/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm get_llm_provider_logic'),
+  ('chutes',          'Chutes',                'https://llm.chutes.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('nscale',          'Nscale',                'https://inference.api.nscale.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('gmi_cloud',       'GMI Cloud',             'https://api.gmi-serving.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: docs.gmicloud.ai'),
+  ('scaleway',        'Scaleway',              'https://api.scaleway.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: Scaleway Generative APIs docs'),
+  ('ovhcloud',        'OVHcloud',              'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: OVHcloud AI Endpoints docs'),
   ('vercel_gateway',  'Vercel AI Gateway',     'https://ai-gateway.vercel.sh/v1',                          'openai', 'authorization', 'Bearer', 'Base URL from go-ai-sdk providers/gateway'),
-  ('v0',              'v0',                    'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('poe',             'Poe',                   'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('nanogpt',         'NanoGPT',               'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('cometapi',        'CometAPI',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('inception',       'Inception',             'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('morph',           'Morph',                 'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('clarifai',        'Clarifai',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('wandb',           'Weights & Biases',      'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('gradientai',      'GradientAI',            'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('anyscale',        'Anyscale',              'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('heroku',          'Heroku',                'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('compactifai',     'CompactifAI',           'https://<base-url>/v1',                          'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
-  ('github_copilot',  'GitHub Copilot',        'https://<base-url>',                             'openai', 'authorization', 'Bearer', 'Address not verified here — check the vendor''s docs'),
+  ('v0',              'v0',                    'https://api.v0.dev/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('poe',             'Poe',                   'https://api.poe.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('nanogpt',         'NanoGPT',               'https://nano-gpt.com/api/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('cometapi',        'CometAPI',              'https://api.cometapi.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: apidoc.cometapi.com'),
+  ('inception',       'Inception',             'https://api.inceptionlabs.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('morph',           'Morph',                 'https://api.morphllm.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('clarifai',        'Clarifai',              'https://api.clarifai.com/v2/ext/openai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm openai_compatible_endpoints'),
+  ('wandb',           'Weights & Biases',      'https://api.inference.wandb.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm get_llm_provider_logic'),
+  ('gradientai',      'GradientAI',            'https://inference.do-ai.run/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm GRADIENT_AI_SERVERLESS_ENDPOINT'),
+  ('anyscale',        'Anyscale',              'https://api.endpoints.anyscale.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: litellm get_llm_provider_logic'),
+  ('heroku',          'Heroku',                'https://<your-app>.herokuapp.com/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: Heroku has no fixed address: litellm requires HEROKU_API_BASE. Replace <your-app>'),
+  ('compactifai',     'CompactifAI',           'https://api.compactif.ai/v1',                          'openai', 'authorization', 'Bearer', 'Base URL: docs.compactif.ai'),
+  ('github_copilot',  'GitHub Copilot',        'https://api.githubcopilot.com',                             'openai', 'authorization', 'Bearer', 'Base URL: GitHub Copilot API host'),
 
   -- Account-scoped: the address encodes a resource, region or workspace only
   -- the operator knows.
