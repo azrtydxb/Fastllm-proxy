@@ -27,13 +27,21 @@ import { hostOf } from "../ui.jsx";
 const COL = { control: 0, proxy: 300, host: 640 };
 const W = { control: 210, proxy: 250, host: 300 };
 const BUS = { snapshot: 268, dispatch: 608 };
-const TOP = 74; // below the registration channel
+const TOP = 68; // below the registration channel
 const REG_Y = 26; // the channel agents' registration runs along
-const GAP = 14;
+const GAP = 11;
 const PROXY_H = 92;
-const HOST_HEAD = 40;
-const HOST_ROW = 19;
-const HOST_PAD = 10;
+const HOST_HEAD = 36;
+const HOST_ROW = 18;
+const HOST_PAD = 8;
+
+// A model name has to share its row with the counters on the right, and some
+// of them are long enough to run straight through them ("nvidia/Qwen3.6-35B-
+// A3B-NVFP4" did). Truncating keeps the row readable; the full name is in the
+// table below, which is where the detail belongs anyway.
+const MODEL_CHARS = 24;
+const trunc = (v, n) =>
+  String(v).length > n ? `${String(v).slice(0, n - 1)}…` : String(v);
 
 const tone = (t) =>
   t === "ok"
@@ -238,6 +246,27 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
           </marker>
         </defs>
 
+        {/* A band per plane. The left columns hold one box and a handful
+            where the right holds every engine host, so without them the
+            drawing reads as mostly empty space rather than as three planes of
+            very different size -- which is the actual shape of the system. */}
+        {[
+          [COL.control, W.control],
+          [COL.proxy, W.proxy],
+          [COL.host, W.host],
+        ].map(([x, w]) => (
+          <rect
+            key={x}
+            x={x - 10}
+            y={TOP - 22}
+            width={w + 20}
+            height={bodyH + 32}
+            rx="10"
+            fill="var(--line-soft)"
+            opacity="0.5"
+          />
+        ))}
+
         {/* Column headings: the planes, named. */}
         <Label x={COL.control} y={14} size="9" fill="var(--fg-5)">
           MANAGEMENT PLANE
@@ -290,17 +319,17 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
         <Flow
           d={`M${COL.control + W.control} ${controlMid - 8} H${BUS.snapshot} V${proxyY(0) + 30} H${COL.proxy}`}
           label={`snapshot · ${config?.config_poll_seconds ?? 5}s`}
-          lx={BUS.snapshot + 4}
+          lx={BUS.snapshot - 6}
           ly={controlMid - 14}
-          anchor="middle"
+          anchor="end"
         />
         <Flow
           d={`M${COL.proxy} ${proxyY(proxies.length - 1) + PROXY_H - 24} H${BUS.snapshot - 12} V${controlMid + 8} H${COL.control + W.control}`}
           dashed
           label={`health · ${config?.health_report_interval_seconds ?? 10}s`}
-          lx={BUS.snapshot - 8}
-          ly={controlMid + 22}
-          anchor="middle"
+          lx={BUS.snapshot - 6}
+          ly={controlMid + 24}
+          anchor="end"
         />
 
         {proxies.length === 0 && (
@@ -370,7 +399,7 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
             />
             <text
               x={BUS.dispatch - 6}
-              y={TOP - 6}
+              y={proxyY(0) + PROXY_H / 2 - 8}
               fontSize="9"
               fontFamily="var(--mono)"
               fill="var(--fg-5)"
@@ -426,7 +455,8 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
                       fill={tone(m.healthy ? "ok" : "bad")}
                     />
                     <Label x="16" y="0" fill="var(--fg-2)">
-                      {m.model}
+                      <title>{m.model}</title>
+                      {trunc(m.model, MODEL_CHARS)}
                     </Label>
                     <Label
                       x={W.host - 24}
