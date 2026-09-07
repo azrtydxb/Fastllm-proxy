@@ -25,7 +25,12 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/frontend-models
 
 `POST /admin/routing/dry-run` answers "which model would this request hit, and
 which rule decided" without changing anything. Use it before and after any
-change here — it is the only way to check a rule does what you meant.
+change here — it is how you check a rule does what you meant.
+
+**It cannot evaluate `max_inflight_per_backend`.** The dry-run runs on the
+control plane, whose registry has no in-flight counters and no engine scrape,
+so every backend looks idle and a spill rule always reports as still matching.
+Only real traffic exercises that condition.
 
 <!-- BEGIN GENERATED: endpoints -->
 

@@ -196,8 +196,23 @@ index of the rule that decided, because "my second rule matched instead of my
 first" and "my first rule matched and points somewhere I did not expect" are
 different bugs with the same symptom.
 
-Two honest limits. Backend **health is not consulted**: the registry is built
-fresh from the snapshot, so every backend looks up — `GET /admin/fleet` is
-where reachability lives. And the prompt **class is supplied, not computed**,
-so this tells you what a `coding` prompt would do, not whether some particular
-prompt is coding — `POST /admin/prompt-classes/evaluate` answers that one.
+A `deny` comes back as a `denied` object carrying the status and message the
+caller would receive, with an empty chain — which is a different thing from
+"nothing is serving", and the field is what tells them apart. A matching rule's
+`tag` comes back too, so you can see what the usage row would be labelled.
+
+Three honest limits, and the third is the one that bites.
+
+Backend **health is not consulted**: the registry is built fresh from the
+snapshot, so every backend looks up — `GET /admin/fleet` is where reachability
+lives. The prompt **class is supplied, not computed**, so this tells you what a
+`coding` prompt would do, not whether some particular prompt is coding —
+`POST /admin/prompt-classes/evaluate` answers that one.
+
+And **`max_inflight_per_backend` cannot be evaluated here at all.** The dry-run
+runs on the control plane, whose registry has no in-flight counters and no
+engine scrape, so every backend looks idle and a spill rule always reports as
+still matching. A local-then-spill chain will therefore dry-run as "rule 0,
+local" no matter how loaded the hardware is, while real traffic spills
+correctly. Only real traffic exercises that condition; `GET /admin/fleet` and
+the providers page show the live load the proxies are actually reading.
