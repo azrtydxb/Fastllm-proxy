@@ -242,11 +242,14 @@ export function Providers({ onUnauthorised, go }) {
       reported: 0,
     });
   }
+  // Grouped by the *backend*, not the model: a model can run at several
+  // providers now, so it belongs to each group that serves it rather than to
+  // one.
   for (const m of data.models) {
-    const g = groups.get(m.provider_id);
-    if (!g) continue;
-    g.models.add(m.name);
     for (const b of m.backends) {
+      const g = groups.get(b.provider_id);
+      if (!g) continue;
+      g.models.add(m.name);
       const h = health.get(backendKey(b.api_base, b.upstream_model || m.name));
       if (h) {
         g.reported += 1;

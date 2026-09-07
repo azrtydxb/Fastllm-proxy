@@ -128,6 +128,10 @@ pub struct Backend {
     /// `max_tokens` to supply when the request omits one and the protocol
     /// requires it. See `crate::protocol::TranslateError::MissingMaxTokens`.
     pub default_max_tokens: Option<u32>,
+    /// Which `model_backends` row this is, carried through so a usage event
+    /// can name the attachment that served and be priced at that provider's
+    /// rate. Never interpreted here.
+    pub backend_id: Option<uuid::Uuid>,
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
@@ -210,6 +214,7 @@ impl Backend {
             headers,
             protocol: def.protocol,
             default_max_tokens: def.default_max_tokens,
+            backend_id: def.backend_id,
             // Optimistic: a backend serves traffic until a health check says
             // otherwise. Starting unhealthy would blackhole every request in
             // the window before the first sweep completes.

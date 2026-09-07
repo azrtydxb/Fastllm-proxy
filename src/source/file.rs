@@ -87,6 +87,9 @@ impl SnapshotSource for FileSource {
                     .unwrap_or_else(|| "authorization".to_string()),
                 auth_scheme: entry.litellm_params.auth_scheme_or_default(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
+                // No database, so no attachment row to name. `File` mode
+                // prices nothing, which is the only thing this id is for.
+                backend_id: None,
             };
             match models.iter_mut().find(|m| m.name == name) {
                 Some(m) => m.backends.push(backend),

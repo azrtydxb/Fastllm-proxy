@@ -56,17 +56,19 @@ flowchart LR
     end
 ```
 
-A model runs on one provider; the same model on two hosts is two provider
-models, balanced by a frontend model in front of them. A principal holds
-roles; roles carry grants; a key is how a principal proves it is that
-principal. Nothing else needs explaining before the first request.
+A model may run at several providers at once; the same model on two hosts is
+one provider model with two backends, and the two form a pool the proxy
+chooses within. A principal holds roles; roles carry grants; a key is how a
+principal proves it is that principal. Nothing else needs explaining before
+the first request.
 
 ## 3. Add a model
 
 A **provider** is somewhere that serves models — a vLLM host, an OpenRouter
-account. A **provider model** is one model on one provider. Running the same
-model on two hosts gives two provider models; a frontend model in front of them
-is what balances the two.
+account. A **provider model** is one model, attached to every provider that
+serves it. Running the same model on two hosts gives one provider model with
+two backends: one name, one context window, and a price per provider, since
+the same weights cost different amounts at different vendors.
 
 On **Models**, create one, then attach it to a provider:
 

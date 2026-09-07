@@ -174,13 +174,16 @@ pub async fn sync(
 ) -> anyhow::Result<SyncReport> {
     let prices = fetch(client, source).await?;
 
-    // One row per model: its price comes from whatever it actually calls
-    // upstream. Since migration 0029 a provider model has one provider and one
-    // `upstream_model`, so this no longer fans out — a model that used to
-    // appear once per backend now appears once.
-    let rows: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT m.id, m.name, m.upstream_model, m.input_price_per_mtok
-         FROM provider_models m ORDER BY m.name",
+    // One row per *attachment*, not per model: a price is what one provider
+    // charges for this model, so a model served in two places has two of them
+    // and both want filling in. The name looked up is what that provider is
+    // actually called upstream, which is the only string a published
+    // catalogue can be expected to match.
+    let rows: Vec<(uuid::Uuid, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT mb.id, m.name, COALESCE(mb.upstream_model, m.name), mb.input_price_per_mtok
+         FROM model_backends mb
+         JOIN provider_models m ON m.id = mb.provider_model_id
+         ORDER BY m.name",
     )
     .fetch_all(pool)
     .await?;
@@ -200,16 +203,13 @@ pub async fn sync(
             report.skipped += 1;
             continue;
         }
-        let Some(price) = upstream_model
-            .as_deref()
-            .and_then(|u| lookup(&prices, u).copied())
-        else {
+        let Some(price) = lookup(&prices, &upstream_model).copied() else {
             report.unmatched += 1;
             continue;
         };
         if !dry_run {
             sqlx::query(
-                "UPDATE provider_models SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
+                "UPDATE model_backends SET input_price_per_mtok = $2, output_price_per_mtok = $3 \
                  WHERE id = $1",
             )
             .bind(id)

@@ -111,8 +111,10 @@ prefilled with something that cannot resolve.
 
 ## Adding one
 
-A provider model is one model name on one provider, so there are two steps: the
-endpoint, then what you want off it.
+A provider model is a name plus the providers that serve it, so there are two
+steps: the endpoint, then what you want off it. A model already registered
+somewhere can be attached to a second provider as well — that is what puts two
+hosts in one pool.
 
 In the UI, on **Providers**, press **Add provider** and give it a credential.
 Then on **Provider models**:
@@ -168,14 +170,27 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models/7/backend
   }'
 ```
 
-The same model on two providers is two provider models, and a frontend model in
-front of them is what balances the two — two entries sharing a `model_name` in a
-LiteLLM config
+Posting that a second time against the same model with a different provider
+attaches it there too, and the two form one **pool**: the proxy chooses between
+them per request, which is what lets prefix-cache affinity send a conversation
+back to the machine that already has it warm. Two entries sharing a
+`model_name` in a LiteLLM config
 [import](operations/configuration.md#migrating-a-file-mode-deployment-onto-a-database)
-to exactly that shape. It is the whole mechanism behind failover and traffic
-splitting — see
-[frontend models](features.md#frontend-models-routing-as-configuration-not-code)
-for routing between _different_ models.
+to exactly that shape. Attaching the same provider twice is a `409`: routing
+would treat it as two machines and send half the traffic to one it had already
+counted.
+
+Prices, `upstream_model` and `default_max_tokens` live on the attachment rather
+than the model, because all three are facts about the provider — the same
+weights cost different amounts at different vendors, OpenRouter calls it
+`google/gemini-2.5-flash` where Google calls it `gemini-2.5-flash`, and only
+some providers demand a `max_tokens`. `PATCH /admin/backends/{id}` changes
+them; `DELETE /admin/backends/{id}` detaches one provider and leaves the model,
+its history and the provider itself alone.
+
+Balancing between _different_ models — failover, traffic splitting, spilling to
+the cloud — is a frontend model's job instead; see
+[frontend models](features.md#frontend-models-routing-as-configuration-not-code).
 
 ## Credentials
 

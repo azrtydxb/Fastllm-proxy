@@ -29,13 +29,115 @@ import {
 } from "../ui.jsx";
 
 const BACKEND_COLS = [
-  { label: "API BASE", width: "2fr" },
+  { label: "PROVIDER", width: "1.1fr" },
+  { label: "API BASE", width: "1.8fr" },
   { label: "UPSTREAM MODEL", width: "1.2fr" },
+  { label: "$ IN / OUT PER MTOK", width: "1.1fr" },
   { label: "PROTOCOL", width: ".7fr" },
-  { label: "CREDENTIAL", width: ".8fr" },
-  { label: "MAX TOKENS", width: ".8fr", align: "right" },
+  { label: "CREDENTIAL", width: ".7fr" },
+  { label: "MAX TOKENS", width: ".7fr", align: "right" },
   { label: "", width: "80px", align: "right" },
 ];
+
+/**
+ * One attachment's prices, edited in place in the backend row.
+ *
+ * In the row rather than in a form of its own because a price belongs to a
+ * provider, and the row is the only place both are visible together. Same
+ * absent/clear contract the model editor documents: an empty box sends an
+ * explicit null, and a value that does not parse refuses rather than clearing
+ * the field it was meant to set.
+ */
+function BackendPrice({ backend, onSave }) {
+  const asDollars = (v) => (v === null ? "" : String(v / 1e6));
+  const [editing, setEditing] = useState(false);
+  const [input, setInput] = useState(asDollars(backend.input_price_per_mtok));
+  const [output, setOutput] = useState(
+    asDollars(backend.output_price_per_mtok),
+  );
+
+  const parse = (v) => {
+    if (v.trim() === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return NaN;
+    return Math.round(n * 1e6);
+  };
+
+  if (!editing) {
+    const priced = backend.input_price_per_mtok !== null;
+    return (
+      <Mono
+        onClick={() => setEditing(true)}
+        title="Click to edit what this provider charges for this model"
+        style={{
+          font: "400 12px var(--mono)",
+          color: priced ? "var(--fg-3)" : "var(--warn-fg)",
+          cursor: "pointer",
+        }}
+      >
+        {priced
+          ? `${fmtPrice(backend.input_price_per_mtok)} / ${fmtPrice(backend.output_price_per_mtok ?? 0)}`
+          : "unpriced"}
+      </Mono>
+    );
+  }
+  return (
+    <Row gap={4} style={{ flexWrap: "nowrap" }}>
+      <input
+        style={{ width: 52 }}
+        value={input}
+        placeholder="in"
+        onChange={(e) => setInput(e.target.value)}
+      />
+      <input
+        style={{ width: 52 }}
+        value={output}
+        placeholder="out"
+        onChange={(e) => setOutput(e.target.value)}
+      />
+      <Button
+        variant="small"
+        onClick={() => {
+          const i = parse(input);
+          const o = parse(output);
+          if (Number.isNaN(i) || Number.isNaN(o)) return;
+          setEditing(false);
+          onSave({ input_price_per_mtok: i, output_price_per_mtok: o });
+        }}
+      >
+        ok
+      </Button>
+    </Row>
+  );
+}
+
+/**
+ * What a model costs, across every provider serving it.
+ *
+ * One number when they agree or only one is priced, a range when they differ
+ * — which is the case a model-level price could never express and the reason
+ * prices moved onto the attachment. Providers with no price are left out
+ * rather than counted as free.
+ */
+function priceRange(backends) {
+  const pairs = backends
+    .filter((b) => b.input_price_per_mtok !== null)
+    .map((b) => [b.input_price_per_mtok, b.output_price_per_mtok]);
+  if (pairs.length === 0) return "unpriced";
+  const ins = pairs.map((p) => p[0]);
+  const outs = pairs.map((p) => p[1] ?? 0);
+  const lo = `${fmtPrice(Math.min(...ins))} / ${fmtPrice(Math.min(...outs))}`;
+  const hi = `${fmtPrice(Math.max(...ins))} / ${fmtPrice(Math.max(...outs))}`;
+  return lo === hi ? lo : `${lo} – ${hi}`;
+}
+
+/** Dollars per Mtok as typed, to the micro-units the API stores. */
+function dollarsToMicros(raw) {
+  if (raw === undefined || String(raw).trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.round(n * 1e6);
+}
 
 export function Models({ onUnauthorised }) {
   const [adding, setAdding] = useState(false);
@@ -97,6 +199,8 @@ export function Models({ onUnauthorised }) {
           default_max_tokens: d.default_max_tokens
             ? Number(d.default_max_tokens)
             : undefined,
+          input_price_per_mtok: dollarsToMicros(d.input_price),
+          output_price_per_mtok: dollarsToMicros(d.output_price),
         }),
       setError,
       onUnauthorised,
@@ -128,6 +232,15 @@ export function Models({ onUnauthorised }) {
       // name can still be typed.
       setServed({ ...served, [providerId]: { error: e.message } });
     }
+  };
+
+  const saveBackend = async (id, patch) => {
+    const ok = await attempt(
+      () => api.patch(`/admin/backends/${id}`, patch),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) reload();
   };
 
   const savePrices = async (m, patch) => {
@@ -276,7 +389,10 @@ export function Models({ onUnauthorised }) {
       )}
 
       {data.models.map((m) => {
-        const priced = m.input_price_per_mtok !== null;
+        // A price is per provider now, so a model does not have one number.
+        // The range is what an operator actually wants to see: "this costs
+        // between X and Y depending on which of its providers serves it".
+        const priced = m.backends.some((b) => b.input_price_per_mtok !== null);
         const cached = m.cache_ttl_seconds > 0;
         const edit = editing === m.id;
         return (
@@ -303,9 +419,7 @@ export function Models({ onUnauthorised }) {
               />
               <ShortId id={m.id} />
               <Pill tone={priced ? "neutral" : "warn"} mono>
-                {priced
-                  ? `${fmtPrice(m.input_price_per_mtok)} / ${fmtPrice(m.output_price_per_mtok)}`
-                  : "unpriced"}
+                {priced ? priceRange(m.backends) : "unpriced"}
               </Pill>
               <Pill tone={cached ? "accent" : "quiet"} mono>
                 {cached ? `cache ${m.cache_ttl_seconds}s` : "cache off"}
@@ -360,6 +474,13 @@ export function Models({ onUnauthorised }) {
                       key={b.id}
                       cols={BACKEND_COLS}
                       cells={[
+                        <Ellipsis
+                          key="pv"
+                          style={{ font: "500 12px var(--mono)" }}
+                          title={b.provider_name}
+                        >
+                          {b.provider_name}
+                        </Ellipsis>,
                         <Row
                           key="b"
                           gap={8}
@@ -396,6 +517,11 @@ export function Models({ onUnauthorised }) {
                         >
                           {b.upstream_model || "—"}
                         </Ellipsis>,
+                        <BackendPrice
+                          key="pr"
+                          backend={b}
+                          onSave={(patch) => saveBackend(b.id, patch)}
+                        />,
                         <Mono
                           key="p"
                           style={{
@@ -445,20 +571,12 @@ export function Models({ onUnauthorised }) {
                 })}
               </Table>
 
-              {/* A provider model has exactly one provider since migration
-                  0029, so offering this form on a model that already has one
-                  would only earn a 409. Detaching is how you change it, and
-                  two upstreams for one client-facing name is now a frontend
-                  model with two targets. */}
-              {m.backends.length > 0 ? (
-                <div style={{ marginTop: 12 }}>
-                  <Muted>
-                    Served by {m.provider_name}. A model has one provider —
-                    remove this one to point it elsewhere, or put this and
-                    another behind a frontend model to balance across them.
-                  </Muted>
-                </div>
-              ) : (
+              {/* Always offered: a model may run at as many providers as
+                  serve it, and they form one pool the backend router chooses
+                  within — which is what lets prefix-cache affinity send a
+                  conversation back to the machine that already has it warm.
+                  Attaching the same provider twice is still a 409. */}
+              {
                 <Stack gap={8} style={{ marginTop: 12 }}>
                   {/* Which provider serves it comes first, because it settles
                       everything else: an existing provider already carries the
@@ -629,6 +747,24 @@ export function Models({ onUnauthorised }) {
                         setDraft(m.id, { default_max_tokens: e.target.value })
                       }
                     />
+                    {/* Priced here rather than on the model: what this costs
+                        is a fact about the provider serving it. */}
+                    <input
+                      placeholder="$ in"
+                      style={{ flex: 0.5 }}
+                      value={draftFor(m.id).input_price || ""}
+                      onChange={(e) =>
+                        setDraft(m.id, { input_price: e.target.value })
+                      }
+                    />
+                    <input
+                      placeholder="$ out"
+                      style={{ flex: 0.5 }}
+                      value={draftFor(m.id).output_price || ""}
+                      onChange={(e) =>
+                        setDraft(m.id, { output_price: e.target.value })
+                      }
+                    />
                     <Button
                       variant="secondary"
                       onClick={() => addBackend(m.id)}
@@ -644,7 +780,7 @@ export function Models({ onUnauthorised }) {
                     </Muted>
                   )}
                 </Stack>
-              )}
+              }
               {draftFor(m.id).protocol === "anthropic" &&
                 !draftFor(m.id).default_max_tokens && (
                   <div style={{ marginTop: 8 }}>
@@ -680,16 +816,6 @@ const SYNC_COLS = [
  */
 
 function PriceEditor({ model, onSave }) {
-  const [input, setInput] = useState(
-    model.input_price_per_mtok === null
-      ? ""
-      : String(model.input_price_per_mtok / 1e6),
-  );
-  const [output, setOutput] = useState(
-    model.output_price_per_mtok === null
-      ? ""
-      : String(model.output_price_per_mtok / 1e6),
-  );
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [context, setContext] = useState(model.context_length ?? "");
   const [description, setDescription] = useState(model.description || "");
@@ -709,12 +835,6 @@ function PriceEditor({ model, onSave }) {
     if (!Number.isInteger(n) || n <= 0) throw new Error(`${raw}" for ${what}`);
     return n;
   };
-  const micros = (v) => {
-    if (v.trim() === "") return undefined;
-    const n = Number(v);
-    if (!Number.isFinite(n) || n < 0) throw new RangeError(v);
-    return Math.round(n * 1e6);
-  };
   const seconds = (v) => {
     if (v === "" || v === null) return null;
     const n = Number(v);
@@ -729,21 +849,7 @@ function PriceEditor({ model, onSave }) {
         borderBottom: "1px solid var(--line-mid)",
       }}
     >
-      <Grid cols={4} gap={10}>
-        <Field label="INPUT $ / MTOK">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="3.00"
-          />
-        </Field>
-        <Field label="OUTPUT $ / MTOK">
-          <input
-            value={output}
-            onChange={(e) => setOutput(e.target.value)}
-            placeholder="15.00"
-          />
-        </Field>
+      <Grid cols={3} gap={10}>
         <Field
           label="CACHE TTL (s)"
           hint="0 or empty turns the response cache off for this model"
@@ -783,8 +889,6 @@ function PriceEditor({ model, onSave }) {
             try {
               setBad(null);
               onSave({
-                input_price_per_mtok: micros(input),
-                output_price_per_mtok: micros(output),
                 // Empty means "no TTL", which the hint promises and which only
                 // an explicit null delivers: `PATCH` treats an absent field as
                 // "leave alone", so omitting it here would silently keep the
@@ -807,15 +911,6 @@ function PriceEditor({ model, onSave }) {
           }}
         >
           Save
-        </Button>
-        <Button
-          variant="danger"
-          onClick={() =>
-            onSave({ input_price_per_mtok: null, output_price_per_mtok: null })
-          }
-          title="Clear both prices — spend for this model will report as unpriced"
-        >
-          Clear prices
         </Button>
         <Muted>
           A saved change rebuilds and republishes the snapshot immediately;

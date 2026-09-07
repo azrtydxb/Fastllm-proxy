@@ -422,12 +422,6 @@ export function VirtualModels({ onUnauthorised }) {
                           <Dot tone="ok" size={6} />
                           <Mono style={{ font: "400 12px var(--mono)" }}>
                             {t.model}
-                            {t.provider ? (
-                              <span style={{ color: "var(--fg-5)" }}>
-                                {" · "}
-                                {t.provider}
-                              </span>
-                            ) : null}
                             {t.provider_model_id === null ? (
                               <span style={{ color: "var(--warn)" }}>
                                 {" · unavailable"}
@@ -525,12 +519,6 @@ export function VirtualModels({ onUnauthorised }) {
                     <Dot tone="ok" size={6} />
                     <Mono style={{ font: "400 12px var(--mono)" }}>
                       {t.model}
-                      {t.provider ? (
-                        <span style={{ color: "var(--fg-5)" }}>
-                          {" · "}
-                          {t.provider}
-                        </span>
-                      ) : null}
                       {t.provider_model_id === null ? (
                         <span style={{ color: "var(--warn)" }}>
                           {" · unavailable"}
@@ -654,13 +642,18 @@ function AddTarget({ models, onAdd }) {
         style={{ fontSize: 12 }}
       >
         <option value="">model…</option>
-        {/* The provider is part of the identity now: two hosts serving the
-            same model are two provider models, and a name alone does not say
-            which one this target means. */}
+        {/* The name alone identifies it again: since migration 0045 a model
+            served by two hosts is one model with two attachments, so there is
+            no second row to tell it apart from. What is worth showing is how
+            many places it can actually run — none means it is not routable. */}
         {models.map((m) => (
           <option key={m.id} value={m.id}>
             {m.name}
-            {m.provider_name ? ` · ${m.provider_name}` : " · no provider"}
+            {m.backends.length === 0
+              ? " · no provider"
+              : m.backends.length > 1
+                ? ` · ${m.backends.length} providers`
+                : ` · ${m.backends[0].provider_name}`}
           </option>
         ))}
       </select>
@@ -843,7 +836,11 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
-                {m.provider_name ? ` · ${m.provider_name}` : " · no provider"}
+                {m.backends.length === 0
+                  ? " · no provider"
+                  : m.backends.length > 1
+                    ? ` · ${m.backends.length} providers`
+                    : ` · ${m.backends[0].provider_name}`}
               </option>
             ))}
           </select>

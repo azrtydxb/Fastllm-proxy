@@ -9,7 +9,6 @@ use crate::control::secrets::{self, EncryptionKey};
 use crate::snapshot::hash_key;
 use anyhow::Context;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -111,20 +110,11 @@ pub async fn import(
     let mut models = 0usize;
     let mut providers = 0usize;
 
-    // A `model_name` appearing more than once used to mean one model with
-    // several backends. It now means several provider models -- one per
-    // endpoint -- held together by a frontend model carrying the name callers
-    // already use, which is exactly what migration 0029 produces for the same
-    // shape. Counting first is what lets every one of them be qualified, so
-    // the bare name is left free for the frontend model.
-    let mut occurrences: HashMap<&str, usize> = HashMap::new();
-    for entry in &cfg.model_list {
-        *occurrences.entry(entry.model_name.as_str()).or_default() += 1;
-    }
-    // Every provider model that came from a pooled `model_name`, so the
-    // frontend model below can point at them.
-    let mut pooled: HashMap<String, Vec<String>> = HashMap::new();
-
+    // A `model_name` that appears more than once means one model on several
+    // hosts. Since migration 0045 that is one provider model with one
+    // attachment per host, so nothing here has to invent qualified names or a
+    // frontend model to hold them together -- the pool does that, and
+    // `router.rs` balances inside it.
     for entry in &cfg.model_list {
         let name = &entry.model_name;
         let api_base = entry.litellm_params.api_base.trim_end_matches('/');
@@ -238,126 +228,49 @@ pub async fn import(
             }
         };
 
-        // A file naming one `model_name` against two `api_base`s means two
-        // provider models. Model names are still globally unique until
-        // addressing moves to the frontend model (ADR 0005), so the second one
-        // is qualified by its provider -- the same shape migration 0029
-        // produces, so an imported database and a migrated one look alike.
-        let provider_name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
-            .bind(provider_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let qualified = format!("{name}@{provider_name}");
+        // One provider model per `model_name`, found or created. Two entries
+        // naming the same model on different hosts converge on this one row
+        // and become two attachments below, which is what the file meant.
+        // Looked up before inserting, rather than `ON CONFLICT ... RETURNING`,
+        // so a genuine per-run count of *new* models falls out directly: an
+        // upsert returns a row either way and cannot tell a creation from a
+        // re-import.
+        let model_id: Uuid =
+            match sqlx::query_scalar("SELECT id FROM provider_models WHERE name = $1")
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await?
+            {
+                Some(id) => id,
+                None => {
+                    models += 1;
+                    sqlx::query_scalar(
+                        "INSERT INTO provider_models (name) VALUES ($1) RETURNING id",
+                    )
+                    .bind(name)
+                    .fetch_one(&mut *tx)
+                    .await?
+                }
+            };
 
-        // Look up before inserting (rather than INSERT ... ON CONFLICT and
-        // checking `xmax`) so a genuine per-run count of *new* models falls
-        // out directly — no separate "count what changed" query needed.
-        // Either spelling counts as this provider's, so a re-import converges
-        // onto the row it created last time rather than adding a third.
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM provider_models WHERE provider_id = $1 AND name IN ($2, $3)",
+        // Converge rather than leave the attachment as first imported. An
+        // edited file is the documented way to change policy, so an
+        // `upstream_model` corrected in YAML that never reached the database
+        // would be a silent mismatch from the other direction.
+        sqlx::query(
+            "INSERT INTO model_backends (provider_model_id, provider_id, upstream_model, \
+                 default_max_tokens) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (provider_model_id, provider_id) DO UPDATE \
+                SET upstream_model = EXCLUDED.upstream_model, \
+                    default_max_tokens = EXCLUDED.default_max_tokens",
         )
+        .bind(model_id)
         .bind(provider_id)
-        .bind(name)
-        .bind(&qualified)
-        .fetch_optional(&mut *tx)
+        .bind(&upstream)
+        .bind(default_max_tokens)
+        .execute(&mut *tx)
         .await?;
-        let pooled_here = occurrences.get(name.as_str()).copied().unwrap_or(1) > 1;
-        let insert_name = if pooled_here {
-            // Every one of them, not just the second: the bare name has to be
-            // free for the frontend model that will carry it.
-            qualified.clone()
-        } else {
-            let taken: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1 AND provider_id <> $2)",
-            )
-            .bind(name)
-            .bind(provider_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if taken {
-                qualified.clone()
-            } else {
-                name.clone()
-            }
-        };
-        if pooled_here {
-            pooled
-                .entry(name.clone())
-                .or_default()
-                .push(insert_name.clone());
-        }
-        match existing {
-            // Converge rather than leave the row as first imported. An edited
-            // file is the documented way to change policy, so an
-            // `upstream_model` corrected in YAML that never reached the
-            // database would be a silent mismatch from the other direction.
-            Some(id) => {
-                sqlx::query(
-                    "UPDATE provider_models SET name = $2, upstream_model = $3, default_max_tokens = $4 \
-                     WHERE id = $1",
-                )
-                .bind(id)
-                .bind(&insert_name)
-                .bind(&upstream)
-                .bind(default_max_tokens)
-                .execute(&mut *tx)
-                .await?;
-            }
-            None => {
-                sqlx::query(
-                    "INSERT INTO provider_models (name, provider_id, upstream_model, default_max_tokens) \
-                     VALUES ($1, $2, $3, $4)",
-                )
-                .bind(&insert_name)
-                .bind(provider_id)
-                .bind(&upstream)
-                .bind(default_max_tokens)
-                .execute(&mut *tx)
-                .await?;
-                models += 1;
-            }
-        }
-    }
-
-    // The frontend model that keeps a pooled `model_name` callable. Without
-    // it, a config meaning "one name, two hosts" would leave callers naming
-    // something that no longer exists.
-    for (client_name, targets) in &pooled {
-        let vm_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO frontend_models (name, description) VALUES ($1, $2) \
-             ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        )
-        .bind(client_name)
-        .bind(format!(
-            "Balances {client_name} across the providers the imported config names for it."
-        ))
-        .fetch_one(&mut *tx)
-        .await?;
-        // Rebuilt rather than merged, so an edited file that drops a host
-        // drops the target too instead of routing there forever.
-        sqlx::query("DELETE FROM frontend_model_defaults WHERE frontend_model_id = $1")
-            .bind(vm_id)
-            .execute(&mut *tx)
-            .await?;
-        for (position, target) in targets.iter().enumerate() {
-            // Equal weight: the file expressed no preference between the
-            // hosts, and inventing one would be a change of behaviour
-            // disguised as an import.
-            sqlx::query(
-                "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
-                                                      target_provider_name, target_model_name, \
-                                                      weight, position) \
-                 SELECT $1, pm.id, p.name, pm.name, 1, $3 \
-                   FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id \
-                  WHERE pm.name = $2",
-            )
-            .bind(vm_id)
-            .bind(target)
-            .bind(position as i32)
-            .execute(&mut *tx)
-            .await?;
-        }
     }
 
     summary.models = models;
@@ -707,7 +620,7 @@ where
         "SELECT id, upstream_api_key FROM providers
          WHERE upstream_api_key IS NOT NULL
            AND ($1::uuid IS NULL
-                OR id = (SELECT provider_id FROM provider_models WHERE id = $1))",
+                OR id IN (SELECT provider_id FROM model_backends WHERE provider_model_id = $1))",
     )
     .bind(only_model_id)
     .fetch_all(&mut *conn)
@@ -789,40 +702,42 @@ mod tests {
         .unwrap();
 
         let summary = import(&pool, &cfg, &test_key()).await.unwrap();
-        // Two entries sharing a model_name are two provider models on two
-        // providers, because a provider model has exactly one provider since
-        // migration 0029. They used to be one model with two backends.
-        assert_eq!(summary.models, 2);
+        // Two entries sharing a model_name are one model on two providers
+        // again, as they were before migration 0029 split them and as
+        // migration 0045 makes possible once more. The name callers use is
+        // the model's own, so nothing has to invent `name@host` or a frontend
+        // model to hold the halves together.
+        assert_eq!(summary.models, 1, "one model, however many hosts serve it");
         assert_eq!(summary.providers, 2, "one provider per endpoint");
 
-        // And callers naming the pooled name still reach something: the
-        // frontend model holds it and balances across both, the same shape
-        // migration 0029 produces for a model that had two backends.
-        let targets: Vec<String> = sqlx::query_scalar(
-            "SELECT m.name FROM frontend_models v \
-             JOIN frontend_model_defaults d ON d.frontend_model_id = v.id \
-             JOIN provider_models m ON m.id = d.provider_model_id \
-             WHERE v.name = $1 ORDER BY d.position",
+        // And both endpoints are reachable under that one name — as a pool,
+        // which is what lets `router.rs` choose between them per request
+        // rather than a weighted split choosing once.
+        let bases: Vec<String> = sqlx::query_scalar(
+            "SELECT p.api_base FROM provider_models m \
+             JOIN model_backends mb ON mb.provider_model_id = m.id \
+             JOIN providers p ON p.id = mb.provider_id \
+             WHERE m.name = $1 ORDER BY p.api_base",
         )
         .bind(&name)
         .fetch_all(&pool)
         .await
         .unwrap();
         assert_eq!(
-            targets,
+            bases,
             vec![
-                format!("{name}@{name}-a:8000"),
-                format!("{name}@{name}-b:8000")
+                format!("http://{name}-a:8000/v1"),
+                format!("http://{name}-b:8000/v1")
             ],
-            "the pooled name must reach both providers"
+            "one model, both hosts in its pool"
         );
 
         // Re-running must converge, not accumulate a third target.
         let again = import(&pool, &cfg, &test_key()).await.unwrap();
         assert_eq!(again.models, 0, "re-import must report no new model");
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM frontend_model_defaults d \
-             JOIN frontend_models v ON v.id = d.frontend_model_id WHERE v.name = $1",
+            "SELECT count(*) FROM model_backends mb \
+             JOIN provider_models m ON m.id = mb.provider_model_id WHERE m.name = $1",
         )
         .bind(&name)
         .fetch_one(&pool)
@@ -876,8 +791,10 @@ mod tests {
             Option<String>,
             Option<i32>,
         ) = sqlx::query_as(
-            "SELECT p.protocol, p.auth_header, p.auth_scheme, m.default_max_tokens
-               FROM provider_models m JOIN providers p ON p.id = m.provider_id
+            "SELECT p.protocol, p.auth_header, p.auth_scheme, mb.default_max_tokens
+               FROM provider_models m
+               JOIN model_backends mb ON mb.provider_model_id = m.id
+               JOIN providers p ON p.id = mb.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -1013,8 +930,10 @@ mod tests {
         assert_eq!(summary.providers, 0, "a corrected file must not add a row");
 
         let (protocol, max_tokens): (String, Option<i32>) = sqlx::query_as(
-            "SELECT p.protocol, m.default_max_tokens
-               FROM provider_models m JOIN providers p ON p.id = m.provider_id
+            "SELECT p.protocol, mb.default_max_tokens
+               FROM provider_models m
+               JOIN model_backends mb ON mb.provider_model_id = m.id
+               JOIN providers p ON p.id = mb.provider_id
               WHERE m.name = $1",
         )
         .bind(&name)
@@ -1057,13 +976,12 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM provider_models WHERE id = $1 AND provider_id IS NOT NULL",
-        )
-        .bind(provider_model_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM model_backends WHERE provider_model_id = $1")
+                .bind(provider_model_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1, "re-import must be idempotent");
     }
 
@@ -1087,7 +1005,8 @@ mod tests {
 
         let stored: Vec<u8> = sqlx::query_scalar(
             "SELECT p.upstream_api_key FROM provider_models m
-             JOIN providers p ON p.id = m.provider_id
+             JOIN model_backends mb ON mb.provider_model_id = m.id
+             JOIN providers p ON p.id = mb.provider_id
              WHERE m.name = $1",
         )
         .bind(&name)
@@ -1529,8 +1448,9 @@ mod tests {
         .await
         .unwrap();
         let provider_model_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO provider_models (name, provider_id, upstream_model) \
-             VALUES ($1, $2, 'legacy-model') RETURNING id",
+            "WITH m AS (INSERT INTO provider_models (name) VALUES ($1) RETURNING id) \
+             INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+             SELECT m.id, $2, 'legacy-model' FROM m RETURNING provider_model_id",
         )
         .bind(&name)
         .bind(provider_id)

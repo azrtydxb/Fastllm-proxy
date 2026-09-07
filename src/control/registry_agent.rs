@@ -167,20 +167,19 @@ pub async fn probe(client: &Upstream, api_base: &str, registered: &[String]) -> 
 /// the id back closes that window, so "renames do not break links" holds for a
 /// model that has been away and come back, not only for one that never left.
 ///
-/// Matched on provider *and* model name together: the same model name on two
-/// hosts is the normal case, and re-attaching to whichever row was found first
-/// would silently repoint a frontend model at a different host. A target whose
-/// provider name was never recorded is left alone rather than guessed at.
+/// Matched on the model name alone, which is exact: `provider_models.name` is
+/// unique, and since migration 0045 one model served by two hosts is one row
+/// with two attachments rather than two rows a name could not tell apart. The
+/// provider name this used to also match on existed only for that ambiguity
+/// and no longer exists.
 pub async fn relink_targets(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut relinked = 0;
     for table in ["frontend_model_defaults", "rule_targets"] {
         relinked += sqlx::query(&format!(
             "UPDATE {table} t SET provider_model_id = pm.id
                FROM provider_models pm
-               JOIN providers p ON p.id = pm.provider_id
               WHERE t.provider_model_id IS NULL
-                AND t.target_model_name = pm.name
-                AND t.target_provider_name = p.name"
+                AND t.target_model_name = pm.name"
         ))
         .execute(pool)
         .await?
@@ -191,31 +190,6 @@ pub async fn relink_targets(pool: &PgPool) -> Result<u64, sqlx::Error> {
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
-}
-
-/// Carry a renamed provider onto the targets that describe it.
-///
-/// Routing resolves by the *model's* name, so this changes nothing about where
-/// requests go. It keeps `target_provider_name` — what the Frontend models
-/// screen shows, and what disambiguates two providers serving a model of the
-/// same name — from naming a provider that no longer exists.
-async fn rename_on_targets(
-    pool: &PgPool,
-    provider_id: Uuid,
-    name: &str,
-) -> Result<(), sqlx::Error> {
-    for table in ["frontend_model_defaults", "rule_targets"] {
-        sqlx::query(&format!(
-            "UPDATE {table} t SET target_provider_name = $2 \
-               FROM provider_models pm \
-              WHERE pm.id = t.provider_model_id AND pm.provider_id = $1"
-        ))
-        .bind(provider_id)
-        .bind(name)
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
 }
 
 pub async fn register(
@@ -266,9 +240,9 @@ pub async fn register(
                 .execute(pool)
                 .await;
                 match renamed {
-                    Ok(done) if done.rows_affected() > 0 => {
-                        rename_on_targets(pool, id, name).await?;
-                    }
+                    // Nothing to carry onto the targets: a target names a
+                    // model, and which providers serve that model is the
+                    // model's business (migration 0045).
                     Ok(_) => {}
                     Err(e) if is_unique_violation(&e) => {
                         tracing::warn!(
@@ -385,8 +359,10 @@ pub async fn reconcile_models(
     served: &[String],
 ) -> Result<(usize, usize), sqlx::Error> {
     let known: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, upstream_model FROM provider_models \
-         WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+        "SELECT mb.provider_model_id, COALESCE(mb.upstream_model, m.name) \
+         FROM model_backends mb \
+         JOIN provider_models m ON m.id = mb.provider_model_id \
+         WHERE mb.provider_id = $1",
     )
     .bind(provider_id)
     .fetch_all(pool)
@@ -397,26 +373,60 @@ pub async fn reconcile_models(
         if known.iter().any(|(_, u)| u == upstream) {
             continue;
         }
-        // The name the provider exposes, qualified only when that name is
-        // already taken by another provider's model. Names are still globally
-        // unique until addressing moves to frontend models (ADR 0005), and a
-        // second host serving the same model is the normal case rather than an
-        // error.
-        let taken: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)")
-                .bind(upstream)
-                .fetch_one(pool)
-                .await?;
-        let name = if taken {
-            format!("{upstream}@{provider_name}")
-        } else {
-            upstream.clone()
-        };
-        sqlx::query(
-            "INSERT INTO provider_models (name, provider_id, upstream_model) \
-             VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING",
+        // A second host serving a model this deployment already knows is the
+        // normal case, and since migration 0045 the right answer is another
+        // attachment on that model rather than a second model named
+        // `model@host`. Two Sparks serving one model then land in one pool,
+        // which is the whole point -- `router.rs` can send a conversation back
+        // to the box that already has its prefix cached.
+        //
+        // Only where every existing attachment is on a *dynamic* provider,
+        // though. An agent is a thing that registered itself; letting one
+        // graft a host onto a model an operator configured by hand would hand
+        // every principal already granted that model a route to a machine
+        // nobody vetted, which is exactly what ADR 0002 closes. Against an
+        // operator-configured model the old qualified name is still used, so
+        // the host shows up as its own model for a human to look at.
+        let existing: Option<(Uuid, bool)> = sqlx::query_as(
+            "SELECT m.id, NOT EXISTS ( \
+                 SELECT 1 FROM model_backends mb \
+                 JOIN providers p ON p.id = mb.provider_id \
+                 WHERE mb.provider_model_id = m.id AND p.kind <> 'dynamic') \
+             FROM provider_models m WHERE m.name = $1",
         )
-        .bind(&name)
+        .bind(upstream)
+        .fetch_optional(pool)
+        .await?;
+
+        let model_id = match existing {
+            Some((id, true)) => id,
+            // Taken by a model an operator configured, or not taken at all.
+            other => {
+                let name = if other.is_some() {
+                    format!("{upstream}@{provider_name}")
+                } else {
+                    upstream.clone()
+                };
+                let created: Option<Uuid> = sqlx::query_scalar(
+                    "INSERT INTO provider_models (name) VALUES ($1) \
+                     ON CONFLICT (name) DO NOTHING RETURNING id",
+                )
+                .bind(&name)
+                .fetch_optional(pool)
+                .await?;
+                match created {
+                    Some(id) => id,
+                    // Lost a race with another agent; it made the row.
+                    None => continue,
+                }
+            }
+        };
+
+        sqlx::query(
+            "INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+             VALUES ($1, $2, $3) ON CONFLICT (provider_model_id, provider_id) DO NOTHING",
+        )
+        .bind(model_id)
         .bind(provider_id)
         .bind(upstream)
         .execute(pool)
@@ -478,8 +488,9 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
             .fetch_one(pool)
             .await?;
         let registered: Vec<String> = sqlx::query_scalar(
-            "SELECT upstream_model FROM provider_models \
-             WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+            "SELECT COALESCE(mb.upstream_model, m.name) FROM model_backends mb \
+             JOIN provider_models m ON m.id = mb.provider_model_id \
+             WHERE mb.provider_id = $1",
         )
         .bind(id)
         .fetch_all(pool)

@@ -169,19 +169,48 @@
       }
     },
     "/admin/backends/{id}": {
-      "delete": {
-        "summary": "Delete backends id",
-        "operationId": "delete_admin_backends_id",
+      "patch": {
+        "summary": "Change what one model costs and is called at one provider. An explicit null clears a field; an absent field is left alone",
+        "operationId": "patch_admin_backends_id",
         "tags": ["admin"],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "upstream_model": {
+                    "type": ["string", "null"],
+                    "description": "What this provider calls the model. Null means the model's own name"
+                  },
+                  "input_price_per_mtok": {
+                    "type": ["integer", "null"],
+                    "description": "Micro-units per million tokens at this provider. The same model costs different amounts at different vendors, which is why this is not on the model"
+                  },
+                  "output_price_per_mtok": {
+                    "type": ["integer", "null"]
+                  },
+                  "default_max_tokens": {
+                    "type": ["integer", "null"],
+                    "description": "Supplied when a request omits max_tokens and this provider requires one"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {
-            "description": "OK"
+          "204": {
+            "description": "Updated"
           },
           "401": {
             "description": "No session, or a bad proxy token"
           },
           "403": {
             "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No such backend"
           }
         },
         "security": [
@@ -195,7 +224,43 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer"
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Detach one model from one provider. The model, its usage history and the provider itself are left alone",
+        "operationId": "delete_admin_backends_id",
+        "tags": ["admin"],
+        "responses": {
+          "204": {
+            "description": "Detached"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No such backend"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         ]

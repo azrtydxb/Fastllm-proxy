@@ -36,6 +36,9 @@ pub struct UsageSink {
     pub model: String,
     /// What the client asked for, when it differs from `model`.
     pub requested_model: Option<String>,
+    /// Which attachment answered, so the control plane can price it at that
+    /// provider's rate. See `usage::UsageEvent::backend_id`.
+    pub backend_id: Option<uuid::Uuid>,
     pub status: u16,
     pub reporter: UsageReporter,
 }
@@ -74,6 +77,7 @@ impl UsageSink {
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
             status: Some(self.status),
             requested_model: self.requested_model,
+            backend_id: self.backend_id,
             // A translated backend's usage comes from the translator, which
             // reports tokens and not money; the control plane prices it.
             cost_micros: None,

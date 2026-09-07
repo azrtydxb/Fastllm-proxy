@@ -20,15 +20,16 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 
 | Method | Path | Summary | Body fields |
 |---|---|---|---|
-| `DELETE` | `/admin/backends/{id}` | Delete backends id | — |
+| `PATCH` | `/admin/backends/{id}` | Change what one model costs and is called at one provider. An explicit null clears a field; an absent field is left alone | `upstream_model`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `default_max_tokens`* |
+| `DELETE` | `/admin/backends/{id}` | Detach one model from one provider. The model, its usage history and the provider itself are left alone | — |
 | `GET` | `/admin/fallback-model` | Read fallback-model | — |
 | `PUT` | `/admin/fallback-model` | Set fallback-model | `provider_model_id`* |
 | `GET` | `/admin/provider-catalogue` | Known providers and how to reach them | — |
 | `GET` | `/admin/provider-models` | Read provider models | — |
-| `POST` | `/admin/provider-models` | Create provider models | `name`, `description`*, `unpriced`, `input_price_per_mtok`*, `output_price_per_mtok`*, `default`, `cache_ttl_seconds`*, `context_length`* |
-| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `name`*, `description`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `cache_ttl_seconds`*, `context_length`* |
+| `POST` | `/admin/provider-models` | Create provider models | `name`, `description`*, `default`, `cache_ttl_seconds`*, `context_length`* |
+| `PATCH` | `/admin/provider-models/{id}` | Correct a model in place. An explicit null clears a field; an absent field is left alone | `name`*, `description`*, `cache_ttl_seconds`*, `context_length`* |
 | `DELETE` | `/admin/provider-models/{id}` | Delete models id | — |
-| `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `provider_id`*, `api_base`*, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `credential_kind`* |
+| `POST` | `/admin/provider-models/{id}/backends` | Create models id backends | `provider_id`*, `api_base`*, `upstream_model`*, `upstream_api_key`*, `Authorization`, `protocol`*, `auth_header`*, `auth_scheme`*, `default_max_tokens`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `credential_kind`* |
 | `GET` | `/admin/providers` | Read providers | — |
 | `POST` | `/admin/providers` | Add a provider: an endpoint and the credential that reaches it | `name`*, `kind`*, `catalogue_key`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`* |
 | `POST` | `/admin/providers/register` | Register or refresh a provider's lease | `api_base`, `node`, `name`*, `engine`*, `ttl_seconds` |
@@ -54,6 +55,14 @@ when already present in the chain, so naming it explicitly does not double it.
 **A backend that fails health checks leaves rotation but is not dropped from the
 chain.** When nothing is healthy the request still goes somewhere and the real
 upstream error reaches the client, which beats a synthetic 503.
+
+**A model may run at several providers, and they form one pool.** `POST
+/admin/provider-models/{id}/backends` again with a different `provider_id`
+attaches it there too; `router.rs` then chooses between them per request
+(prefix-cache affinity, least-loaded, and so on). The same provider twice is a
+409. Prices, `upstream_model` and `default_max_tokens` are on the attachment,
+not the model -- the same weights cost different amounts at different vendors
+-- and `PATCH /admin/backends/{id}` is what changes them.
 
 **A provider is created before its models, not by them.** `POST
 /admin/providers` takes the endpoint and its credential — from a catalogue key

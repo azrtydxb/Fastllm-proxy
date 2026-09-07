@@ -61,7 +61,7 @@ Two words, used consistently from here on:
 
 |                    |                                                                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Provider model** | What a request is routed _to_: one name on one provider. Two hosts serving the same model are two provider models                |
+| **Provider model** | What a request is routed _to_: one name, and every provider that serves it. Two hosts running the same model are one provider model with two backends, and form one pool |
 | **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of provider models — and where two of them are balanced against each other |
 
 **A client names a frontend model, and only a frontend model.** Provider models

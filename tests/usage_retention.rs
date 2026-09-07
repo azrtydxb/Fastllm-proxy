@@ -285,8 +285,9 @@ async fn deleting_a_model_keeps_the_usage_it_was_billed_for() {
     .await
     .unwrap();
     let provider_model_id: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO provider_models (name, provider_id, upstream_model) \
-         VALUES ($1, $2, 'gone') RETURNING id",
+        "WITH m AS (INSERT INTO provider_models (name) VALUES ($1) RETURNING id) \
+         INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+         SELECT m.id, $2, 'gone' FROM m RETURNING provider_model_id",
     )
     .bind(&model)
     .bind(provider)

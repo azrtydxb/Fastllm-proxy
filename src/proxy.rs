@@ -1073,6 +1073,7 @@ async fn proxy_request(
                                 requested_model: (requested_model.as_str()
                                     != candidate_model.as_str())
                                 .then(|| requested_model.to_string()),
+                                backend_id: backend.backend_id,
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             }
@@ -1117,6 +1118,7 @@ async fn proxy_request(
                                 requested_model: (requested_model.as_str()
                                     != candidate_model.as_str())
                                 .then(|| requested_model.to_string()),
+                                backend_id: backend.backend_id,
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             });
@@ -1308,6 +1310,9 @@ fn record_refusal(
         ttft_ms: None,
         status: Some(status.as_u16()),
         requested_model: None,
+        // A refusal never reached a backend, so there is no attachment to
+        // price it against — and nothing to price either.
+        backend_id: None,
         cost_micros: None,
     });
 }
@@ -1454,6 +1459,8 @@ struct UsageTracking {
     model: String,
     /// What the client asked for, when it differs from `model`.
     requested_model: Option<String>,
+    /// Which attachment answered; see `usage::UsageEvent::backend_id`.
+    backend_id: Option<uuid::Uuid>,
     status: u16,
     reporter: UsageReporter,
 }
@@ -1498,6 +1505,7 @@ impl UsageTracking {
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
             status: Some(self.status),
             requested_model: self.requested_model,
+            backend_id: self.backend_id,
             cost_micros: tokens.as_ref().and_then(|t| t.cost_micros),
         });
     }

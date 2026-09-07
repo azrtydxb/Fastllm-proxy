@@ -187,21 +187,26 @@ pub async fn build_snapshot_with(
         Option<String>,
         Option<i32>,
         String,
+        Uuid,
     );
-    // The join that used to be a table. A provider model has exactly one
-    // provider (migration 0029), so this yields at most one row per model and
-    // `BackendDef` — the proxy's resolved view of "where do I send this and
-    // how do I authenticate" — is unchanged by the split. The snapshot wire
-    // format therefore does not move, which is why proxies do not need to be
-    // upgraded in step with the control plane.
+    // One row per attachment (migration 0045), so a model served by two
+    // machines yields two and its pool has two members for `router.rs` to
+    // choose between. Where the credential and protocol live is unchanged:
+    // on the provider.
     //
-    // A model with no provider yields no row and is not routable. That is the
-    // same state a model with no backends had before, and the proxy already
-    // handles it as "no healthy backend".
+    // `upstream_model` falls back to the model's own name, which is what a
+    // self-hosted engine almost always wants and saves typing it twice.
+    //
+    // A model with no attachment yields no row and is not routable — the same
+    // state a model with no backends always had, which the proxy handles as
+    // "no healthy backend".
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
-        "SELECT m.id, p.api_base, m.upstream_model, p.upstream_api_key, p.protocol, \
-         p.auth_header, p.auth_scheme, m.default_max_tokens, p.credential_kind \
-         FROM provider_models m JOIN providers p ON p.id = m.provider_id",
+        "SELECT mb.provider_model_id, p.api_base, COALESCE(mb.upstream_model, m.name), \
+         p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, \
+         mb.default_max_tokens, p.credential_kind, mb.id \
+         FROM model_backends mb \
+         JOIN providers p ON p.id = mb.provider_id \
+         JOIN provider_models m ON m.id = mb.provider_model_id",
     )
     .fetch_all(pool)
     .await?;
@@ -219,6 +224,7 @@ pub async fn build_snapshot_with(
             auth_scheme,
             max_tokens,
             credential_kind,
+            backend_id,
         ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
@@ -313,6 +319,7 @@ pub async fn build_snapshot_with(
                 auth_header: auth_header.clone(),
                 auth_scheme: auth_scheme.clone(),
                 default_max_tokens: max_tokens.map(|n| n as u32),
+                backend_id: Some(*backend_id),
             });
         }
         models.push(ModelDef {
@@ -325,15 +332,12 @@ pub async fn build_snapshot_with(
             // A non-positive limit is meaningless and is read as unknown
             // rather than as a model that can accept nothing.
             context_length: context_length.filter(|c| *c > 0).map(|c| c as u64),
-            // Always unset from the database. `ModelDef::policy` chooses
-            // between a pool's backends, and a provider model has exactly one
-            // provider and therefore one backend — there is nothing to choose
-            // between. It moved to the frontend model, where the targets are
-            // (migration 0038).
-            //
-            // The field stays because `File` mode still uses it: a config file
-            // can give one model several backends, and there a pool really can
-            // have more than one member.
+            // Still unset from the database, but no longer because there is
+            // nothing to choose between: since migration 0045 a model can have
+            // several attachments and its pool really does have members. There
+            // is simply no column to read a per-model policy from yet, so
+            // every pool uses the deployment's `--policy`. `File` mode has
+            // always been able to set this per model.
             policy: None,
             backends,
         });
@@ -1126,7 +1130,9 @@ mod tests {
 
         let broken_model = unique_name("undecryptable-model");
         sqlx::query(
-            "INSERT INTO provider_models (name, provider_id, upstream_model) VALUES ($1, $2, 'broken')",
+            "WITH m AS (INSERT INTO provider_models (name) VALUES ($1) RETURNING id) \
+             INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+             SELECT m.id, $2, 'broken' FROM m",
         )
         .bind(&broken_model)
         .bind(broken_provider_id)
@@ -1138,7 +1144,9 @@ mod tests {
         // rather than merely "the build did not panic".
         let other_model = unique_name("unrelated-model");
         sqlx::query(
-            "INSERT INTO provider_models (name, provider_id, upstream_model) VALUES ($1, $2, 'healthy')",
+            "WITH m AS (INSERT INTO provider_models (name) VALUES ($1) RETURNING id) \
+             INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+             SELECT m.id, $2, 'healthy' FROM m",
         )
         .bind(&other_model)
         .bind(healthy_provider_id)

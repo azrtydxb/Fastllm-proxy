@@ -969,8 +969,9 @@ async fn provider_available_models(
         })?;
 
     let registered: Vec<String> = sqlx::query_scalar(
-        "SELECT upstream_model FROM provider_models \
-         WHERE provider_id = $1 AND upstream_model IS NOT NULL",
+        "SELECT COALESCE(mb.upstream_model, m.name) FROM model_backends mb \
+         JOIN provider_models m ON m.id = mb.provider_model_id \
+         WHERE mb.provider_id = $1",
     )
     .bind(id)
     .fetch_all(&ctx.pool)
@@ -1004,12 +1005,15 @@ async fn delete_provider(
     _perm: RequireConfigWrite,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let models: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM provider_models WHERE provider_id = $1 ORDER BY name")
-            .bind(id)
-            .fetch_all(&ctx.pool)
-            .await
-            .map_err(|e| db_error("checking a provider's models", &e))?;
+    let models: Vec<String> = sqlx::query_scalar(
+        "SELECT m.name FROM provider_models m \
+             JOIN model_backends mb ON mb.provider_model_id = m.id \
+             WHERE mb.provider_id = $1 ORDER BY m.name",
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("checking a provider's models", &e))?;
     if !models.is_empty() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -1063,7 +1067,7 @@ async fn list_providers(
         "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, p.auth_scheme, \
              p.upstream_api_key IS NOT NULL, p.catalogue_key, p.node, \
              p.engine_running, p.engine_waiting, p.engine_kv_cache, p.engine_load_at, \
-             (SELECT count(*) FROM provider_models m WHERE m.provider_id = p.id) \
+             (SELECT count(*) FROM model_backends mb WHERE mb.provider_id = p.id) \
          FROM providers p ORDER BY p.name",
     )
     .fetch_all(&ctx.pool)
@@ -1562,30 +1566,6 @@ async fn post_provider(
     ))
 }
 
-/// Carry a provider's new name onto the targets that describe it.
-///
-/// Routing resolves a target by `target_model_name` alone, so this changes
-/// nothing about where requests go — which is exactly why it is easy to
-/// forget. `target_provider_name` is what the Frontend models screen shows and
-/// what says *which* provider a target meant when two serve a model of the same
-/// name; left behind, it would name a provider that no longer exists.
-async fn rename_provider_on_targets(
-    pool: &PgPool,
-    previous: &str,
-    name: &str,
-) -> Result<(), sqlx::Error> {
-    for table in ["frontend_model_defaults", "rule_targets"] {
-        sqlx::query(&format!(
-            "UPDATE {table} SET target_provider_name = $1 WHERE target_provider_name = $2"
-        ))
-        .bind(name)
-        .bind(previous)
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
-}
-
 /// `host:port`, suffixed only when that is already taken.
 async fn unique_provider_name(ctx: &Ctx, host: &str) -> Result<String, ApiError> {
     let mut name = host.to_string();
@@ -1687,11 +1667,6 @@ async fn patch_provider(
                 "name cannot be empty".to_string(),
             ));
         }
-        let previous: String = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
-            .bind(id)
-            .fetch_one(&ctx.pool)
-            .await
-            .map_err(|e| db_error("reading a provider's name", &e))?;
         sqlx::query("UPDATE providers SET name = $1 WHERE id = $2")
             .bind(name)
             .bind(id)
@@ -1707,11 +1682,6 @@ async fn patch_provider(
                     db_error("renaming a provider", &e)
                 }
             })?;
-        if previous != name {
-            rename_provider_on_targets(&ctx.pool, &previous, name)
-                .await
-                .map_err(|e| db_error("renaming a provider on its targets", &e))?;
-        }
     }
     if let Some(kind) = body.kind.as_deref().map(str::trim) {
         if !matches!(kind, "static" | "cloud" | "dynamic") {
@@ -1886,9 +1856,21 @@ async fn patch_provider(
 /// that model from its provider and takes the same id.
 #[derive(Serialize)]
 struct BackendView {
+    /// The `model_backends` row, which is what `DELETE /admin/backends/{id}`
+    /// and `PATCH /admin/backends/{id}` address. Before migration 0045 this
+    /// was the provider model's id, because an attachment had no row of its
+    /// own.
     id: Uuid,
+    provider_id: Uuid,
+    provider_name: String,
     api_base: String,
     upstream_model: String,
+    /// Micro-units per million tokens, on the attachment: the same model
+    /// costs different amounts at different vendors, so a price is a fact
+    /// about where it runs. `None` is unpriced — usage is still recorded and
+    /// cost left NULL, so unpriced is visible rather than looking free.
+    input_price_per_mtok: Option<i64>,
+    output_price_per_mtok: Option<i64>,
     /// Whether a credential is configured — never the credential itself, in
     /// either plaintext or ciphertext. `upstream_api_key` is the one secret
     /// in this schema that cannot be reduced to a hash (the proxy has to
@@ -1910,26 +1892,17 @@ struct ModelView {
     id: Uuid,
     name: String,
     description: String,
-    /// Micro-units per million tokens. `None` is unpriced — usage is still
-    /// recorded, cost is left NULL rather than assumed zero.
-    input_price_per_mtok: Option<i64>,
-    output_price_per_mtok: Option<i64>,
     /// `None` is caching off.
     cache_ttl_seconds: Option<i32>,
     /// Tokens this model accepts, or absent when nobody has declared it.
     /// Absent is a third state, not zero — routing demotes a model only when
     /// the figure is known and too small.
     context_length: Option<i64>,
-    /// The provider serving this model, absent when none is configured.
+    /// Everywhere this model runs. Empty is a real state and not an error: a
+    /// model can outlive the provider it was attached to. It is not routable,
+    /// and the UI shows it as needing attention rather than hiding it.
     ///
-    /// Absent is a real state and not an error: a model can outlive its
-    /// provider, and before migration 0029 the same condition was "a model
-    /// with no backends". It is not routable, and the UI shows it as needing
-    /// attention rather than hiding it.
-    provider_id: Option<Uuid>,
-    provider_name: Option<String>,
-    /// Zero or one entry, never more. Kept as a list so existing clients and
-    /// the UI keep parsing; the one-provider rule is enforced by the schema.
+    /// Prices live on these rather than on the model — see `BackendView`.
     backends: Vec<BackendView>,
 }
 
@@ -1937,88 +1910,94 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
-    // `upstream_api_key IS NOT NULL` rather than the column: this query must
-    // not be able to return a credential even by accident, so the ciphertext
-    // never leaves Postgres on this path at all.
-    // Positional, and long enough that a mis-slotted type is easy to write and
-    // hard to see, so each one is named after the column it reads.
-    type ModelRow = (
-        Uuid,           // m.id
-        String,         // m.name
-        String,         // m.description
-        Option<i64>,    // m.input_price_per_mtok
-        Option<i64>,    // m.output_price_per_mtok
-        Option<i32>,    // m.cache_ttl_seconds
-        Option<i64>,    // m.context_length
-        Option<Uuid>,   // p.id
-        Option<String>, // p.name
-        Option<String>, // p.api_base
-        Option<String>, // m.upstream_model
-        Option<bool>,   // p.upstream_api_key IS NOT NULL
-        Option<String>, // p.protocol
-        Option<String>, // p.auth_header
-        Option<i32>,    // m.default_max_tokens
-    );
+    type ModelRow = (Uuid, String, String, Option<i32>, Option<i64>);
     let models: Vec<ModelRow> = sqlx::query_as(
-        "SELECT m.id, m.name, m.description, m.input_price_per_mtok, \
-             m.output_price_per_mtok, m.cache_ttl_seconds, m.context_length, \
-             p.id, p.name, p.api_base, m.upstream_model, \
-             p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, m.default_max_tokens \
-         FROM provider_models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.name",
+        "SELECT id, name, description, cache_ttl_seconds, context_length \
+         FROM provider_models ORDER BY name",
     )
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("listing models", &e))?;
 
+    // `upstream_api_key IS NOT NULL` rather than the column: this query must
+    // not be able to return a credential even by accident, so the ciphertext
+    // never leaves Postgres on this path at all.
+    //
+    // Positional, and long enough that a mis-slotted type is easy to write and
+    // hard to see, so each one is named after the column it reads.
+    type BackendRow = (
+        Uuid,        // mb.provider_model_id
+        Uuid,        // mb.id
+        Uuid,        // p.id
+        String,      // p.name
+        String,      // p.api_base
+        String,      // COALESCE(mb.upstream_model, m.name)
+        Option<i64>, // mb.input_price_per_mtok
+        Option<i64>, // mb.output_price_per_mtok
+        bool,        // p.upstream_api_key IS NOT NULL
+        String,      // p.protocol
+        String,      // p.auth_header
+        Option<i32>, // mb.default_max_tokens
+    );
+    // Ordered by provider name so a model's backends read the same way twice
+    // running; the routing order between them is the pool policy's business,
+    // not this listing's.
+    let backends: Vec<BackendRow> = sqlx::query_as(
+        "SELECT mb.provider_model_id, mb.id, p.id, p.name, p.api_base, \
+             COALESCE(mb.upstream_model, m.name), \
+             mb.input_price_per_mtok, mb.output_price_per_mtok, \
+             p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, mb.default_max_tokens \
+         FROM model_backends mb \
+         JOIN providers p ON p.id = mb.provider_id \
+         JOIN provider_models m ON m.id = mb.provider_model_id \
+         ORDER BY p.name",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing model backends", &e))?;
+
     Ok(Json(
         models
             .into_iter()
             .map(
-                |(
+                |(id, name, description, cache_ttl_seconds, context_length)| ModelView {
                     id,
                     name,
                     description,
-                    input_price_per_mtok,
-                    output_price_per_mtok,
                     cache_ttl_seconds,
                     context_length,
-                    provider_id,
-                    provider_name,
-                    api_base,
-                    upstream_model,
-                    has_key,
-                    protocol,
-                    auth_header,
-                    default_max_tokens,
-                )| {
-                    // Every provider column arrives together or not at all —
-                    // they come from one LEFT JOIN row — so one of them
-                    // deciding is enough, and `api_base` is the one without
-                    // which nothing is routable.
-                    let backends = match api_base {
-                        Some(api_base) => vec![BackendView {
-                            id,
-                            api_base,
-                            upstream_model: upstream_model.unwrap_or_else(|| name.clone()),
-                            has_upstream_api_key: has_key.unwrap_or(false),
-                            protocol: protocol.unwrap_or_else(|| "openai".into()),
-                            auth_header: auth_header.unwrap_or_else(|| "authorization".into()),
-                            default_max_tokens,
-                        }],
-                        None => Vec::new(),
-                    };
-                    ModelView {
-                        id,
-                        name,
-                        description,
-                        input_price_per_mtok,
-                        output_price_per_mtok,
-                        cache_ttl_seconds,
-                        context_length,
-                        provider_id,
-                        provider_name,
-                        backends,
-                    }
+                    backends: backends
+                        .iter()
+                        .filter(|(model_id, ..)| *model_id == id)
+                        .map(
+                            |(
+                                _,
+                                backend_id,
+                                provider_id,
+                                provider_name,
+                                api_base,
+                                upstream_model,
+                                input_price_per_mtok,
+                                output_price_per_mtok,
+                                has_key,
+                                protocol,
+                                auth_header,
+                                default_max_tokens,
+                            )| BackendView {
+                                id: *backend_id,
+                                provider_id: *provider_id,
+                                provider_name: provider_name.clone(),
+                                api_base: api_base.clone(),
+                                upstream_model: upstream_model.clone(),
+                                input_price_per_mtok: *input_price_per_mtok,
+                                output_price_per_mtok: *output_price_per_mtok,
+                                has_upstream_api_key: *has_key,
+                                protocol: protocol.clone(),
+                                auth_header: auth_header.clone(),
+                                default_max_tokens: *default_max_tokens,
+                            },
+                        )
+                        .collect(),
                 },
             )
             .collect(),
@@ -2031,16 +2010,6 @@ struct NewModel {
     name: String,
     #[serde(default)]
     description: String,
-    /// Price per *million* tokens, in micro-units — the unit every provider
-    /// publishes, and an integer so the arithmetic is exact.
-    ///
-    /// Unset leaves the model unpriced: usage is still recorded, but cost is
-    /// left NULL rather than assumed zero, so unpriced is visible instead of
-    /// looking free.
-    #[serde(default)]
-    input_price_per_mtok: Option<i64>,
-    #[serde(default)]
-    output_price_per_mtok: Option<i64>,
     /// Seconds an identical request may be answered from cache. Unset or 0 is
     /// off, which is the default: caching changes semantics, since two
     /// identical requests at `temperature > 0` are supposed to be able to
@@ -2589,14 +2558,11 @@ async fn post_model(
     // renaming the provider model out of the way instead would revoke every
     // grant naming it (migration 0029 did that in production).
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO provider_models (name, description, input_price_per_mtok, output_price_per_mtok, \
-             cache_ttl_seconds, context_length) \
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO provider_models (name, description, cache_ttl_seconds, context_length) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
-    .bind(body.input_price_per_mtok)
-    .bind(body.output_price_per_mtok)
     .bind(body.cache_ttl_seconds)
     .bind(body.context_length)
     .fetch_one(&ctx.pool)
@@ -2639,10 +2605,6 @@ struct PatchModel {
     name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
-    input_price_per_mtok: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option")]
-    output_price_per_mtok: Option<Option<i64>>,
     #[serde(default, deserialize_with = "double_option")]
     cache_ttl_seconds: Option<Option<i32>>,
     /// Tokens this model accepts. `null` clears it back to undeclared, which
@@ -2866,20 +2828,6 @@ async fn patch_model(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchModel>,
 ) -> Result<StatusCode, ApiError> {
-    for (name, value) in [
-        ("input_price_per_mtok", body.input_price_per_mtok.flatten()),
-        (
-            "output_price_per_mtok",
-            body.output_price_per_mtok.flatten(),
-        ),
-    ] {
-        if value.is_some_and(|v| v < 0) {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                format!("{name} cannot be negative"),
-            ));
-        }
-    }
     if body.cache_ttl_seconds.flatten().is_some_and(|v| v < 0) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -2909,20 +2857,14 @@ async fn patch_model(
     // carries its own "was it present" flag instead.
     let done = sqlx::query(
         "UPDATE provider_models SET
-           description           = CASE WHEN $2 THEN $3  ELSE description           END,
-           input_price_per_mtok  = CASE WHEN $4 THEN $5  ELSE input_price_per_mtok  END,
-           output_price_per_mtok = CASE WHEN $6 THEN $7  ELSE output_price_per_mtok END,
-           cache_ttl_seconds     = CASE WHEN $8 THEN $9  ELSE cache_ttl_seconds     END,
-           context_length        = CASE WHEN $10 THEN $11 ELSE context_length        END
+           description       = CASE WHEN $2 THEN $3 ELSE description       END,
+           cache_ttl_seconds = CASE WHEN $4 THEN $5 ELSE cache_ttl_seconds END,
+           context_length    = CASE WHEN $6 THEN $7 ELSE context_length    END
          WHERE id = $1",
     )
     .bind(id)
     .bind(body.description.is_some())
     .bind(body.description.clone().flatten().unwrap_or_default())
-    .bind(body.input_price_per_mtok.is_some())
-    .bind(body.input_price_per_mtok.flatten())
-    .bind(body.output_price_per_mtok.is_some())
-    .bind(body.output_price_per_mtok.flatten())
     .bind(body.cache_ttl_seconds.is_some())
     .bind(body.cache_ttl_seconds.flatten())
     .bind(body.context_length.is_some())
@@ -3003,6 +2945,13 @@ struct NewBackend {
     /// capped at a number nobody chose.
     #[serde(default)]
     default_max_tokens: Option<i32>,
+    /// What this provider charges for this model, in micro-units per million
+    /// tokens. On the attachment rather than the model because the same model
+    /// costs different amounts at different vendors.
+    #[serde(default)]
+    input_price_per_mtok: Option<i64>,
+    #[serde(default)]
+    output_price_per_mtok: Option<i64>,
     /// How to read `upstream_api_key`. Absent means `static` — the key is the
     /// credential. `gcp_service_account` means it is a Google service-account
     /// key file, which the control plane exchanges for an access token on
@@ -3026,6 +2975,8 @@ impl NewBackend {
             auth_header: None,
             auth_scheme: None,
             default_max_tokens: None,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
             credential_kind: None,
         }
     }
@@ -3076,27 +3027,6 @@ async fn post_backend(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "default_max_tokens must be greater than zero".to_string(),
-        ));
-    }
-
-    // A provider model has exactly one provider, so attaching a second is a
-    // conflict rather than an addition. Refusing is the honest answer: the
-    // caller wanted two upstreams for one name, and that is now a frontend
-    // model with two targets, not a model with two backends.
-    let existing: Option<i64> =
-        sqlx::query_scalar("SELECT provider_id FROM provider_models WHERE id = $1")
-            .bind(provider_model_id)
-            .fetch_one(&ctx.pool)
-            .await
-            .map_err(|e| db_error("provider lookup", &e))?;
-    if existing.is_some() {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            format!(
-                "model {model_name:?} already has a provider; a provider model has exactly one. \
-                 Detach it first, or create a frontend model with both as targets to balance \
-                 across them"
-            ),
         ));
     }
 
@@ -3155,22 +3085,51 @@ async fn post_backend(
         None => attach_by_address(&ctx, &body).await?,
     };
 
-    sqlx::query(
-        "UPDATE provider_models SET provider_id = $1, upstream_model = $2, default_max_tokens = $3 \
-         WHERE id = $4",
+    for (name, value) in [
+        ("input_price_per_mtok", body.input_price_per_mtok),
+        ("output_price_per_mtok", body.output_price_per_mtok),
+    ] {
+        if value.is_some_and(|v| v < 0) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("{name} cannot be negative"),
+            ));
+        }
+    }
+
+    // One attachment per (model, provider). A second would be two names for
+    // one endpoint, which routing would load-balance between — sending half
+    // the traffic to a machine it had already counted.
+    let backend_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO model_backends (provider_model_id, provider_id, upstream_model, \
+             default_max_tokens, input_price_per_mtok, output_price_per_mtok) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
+    .bind(provider_model_id)
     .bind(attached.id)
     .bind(&upstream_model)
     .bind(body.default_max_tokens)
-    .bind(provider_model_id)
-    .execute(&ctx.pool)
+    .bind(body.input_price_per_mtok)
+    .bind(body.output_price_per_mtok)
+    .fetch_one(&ctx.pool)
     .await
-    .map_err(|e| db_error("attaching provider", &e))?;
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                "this model is already attached to that provider; PATCH \
+                 /admin/backends/{id} changes an existing attachment"
+                    .to_string(),
+            )
+        } else {
+            db_error("attaching provider", &e)
+        }
+    })?;
     refresh(&ctx).await;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "id": provider_model_id,
+            "id": backend_id,
             "provider_id": attached.id,
             "provider_model_id": provider_model_id,
             "api_base": attached.api_base,
@@ -3333,30 +3292,123 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
     })
 }
 
+/// What a `PATCH /admin/backends/{id}` may change.
+///
+/// Everything here is a fact about *this model at this provider*, which is
+/// why none of it lives on the model: the same weights cost different amounts
+/// at different vendors, carry a different upstream name, and have different
+/// opinions about whether `max_tokens` is mandatory.
+///
+/// Moving an attachment to a different provider is deliberately not offered.
+/// That is a delete and an add — two operations an operator can see the effect
+/// of — rather than one that silently repoints traffic while keeping the id
+/// a frontend model's history refers to.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchBackend {
+    /// `null` clears it back to "the model's own name".
+    #[serde(default, deserialize_with = "double_option")]
+    upstream_model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    input_price_per_mtok: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    output_price_per_mtok: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    default_max_tokens: Option<Option<i32>>,
+}
+
+async fn patch_backend(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchBackend>,
+) -> Result<StatusCode, ApiError> {
+    for (name, value) in [
+        ("input_price_per_mtok", body.input_price_per_mtok.flatten()),
+        (
+            "output_price_per_mtok",
+            body.output_price_per_mtok.flatten(),
+        ),
+    ] {
+        if value.is_some_and(|v| v < 0) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("{name} cannot be negative"),
+            ));
+        }
+    }
+    if body.default_max_tokens.flatten().is_some_and(|v| v <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "default_max_tokens must be positive; send null to clear it".to_string(),
+        ));
+    }
+
+    // `COALESCE($n, column)` would make "set to null" impossible, so each
+    // field carries its own "was it present" flag instead.
+    let done = sqlx::query(
+        "UPDATE model_backends SET
+           upstream_model        = CASE WHEN $2 THEN $3 ELSE upstream_model        END,
+           input_price_per_mtok  = CASE WHEN $4 THEN $5 ELSE input_price_per_mtok  END,
+           output_price_per_mtok = CASE WHEN $6 THEN $7 ELSE output_price_per_mtok END,
+           default_max_tokens    = CASE WHEN $8 THEN $9 ELSE default_max_tokens    END
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.upstream_model.is_some())
+    .bind(
+        body.upstream_model
+            .clone()
+            .flatten()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty()),
+    )
+    .bind(body.input_price_per_mtok.is_some())
+    .bind(body.input_price_per_mtok.flatten())
+    .bind(body.output_price_per_mtok.is_some())
+    .bind(body.output_price_per_mtok.flatten())
+    .bind(body.default_max_tokens.is_some())
+    .bind(body.default_max_tokens.flatten())
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("backend update", &e))?;
+
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "no backend with id {id}; GET /admin/provider-models lists each model's backends"
+            ),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/backends/{id}` — detach one model from one provider.
+///
+/// A real row deletion since migration 0045, where before it was an UPDATE
+/// blanking three columns on the model. The model, its usage history and any
+/// frontend model pointing at it are untouched; it simply stops running at
+/// that provider, and stops being routable at all if that was its only one.
+///
+/// The provider is left alone. Deleting a model's last attachment is a
+/// routing change, not a reason to remove an endpoint an operator configured.
 async fn delete_backend(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    // The id is the model's, because since migration 0029 the model *is* the
-    // link to its provider. Detaching leaves the model, its price, its usage
-    // history and any frontend model pointing at it untouched — it simply
-    // stops being routable, which is the reversible half of "remove this
-    // backend" and the only half this route should ever do.
-    let done = sqlx::query(
-        "UPDATE provider_models SET provider_id = NULL, upstream_model = NULL, \
-         default_max_tokens = NULL WHERE id = $1 AND provider_id IS NOT NULL",
-    )
-    .bind(id)
-    .execute(&ctx.pool)
-    .await
-    .map_err(|e| db_error("detaching provider", &e))?;
+    let done = sqlx::query("DELETE FROM model_backends WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("detaching provider", &e))?;
     if done.rows_affected() == 0 {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!(
-                "no model with id {id} that has a provider; GET /admin/provider-models lists each \
-                 model's provider"
+                "no backend with id {id}; GET /admin/provider-models lists each model's backends"
             ),
         ));
     }
@@ -3380,10 +3432,6 @@ struct TargetView {
     /// itself remains, bound by name, and reattaches if that name comes back.
     provider_model_id: Option<Uuid>,
     model: String,
-    /// The provider this target wants. Part of the identity: two hosts serving
-    /// the same model are two provider models, so a name alone does not say
-    /// which one is meant.
-    provider: Option<String>,
     weight: i32,
     position: i32,
 }
@@ -3422,7 +3470,7 @@ struct FrontendModelView {
 /// (migration 0036) — that is what lets routing reattach when the model comes
 /// back. An inner join here would drop exactly the targets an operator most
 /// needs to see.
-type TargetRow = (Uuid, Uuid, Option<Uuid>, String, Option<String>, i32, i32);
+type TargetRow = (Uuid, Uuid, Option<Uuid>, String, i32, i32);
 
 async fn list_virtual_models(
     State(ctx): State<Ctx>,
@@ -3442,7 +3490,7 @@ async fn list_virtual_models(
     .map_err(|e| db_error("listing routing rules", &e))?;
     let rule_targets: Vec<TargetRow> = sqlx::query_as(
         "SELECT rt.id, rt.rule_id, rt.provider_model_id, rt.target_model_name, \
-                rt.target_provider_name, rt.weight, rt.position
+                rt.weight, rt.position
          FROM rule_targets rt
          ORDER BY rt.rule_id, rt.position",
     )
@@ -3451,7 +3499,7 @@ async fn list_virtual_models(
     .map_err(|e| db_error("listing rule targets", &e))?;
     let default_targets: Vec<TargetRow> = sqlx::query_as(
         "SELECT vd.id, vd.frontend_model_id, vd.provider_model_id, vd.target_model_name, \
-                vd.target_provider_name, vd.weight, vd.position
+                vd.weight, vd.position
          FROM frontend_model_defaults vd
          ORDER BY vd.frontend_model_id, vd.position",
     )
@@ -3463,11 +3511,10 @@ async fn list_virtual_models(
         rows.iter()
             .filter(|(_, o, ..)| *o == owner)
             .map(
-                |(id, _, provider_model_id, model, provider, weight, position)| TargetView {
+                |(id, _, provider_model_id, model, weight, position)| TargetView {
                     id: *id,
                     provider_model_id: *provider_model_id,
                     model: model.clone(),
-                    provider: provider.clone(),
                     weight: *weight,
                     position: *position,
                 },
@@ -3828,10 +3875,10 @@ async fn post_rule_target(
         // The name is copied from the model at write time and is what the
         // target is really bound to — the id only records which row carries
         // that name today, and goes NULL if it is deleted.
-        "INSERT INTO rule_targets (rule_id, provider_model_id, target_provider_name, \
+        "INSERT INTO rule_targets (rule_id, provider_model_id, \
                                    target_model_name, weight, position)
-         SELECT $1, pm.id, p.name, pm.name, $3, $4
-           FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id
+         SELECT $1, pm.id, pm.name, $3, $4
+           FROM provider_models pm
           WHERE pm.id = $2
          RETURNING id",
     )
@@ -3895,10 +3942,9 @@ async fn post_default_target(
     let id: Uuid = sqlx::query_scalar(
         // Same as a rule's target: bound by name, with the id as a cache.
         "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
-                                              target_provider_name, target_model_name, \
-                                              weight, position)
-         SELECT $1, pm.id, p.name, pm.name, $3, $4
-           FROM provider_models pm LEFT JOIN providers p ON p.id = pm.provider_id
+                                              target_model_name, weight, position)
+         SELECT $1, pm.id, pm.name, $3, $4
+           FROM provider_models pm
           WHERE pm.id = $2
          RETURNING id",
     )
@@ -5926,6 +5972,7 @@ async fn post_usage(
     let mut ttft_ms: Vec<Option<i32>> = Vec::with_capacity(submitted);
     let mut status: Vec<Option<i16>> = Vec::with_capacity(submitted);
     let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
+    let mut backend_ids: Vec<Option<Uuid>> = Vec::with_capacity(submitted);
     let mut reported_cost: Vec<Option<i64>> = Vec::with_capacity(submitted);
     let mut usage_reported: Vec<bool> = Vec::with_capacity(submitted);
     let mut refusal: Vec<Option<String>> = Vec::with_capacity(submitted);
@@ -5939,6 +5986,7 @@ async fn post_usage(
         ttft_ms.push(e.ttft_ms.map(|v| v as i32));
         status.push(e.status.map(|v| v as i16));
         requested_model.push(e.requested_model.clone());
+        backend_ids.push(e.backend_id);
         reported_cost.push(e.cost_micros.map(|c| c.min(i64::MAX as u64) as i64));
         usage_reported.push(e.usage_reported);
         // Serialised through the enum rather than formatted ad hoc, so the
@@ -5972,16 +6020,16 @@ async fn post_usage(
         "WITH input AS (
             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
-                $10::bigint[], $11::boolean[], $12::text[])
+                $10::bigint[], $11::boolean[], $12::text[], $13::uuid[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
                      duration_ms, ttft_ms, status, requested_model, reported_cost,
-                     usage_reported, refusal)
+                     usage_reported, refusal, backend_id)
          )
-         INSERT INTO usage_events (principal_id, provider_model_id, model_name, provider_name,
-                                   prompt_tokens, completion_tokens, at,
+         INSERT INTO usage_events (principal_id, provider_model_id, model_backend_id, model_name,
+                                   provider_name, prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, usage_reported,
                                    refusal, cost_micros)
-         SELECT i.principal_id, m.id, i.model_name, pr.name,
+         SELECT i.principal_id, m.id, mb.id, i.model_name, pr.name,
                 i.prompt_tokens, i.completion_tokens, i.at,
                 i.duration_ms, i.ttft_ms, i.status, i.requested_model, i.usage_reported,
                 i.refusal,
@@ -6014,17 +6062,34 @@ async fn post_usage(
                     -- zero; this keeps that distinction true at the source.
                     CASE WHEN NOT i.usage_reported
                          THEN NULL
-                         WHEN m.input_price_per_mtok IS NULL AND m.output_price_per_mtok IS NULL
+                         WHEN mb.input_price_per_mtok IS NULL AND mb.output_price_per_mtok IS NULL
                          THEN NULL
-                         ELSE ((i.prompt_tokens     * COALESCE(m.input_price_per_mtok, 0)
-                              + i.completion_tokens * COALESCE(m.output_price_per_mtok, 0))
+                         ELSE ((i.prompt_tokens     * COALESCE(mb.input_price_per_mtok, 0)
+                              + i.completion_tokens * COALESCE(mb.output_price_per_mtok, 0))
                               + 500000) / 1000000
                     END
                 )
          FROM input i
          JOIN principals p ON p.id = i.principal_id
          LEFT JOIN provider_models m ON m.name = i.model_name
-         LEFT JOIN providers pr ON pr.id = m.provider_id
+         -- The attachment the proxy says answered, which is what decides the
+         -- price: the same model at two providers costs two different
+         -- amounts, so the model name alone cannot say what this request was
+         -- billed at.
+         --
+         -- The second arm is for an event with no `backend_id` -- a `File`-mode
+         -- proxy, or one older than that field. It prices by model, which is
+         -- exact while the model has a single attachment and correctly
+         -- declines to guess when it has several: `LIMIT 1` in a correlated
+         -- subquery would pick one arbitrarily and bill Spark traffic at
+         -- OpenRouter rates.
+         LEFT JOIN model_backends mb
+                ON mb.id = i.backend_id
+                OR (i.backend_id IS NULL
+                    AND mb.provider_model_id = m.id
+                    AND (SELECT count(*) FROM model_backends x
+                          WHERE x.provider_model_id = m.id) = 1)
+         LEFT JOIN providers pr ON pr.id = mb.provider_id
          RETURNING id, principal_id, prompt_tokens, completion_tokens, COALESCE(cost_micros, 0)",
     )
     .bind(&principal_ids)
@@ -6039,6 +6104,7 @@ async fn post_usage(
     .bind(&reported_cost)
     .bind(&usage_reported)
     .bind(&refusal)
+    .bind(&backend_ids)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -6643,7 +6709,9 @@ async fn get_config(
     caller: AdminPrincipal,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let unpriced: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM provider_models WHERE input_price_per_mtok IS NULL",
+        "SELECT count(*) FROM provider_models m WHERE NOT EXISTS ( \
+            SELECT 1 FROM model_backends mb \
+            WHERE mb.provider_model_id = m.id AND mb.input_price_per_mtok IS NOT NULL)",
     )
     .fetch_one(&ctx.pool)
     .await
@@ -7143,7 +7211,10 @@ pub async fn serve(
             axum::routing::patch(patch_model).delete(delete_model),
         )
         .route("/admin/provider-models/{id}/backends", post(post_backend))
-        .route("/admin/backends/{id}", delete(delete_backend))
+        .route(
+            "/admin/backends/{id}",
+            axum::routing::patch(patch_backend).delete(delete_backend),
+        )
         .route(
             "/admin/frontend-models",
             get(list_virtual_models).post(post_frontend_model),
@@ -7961,8 +8032,6 @@ mod tests {
             Json(NewModel {
                 name: before.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8028,8 +8097,6 @@ mod tests {
             Json(PatchModel {
                 name: Some(after.clone()),
                 description: None,
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8178,8 +8245,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8204,6 +8269,8 @@ mod tests {
                 auth_header: None,
                 auth_scheme: None,
                 default_max_tokens: None,
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
                 credential_kind: None,
             }),
         )
@@ -8224,6 +8291,8 @@ mod tests {
                 auth_header: None,
                 auth_scheme: None,
                 default_max_tokens: None,
+                input_price_per_mtok: None,
+                output_price_per_mtok: None,
                 credential_kind: None,
             }),
         )
@@ -8310,8 +8379,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8580,8 +8647,6 @@ mod tests {
             Json(NewModel {
                 name: primary_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8596,8 +8661,6 @@ mod tests {
             Json(NewModel {
                 name: secondary_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8719,8 +8782,6 @@ mod tests {
             Json(NewModel {
                 name: name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8763,8 +8824,6 @@ mod tests {
             Json(NewModel {
                 name: other_name,
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -8962,6 +9021,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            backend_id: None,
             cost_micros: None,
         }
     }
@@ -9003,8 +9063,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -9105,8 +9163,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -9186,8 +9242,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -9550,8 +9604,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -9629,18 +9681,29 @@ mod tests {
         let principal_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
         let model_name = unique_name("cost-src-model");
-        let _ = post_model(
+        let (_, model) = post_model(
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                // $1 per Mtok in and out, so 3 tokens would price at 3 micros
-                // exactly and 1 token at 1.
-                input_price_per_mtok: Some(1_000_000),
-                output_price_per_mtok: Some(1_000_000),
                 cache_ttl_seconds: None,
                 context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+        // $1 per Mtok in and out, so 2000 tokens price at 2000 micros exactly
+        // and 1 token at 1. On the attachment, since migration 0045.
+        let _ = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(model_id),
+            Json(NewBackend {
+                input_price_per_mtok: Some(1_000_000),
+                output_price_per_mtok: Some(1_000_000),
+                ..NewBackend::openai(&stub_provider(), None)
             }),
         )
         .await
@@ -9651,7 +9714,10 @@ mod tests {
         reported.completion_tokens = 1000;
         reported.cost_micros = Some(42);
 
-        // Same shape, no reported cost: priced from the model instead.
+        // Same shape, no reported cost: priced from the attachment instead.
+        // Deliberately without a `backend_id`, which is what a proxy older
+        // than that field sends — the model has one attachment, so pricing by
+        // name is still exact.
         let mut priced = usage_event(principal_id, &model_name);
         priced.prompt_tokens = 1000;
         priced.completion_tokens = 1000;
@@ -9853,16 +9919,30 @@ mod tests {
         let priced = unique_name("agg-model-priced");
         let unpriced = unique_name("agg-model-unpriced");
         for (name, price) in [(&priced, Some(1_000_000)), (&unpriced, None)] {
-            let _ = post_model(
+            let (_, created) = post_model(
                 State(ctx.clone()),
                 RequireConfigWrite,
                 Json(NewModel {
                     name: name.clone(),
                     description: String::new(),
-                    input_price_per_mtok: price,
-                    output_price_per_mtok: price,
                     cache_ttl_seconds: None,
                     context_length: None,
+                }),
+            )
+            .await
+            .unwrap();
+            // The price lives on the attachment, so an unattached model is
+            // unpriced by construction — which is the state this test needs
+            // one of the two to be in anyway.
+            let model_id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+            let _ = post_backend(
+                State(ctx.clone()),
+                RequireConfigWrite,
+                Path(model_id),
+                Json(NewBackend {
+                    input_price_per_mtok: price,
+                    output_price_per_mtok: price,
+                    ..NewBackend::openai(&stub_provider(), None)
                 }),
             )
             .await
@@ -9928,12 +10008,117 @@ mod tests {
         );
     }
 
+    /// The point of migration 0045: one model, two machines, one pool.
+    ///
+    /// Before it, this shape had to be two provider models called
+    /// `bge-m3@host-a` and `bge-m3@host-b`, which meant two prices to keep in
+    /// step, two context windows to keep equal, and — because `Registry`
+    /// groups backends by model name — two pools of one, so the prefix-cache
+    /// affinity router had nothing to choose between on either.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn one_model_can_run_on_two_providers_and_they_share_a_pool() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "two-hosts-");
+        let name = unique_name("two-hosts");
+        let (_, model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewModel {
+                name: name.clone(),
+                description: String::new(),
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let model_id = model.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+
+        let a = stub_provider();
+        let b = stub_provider();
+        for (base, price) in [(&a, 1_000_000), (&b, 2_000_000)] {
+            let _ = post_backend(
+                State(ctx.clone()),
+                RequireConfigWrite,
+                Path(model_id),
+                Json(NewBackend {
+                    // Different prices on purpose: the same weights cost
+                    // different amounts at different vendors, which is why a
+                    // price cannot live on the model.
+                    input_price_per_mtok: Some(price),
+                    output_price_per_mtok: Some(price),
+                    ..NewBackend::openai(base, None)
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
+        let view = listed.0.iter().find(|m| m.id == model_id).expect("listed");
+        assert_eq!(view.backends.len(), 2, "one model, two attachments");
+        let mut prices: Vec<Option<i64>> = view
+            .backends
+            .iter()
+            .map(|b| b.input_price_per_mtok)
+            .collect();
+        prices.sort();
+        assert_eq!(prices, vec![Some(1_000_000), Some(2_000_000)]);
+
+        // Attaching the same provider twice is a conflict, not a second
+        // backend: routing would treat it as two machines and send half the
+        // traffic to one it had already counted.
+        let again = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(model_id),
+            Json(NewBackend::openai(&a, None)),
+        )
+        .await;
+        assert!(
+            matches!(&again, Err(e) if e.0 == StatusCode::CONFLICT),
+            "a provider may serve a model once"
+        );
+
+        // And the snapshot the proxies read puts both in one pool, which is
+        // what makes `router.rs` able to choose between them per request.
+        let snapshot = crate::control::build::build_snapshot(&ctx.pool, &ctx.key)
+            .await
+            .unwrap();
+        let built = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == name)
+            .expect("in the snapshot");
+        assert_eq!(built.backends.len(), 2, "both hosts in one pool");
+        assert!(
+            built.backends.iter().all(|b| b.backend_id.is_some()),
+            "each carries its attachment id, so usage can be priced at the \
+             rate of whichever one served"
+        );
+
+        // Detaching one leaves the model and the other backend alone.
+        let first = view.backends[0].id;
+        delete_backend(State(ctx.clone()), RequireConfigWrite, Path(first))
+            .await
+            .unwrap();
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
+        let view = listed.0.iter().find(|m| m.id == model_id).expect("listed");
+        assert_eq!(view.backends.len(), 1, "the other survives");
+    }
+
     /// Prices change. Before this, correcting one meant deleting the model —
     /// cascading its backends and their encrypted credentials — and recreating
     /// the lot.
+    ///
+    /// Prices live on the attachment since migration 0045, so this patches a
+    /// backend rather than the model: the same weights cost different amounts
+    /// at different vendors, and a model-level price could only ever be right
+    /// for one of them.
     #[tokio::test]
     #[ignore = "requires postgres"]
-    async fn a_models_price_can_be_corrected_without_recreating_it() {
+    async fn a_price_can_be_corrected_without_recreating_the_model() {
         let (ctx, _cache) = test_ctx().await;
         let _cleanup = TestCleanup::new().track_prefix("provider_models", "name", "patch-model-");
         let name = unique_name("patch-model");
@@ -9943,8 +10128,6 @@ mod tests {
             Json(NewModel {
                 name: name.clone(),
                 description: "before".into(),
-                input_price_per_mtok: Some(3_000_000),
-                output_price_per_mtok: Some(15_000_000),
                 cache_ttl_seconds: Some(60),
                 context_length: None,
             }),
@@ -9953,18 +10136,33 @@ mod tests {
         .unwrap();
         let id = created.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
 
-        // The read path must show them, or a price can be set and never seen.
-        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
-        let view = listed.0.iter().find(|m| m.id == id).expect("listed");
-        assert_eq!(view.input_price_per_mtok, Some(3_000_000));
-        assert_eq!(view.cache_ttl_seconds, Some(60));
-
-        // Change one field. Everything omitted must be left alone — a PATCH
-        // that sets a price must not silently turn caching off.
-        patch_model(
+        let (_, attached) = post_backend(
             State(ctx.clone()),
             RequireConfigWrite,
             Path(id),
+            Json(NewBackend {
+                input_price_per_mtok: Some(3_000_000),
+                output_price_per_mtok: Some(15_000_000),
+                ..NewBackend::openai(&stub_provider(), None)
+            }),
+        )
+        .await
+        .unwrap();
+        let backend_id = attached.0["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+
+        // The read path must show them, or a price can be set and never seen.
+        let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
+        let view = listed.0.iter().find(|m| m.id == id).expect("listed");
+        assert_eq!(view.cache_ttl_seconds, Some(60));
+        assert_eq!(view.backends.len(), 1);
+        assert_eq!(view.backends[0].input_price_per_mtok, Some(3_000_000));
+
+        // Change one field. Everything omitted must be left alone — a PATCH
+        // that sets a price must not silently clear the other one.
+        patch_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(backend_id),
             Json(
                 serde_json::from_value(serde_json::json!({
                     "input_price_per_mtok": 4_000_000
@@ -9977,33 +10175,41 @@ mod tests {
 
         let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let view = listed.0.iter().find(|m| m.id == id).expect("listed");
-        assert_eq!(view.input_price_per_mtok, Some(4_000_000));
-        assert_eq!(view.output_price_per_mtok, Some(15_000_000), "untouched");
+        assert_eq!(view.backends[0].input_price_per_mtok, Some(4_000_000));
+        assert_eq!(
+            view.backends[0].output_price_per_mtok,
+            Some(15_000_000),
+            "untouched"
+        );
         assert_eq!(view.cache_ttl_seconds, Some(60), "untouched");
         assert_eq!(view.description, "before", "untouched");
 
-        // Explicit null clears, which is how a model becomes unpriced again.
+        // Explicit null clears, which is how a backend becomes unpriced again.
+        patch_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(backend_id),
+            Json(
+                serde_json::from_value(serde_json::json!({"input_price_per_mtok": null})).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
         patch_model(
             State(ctx.clone()),
             RequireConfigWrite,
             Path(id),
-            Json(
-                serde_json::from_value(serde_json::json!({
-                    "input_price_per_mtok": null,
-                    "cache_ttl_seconds": null
-                }))
-                .unwrap(),
-            ),
+            Json(serde_json::from_value(serde_json::json!({"cache_ttl_seconds": null})).unwrap()),
         )
         .await
         .unwrap();
 
         let listed = list_models(State(ctx.clone()), RequireRead).await.unwrap();
         let view = listed.0.iter().find(|m| m.id == id).expect("listed");
-        assert_eq!(view.input_price_per_mtok, None, "null clears");
+        assert_eq!(view.backends[0].input_price_per_mtok, None, "null clears");
         assert_eq!(view.cache_ttl_seconds, None);
         assert_eq!(
-            view.output_price_per_mtok,
+            view.backends[0].output_price_per_mtok,
             Some(15_000_000),
             "still untouched"
         );
@@ -10013,6 +10219,15 @@ mod tests {
             RequireConfigWrite,
             Path(Uuid::nil()),
             Json(serde_json::from_value(serde_json::json!({"description": "x"})).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        let missing = patch_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(Uuid::nil()),
+            Json(serde_json::from_value(serde_json::json!({"upstream_model": "x"})).unwrap()),
         )
         .await
         .unwrap_err();
@@ -10032,8 +10247,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -10052,6 +10265,8 @@ mod tests {
             auth_header: None,
             auth_scheme: None,
             default_max_tokens: None,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
             credential_kind: kind.map(str::to_string),
         }
         };
@@ -10122,8 +10337,6 @@ mod tests {
             Json(NewModel {
                 name: unique_name("gcp-validate"),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -10162,8 +10375,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),
@@ -10216,8 +10427,6 @@ mod tests {
                     Json(NewModel {
                         name,
                         description: String::new(),
-                        input_price_per_mtok: None,
-                        output_price_per_mtok: None,
                         cache_ttl_seconds: None,
                         context_length: None,
                     }),
@@ -10535,8 +10744,6 @@ mod tests {
             Json(NewModel {
                 name: model_name.clone(),
                 description: String::new(),
-                input_price_per_mtok: None,
-                output_price_per_mtok: None,
                 cache_ttl_seconds: None,
                 context_length: None,
             }),

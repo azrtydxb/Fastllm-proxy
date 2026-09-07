@@ -88,6 +88,17 @@ pub struct UsageEvent {
     /// one that actually answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    /// Which `model_backends` row served this, echoed from
+    /// `snapshot::BackendDef::backend_id`.
+    ///
+    /// The data plane never interprets it. The control plane needs it because
+    /// prices live on the attachment: the same model at two providers costs
+    /// two different amounts, and the model name alone cannot say which one
+    /// was billed. `None` from a `File`-mode proxy or one older than this
+    /// field, and the control plane then prices by name — exact whenever the
+    /// model has a single attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<uuid::Uuid>,
     /// What the provider says it charged, in micro-units.
     ///
     /// Authoritative where present: it is the amount actually billed, it
@@ -337,6 +348,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            backend_id: None,
             cost_micros: None,
         }
     }

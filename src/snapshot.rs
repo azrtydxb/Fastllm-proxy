@@ -176,6 +176,14 @@ pub struct BackendDef {
     /// did not set it. `None` means such a request is refused rather than
     /// silently capped at a number nobody chose.
     pub default_max_tokens: Option<u32>,
+    /// Which `model_backends` row this is, so a usage event can say which
+    /// attachment served and be priced at that provider's rate.
+    ///
+    /// Opaque to the data plane: it is echoed back on the usage event and
+    /// never interpreted here. `None` in `File` mode, where there is no
+    /// database and therefore no row to name — those deployments price
+    /// nothing anyway.
+    pub backend_id: Option<uuid::Uuid>,
 }
 
 /// Defaults are today's behaviour: an OpenAI-compatible upstream reached with
@@ -192,6 +200,7 @@ impl Default for BackendDef {
             auth_header: "authorization".into(),
             auth_scheme: Some("Bearer".into()),
             default_max_tokens: None,
+            backend_id: None,
         }
     }
 }
@@ -458,6 +467,11 @@ pub struct WireBackendDef {
     pub auth_scheme: Option<String>,
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
+    /// Absent from a control plane older than this field, and from `File`
+    /// mode. A usage event without it is priced the old way — by model name —
+    /// which is exact whenever the model has one attachment.
+    #[serde(default)]
+    pub backend_id: Option<uuid::Uuid>,
 }
 
 fn default_protocol() -> String {
@@ -733,6 +747,7 @@ impl Snapshot {
                             auth_header: b.auth_header.clone(),
                             auth_scheme: b.auth_scheme.clone(),
                             default_max_tokens: b.default_max_tokens,
+                            backend_id: b.backend_id,
                         })
                         .collect(),
                 })
@@ -911,6 +926,7 @@ impl Snapshot {
                                 auth_header: b.auth_header,
                                 auth_scheme: b.auth_scheme,
                                 default_max_tokens: b.default_max_tokens,
+                                backend_id: b.backend_id,
                             })
                         })
                         .collect(),

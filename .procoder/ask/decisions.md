@@ -501,3 +501,39 @@ scraping cannot happen during routing.
   each. Cheaper and no new I/O, but still blind to traffic that arrives at the
   engine another way.
 - Display only: keep what was just built and do not route on it.
+
+## How does one model on several machines get represented?
+
+`bge-m3` runs on both Sparks and is stored as two provider models,
+`bge-m3@192.168.10.245:8890` and `bge-m3@192.168.10.246:8890`, because a
+provider model belongs to exactly one provider. The consequence is that every
+routing pool holds exactly one backend, so the prefix-cache-aware balancer in
+`src/router.rs` picks one item from a list of one on every request — the
+policy that matters most on prefix-caching engines is switched off by the data
+model rather than by configuration.
+
+- One provider model, several providers (a join table; the credential and
+  protocol stay on the provider record). One name, one price, one context
+  length, and pools with real members so cache affinity does its job. Partly
+  reverses the provider decomposition, in the endpoint dimension only.
+- Fan out at the rule: list both names as targets and balance across them at
+  the rule level. No schema change, but the `@host:port` names stay, price and
+  context window are maintained twice, and the balancing is done by the
+  cache-blind level rather than the cache-aware one.
+
+## Which non-routing actions does a rule need?
+
+`route`, `failover`, `balance` and `split` collapse into one action with a
+picking mode, since all four mean "order a chain, try the head, fall down the
+list". The open question is what else a rule may do. Every rule stays terminal
+either way: modifiers like capping `max_tokens` become fields on a routing
+rule, so `dry-run` can still name the one rule that decided.
+
+- `deny` only. Refuse with a status and message — today inexpressible. Keeps
+  the rule list flat and every virtual model self-contained.
+- `deny` and `jump`. `jump` evaluates another virtual model's chain, so shared
+  policy is written once instead of repeated per virtual model. Needs loop
+  detection, and is much cheaper to design in now than to retrofit.
+- `deny`, `jump` and `tag` (label the usage rows a rule produced, for
+  chargeback). Cheap to add, but only worth it if per-rule cost attribution is
+  something you actually want to report on.
