@@ -227,10 +227,16 @@ impl LoadMatch {
         let Some(ceiling) = self.max_inflight_per_backend else {
             return true;
         };
+        // The engine's own count where it is fresh, this replica's otherwise —
+        // see `Backend::inflight_for_limit`. Read once here rather than per
+        // backend, so every candidate in one decision is judged against the
+        // same instant.
+        let now_ms = crate::registry::now_ms();
         targets.iter().any(|t| {
             registry.pool(&t.model).is_some_and(|pool| {
-                pool.iter()
-                    .any(|b| b.is_healthy() && (b.inflight() as u64) < u64::from(ceiling))
+                pool.iter().any(|b| {
+                    b.is_healthy() && (b.inflight_for_limit(now_ms) as u64) < u64::from(ceiling)
+                })
             })
         })
     }
@@ -1433,6 +1439,42 @@ mod tests {
         assert!(
             rule.matches(&facts_with(None, 0, None, &headers), &reg),
             "and it matches again as soon as capacity frees up"
+        );
+    }
+
+    /// The whole point of scraping the engine: the ceiling counts everything
+    /// reaching the backend, not just what this replica sent. Here the replica
+    /// has sent nothing and the rule still declines, because the engine says
+    /// it is busy — which is what a second proxy's traffic looks like from
+    /// here.
+    #[test]
+    fn a_fresh_engine_reading_outranks_this_replicas_own_count() {
+        let reg = registry_with(&["busy"]);
+        let rule = rule_with(
+            RuleConditions {
+                load: LoadMatch {
+                    max_inflight_per_backend: Some(2),
+                },
+                ..Default::default()
+            },
+            "busy",
+        );
+        let headers = HeaderMap::new();
+        let pool = reg.pool("busy").unwrap();
+
+        pool[0].record_engine_inflight(2, crate::registry::now_ms());
+        assert!(
+            !rule.matches(&facts_with(None, 0, None, &headers), &reg),
+            "this replica sent nothing, but the engine is at the ceiling"
+        );
+
+        // A reading older than `ENGINE_FRESH_FOR` is not believed: a backend
+        // that stopped answering `/metrics` while busy must not be locked out
+        // for ever.
+        pool[0].record_engine_inflight(2, crate::registry::now_ms() - 60_000);
+        assert!(
+            rule.matches(&facts_with(None, 0, None, &headers), &reg),
+            "a stale reading falls back to the local count, which is zero"
         );
     }
 

@@ -85,6 +85,13 @@ struct Cli {
     #[arg(long, default_value_t = 3)]
     health_timeout: u64,
 
+    /// Seconds between reads of each backend's `/metrics`, which is what
+    /// `max_inflight_per_backend` counts against when a backend publishes it.
+    /// `0` turns the scrape off and leaves that ceiling on this replica's own
+    /// count, which under-counts whenever more than one proxy is running.
+    #[arg(long, default_value_t = 2)]
+    engine_scrape_interval: u64,
+
     /// Seconds to wait for upstream response headers. Does not bound generation.
     #[arg(long, default_value_t = 120)]
     upstream_timeout: u64,
@@ -1609,6 +1616,12 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
         Duration::from_secs(cli.health_interval.max(1)),
         Duration::from_secs(cli.health_timeout.max(1)),
     );
+    if cli.engine_scrape_interval > 0 {
+        fastllm_proxy::engine_scrape::spawn(
+            Arc::clone(&state),
+            Duration::from_secs(cli.engine_scrape_interval),
+        );
+    }
     // Unconditional, unlike `reconcile::spawn` -- every role that reaches
     // this function owns a `Limiter` and can accumulate idle entries in it
     // (a deleted principal, a rotated key's old principal), regardless of

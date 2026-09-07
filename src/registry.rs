@@ -18,6 +18,19 @@ use crate::protocol::{anthropic, Protocol};
 use crate::snapshot::{BackendDef, Snapshot};
 use sha2::{Digest, Sha256};
 
+/// Milliseconds since the epoch, the single clock the engine-load readings and
+/// the routing check that consults them both read.
+///
+/// Wall-clock rather than `Instant` because the two callers live in different
+/// tasks and only need to compare *ages*, and because a monotonic instant
+/// cannot be stored in the `AtomicU64` the reading shares with the counter.
+#[inline]
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 /// Stable identifier for a backend across config reloads.
 ///
 /// The prefix-affinity cache stores these rather than array indices, so a
@@ -119,6 +132,20 @@ pub struct Backend {
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
     inflight: AtomicUsize,
+    /// What the engine itself says is in flight, and when it said so.
+    ///
+    /// `inflight` above counts what *this replica* sent, which is the wrong
+    /// number for a ceiling: two proxies each admit up to the limit, so a
+    /// `max_inflight_per_backend` of 8 spills at about 16, and anything
+    /// reaching the engine another way is invisible. The engine counts once,
+    /// for everybody.
+    ///
+    /// Filled by `crate::engine_scrape`, never on the request path.
+    /// `engine_at` is a `now_ms` reading and zero means "never read",
+    /// which is how a backend with no `/metrics` — every hosted one — stays
+    /// on the local count instead of pretending to be idle.
+    engine_inflight: AtomicUsize,
+    engine_at: AtomicU64,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
     /// Exponentially weighted mean whole-request latency, in microseconds.
@@ -189,6 +216,8 @@ impl Backend {
             healthy: AtomicBool::new(true),
             consecutive_failures: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
+            engine_inflight: AtomicUsize::new(0),
+            engine_at: AtomicU64::new(0),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             latency_ewma_us: AtomicU64::new(0),
@@ -204,6 +233,35 @@ impl Backend {
     #[inline]
     pub fn inflight(&self) -> usize {
         self.inflight.load(Ordering::Relaxed)
+    }
+
+    /// How stale an engine reading may be and still be believed.
+    ///
+    /// Generous next to the scrape interval, and deliberately so: the cost of
+    /// believing a two-second-old count is that a burst is noticed slightly
+    /// late, while the cost of discarding it is falling back to a per-replica
+    /// number that is wrong by a constant factor. A backend that stops
+    /// answering `/metrics` for longer than this stops being special.
+    const ENGINE_FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Record what the engine reported. Called by the scraper, never by a
+    /// request.
+    pub fn record_engine_inflight(&self, count: usize, now_ms: u64) {
+        self.engine_inflight.store(count, Ordering::Relaxed);
+        self.engine_at.store(now_ms.max(1), Ordering::Relaxed);
+    }
+
+    /// The count a ceiling should be compared against.
+    ///
+    /// The engine's when it is fresh, this replica's otherwise. Never a sum:
+    /// the engine's number already includes what this replica sent, so adding
+    /// them would double-count exactly the requests we know most about.
+    pub fn inflight_for_limit(&self, now_ms: u64) -> usize {
+        let at = self.engine_at.load(Ordering::Relaxed);
+        if at != 0 && now_ms.saturating_sub(at) <= Self::ENGINE_FRESH_FOR.as_millis() as u64 {
+            return self.engine_inflight.load(Ordering::Relaxed);
+        }
+        self.inflight()
     }
 
     pub fn requests_total(&self) -> u64 {

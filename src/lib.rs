@@ -13,6 +13,8 @@ pub mod cache;
 pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
+pub mod engine_metrics;
+pub mod engine_scrape;
 pub mod health;
 
 /// Proxies reporting backend health to the control plane, over the same

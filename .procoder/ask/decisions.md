@@ -473,3 +473,31 @@ answers).
 - That, and let routing use them: `max_inflight_per_backend` reads the engine's
   own count rather than the proxy's, which makes local/cloud spillover correct
   across replicas.
+
+## Where should routing read the engine's in-flight count from?
+
+`max_inflight_per_backend` reads `Backend.inflight`, an atomic the proxy
+increments per request. Per replica: with two proxies and a limit of 8, spill
+starts at about 16, and traffic that did not come through FastLLM is invisible.
+The engine counts once, for everyone.
+
+The obvious implementation is wrong. The sweep runs on the control plane every
+60s and its numbers reach proxies in a snapshot, so routing would decide on a
+queue depth up to a minute old. For a value that changes per second that is
+worse than the local counter it replaces — a backend that drained 50 seconds
+ago would still be avoided, and one that just filled would still be chosen.
+
+The request path also performs no I/O (`tests/no_io_on_hot_path.rs`), so
+scraping cannot happen during routing.
+
+- Each proxy scrapes its own backends on a background task, every second or
+  two, into the same `Backend` struct that holds the in-flight counter. Routing
+  reads an atomic, exactly as now, and falls back to the local count when the
+  reading is stale. Correct, and the only version where routing on this is an
+  improvement — but it puts engine-specific metric names in the proxy, and adds
+  a scrape per replica per backend.
+- Leave routing on the local counter and instead make the limit account for
+  replica count, so a limit of 8 means 8 across the deployment rather than 8
+  each. Cheaper and no new I/O, but still blind to traffic that arrives at the
+  engine another way.
+- Display only: keep what was just built and do not route on it.

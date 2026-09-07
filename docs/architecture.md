@@ -51,6 +51,7 @@ flowchart LR
     health["backend health<br/>probes + in-flight counts"] -->|"POST /health-report (every 10s)"| admin
     admin --> fleetstore
     fwd -.observed by.-> health
+    engines["engine load<br/>GET /metrics (every 2s)"] -.reads.-> route
 ```
 
 `--role all` runs both boxes in one process; the snapshot is handed over in
@@ -217,9 +218,12 @@ split exists to prevent.
   only if some rule names a class that refines a fast-tier one, so a deployment
   that does not use it cannot pay for it. See [semantic routing](classifier.md).
 - **Two routing conditions are deliberately non-deterministic.**
-  `max_inflight_per_backend` reads live in-flight counters and the time-window
-  conditions read the clock, so identical requests can route differently and
-  prefix affinity stops applying to the traffic they divert. Every other
+  `max_inflight_per_backend` reads live in-flight counters — the engine's own,
+  scraped from its Prometheus `/metrics` by each proxy in the background, so
+  the ceiling means the same thing however many proxies are running, falling
+  back to this replica's count for a backend that publishes none — and the
+  time-window conditions read the clock, so identical requests can route
+  differently and prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
   opt-in-visibly line the passthrough/translate split draws.
 

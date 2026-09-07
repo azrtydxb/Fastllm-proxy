@@ -26,6 +26,18 @@ and prefix affinity means something. A load- or time-dependent rule gives that
 up by design — two identical requests a second apart can legitimately land on
 different models. Worth choosing knowingly.
 
+**What `max_inflight_per_backend` counts.** The engine's own number where it
+publishes one. Every proxy reads each backend's Prometheus `/metrics` in the
+background (`--engine-scrape-interval`, two seconds by default) and routing
+compares the ceiling against what vLLM or SGLang says is running plus queued.
+That matters as soon as there is more than one proxy: a per-replica counter
+means two proxies each admit up to the ceiling, so a limit of 2 spills at
+about 4, and traffic that reached the engine without passing through FastLLM
+is invisible. A backend that publishes no metrics — every hosted provider —
+falls back to this replica's own count, and so does one whose last reading has
+gone stale, so the condition degrades to its old behaviour rather than to
+"idle".
+
 Some shapes worth stealing:
 
 ```jsonc

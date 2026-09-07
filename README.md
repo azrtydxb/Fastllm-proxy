@@ -89,7 +89,7 @@ Route on any of these:
 | `headers`                                       | exact header values — the client labels its own workload                                                                                               |
 | _context window_                                | not a condition — a model whose declared `context_length` cannot hold the prompt plus the requested generation is automatically demoted down the chain |
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                                                                                               |
-| `max_inflight_per_backend`                      | how busy this rule's own targets are                                                                                                                   |
+| `max_inflight_per_backend`                      | how busy this rule's own targets are — the engine's own count where it publishes `/metrics`, so the ceiling holds across several proxies                |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window, wrapping midnight                                                                                                                   |
 
 ```jsonc

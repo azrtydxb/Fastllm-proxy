@@ -79,6 +79,13 @@ of the request.** It reads live in-flight counters, so two identical requests a
 second apart can route differently. That is the price of local/cloud spillover;
 the field is named for the mechanism rather than the intent for that reason.
 
+**It counts the engine's requests, not this proxy's.** Each proxy scrapes every
+backend's Prometheus `/metrics` every two seconds
+(`--engine-scrape-interval`, `0` disables) and compares the ceiling against
+vLLM/SGLang's own running + queued count, so a limit of 2 still means 2 with
+three proxies running. A backend with no `/metrics`, or one whose last reading
+is over ten seconds old, falls back to this replica's own count.
+
 ## Prefer the API over SQL
 
 Changes made through `/admin/*` write an audit row and rebuild the snapshot.

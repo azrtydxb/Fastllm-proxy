@@ -9,9 +9,9 @@ upper snake case — and the flag wins where both are given. That is what makes
 a container configurable without an entrypoint script. The exceptions are the
 tuning knobs that a deployment sets once and a container never overrides:
 `--policy`, `--admin-port`, `--snapshot-cache`, `--workers`, `--max-retries`,
-`--max-body-mb`, `--pool-max-idle`, `--upstream-timeout`, `--health-interval`
-and `--health-timeout` are flags only. `--help` on your own binary is the
-authority: it prints `[env: …]` beside every flag that has one.
+`--max-body-mb`, `--pool-max-idle`, `--upstream-timeout`, `--health-interval`,
+`--health-timeout` and `--engine-scrape-interval` are flags only. `--help` on
+your own binary is the authority: it prints `[env: …]` beside every flag that has one.
 
 ## Subcommands
 
@@ -155,6 +155,7 @@ machine.
 | `--pool-max-idle`          | `256`            | Idle upstream connections kept per backend                                                                                                             |
 | `--health-interval`        | `10`             | Seconds between health sweeps                                                                                                                          |
 | `--health-timeout`         | `3`              | Seconds a probe may take before it counts as a failure                                                                                                 |
+| `--engine-scrape-interval` | `2`              | Seconds between reads of each backend's Prometheus `/metrics`, which is what `max_inflight_per_backend` counts against. `0` turns it off               |
 | `--health-report-interval` | `10`             | Seconds between health reports to the control plane. Backend health exists only in the data plane, so this is the only way the UI can see it           |
 | `--config-poll`            | `5`              | Seconds between snapshot refreshes. `0` disables the watch; in `File` mode `SIGHUP` is then the only reload                                            |
 
