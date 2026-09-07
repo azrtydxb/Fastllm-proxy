@@ -439,10 +439,18 @@ pub async fn reconcile_models(
     // maintained automatically. Usage rows survive this (migration 0031) and a
     // frontend model pointing at it keeps its target by name (0036), so the
     // delete is recoverable in every way that matters.
+    //
+    // The *attachment* goes, not the model. Since migration 0045 a model can be
+    // served by several providers, so one host dropping it says nothing about
+    // the others -- deleting the model here would take it away from every
+    // provider still serving it. A model left with no attachments is simply not
+    // routable, which is a state the request path and the UI already show.
     let removed = sqlx::query(
-        "DELETE FROM provider_models \
-          WHERE provider_id = $1 AND upstream_model IS NOT NULL \
-            AND NOT (upstream_model = ANY($2))",
+        "DELETE FROM model_backends mb \
+          USING provider_models m \
+          WHERE mb.provider_model_id = m.id \
+            AND mb.provider_id = $1 \
+            AND NOT (COALESCE(mb.upstream_model, m.name) = ANY($2))",
     )
     .bind(provider_id)
     .bind(served)
