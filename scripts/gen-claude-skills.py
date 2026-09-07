@@ -41,7 +41,7 @@ DOMAINS: dict[str, list[str]] = {
     "fastllm-limits-budgets": [r"^/admin/limits$", r"^/admin/budgets$", r"^/limits/reconcile$",
                                r"^/admin/prices/"],
     "fastllm-observability": [r"^/admin/usage$", r"^/admin/timeseries$", r"^/admin/audit$",
-                              r"^/metrics$", r"^/admin/health$", r"^/admin/fleet$"],
+                              r"^/metrics$", r"^/admin/health$", r"^/admin/fleet$", r"^/admin/nodes$"],
     "fastllm-deployment": [r"^/admin/config$", r"^/admin/deployment$", r"^/admin/snapshot/",
                            r"^/snapshot$", r"^/health-report$", r"^/usage$", r"^/health$",
                            r"^/healthz$", r"^/docs$", r"^/openapi.json$"],

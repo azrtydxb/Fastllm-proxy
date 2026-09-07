@@ -1117,6 +1117,15 @@
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
       }
     },
+    "/admin/nodes": {
+      "get": {
+        "summary": "The hosts registering their own endpoints, rolled up per node. An agent is not a row: it is a `node` several dynamic providers share, and its lease is what says it is alive",
+        "operationId": "get_admin_nodes",
+        "tags": ["admin"],
+        "responses": { "200": { "description": "OK" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" } },
+        "security": [{ "session": [] }]
+      }
+    },
     "/admin/prices/sync": {
       "post": {
         "summary": "Create prices sync",

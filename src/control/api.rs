@@ -5009,6 +5009,73 @@ async fn persist_rejection_deltas(
 /// Per replica and not merged, because the interesting failures are the ones
 /// where replicas disagree — a proxy that cannot reach a backend the others can
 /// is a partition, and a fleet-wide average hides the only symptom there is.
+/// One registering agent, rolled up from the endpoints it keeps alive.
+///
+/// An agent is not a row anywhere: it is a `node` several dynamic providers
+/// share. What makes it visible is the lease — `register` pushes
+/// `lease_expires_at` forward on every heartbeat, so a lease still in the
+/// future means the agent checked in within its TTL. That is the liveness
+/// signal, and it is the agent's own; `last_seen_at` is the control plane's
+/// separate probe of the endpoint and answers a different question.
+#[derive(Serialize)]
+struct NodeView {
+    node: String,
+    endpoints: i64,
+    /// Endpoints the sweep has marked degraded — reachable agent, unhappy
+    /// engine.
+    degraded: i64,
+    /// The furthest lease this node holds. Past means every endpoint it
+    /// registered has lapsed, which is what a stopped agent looks like.
+    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the control plane last probed one of its endpoints successfully.
+    last_probed_at: Option<chrono::DateTime<chrono::Utc>>,
+    engines: Vec<String>,
+}
+
+async fn list_nodes(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<NodeView>>, ApiError> {
+    type Row = (
+        String,
+        i64,
+        i64,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Vec<String>>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT node,
+                count(*),
+                count(degraded_since),
+                max(lease_expires_at),
+                max(last_seen_at),
+                array_remove(array_agg(DISTINCT engine), NULL)
+           FROM providers
+          WHERE kind = 'dynamic' AND node IS NOT NULL
+       GROUP BY node
+       ORDER BY node",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing nodes", &e))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(node, endpoints, degraded, lease_expires_at, last_probed_at, engines)| NodeView {
+                    node,
+                    endpoints,
+                    degraded,
+                    lease_expires_at,
+                    last_probed_at,
+                    engines: engines.unwrap_or_default(),
+                },
+            )
+            .collect(),
+    ))
+}
+
 async fn list_fleet(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
@@ -7941,6 +8008,7 @@ pub async fn serve(
         .route("/admin/usage", get(usage_summary))
         .route("/admin/timeseries", get(timeseries))
         .route("/admin/fleet", get(list_fleet))
+        .route("/admin/nodes", get(list_nodes))
         .route("/admin/routing/dry-run", post(routing_dry_run))
         .route("/admin/prices/sync", post(sync_prices))
         .route("/admin/config", get(get_config))

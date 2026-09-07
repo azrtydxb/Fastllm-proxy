@@ -170,6 +170,13 @@ const SCREENS = [
       "proxy-2 (4m behind)",
       "stuck on an older snapshot",
       "USAGE DROPPED",
+      // The registering hosts, and the lapsed lease that is what a stopped
+      // agent looks like. Before this the screen showed only what proxies
+      // could reach, never who decided there was anything to reach.
+      "Registration agents",
+      "dgx-spark",
+      "lapsed",
+      "1 degraded",
     ],
   ],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],

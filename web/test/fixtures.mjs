@@ -206,6 +206,26 @@ const FIXTURES = {
   // Zero is the normal state; the Settings screen turns non-zero into a
   // warning that the database and the published snapshot have diverged.
   "/admin/health": { snapshot_rebuild_failures: 0 },
+  // Two registering hosts: one healthy, one whose lease has lapsed -- which is
+  // what a stopped agent looks like, and the state the screen exists to show.
+  "/admin/nodes": [
+    {
+      node: "dgx-spark",
+      endpoints: 3,
+      degraded: 0,
+      lease_expires_at: "2099-01-01T00:00:00Z",
+      last_probed_at: "2026-08-09T10:00:00Z",
+      engines: ["vllm"],
+    },
+    {
+      node: "dgx-spark2",
+      endpoints: 2,
+      degraded: 1,
+      lease_expires_at: "2020-01-01T00:00:00Z",
+      last_probed_at: null,
+      engines: [],
+    },
+  ],
   // A pool: several provider models chosen between by one policy. What a rule
   // points at instead of listing the models.
   "/admin/model-pools": [

@@ -7,6 +7,7 @@ import {
   Card,
   Dot,
   Ellipsis,
+  Empty,
   ErrorNote,
   Grid,
   Loading,
@@ -48,9 +49,36 @@ const BACKEND_COLS = [
   { label: "ERRORS", width: ".7fr", align: "right" },
 ];
 
+const NODE_COLS = [
+  { label: "NODE", width: "1.4fr" },
+  { label: "ENDPOINTS", width: "1fr" },
+  { label: "ENGINE", width: "1fr" },
+  { label: "LEASE", width: "1.2fr" },
+  { label: "LAST PROBED", width: "1.2fr" },
+];
+
+/** A timestamp as "3m ago" / "in 45s", which is what a lease is read as. */
+function fmtWhen(iso) {
+  const d = (new Date(iso) - new Date()) / 1000;
+  const a = Math.abs(d);
+  const n =
+    a < 90
+      ? `${Math.round(a)}s`
+      : a < 5400
+        ? `${Math.round(a / 60)}m`
+        : `${Math.round(a / 3600)}h`;
+  return d >= 0 ? `in ${n}` : `${n} ago`;
+}
+
 export function Fleet({ onUnauthorised, config }) {
   const { data, error, loading, reload, setError } = useLoader(
-    () => api.get("/admin/fleet"),
+    async () => {
+      const [fleet, nodes] = await Promise.all([
+        api.get("/admin/fleet"),
+        api.get("/admin/nodes"),
+      ]);
+      return { fleet, nodes };
+    },
     {
       onUnauthorised,
     },
@@ -58,12 +86,93 @@ export function Fleet({ onUnauthorised, config }) {
   usePoll(reload, POLL_MS);
 
   if (loading && !data) return <Loading />;
-  const reports = data || [];
+  const reports = data?.fleet || [];
+  const nodes = data?.nodes || [];
   const summary = fleetSummary(reports);
 
   return (
     <Stack>
       <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>
+
+      {/* The other half of the fleet. A proxy reports what it can reach; an
+          agent decides what there is to reach at all — it registers this
+          host's endpoints and holds them on a lease. Nothing showed them, so a
+          stopped agent looked like nothing until its leases lapsed and the
+          endpoints quietly went away. */}
+      <Card
+        title="Registration agents"
+        subtitle="hosts registering their own endpoints, held on a lease"
+      >
+        {nodes.length === 0 ? (
+          <Empty>
+            No host is registering endpoints. Providers added by hand are
+            unaffected — this is only about agents.
+          </Empty>
+        ) : (
+          <Table cols={NODE_COLS}>
+            {nodes.map((n) => {
+              const lapsed =
+                !n.lease_expires_at ||
+                new Date(n.lease_expires_at) < new Date();
+              return (
+                <Tr
+                  key={n.node}
+                  cols={NODE_COLS}
+                  cells={[
+                    <Row key="n" gap={8} style={{ flexWrap: "nowrap" }}>
+                      <Dot
+                        tone={lapsed ? "bad" : n.degraded > 0 ? "warn" : "ok"}
+                      />
+                      <Mono style={{ font: "500 12px var(--mono)" }}>
+                        {n.node}
+                      </Mono>
+                    </Row>,
+                    <Mono key="e" style={{ font: "400 12px var(--mono)" }}>
+                      {n.endpoints}
+                      {n.degraded > 0 ? ` · ${n.degraded} degraded` : ""}
+                    </Mono>,
+                    <Mono
+                      key="g"
+                      style={{
+                        font: "400 12px var(--mono)",
+                        color: "var(--fg-3)",
+                      }}
+                    >
+                      {n.engines.length ? n.engines.join(", ") : "—"}
+                    </Mono>,
+                    // The lease is the agent's own heartbeat: `register` pushes
+                    // it forward every check-in, so "in the future" means the
+                    // agent is alive. Lapsed is what a stopped agent looks like.
+                    <Mono
+                      key="l"
+                      style={{
+                        font: "400 12px var(--mono)",
+                        color: lapsed ? "var(--bad-fg)" : "var(--fg-3)",
+                      }}
+                    >
+                      {lapsed
+                        ? "lapsed"
+                        : `renews ${fmtWhen(n.lease_expires_at)}`}
+                    </Mono>,
+                    // A separate signal: the control plane's own probe, not the
+                    // agent's word. Stale here with a live lease means the
+                    // sweep is not running.
+                    <Mono
+                      key="p"
+                      style={{
+                        font: "400 12px var(--mono)",
+                        color: "var(--fg-4)",
+                      }}
+                    >
+                      {n.last_probed_at ? fmtWhen(n.last_probed_at) : "never"}
+                    </Mono>,
+                  ]}
+                />
+              );
+            })}
+          </Table>
+        )}
+      </Card>
 
       {reports.length === 0 && (
         <Banner tone="warn">
