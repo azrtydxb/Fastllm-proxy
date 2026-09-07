@@ -397,10 +397,6 @@ model_list:
         })
     }
 
-
-
-
-
     /// A pool's own policy wins over the deployment's.
     ///
     /// The case this exists for: one control plane serving two identical

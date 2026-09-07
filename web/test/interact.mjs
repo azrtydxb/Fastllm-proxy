@@ -607,6 +607,18 @@ await goto("models");
     "a cheapest option is still in a policy select",
   );
 
+  // Provider models are models on endpoints, not a place to balance. The
+  // control there chose between one model's own providers, which made a third
+  // place to set a policy on a screen that is not about load balancing.
+  await goto("models");
+  check(
+    "the provider models screen offers no load balancing",
+    !$("select").some((el) =>
+      [...el.options].some((o) => o.value === "least-loaded"),
+    ),
+    "a load-balancing select is still on Provider models",
+  );
+
   // And the routing screen no longer offers one at all: a target is a model
   // or a pool, and the pool carries the policy.
   sent.length = 0;

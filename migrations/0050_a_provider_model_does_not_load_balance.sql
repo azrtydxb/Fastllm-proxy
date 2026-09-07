@@ -1,0 +1,18 @@
+-- Load balancing happens in one place: a pool.
+--
+-- `provider_models.policy` chose between one model's own providers, which made
+-- three places a policy could be set and put a LOAD BALANCING control on a
+-- screen that is not about load balancing at all. The vocabulary is simpler
+-- than the schema had become:
+--
+--   a provider        an engine endpoint
+--   a provider model  a model running on those endpoints
+--   a pool            several models, and how to choose between them
+--   a rule's targets  an ordered failover chain
+--
+-- Nothing routes differently by default. A model served by two endpoints still
+-- has both in its pool and still balances across them -- it just uses the
+-- deployment's `--policy` to do it, the same as every model that never set
+-- this. What is gone is the per-model override, and with it the third place an
+-- operator had to look.
+ALTER TABLE provider_models DROP COLUMN policy;

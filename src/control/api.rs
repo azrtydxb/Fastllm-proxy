@@ -1898,9 +1898,6 @@ struct ModelView {
     /// Absent is a third state, not zero — routing demotes a model only when
     /// the figure is known and too small.
     context_length: Option<i64>,
-    /// How this model's backends are chosen between. `None` is the
-    /// deployment's `--policy`.
-    policy: Option<String>,
     /// Everywhere this model runs. Empty is a real state and not an error: a
     /// model can outlive the provider it was attached to. It is not routable,
     /// and the UI shows it as needing attention rather than hiding it.
@@ -1913,16 +1910,9 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
-    type ModelRow = (
-        Uuid,
-        String,
-        String,
-        Option<i32>,
-        Option<i64>,
-        Option<String>,
-    );
+    type ModelRow = (Uuid, String, String, Option<i32>, Option<i64>);
     let models: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, description, cache_ttl_seconds, context_length, policy \
+        "SELECT id, name, description, cache_ttl_seconds, context_length \
          FROM provider_models ORDER BY name",
     )
     .fetch_all(&ctx.pool)
@@ -1970,13 +1960,12 @@ async fn list_models(
         models
             .into_iter()
             .map(
-                |(id, name, description, cache_ttl_seconds, context_length, policy)| ModelView {
+                |(id, name, description, cache_ttl_seconds, context_length)| ModelView {
                     id,
                     name,
                     description,
                     cache_ttl_seconds,
                     context_length,
-                    policy,
                     backends: backends
                         .iter()
                         .filter(|(model_id, ..)| *model_id == id)
@@ -2035,10 +2024,6 @@ struct NewModel {
     /// the field was simply dropped.
     #[serde(default)]
     context_length: Option<i32>,
-    /// How to choose among this model's backends once it has more than one.
-    /// Absent means the deployment's `--policy`.
-    #[serde(default)]
-    policy: Option<String>,
 }
 
 /// Accept only a policy this build knows, and say which ones those are.
@@ -2573,14 +2558,13 @@ async fn post_model(
     // renaming the provider model out of the way instead would revoke every
     // grant naming it (migration 0029 did that in production).
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO provider_models (name, description, cache_ttl_seconds, context_length, \
-             policy) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO provider_models (name, description, cache_ttl_seconds, context_length) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
     .bind(body.cache_ttl_seconds)
     .bind(body.context_length)
-    .bind(validated_policy(body.policy.as_deref())?)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2627,10 +2611,6 @@ struct PatchModel {
     /// is not the same as zero — see `ModelDef::context_length`.
     #[serde(default, deserialize_with = "double_option")]
     context_length: Option<Option<i64>>,
-    /// How to choose among this model's backends. `null` clears it back to
-    /// the deployment's `--policy`.
-    #[serde(default, deserialize_with = "double_option")]
-    policy: Option<Option<String>>,
 }
 
 /// Move a grant from one name to another, inside a caller's transaction.
@@ -2854,10 +2834,6 @@ async fn patch_model(
             "cache_ttl_seconds cannot be negative; 0 or null turns caching off",
         ));
     }
-    // An explicit null clears; an absent field leaves it. `validated_policy`
-    // spells both as `None`, so the "was it present" flag below is what tells
-    // them apart.
-    let policy = validated_policy(body.policy.clone().flatten().as_deref())?;
     if let Some(name) = body.name.as_deref().map(str::trim) {
         if name.is_empty() {
             return Err(api_error(
@@ -2883,8 +2859,7 @@ async fn patch_model(
         "UPDATE provider_models SET
            description       = CASE WHEN $2 THEN $3 ELSE description       END,
            cache_ttl_seconds = CASE WHEN $4 THEN $5 ELSE cache_ttl_seconds END,
-           context_length    = CASE WHEN $6 THEN $7 ELSE context_length    END,
-           policy            = CASE WHEN $8 THEN $9 ELSE policy            END
+           context_length    = CASE WHEN $6 THEN $7 ELSE context_length    END
          WHERE id = $1",
     )
     .bind(id)
@@ -2894,8 +2869,6 @@ async fn patch_model(
     .bind(body.cache_ttl_seconds.flatten())
     .bind(body.context_length.is_some())
     .bind(body.context_length.flatten())
-    .bind(body.policy.is_some())
-    .bind(policy)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("model update", &e))?;
@@ -8741,7 +8714,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -8807,7 +8779,6 @@ mod tests {
                 description: None,
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -8956,7 +8927,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9091,7 +9061,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9360,7 +9329,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9375,7 +9343,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9503,7 +9470,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9544,7 +9510,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9785,7 +9750,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9886,7 +9850,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -9966,7 +9929,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -10329,7 +10291,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -10413,7 +10374,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -10652,7 +10612,6 @@ mod tests {
                     description: String::new(),
                     cache_ttl_seconds: None,
                     context_length: None,
-                    policy: None,
                 }),
             )
             .await
@@ -10755,7 +10714,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -10857,7 +10815,6 @@ mod tests {
                 description: "before".into(),
                 cache_ttl_seconds: Some(60),
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -10977,7 +10934,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -11068,7 +11024,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -11107,7 +11062,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await
@@ -11160,7 +11114,6 @@ mod tests {
                         description: String::new(),
                         cache_ttl_seconds: None,
                         context_length: None,
-                        policy: None,
                     }),
                 )
                 .await
@@ -11484,7 +11437,6 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
-                policy: None,
             }),
         )
         .await

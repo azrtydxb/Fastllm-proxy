@@ -158,9 +158,9 @@ pub async fn build_snapshot_with(
 ) -> anyhow::Result<Snapshot> {
     // Named, because the row grew a fifth column and an anonymous tuple that
     // wide stops being readable at the call site.
-    type ModelRow = (Uuid, String, Option<i32>, Option<i64>, Option<String>);
+    type ModelRow = (Uuid, String, Option<i32>, Option<i64>);
     let model_rows: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, cache_ttl_seconds, context_length, policy \
+        "SELECT id, name, cache_ttl_seconds, context_length \
          FROM provider_models ORDER BY name",
     )
     .fetch_all(pool)
@@ -216,7 +216,7 @@ pub async fn build_snapshot_with(
     .await?;
 
     let mut models = Vec::new();
-    for (id, name, cache_ttl_seconds, context_length, policy) in &model_rows {
+    for (id, name, cache_ttl_seconds, context_length) in &model_rows {
         let mut backends = Vec::new();
         for (
             _,
@@ -340,16 +340,12 @@ pub async fn build_snapshot_with(
             // A non-positive limit is meaningless and is read as unknown
             // rather than as a model that can accept nothing.
             context_length: context_length.filter(|c| *c > 0).map(|c| c as u64),
-            // How to choose among this model's own backends, now that it can
-            // have several (migration 0045). Two identical local replicas
-            // sharing a prefix cache and one model offered by three vendors at
-            // different prices want different answers, and a deployment
-            // routinely holds both. NULL is the deployment's `--policy`.
-            //
-            // A spelling this build does not know reads as unset rather than
-            // failing the rebuild, so a control plane that learns a new policy
-            // cannot stop an older proxy routing.
-            policy: policy.as_deref().and_then(crate::router::Policy::parse),
+            // Never set from the database. Choosing between a model's own
+            // endpoints is not something an operator configures per model any
+            // more -- load balancing is a pool, and this level uses the
+            // deployment's `--policy`. `File` mode can still set it, which is
+            // the only reason the field survives.
+            policy: None,
             backends,
         });
     }

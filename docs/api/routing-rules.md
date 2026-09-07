@@ -169,7 +169,7 @@ exactly one place:
 | ---------------- | --------------------------------- | --------------- |
 | a rule's targets | the order to try things in        | Frontend models |
 | a pool           | which of several models serves    | Model pools     |
-| a provider model | which of its own providers serves | Provider models |
+| a provider model | nothing — it is a model on endpoints; where several serve it, the deployment's `--policy` spreads across them | — |
 
 Some shapes worth stealing:
 

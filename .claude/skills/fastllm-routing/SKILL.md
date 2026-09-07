@@ -100,9 +100,9 @@ hold the same members and differ only in policy — that is what naming it buys.
 A pool expands in place: its chosen member, then its others, then the chain's
 next target.
 
-**A provider model's `policy`** chooses between its own attachments (the
-providers serving that one model). Set with `PATCH
-/admin/provider-models/{id}`.
+**A provider model has no policy.** It is a model running on endpoints. Where
+several endpoints serve it they all go in its pool and the deployment's
+`--policy` spreads across them; there is nothing to set per model.
 
 `routing_rules.policy` and `frontend_models.policy` no longer exist; a rule
 that balanced across its targets is a rule pointing at a pool.
