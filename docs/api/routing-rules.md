@@ -33,10 +33,18 @@ compares the ceiling against what vLLM or SGLang says is running plus queued.
 That matters as soon as there is more than one proxy: a per-replica counter
 means two proxies each admit up to the ceiling, so a limit of 2 spills at
 about 4, and traffic that reached the engine without passing through FastLLM
-is invisible. A backend that publishes no metrics — every hosted provider —
-falls back to this replica's own count, and so does one whose last reading has
-gone stale, so the condition degrades to its old behaviour rather than to
-"idle".
+is invisible. Which backends have this is detected, not configured. Each is asked once;
+one that answers with something that is not engine metrics — a 404, or a
+Prometheus body with no scheduler families in it — is asked once more five
+minutes later and then never again, so a deployment of hosted providers pays
+two requests per provider and nothing after that. A backend that does not
+answer *at all* keeps being retried, because an engine part way through
+loading a model is indistinguishable from one that is down. Editing an
+endpoint starts the detection over.
+
+Anything not detected as an engine falls back to this replica's own count, and
+so does a backend whose last reading has gone stale, so the condition degrades
+to its old behaviour rather than to "idle".
 
 Some shapes worth stealing:
 

@@ -83,11 +83,49 @@ fn read_family(body: &str, names: &[&str], average: bool) -> Option<f64> {
     None
 }
 
+/// Why a probe did not produce a reading, and whether asking again could ever
+/// change the answer.
+///
+/// The distinction is the whole of the autodetection. A hosted provider has no
+/// scheduler metrics and never will, so it must be asked about roughly twice
+/// and then left alone; an engine that is still loading a model is
+/// indistinguishable from one that is down, and must keep being asked. Folding
+/// both into one error is what would make the scraper either poll every vendor
+/// in the catalogue for ever or give up on a backend that was merely starting.
+#[derive(Debug)]
+pub enum ProbeError {
+    /// The address answered, and what came back is not an engine's metrics —
+    /// a 404, a page, or a Prometheus body with no scheduler families in it.
+    /// Settled: nothing here changes until the backend's configuration does.
+    NotAnEngine(String),
+    /// Nothing answered, or not in time, or the answer could not be read. Says
+    /// nothing about whether this backend has metrics: an engine part way
+    /// through loading a model looks exactly like this.
+    Unreachable(String),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnEngine(why) | Self::Unreachable(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for ProbeError {}
+
 /// Ask an engine what it is currently doing.
 ///
 /// `/metrics` sits at the server root, not under the `/v1` an `api_base`
 /// ends with — so the path is derived from the origin rather than appended.
-pub async fn engine_load(client: &Upstream, api_base: &str) -> anyhow::Result<EngineLoad> {
+///
+/// A body with no `RUNNING` family in it is an error, not a reading of zero.
+/// That distinction is load-bearing twice over: routing would otherwise treat
+/// anything that answers `/metrics` at all as an engine that is permanently
+/// idle and never spill off it, and the providers page would show "0 running"
+/// for a provider that does not report, which is a different claim from "does
+/// not say".
+pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad, ProbeError> {
     use http_body_util::BodyExt as _;
     let origin = metrics_origin(api_base);
     let url = format!("{origin}/metrics");
@@ -95,24 +133,42 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> anyhow::Result<En
         .method("GET")
         .uri(&url)
         .header(hyper::header::USER_AGENT, "fastllm-proxy")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))?;
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        // An address that will not even form a request will not form one next
+        // time either, so this is settled rather than transient.
+        .map_err(|e| ProbeError::NotAnEngine(format!("{url} is not a usable address: {e}")))?;
     // Shorter than the model-list probe: this is a nicety, and a slow answer
     // is worth less than a prompt sweep.
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(req))
-        .await
-        .map_err(|_| anyhow::anyhow!("{url} timed out"))??;
+    let resp =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.request(req)).await {
+            Err(_) => return Err(ProbeError::Unreachable(format!("{url} timed out"))),
+            Ok(Err(e)) => return Err(ProbeError::Unreachable(format!("{url}: {e}"))),
+            Ok(Ok(resp)) => resp,
+        };
     if !resp.status().is_success() {
-        anyhow::bail!("{url} answered {}", resp.status());
+        return Err(ProbeError::NotAnEngine(format!(
+            "{url} answered {}",
+            resp.status()
+        )));
     }
     let body = resp
         .into_body()
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
+        .map_err(|e| ProbeError::Unreachable(format!("reading {url}: {e}")))?
         .to_bytes();
-    let body = std::str::from_utf8(&body)?;
+    let body = std::str::from_utf8(&body)
+        .map_err(|_| ProbeError::NotAnEngine(format!("{url} did not answer with text")))?;
+    // `RUNNING` and nothing else decides whether this is an engine: it is the
+    // number routing actually consults, so a body that lacks it has nothing to
+    // offer even if it is Prometheus text from something else entirely.
+    let Some(running) = read_family(body, RUNNING, false) else {
+        return Err(ProbeError::NotAnEngine(format!(
+            "{url} reports no engine metrics"
+        )));
+    };
     Ok(EngineLoad {
-        running: read_family(body, RUNNING, false).unwrap_or(0.0).max(0.0) as u32,
+        running: running.max(0.0) as u32,
         waiting: read_family(body, WAITING, false).unwrap_or(0.0).max(0.0) as u32,
         kv_cache: read_family(body, KV_CACHE, true).map(|v| v.clamp(0.0, 1.0) as f32),
     })
@@ -132,6 +188,112 @@ fn metrics_origin(api_base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{engine_load, ProbeError};
+
+    /// A tiny server that answers every request with one canned body, so the
+    /// classification below is exercised over real HTTP rather than against a
+    /// hand-built response.
+    fn stub(status: &'static str, body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read as _, Write as _};
+                // Drain the request first: closing on unread bytes sends an
+                // RST and the client reports a transport error instead of the
+                // response we wrote.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 512];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    fn client() -> crate::upstream::Upstream {
+        crate::upstream::Upstream::new(
+            crate::upstream::Config {
+                max_idle_per_host: 2,
+                idle_timeout: std::time::Duration::from_secs(5),
+                connect_timeout: std::time::Duration::from_secs(5),
+            },
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        )
+    }
+
+    /// The reason `running` is not `unwrap_or(0)`: something that answers
+    /// `/metrics` without being an engine would otherwise read as an engine
+    /// that is permanently idle, and `max_inflight_per_backend` would never
+    /// spill off it.
+    #[tokio::test]
+    async fn prometheus_text_from_something_that_is_not_an_engine_is_not_a_reading_of_zero() {
+        let base = stub("200 OK", "process_cpu_seconds_total 1.0\ngo_goroutines 7\n");
+        let err = engine_load(&client(), &base).await.unwrap_err();
+        assert!(
+            matches!(err, ProbeError::NotAnEngine(_)),
+            "got {err:?}, which would have been believed as a load"
+        );
+    }
+
+    /// A hosted provider: the address answers, with a 404. Settled, so the
+    /// scraper stops asking rather than polling every vendor for ever.
+    #[tokio::test]
+    async fn a_404_settles_rather_than_being_retried_for_ever() {
+        let base = stub("404 Not Found", "nope");
+        let err = engine_load(&client(), &base).await.unwrap_err();
+        assert!(matches!(err, ProbeError::NotAnEngine(_)), "got {err:?}");
+    }
+
+    /// Nothing listening is *not* settled: an engine part way through loading
+    /// a model looks exactly like this, and giving up on it would mean a
+    /// restart to get it back.
+    #[tokio::test]
+    async fn a_dead_address_stays_retryable() {
+        // Bound and dropped, so the port is almost certainly free and the
+        // connection is refused rather than hanging.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let err = engine_load(&client(), &format!("http://{addr}/v1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProbeError::Unreachable(_)), "got {err:?}");
+    }
+
+    /// And the happy path still reads what the DGX vLLM actually serves.
+    #[tokio::test]
+    async fn a_real_engine_body_is_read() {
+        let base = stub(
+            "200 OK",
+            "vllm:num_requests_running{engine=\"0\"} 3.0\n\
+             vllm:num_requests_waiting{engine=\"0\"} 2.0\n\
+             vllm:kv_cache_usage_perc{engine=\"0\"} 0.42\n",
+        );
+        let load = engine_load(&client(), &base).await.unwrap();
+        assert_eq!(load.running, 3);
+        assert_eq!(load.waiting, 2);
+        assert_eq!(load.kv_cache, Some(0.42));
+    }
+
     /// Parsed against the real thing: these lines are copied from the vLLM on
     /// 192.168.10.245:8000, labels and all.
     #[test]

@@ -86,6 +86,12 @@ vLLM/SGLang's own running + queued count, so a limit of 2 still means 2 with
 three proxies running. A backend with no `/metrics`, or one whose last reading
 is over ten seconds old, falls back to this replica's own count.
 
+**Which backends have metrics is detected, not configured.** One that answers
+with something that is not engine metrics is asked twice and then dropped from
+the scrape for the life of the process; one that does not answer at all is
+retried, since a loading engine looks the same as a dead one. Nothing needs to
+mark a provider as an engine, and nothing polls a cloud vendor in a loop.
+
 ## Prefer the API over SQL
 
 Changes made through `/admin/*` write an audit row and rebuild the snapshot.

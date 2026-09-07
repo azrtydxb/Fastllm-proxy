@@ -221,7 +221,8 @@ split exists to prevent.
   `max_inflight_per_backend` reads live in-flight counters — the engine's own,
   scraped from its Prometheus `/metrics` by each proxy in the background, so
   the ceiling means the same thing however many proxies are running, falling
-  back to this replica's count for a backend that publishes none — and the
+  back to this replica's count for a backend that publishes none (which is
+  detected by asking, not configured) — and the
   time-window conditions read the clock, so identical requests can route
   differently and prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
