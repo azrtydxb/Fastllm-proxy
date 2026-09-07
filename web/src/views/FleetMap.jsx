@@ -210,6 +210,10 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
 
   const controlTone = health?.snapshot_rebuild_failures > 0 ? "bad" : "ok";
   const anyAgent = hosts.some((r) => r.node);
+  const regRiserMax = hosts.reduce(
+    (a, r, i) => (r.node ? Math.max(a, i) : a),
+    0,
+  );
 
   return (
     <div style={{ overflowX: "auto" }}>
@@ -396,19 +400,6 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
                 fill="none"
                 markerEnd="url(#fleet-arrow)"
               />
-              {/* The agent that registered this host, tapped off the channel
-                  running along the top. An endpoint nobody registered has no
-                  line, which is the honest difference between the two. */}
-              {row.node && (
-                <path
-                  d={`M${COL.host + 40} ${y} V${REG_Y} H${COL.control + 40} V${controlY}`}
-                  stroke="var(--line-mid)"
-                  strokeWidth="1"
-                  strokeDasharray="3 3"
-                  fill="none"
-                  markerEnd="url(#fleet-arrow)"
-                />
-              )}
               <Box x={COL.host} y={y} w={W.host} h={h} t={t}>
                 <Label x="12" y="19" size="11" fill="var(--fg)">
                   {row.host}
@@ -452,16 +443,42 @@ export function FleetMap({ reports, nodes, summary, config, health }) {
           );
         })}
 
+        {/* Registration, drawn once as a bus. Every agent-owned host gets its
+            own riser into a shared channel, and the channel enters the control
+            plane a single time -- one path per host would trace the same line
+            N times and read as one, with N arrowheads stacked on one point. */}
         {anyAgent && (
-          <text
-            x={COL.control + 48}
-            y={REG_Y - 6}
-            fontSize="9"
-            fontFamily="var(--mono)"
-            fill="var(--fg-5)"
-          >
-            agents register endpoints on a lease
-          </text>
+          <g>
+            {hosts.map((row, i) =>
+              row.node ? (
+                <path
+                  key={row.host}
+                  d={`M${COL.host + 30 + i * 16} ${hostY(i)} V${REG_Y}`}
+                  stroke="var(--line-mid)"
+                  strokeWidth="1"
+                  strokeDasharray="3 3"
+                  fill="none"
+                />
+              ) : null,
+            )}
+            <path
+              d={`M${COL.host + 30 + regRiserMax * 16} ${REG_Y} H${COL.control + 40} V${controlY}`}
+              stroke="var(--line-mid)"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              fill="none"
+              markerEnd="url(#fleet-arrow)"
+            />
+            <text
+              x={COL.control + 48}
+              y={REG_Y - 6}
+              fontSize="9"
+              fontFamily="var(--mono)"
+              fill="var(--fg-5)"
+            >
+              agents register endpoints on a lease
+            </text>
+          </g>
         )}
       </svg>
     </div>
