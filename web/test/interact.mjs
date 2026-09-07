@@ -315,6 +315,41 @@ await click(byText("+ Add rule"));
   }
 }
 
+// Adding a target. The field is `provider_model_id`; sending `model_id` is a
+// 422 the server rejects wholesale, and that is exactly what shipped for
+// several days after the rename -- every "+ target" button in the app was
+// dead and no check here noticed, because none of them clicked one.
+await goto("routing");
+{
+  sent.length = 0;
+  const addTarget = containing("+ target");
+  check("a target can be added", !!addTarget, "no + target control found");
+  if (addTarget) {
+    await click(addTarget);
+    const pick = $("select").find((el) =>
+      [...el.options].some((o) => o.textContent.includes("local-qwen")),
+    );
+    const opt = [...(pick?.options || [])].find((o) =>
+      o.textContent.includes("local-qwen"),
+    );
+    if (pick && opt) await fill(pick, opt.value);
+    await click(byText("add"));
+    const t = lastCall("POST", "/targets") || lastCall("POST", "/defaults");
+    check("target POST is sent", !!t, "no request was sent");
+    if (t) {
+      check(
+        "the target names provider_model_id, not model_id",
+        t.body.provider_model_id !== undefined && t.body.model_id === undefined,
+        `body was ${JSON.stringify(t.body)}`,
+      );
+      check(
+        "weight and position are numbers",
+        typeof t.body.position === "number",
+      );
+    }
+  }
+}
+
 // Dry-run: the panel that answers "why did it route there".
 await goto("routing");
 await click(byText("Dry-run a request"));

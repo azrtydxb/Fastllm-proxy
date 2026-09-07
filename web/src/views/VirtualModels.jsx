@@ -526,11 +526,11 @@ export function VirtualModels({ onUnauthorised }) {
                     ))}
                     <AddTarget
                       models={data.models}
-                      onAdd={async (model_id, weight) => {
+                      onAdd={async (provider_model_id, weight) => {
                         const ok = await attempt(
                           () =>
                             api.post(`/admin/rules/${r.id}/targets`, {
-                              model_id,
+                              provider_model_id,
                               weight,
                               position: r.targets.length,
                             }),
@@ -654,11 +654,11 @@ export function VirtualModels({ onUnauthorised }) {
                 )}
                 <AddTarget
                   models={data.models}
-                  onAdd={async (model_id, weight) => {
+                  onAdd={async (provider_model_id, weight) => {
                     const ok = await attempt(
                       () =>
                         api.post(`/admin/frontend-models/${vm.id}/defaults`, {
-                          model_id,
+                          provider_model_id,
                           weight,
                           position: vm.default_targets.length,
                         }),
@@ -831,7 +831,7 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
         });
         if (c.model_id && c.action !== "deny" && c.action !== "jump") {
           await api.post(`/admin/rules/${rule.id}/targets`, {
-            model_id: c.model_id,
+            provider_model_id: c.model_id,
             weight: 100,
             position: 0,
           });
