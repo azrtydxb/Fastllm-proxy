@@ -139,18 +139,23 @@ at it as a single target:
 {"position": 0, "class": "code", "targets": ["leastloaded-gemma", "gpt-5"]}
 ```
 
+Every policy here reads how busy or how warm a member is _now_. Cost is
+deliberately not among them: a price is fixed, so a pool set to "cheapest"
+would never balance — it would pick the same member until somebody edited a
+price. Cost decides routing through the `min/max_request_cost_micros`
+condition, which is a routing decision made where routing decisions are made.
+
 Naming it is the point. `leastloaded-gemma` and `lowestlatency-gemma` can hold
 the same members and differ only in how they choose — which a policy buried in
 one rule's target list could never express, and which no screen could show.
 
-| policy           | picks                                                                   |
-| ---------------- | ----------------------------------------------------------------------- |
-| _(unset)_        | weighted split by member weight, deterministic per conversation         |
-| `cache-affinity` | the member holding this prefix's KV cache                               |
-| `least-loaded`   | fewest in-flight requests                                               |
-| `lowest-latency` | lowest recent mean latency                                              |
-| `round-robin`    | strict rotation                                                         |
-| `cheapest`       | lowest published price; an unpriced member is skipped, not read as free |
+| policy           | picks                                                           |
+| ---------------- | --------------------------------------------------------------- |
+| _(unset)_        | weighted split by member weight, deterministic per conversation |
+| `cache-affinity` | the member holding this prefix's KV cache                       |
+| `least-loaded`   | fewest in-flight requests                                       |
+| `lowest-latency` | lowest recent mean latency                                      |
+| `round-robin`    | strict rotation                                                 |
 
 **A pool expands in place.** Its chosen member leads, then its _other_ members,
 then the chain's next target — so a pool degrades into a failover chain of its

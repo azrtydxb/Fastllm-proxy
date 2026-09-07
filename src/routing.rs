@@ -1042,20 +1042,6 @@ fn target_load(registry: &Registry, model: &str) -> (usize, u64) {
     }
 }
 
-/// The cheapest published price across a target's pool, or `None` when nothing
-/// serving it is priced.
-///
-/// The minimum rather than an average: what this target costs is what it costs
-/// when it runs, and the pool's own `Policy::Cheapest` is what would send it to
-/// that provider. A model with no pool at all has no price to compare.
-fn target_price(registry: &Registry, model: &str) -> Option<i64> {
-    registry
-        .pool(model)?
-        .iter()
-        .filter_map(|b| b.price_per_mtok())
-        .min()
-}
-
 /// Pick the target this policy prefers, or `None` to fall back to the weighted
 /// split.
 ///
@@ -1086,18 +1072,6 @@ fn choose_by_policy<'a>(
         // number and using it keeps this function a pure one, so two proxies
         // deciding independently still agree on a given request.
         Policy::RoundRobin => targets.get(prefix_hash as usize % targets.len().max(1)),
-        // The cheapest *model*, which is a different question from the
-        // cheapest backend one level down: these targets are different models
-        // with different capabilities, and a model is only as expensive as its
-        // least expensive provider. A target nobody has priced is skipped
-        // rather than read as free — the same rule `Policy::Cheapest` follows
-        // inside a pool — and if none is priced this declines and the weighted
-        // split decides.
-        Policy::Cheapest => targets
-            .iter()
-            .filter_map(|t| target_price(registry, &t.model).map(|p| (p, t)))
-            .min_by_key(|(p, _)| *p)
-            .map(|(_, t)| t),
     }
 }
 

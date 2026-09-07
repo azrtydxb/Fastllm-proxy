@@ -49,21 +49,6 @@ pub enum Policy {
     /// hit is worth more than a few hundred microseconds of measured
     /// difference between identical machines.
     LowestLatency,
-    /// The lowest published price, tie-broken by in-flight.
-    ///
-    /// Only meaningful for a pool whose members are the *same model at
-    /// different vendors* — which is a shape that exists at all because a
-    /// price lives on the attachment (migration 0045). Same weights, same
-    /// output, different bill.
-    ///
-    /// A backend nobody has priced is ranked **last**, not free. Unpriced
-    /// means "we do not know", the same as it does everywhere else here: a
-    /// self-hosted box that really is free is one `input_price_per_mtok` of
-    /// `0` away from being preferred, and inferring that from silence would
-    /// send traffic somewhere on the strength of a blank field. When nothing
-    /// in the pool is priced this degenerates to least-loaded, which is the
-    /// only honest answer left.
-    Cheapest,
 }
 
 impl Policy {
@@ -76,7 +61,6 @@ impl Policy {
             Self::LeastLoaded => "least-loaded",
             Self::RoundRobin => "round-robin",
             Self::LowestLatency => "lowest-latency",
-            Self::Cheapest => "cheapest",
         }
     }
 
@@ -90,7 +74,6 @@ impl Policy {
             "least-loaded" => Some(Self::LeastLoaded),
             "round-robin" => Some(Self::RoundRobin),
             "lowest-latency" => Some(Self::LowestLatency),
-            "cheapest" => Some(Self::Cheapest),
             _ => None,
         }
     }
@@ -178,7 +161,6 @@ impl Router {
             }
             Policy::LeastLoaded => (least_loaded(&candidates, &self.rr), false),
             Policy::LowestLatency => (lowest_latency(&candidates, &self.rr), false),
-            Policy::Cheapest => (cheapest(&candidates, &self.rr), false),
             Policy::CacheAffinity => self.pick_affine(&candidates, prefix),
         };
 
@@ -274,34 +256,6 @@ fn lowest_latency<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a 
     let front: Vec<&Arc<Backend>> = candidates
         .iter()
         .filter(|b| b.latency_us().is_none_or(|us| us <= ceiling))
-        .copied()
-        .collect();
-    if front.is_empty() {
-        return least_loaded(candidates, rr);
-    }
-    least_loaded(&front, rr)
-}
-
-/// The cheapest published price, with in-flight as the tie-break.
-///
-/// Priced as input plus output per million tokens rather than weighted by this
-/// request's shape: the request's token counts are not known here (`pick` runs
-/// before the body is read on the streaming path), and a pool whose members
-/// differ on one of the two figures almost always differs on both in the same
-/// direction. The tie-break is `least_loaded`, so two vendors at the same
-/// price still balance rather than one taking everything.
-///
-/// Unpriced backends are excluded while any priced one remains — see
-/// `Policy::Cheapest` for why silence is not read as free — and the whole pool
-/// falls back to least-loaded when none of them is priced.
-fn cheapest<'a>(candidates: &[&'a Arc<Backend>], rr: &AtomicUsize) -> &'a Arc<Backend> {
-    let best = candidates.iter().filter_map(|b| b.price_per_mtok()).min();
-    let Some(best) = best else {
-        return least_loaded(candidates, rr);
-    };
-    let front: Vec<&Arc<Backend>> = candidates
-        .iter()
-        .filter(|b| b.price_per_mtok() == Some(best))
         .copied()
         .collect();
     if front.is_empty() {
@@ -443,74 +397,9 @@ model_list:
         })
     }
 
-    /// A pool of the same model at two vendors, priced.
-    ///
-    /// Built from `BackendDef` directly rather than from YAML, because a
-    /// `File`-mode config has nowhere to write a price — prices arrive from
-    /// `model_backends`, which only the control plane reads.
-    fn priced_pool(prices: &[Option<i64>]) -> Pool {
-        let snapshot = crate::snapshot::Snapshot {
-            models: vec![crate::snapshot::ModelDef {
-                name: "m".into(),
-                cache_ttl: None,
-                context_length: None,
-                policy: Some(Policy::Cheapest),
-                backends: prices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, price)| crate::snapshot::BackendDef {
-                        api_base: format!("http://10.0.0.{}:8000/v1", i + 1),
-                        upstream_model: "m".into(),
-                        input_price_per_mtok: *price,
-                        ..Default::default()
-                    })
-                    .collect(),
-            }],
-            ..Default::default()
-        };
-        let reg = Registry::build_from_snapshot(&snapshot, &Interner::default(), None).unwrap();
-        Arc::clone(reg.pool("m").unwrap())
-    }
 
-    /// The policy that only exists because a price is a fact about the
-    /// provider (migration 0045): same model, same output, different bill.
-    #[test]
-    fn cheapest_picks_the_cheaper_vendor() {
-        let r = router(Policy::RoundRobin);
-        let pool = priced_pool(&[Some(9_000_000), Some(1_000_000)]);
-        // Twice, because the pool's policy must win over the deployment's
-        // round-robin rather than alternating with it.
-        for _ in 0..2 {
-            let picked = r.pick(&pool, 7, &[]).unwrap();
-            assert_eq!(picked.api_base, "http://10.0.0.2:8000/v1");
-        }
-    }
 
-    /// Unpriced is unknown, not free — the same rule the rest of this crate
-    /// follows. Reading silence as zero would send every request to whichever
-    /// backend nobody had got round to pricing.
-    #[test]
-    fn an_unpriced_backend_is_not_treated_as_free() {
-        let r = router(Policy::RoundRobin);
-        let pool = priced_pool(&[None, Some(5_000_000)]);
-        let picked = r.pick(&pool, 7, &[]).unwrap();
-        assert_eq!(
-            picked.api_base, "http://10.0.0.2:8000/v1",
-            "the priced one wins; the blank field is not a claim of zero"
-        );
-    }
 
-    /// And with nothing priced there is no cost answer, so it degrades to the
-    /// policy that needs no data rather than picking arbitrarily.
-    #[test]
-    fn cheapest_falls_back_to_least_loaded_when_nothing_is_priced() {
-        let r = router(Policy::RoundRobin);
-        let pool = priced_pool(&[None, None]);
-        let busy = Arc::clone(&pool.backends[0]);
-        let _g = crate::registry::InflightGuard::acquire(busy);
-        let picked = r.pick(&pool, 7, &[]).unwrap();
-        assert_eq!(picked.api_base, "http://10.0.0.2:8000/v1", "the idle one");
-    }
 
     /// A pool's own policy wins over the deployment's.
     ///

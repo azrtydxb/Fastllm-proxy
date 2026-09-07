@@ -176,9 +176,9 @@ pub struct BackendDef {
     /// did not set it. `None` means such a request is refused rather than
     /// silently capped at a number nobody chose.
     pub default_max_tokens: Option<u32>,
-    /// Micro-units per million tokens at this provider, for
-    /// `router::Policy::Cheapest`. `None` is unpriced, which that policy
-    /// ranks last rather than free.
+    /// Micro-units per million tokens at this provider. `None` is unpriced,
+    /// which is unknown rather than free — a cost condition declines rather
+    /// than firing on a blank field.
     ///
     /// Carried into the snapshot only because routing may consult it; the
     /// authoritative pricing of a *request* still happens in the control

@@ -133,8 +133,8 @@ pub struct Backend {
     /// rate. Never interpreted here.
     pub backend_id: Option<uuid::Uuid>,
     /// Input plus output price per million tokens, or `None` when this
-    /// backend is unpriced. Pre-added at build time so `Policy::Cheapest`
-    /// compares one number per candidate instead of two.
+    /// backend is unpriced. Pre-added at build time so a caller comparing
+    /// cost reads one number per candidate instead of two.
     price_per_mtok: Option<i64>,
     input_price_per_mtok: Option<i64>,
     output_price_per_mtok: Option<i64>,
@@ -224,7 +224,7 @@ impl Backend {
             // Either figure alone is enough to call a backend priced: a
             // provider that charges for input and nothing for output is a
             // real arrangement, and reading the missing half as "unknown"
-            // would drop it out of `Cheapest` entirely.
+            // would make the whole backend unpriced.
             price_per_mtok: match (def.input_price_per_mtok, def.output_price_per_mtok) {
                 (None, None) => None,
                 (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -252,7 +252,7 @@ impl Backend {
     }
 
     /// What this backend charges per million tokens, in and out together.
-    /// `None` is unpriced — see `router::Policy::Cheapest`.
+    /// `None` is unpriced, which is a different thing from free.
     #[inline]
     pub fn price_per_mtok(&self) -> Option<i64> {
         self.price_per_mtok

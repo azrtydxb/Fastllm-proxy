@@ -134,8 +134,9 @@ function priceRange(backends) {
 // How a model chooses between its own backends, once it has more than one.
 // A different question from the frontend model's policy, which chooses between
 // *models*: these are interchangeable copies of one model, so this is about
-// which machine is warmest or cheapest rather than about capability or cost
-// tier.
+// which machine is warmest or least busy rather than about capability or cost
+// tier. Cost is not a balancing question: a price is fixed, so it would pick
+// the same provider every time. It belongs to routing, as a rule condition.
 const POOL_POLICIES = [
   [
     "cache-affinity",
@@ -144,7 +145,6 @@ const POOL_POLICIES = [
   ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
   ["lowest-latency", "lowest latency — when the machines are not equally fast"],
   ["round-robin", "round robin — strict rotation, cache-blind"],
-  ["cheapest", "cheapest — lowest published price; unpriced ranks last"],
 ];
 
 /** Dollars per Mtok as typed, to the micro-units the API stores. */

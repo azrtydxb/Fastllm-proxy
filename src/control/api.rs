@@ -2056,8 +2056,7 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
             StatusCode::BAD_REQUEST,
             format!(
                 "unknown policy {raw:?}; expected one of cache-affinity, least-loaded, \
-                 round-robin, lowest-latency, cheapest, or omit it to use the deployment \
-                 default"
+                 round-robin, lowest-latency, or omit it for the weighted split"
             ),
         )),
     }

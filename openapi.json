@@ -1072,7 +1072,7 @@
         "summary": "Create a pool. Its name must not collide with a provider model or a frontend model, because routing resolves targets by name",
         "operationId": "post_admin_model_pools",
         "tags": ["admin"],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"], "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest", null], "description": "How to choose between members. Null is the weighted split" } } } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"], "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", null], "description": "How to choose between members. Null is the weighted split" } } } } } },
         "responses": { "201": { "description": "Created" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "The name is taken by a pool, a provider model or a frontend model" } },
         "security": [{ "session": [] }]
       }
@@ -1853,7 +1853,7 @@
                 "properties": {
                   "policy": {
                     "type": ["string", "null"],
-                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest", null],
+                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", null],
                     "description": "How to choose among this rule's targets. Null clears it back to the frontend model's, and then to the weighted split"
                   },
                   "position": {
@@ -2263,7 +2263,7 @@
                   },
                   "policy": {
                     "type": "string",
-                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest"],
+                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin"],
                     "description": "How to choose among this rule's targets. Absent means the frontend model's, then the weighted split"
                   },
                   "tag": {

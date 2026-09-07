@@ -82,7 +82,8 @@ is serving", and the distinction is the point.
 cheapest model the frontend model can reach — one number per request, the same
 for every rule, so it does not depend on which rule is asking. Pairs with
 `deny` ("refuse anything over $0.50 however I route it"). Sending the expensive
-ones somewhere cheaper is not this; that is the `cheapest` policy below. All
+ones somewhere cheaper is not this; order the chain with the cheaper target
+first. All
 targets unpriced means no cost, and the rule declines.
 
 ## Three levels, and they answer different questions
@@ -92,8 +93,9 @@ split — tried in the order written. `POST /admin/rules/{id}/targets` takes
 either `provider_model_id` **or** `model_pool_id`, never both.
 
 **A pool** (`/admin/model-pools`) is a named group of provider models with one
-policy: `cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`,
-`cheapest`, or unset for the weighted split by member weight. Two pools may
+policy: `cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`, or unset
+for the weighted split by member weight. Cost is not one of them — a price is
+fixed, so it never balances; use a rule's `min/max_request_cost_micros`. Two pools may
 hold the same members and differ only in policy — that is what naming it buys.
 A pool expands in place: its chosen member, then its others, then the chain's
 next target.

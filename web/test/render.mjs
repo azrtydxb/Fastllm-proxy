@@ -125,6 +125,9 @@ const SCREENS = [
       "1 member",
       "10.42.1.7:8000",
       "10.42.1.8:8000",
+      // The create flow starts collapsed: choosing what goes in the pool is
+      // what names it, so there is nothing to type until members are picked.
+      "Create pool",
     ],
   ],
   [

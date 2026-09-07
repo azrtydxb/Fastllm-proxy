@@ -494,6 +494,91 @@ await goto("models");
     }
   }
 
+  // Creating a pool: pick members, pick a policy, and the name is generated
+  // from both. Naming first was the wrong order -- the name describes the
+  // choice, so it cannot be written before the choice is made.
+  sent.length = 0;
+  await goto("pools");
+  {
+    await click(byText("Create pool"));
+    const boxes = $("input").filter((i) => i.type === "checkbox");
+    check(
+      "members are a multi-select",
+      boxes.length > 1,
+      `found ${boxes.length}`,
+    );
+    const nameOf = () =>
+      $("input").find(
+        (i) => i.placeholder === "pick members to generate a name",
+      )?.value;
+    check("no name before anything is picked", !nameOf());
+    if (boxes.length) {
+      await click(boxes[0]);
+      check(
+        "picking a member generates a name",
+        !!nameOf(),
+        `name was ${JSON.stringify(nameOf())}`,
+      );
+      const beforePolicy = nameOf();
+      const pol = $("select").find((el) =>
+        [...el.options].some((o) => o.value === "least-loaded"),
+      );
+      await fill(pol, "least-loaded");
+      check(
+        "and the policy is part of it",
+        nameOf() !== beforePolicy && /leastloaded/.test(nameOf() || ""),
+        `name was ${JSON.stringify(nameOf())}`,
+      );
+      // Typing must stop the generator: overwriting what somebody wrote would
+      // be data loss dressed as a convenience.
+      const box = $("input").find(
+        (i) => i.placeholder === "pick members to generate a name",
+      );
+      await fill(box, "my-own-name");
+      await click(boxes[1]);
+      check(
+        "an edited name stops following the selection",
+        nameOf() === "my-own-name",
+        `name was ${JSON.stringify(nameOf())}`,
+      );
+      await click(byText("Save"));
+      // The member POSTs share this prefix, so match the creation exactly --
+      // `lastCall` would otherwise hand back the last member instead.
+      const call = [...sent]
+        .reverse()
+        .find(
+          (r) => r.method === "POST" && r.path.endsWith("/admin/model-pools"),
+        );
+      check(
+        "save sends the name and policy",
+        call?.body?.name === "my-own-name" &&
+          call?.body?.policy === "least-loaded",
+        `sent ${JSON.stringify(call?.body)}`,
+      );
+      const members = sent.filter(
+        (r) => r.method === "POST" && /\/members$/.test(r.path),
+      );
+      check(
+        "and one member POST per ticked model, in the order ticked",
+        members.length === 2 &&
+          members[0].body.position === 0 &&
+          members[1].body.position === 1,
+        `sent ${JSON.stringify(members.map((m) => m.body))}`,
+      );
+    }
+  }
+
+  // Cost is not a load-balancing policy: a price is fixed, so a balancer set
+  // to it never balances. It decides routing through a rule condition instead.
+  await goto("pools");
+  check(
+    "cheapest is not offered as a balancer",
+    !$("select").some((el) =>
+      [...el.options].some((o) => o.value === "cheapest"),
+    ),
+    "a cheapest option is still in a policy select",
+  );
+
   // And the routing screen no longer offers one at all: a target is a model
   // or a pool, and the pool carries the policy.
   sent.length = 0;
