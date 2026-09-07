@@ -197,7 +197,8 @@ export function Providers({ onUnauthorised, go }) {
       api_base: g.origin,
       // Seeded only where the form offers it, so a protocol the form never
       // showed cannot be re-sent, let alone changed.
-      protocol: g.kind === "static" ? [...g.protocols][0] || "openai" : undefined,
+      protocol:
+        g.kind === "static" ? [...g.protocols][0] || "openai" : undefined,
     });
   };
 
@@ -224,6 +225,14 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
+      load:
+        p.engine_load_at === null || p.engine_load_at === undefined
+          ? null
+          : {
+              running: p.engine_running,
+              waiting: p.engine_waiting,
+              kv: p.engine_kv_cache,
+            },
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -616,6 +625,21 @@ export function Providers({ onUnauthorised, go }) {
                       </Muted>
                     </Row>
                     <div style={{ flex: 1 }} />
+                    {/* What the engine says it is doing. Absent for every
+                        hosted provider, and for any engine started without
+                        metrics — so the row is simply not drawn rather than
+                        drawn as zeroes, which would read as "idle". */}
+                    {g.load && (
+                      <Muted>
+                        {fmtInt(g.load.running)} running
+                        {g.load.waiting > 0
+                          ? ` · ${fmtInt(g.load.waiting)} queued`
+                          : ""}
+                        {g.load.kv !== null && g.load.kv !== undefined
+                          ? ` · KV ${Math.round(g.load.kv * 100)}%`
+                          : ""}
+                      </Muted>
+                    )}
                     {g.reported === 0 ? (
                       <Muted>not yet probed</Muted>
                     ) : (

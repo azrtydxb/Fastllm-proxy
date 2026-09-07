@@ -445,3 +445,31 @@ Options:
   stable public contract; adds nothing to rename-safety beyond A.
 - B only: key type now, name-bound links later. Rejected in the writing — it is
   the expensive half with none of the benefit the request asked for.
+
+## Should the sweep read engine metrics, and how much of them?
+
+Every engine on the Sparks serves Prometheus at `/metrics` unauthenticated —
+415 metric lines on the vLLM at 192.168.10.245:8000 — plus `/load`, which is
+the engine's own in-flight count. The sweep already dials each provider once a
+minute for `GET /v1/models`, so the marginal cost of reading a few numbers on
+the same pass is small.
+
+What it would buy: the sweep's health is binary today (healthy / degraded).
+The engine knows its queue depth, KV-cache utilisation and prefix-cache hit
+rate. `max_inflight_per_backend` currently routes on the *proxy's* own
+in-flight counters, which are per replica and miss anything the engine is
+doing for someone else.
+
+What it costs: another thing to store per provider, and a scrape that must not
+hold the sweep up or fail it. Metric names are engine-specific, so this is
+vLLM/SGLang knowledge entering the control plane, which registration has so far
+avoided (`served_models` needs only `GET /v1/models`, which every engine
+answers).
+
+- Nothing for now. Metrics stay something Prometheus scrapes directly.
+- A few numbers per provider — queue depth, KV-cache used, in-flight from
+  `/load` — surfaced on the Providers and Fleet screens, and nothing routes on
+  them yet.
+- That, and let routing use them: `max_inflight_per_backend` reads the engine's
+  own count rather than the proxy's, which makes local/cloud spillover correct
+  across replicas.

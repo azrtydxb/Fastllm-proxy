@@ -707,6 +707,14 @@ struct ProviderView {
     /// The host vouching for a dynamic provider, and the one whose agent owns
     /// its name. NULL for static and cloud, which nothing is maintaining.
     node: Option<String>,
+    /// What the engine last said it was doing, or `null` where it publishes no
+    /// metrics — which is every hosted provider, and any engine started
+    /// without them. Absent is not zero: an idle backend and one that does not
+    /// report are different things and the screen says so.
+    engine_running: Option<i32>,
+    engine_waiting: Option<i32>,
+    engine_kv_cache: Option<f32>,
+    engine_load_at: Option<chrono::DateTime<chrono::Utc>>,
     /// How many provider models this provider serves. The count rather than
     /// the models themselves: `GET /admin/provider-models` already carries those, and a
     /// provider fronting a few hundred models would make this response the
@@ -1045,11 +1053,16 @@ async fn list_providers(
         bool,
         Option<String>,
         Option<String>,
+        Option<i32>,
+        Option<i32>,
+        Option<f32>,
+        Option<chrono::DateTime<chrono::Utc>>,
         i64,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, p.auth_scheme, \
              p.upstream_api_key IS NOT NULL, p.catalogue_key, p.node, \
+             p.engine_running, p.engine_waiting, p.engine_kv_cache, p.engine_load_at, \
              (SELECT count(*) FROM provider_models m WHERE m.provider_id = p.id) \
          FROM providers p ORDER BY p.name",
     )
@@ -1071,6 +1084,10 @@ async fn list_providers(
                     has_upstream_api_key,
                     catalogue_key,
                     node,
+                    engine_running,
+                    engine_waiting,
+                    engine_kv_cache,
+                    engine_load_at,
                     model_count,
                 )| ProviderView {
                     id,
@@ -1083,6 +1100,10 @@ async fn list_providers(
                     has_upstream_api_key,
                     catalogue_key,
                     node,
+                    engine_running,
+                    engine_waiting,
+                    engine_kv_cache,
+                    engine_load_at,
                     model_count,
                 },
             )

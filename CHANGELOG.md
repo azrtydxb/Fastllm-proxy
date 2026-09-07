@@ -81,6 +81,14 @@ source for _why_ anything is the way it is; this file is the summary.
   `upstream closed the connection before sending a response`. Any upstream
   answering `Connection: close` hit it, which is legal and happens under load.
   Found because a test stub did exactly that.
+- **A provider reports what its engine is doing.** The sweep already dials each
+  provider once a minute for its model list; on the same pass it reads
+  `/metrics`, which vLLM and SGLang both publish, and records requests running,
+  requests queued and KV-cache utilisation (migration 0044). The Providers
+  screen said "1 of 1 up" for an idle box and one with forty requests queued
+  alike. A provider that publishes no metrics — every hosted one — leaves the
+  columns NULL and the row is simply not drawn, because absent and zero are
+  different things.
 - **`kind` says where a provider's details came from, not where its host
   lives.** `cloud` is preconfigured from the catalogue and needs only a
   credential; `dynamic` comes from an agent; `static` is one an operator typed
