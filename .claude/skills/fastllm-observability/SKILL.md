@@ -50,10 +50,15 @@ nothing" from "counts unknown" — treating them alike understates consumption.
 **`/admin/fleet` never averages replicas together.** Every replica losing a
 backend is a dead backend; one replica losing it is a partition.
 
-**A few seconds of `snapshot_version` spread is normal, not a fault.** Proxies
-poll for a snapshot every `config_poll_seconds` and report health every
-`health_report_interval_seconds` (both in `GET /admin/config`), on independent
-timers — so a replica can report the previous version for the sum of the two
-with nothing wrong. Do not report a lagging replica until it is behind by more
-than that sum; a snapshot taken seconds after any admin write will otherwise
-look like a split fleet every time.
+**`snapshot_version` spread is not a measure of staleness.** A version is the
+microsecond the control plane built that snapshot, and it republishes only when
+the content changed — so the gap between two consecutive versions is the time
+between two real config changes, not any replica's lag. A replica one version
+behind can show a gap of a second or of a minute at identical health.
+
+Judge it by how long the newest version has been available instead: proxies
+poll every `config_poll_seconds` and report health every
+`health_report_interval_seconds` (both in `GET /admin/config`), so only a
+replica still behind a snapshot older than their sum is genuinely stuck.
+Reading any spread at all as a fault reports a healthy fleet as split after
+every change.

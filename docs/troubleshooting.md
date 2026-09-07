@@ -155,14 +155,22 @@ Compare `snapshot_version` per replica on the **Fleet** screen. A replica on an
 older snapshot answers `/health` with `ok` and misbehaves only on whatever
 changed — most often a key it has never seen.
 
-A few seconds of disagreement right after a write is normal and is not an
-alert. Each proxy polls for a new snapshot every `config_poll_seconds` and
-reports its health every `health_report_interval_seconds`, so a replica can
-_report_ the previous version for the sum of the two — 15s on the defaults —
-with nothing wrong. The Fleet screen says "still picking up the snapshot" for
-that, and only raises the red banner past that window plus a margin for timer
-drift. If you are checking by hand, apply the same allowance rather than
-reading any spread at all as a fault.
+Disagreement right after a change is normal and is not an alert. Each proxy
+polls for a new snapshot every `config_poll_seconds` and reports its health
+every `health_report_interval_seconds`, so a replica can _report_ the previous
+version for the sum of the two — 15s on the defaults — with nothing wrong.
+
+**The size of the version gap is not a measure of staleness.** A version is the
+microsecond at which the control plane built that snapshot, and it only
+republishes when the content actually changed. Two consecutive versions are
+therefore separated by however long it happened to be between two real changes,
+so a replica exactly one version behind can show a gap of a second or of a
+minute with no difference in health. What decides it is how long the newest
+snapshot has been *available*: once it has existed longer than a poll and a
+report can account for, a replica still on the old one is genuinely stuck. The
+Fleet screen says "still picking up the snapshot" until then and only raises
+the red banner after — and reports the snapshot's age in it, which is the
+number to reason with.
 
 ## Backends
 

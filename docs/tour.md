@@ -102,10 +102,13 @@ it has never seen — so the snapshot version per replica is the thing to look a
 when one replica behaves differently from the others.
 
 The screen distinguishes a replica that is *catching up* from one that is
-*stuck*. Polling and health reporting are on separate timers, so a spread of a
-few seconds follows every configuration change; that shows as a quiet "still
-picking up the snapshot" note. Only a replica further behind than those two
-timers can explain gets the red banner.
+*stuck*, and does it by the age of the newest snapshot rather than by the gap
+between version numbers — versions are stamped when the configuration last
+changed, so the gap measures the control plane's edit history, not any
+replica's health. Polling and reporting are on separate timers, so lagging
+briefly after a change is normal and shows as a quiet "still picking up the
+snapshot" note. Only a replica that is still behind a snapshot older than those
+two timers can explain gets the red banner.
 
 ## Audit log — every change, and who made it
 

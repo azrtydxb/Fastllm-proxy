@@ -1,18 +1,22 @@
-// The convergence grace, which is the difference between an alert an operator
-// trusts and one they learn to skim past.
+// Telling a replica that is *stuck* from one that is merely *catching up*.
 //
-// Every replica polls for a snapshot on its own timer and reports its health
-// on another, so a spread of a few seconds after any write is what a healthy
-// fleet looks like. These cases pin the boundary in both directions: inside
-// the window nothing may be called a laggard, outside it something must be.
+// The distinction is a question about time, and specifically not about the
+// size of the version gap: versions are only republished when the content
+// changed, so the gap between two of them is the control plane's edit history
+// and says nothing about any replica's health. What decides it is how long the
+// newest snapshot has been available. These cases pin that in both directions.
 import assert from "node:assert/strict";
 import { fleetSummary, convergenceGrace } from "../src/fleet.js";
 
 const CONFIG = { config_poll_seconds: 5, health_report_interval_seconds: 10 };
-const NEWEST = 1_700_000_000_000_000; // epoch micros
-const at = (replica, secondsBehind) => ({
+const GRACE = 20; // 5 + 10 + 5
+
+// A version is the epoch microsecond the control plane built the snapshot.
+const NOW_MS = 1_788_800_000_000;
+const publishedAgo = (seconds) => (NOW_MS - seconds * 1000) * 1000;
+const on = (replica, version) => ({
   replica,
-  snapshot_version: NEWEST - secondsBehind * 1e6,
+  snapshot_version: version,
   backends: [],
 });
 
@@ -28,12 +32,12 @@ const check = (name, fn) => {
 };
 
 check("grace is poll + report + margin", () => {
-  assert.equal(convergenceGrace(CONFIG), 20);
+  assert.equal(convergenceGrace(CONFIG), GRACE);
 });
 
 check("grace falls back to shipped defaults", () => {
-  assert.equal(convergenceGrace(undefined), 20);
-  assert.equal(convergenceGrace({}), 20);
+  assert.equal(convergenceGrace(undefined), GRACE);
+  assert.equal(convergenceGrace({}), GRACE);
 });
 
 check("grace follows a slower deployment's own timers", () => {
@@ -46,61 +50,106 @@ check("grace follows a slower deployment's own timers", () => {
   );
 });
 
-// The bug this file exists for: a 7s spread was reported as a fault, so the
-// banner flapped between replicas after every configuration change.
-check("a replica inside the window is converging, not a laggard", () => {
-  const s = fleetSummary([at("a", 0), at("b", 7)], CONFIG);
+// The bug this file exists for. Observed live: two replicas one version apart,
+// where the two versions happened to be 23s of edit history apart. The old
+// code read 23s as staleness and cried wolf; the newest snapshot was 7s old
+// and the trailing replica picked it up on its next poll.
+check("a big version gap is not a fault when the snapshot is new", () => {
+  const s = fleetSummary(
+    [on("a", publishedAgo(7)), on("b", publishedAgo(30))],
+    CONFIG,
+    NOW_MS,
+  );
   assert.deepEqual(s.laggards, []);
   assert.deepEqual(s.converging, ["b"]);
+  // The gap really is far wider than the grace -- that is the point.
+  assert.ok(s.snapshotSpread / 1e6 > GRACE);
 });
 
-check("a replica past the window is a laggard", () => {
-  const s = fleetSummary([at("a", 0), at("b", 240)], CONFIG);
+// The mirror image, and the reason gap size cannot be the test either way: a
+// one-second gap is still a fault once the newer snapshot has been sitting
+// there unclaimed for minutes.
+check("a tiny version gap is a fault when the snapshot is old", () => {
+  const s = fleetSummary(
+    [on("a", publishedAgo(300)), on("b", publishedAgo(301))],
+    CONFIG,
+    NOW_MS,
+  );
   assert.deepEqual(s.laggards, ["b"]);
   assert.deepEqual(s.converging, []);
+  assert.ok(s.snapshotSpread / 1e6 < 2);
 });
 
-// Exactly at the boundary counts as converging: the grace is what the timers
-// can account for, so the alert belongs strictly beyond it.
 check("the boundary itself is not an alert", () => {
-  const s = fleetSummary([at("a", 0), at("b", 20)], CONFIG);
+  const s = fleetSummary(
+    [on("a", publishedAgo(GRACE)), on("b", publishedAgo(GRACE + 60))],
+    CONFIG,
+    NOW_MS,
+  );
   assert.deepEqual(s.laggards, []);
   assert.deepEqual(s.converging, ["b"]);
 });
 
 check("one second past the boundary is", () => {
-  const s = fleetSummary([at("a", 0), at("b", 21)], CONFIG);
+  const s = fleetSummary(
+    [on("a", publishedAgo(GRACE + 1)), on("b", publishedAgo(GRACE + 60))],
+    CONFIG,
+    NOW_MS,
+  );
   assert.deepEqual(s.laggards, ["b"]);
 });
 
-check("a fleet in sync is neither", () => {
-  const s = fleetSummary([at("a", 0), at("b", 0)], CONFIG);
+check("a fleet in sync is neither, however old the snapshot", () => {
+  const v = publishedAgo(3600);
+  const s = fleetSummary([on("a", v), on("b", v)], CONFIG, NOW_MS);
   assert.deepEqual(s.laggards, []);
   assert.deepEqual(s.converging, []);
   assert.equal(s.snapshotSpread, 0);
 });
 
-// Both states at once: the slow one must not hide the stuck one, which is the
-// failure mode of collapsing this to a single flag.
-check("a stuck replica and a converging one are reported apart", () => {
-  const s = fleetSummary([at("a", 0), at("b", 6), at("c", 600)], CONFIG);
-  assert.deepEqual(s.laggards, ["c"]);
-  assert.deepEqual(s.converging, ["b"]);
+check("every replica behind an old snapshot is named", () => {
+  const s = fleetSummary(
+    [
+      on("a", publishedAgo(120)),
+      on("b", publishedAgo(200)),
+      on("c", publishedAgo(900)),
+    ],
+    CONFIG,
+    NOW_MS,
+  );
+  assert.deepEqual(s.laggards, ["b", "c"]);
 });
 
 check("no reports means no alert and no crash", () => {
-  const s = fleetSummary([], CONFIG);
+  const s = fleetSummary([], CONFIG, NOW_MS);
   assert.equal(s.snapshotVersion, null);
+  assert.deepEqual(s.laggards, []);
+  assert.deepEqual(s.converging, []);
+});
+
+check("a single replica is never behind itself", () => {
+  const s = fleetSummary([on("a", publishedAgo(9000))], CONFIG, NOW_MS);
   assert.deepEqual(s.laggards, []);
   assert.deepEqual(s.converging, []);
 });
 
 check("a slower deployment widens its own window", () => {
   const slow = { config_poll_seconds: 60, health_report_interval_seconds: 60 };
-  assert.deepEqual(fleetSummary([at("a", 0), at("b", 90)], slow).laggards, []);
-  assert.deepEqual(fleetSummary([at("a", 0), at("b", 90)], CONFIG).laggards, [
-    "b",
-  ]);
+  const reports = [on("a", publishedAgo(90)), on("b", publishedAgo(400))];
+  assert.deepEqual(fleetSummary(reports, slow, NOW_MS).laggards, []);
+  assert.deepEqual(fleetSummary(reports, CONFIG, NOW_MS).laggards, ["b"]);
+});
+
+// A control-plane clock ahead of the browser's makes the newest snapshot look
+// unpublished. That must fail quiet: a false silence costs one poll, a false
+// alarm costs the operator's trust in the banner.
+check("a snapshot stamped in the future raises nothing", () => {
+  const s = fleetSummary(
+    [on("a", (NOW_MS + 60_000) * 1000), on("b", publishedAgo(600))],
+    CONFIG,
+    NOW_MS,
+  );
+  assert.deepEqual(s.laggards, []);
 });
 
 console.log(failures ? `\n${failures} failed` : "\nfleet: all passed");

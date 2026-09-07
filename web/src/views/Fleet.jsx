@@ -204,9 +204,10 @@ export function Fleet({ onUnauthorised, config }) {
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
             — it answers /health with ok and lists the right models, and
-            misbehaves only on whatever changed. Longer than the{" "}
-            {convergenceGrace(config)}s a poll and a health report can account
-            for, so this is not the fleet catching up.
+            misbehaves only on whatever changed. The current snapshot has been
+            published for {Math.round(summary.snapshotAgeSeconds)}s, longer than
+            the {convergenceGrace(config)}s a poll and a health report can
+            account for, so this is not the fleet catching up.
           </span>
         </Banner>
       )}
@@ -224,7 +225,10 @@ export function Fleet({ onUnauthorised, config }) {
             {" "}
             — normal: proxies poll every {config?.config_poll_seconds ?? 5}s and
             report every {config?.health_report_interval_seconds ?? 10}s, so a
-            replica reads behind for a few seconds after every change.
+            replica reads behind for a few seconds after every change. The
+            version numbers can differ by much more than that without meaning
+            it: they are stamped when the configuration last changed, not when a
+            replica last polled.
           </span>
         </Banner>
       )}

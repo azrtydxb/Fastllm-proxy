@@ -81,19 +81,11 @@ export function mergeBackends(reports) {
  * Two independent timers sit between publishing a snapshot and seeing every
  * replica report it: a proxy polls for a new snapshot every
  * `config_poll_seconds`, and reports its health every
- * `health_report_interval_seconds`. A replica that polls just before a write
- * lands and reports just before its next poll therefore shows the previous
- * version for the sum of the two — with nothing wrong anywhere.
+ * `health_report_interval_seconds`. A replica that polls just before a new
+ * version lands and reports just before its next poll therefore shows the
+ * previous version for the sum of the two, with nothing wrong anywhere.
  *
- * Treating any spread at all as a fault reported that ordinary convergence as
- * an alert: after every configuration change the fleet banner went red for a
- * few seconds, cleared, then went red again naming a different replica as each
- * one reported in. An alert that fires on healthy behaviour is one an operator
- * learns to ignore, which costs the real split it exists to surface.
- *
- * The extra margin covers timer drift and the report round trip. Clock skew
- * between hosts does not enter it: versions are stamped by the control plane,
- * so this compares two numbers from the same clock.
+ * The extra margin covers timer drift and the report round trip.
  */
 export function convergenceGrace(config) {
   return (
@@ -106,20 +98,41 @@ export function convergenceGrace(config) {
 /**
  * Fleet-wide facts that do not belong to any one backend.
  *
- * `config` is optional: without it the grace period falls back to the shipped
- * defaults, which is right for callers that do not read spread anyway.
+ * `config` supplies the convergence grace; `now` is injectable so the
+ * classification can be tested without a clock.
  */
-export function fleetSummary(reports, config) {
+export function fleetSummary(reports, config, now = Date.now()) {
   const list = reports || [];
   const versions = list.map((r) => r.snapshot_version);
   const backends = mergeBackends(list);
   const newest = versions.length ? Math.max(...versions) : null;
-  const graceMicros = convergenceGrace(config) * 1e6;
-  // Behind at all, and behind for longer than convergence can explain. The
-  // first is normal and worth showing quietly; only the second is a fault.
-  const behind = list.filter(
-    (r) => newest !== null && r.snapshot_version < newest,
-  );
+  const behind =
+    newest === null ? [] : list.filter((r) => r.snapshot_version < newest);
+
+  // Whether a behind replica is *stuck* or merely *catching up* is a question
+  // about time, and specifically not about the size of the version gap.
+  //
+  // A version is the wall-clock microsecond at which the control plane built
+  // that snapshot, and it only republishes when the content actually changed
+  // (`rebuild_once` compares first). So consecutive versions are separated by
+  // however long it happened to be between two real changes -- seven seconds
+  // here, twenty-three there -- and a replica exactly one version behind shows
+  // a "lag" of whatever that gap was. Reading that number as staleness is what
+  // made the banner fire: it measured the control plane's edit history, not
+  // any replica's health.
+  //
+  // What does answer the question is how long the newest snapshot has been
+  // *available*. Once it has existed for longer than a poll and a report can
+  // account for, every replica has had its chance and anyone still behind is
+  // genuinely stuck -- however small the version gap. Before that, nobody is
+  // late yet, however large it is.
+  //
+  // Both terms come from the control plane's clock except `now`; skew there
+  // only shortens or lengthens the grace slightly, and a clock far enough
+  // behind fails quiet rather than crying wolf.
+  const availableForSeconds = newest === null ? 0 : (now * 1000 - newest) / 1e6;
+  const stuck = availableForSeconds > convergenceGrace(config);
+
   return {
     replicas: list.length,
     // The check `docs/api.md` recommends, which no single replica can make:
@@ -129,15 +142,14 @@ export function fleetSummary(reports, config) {
     snapshotSpread: versions.length
       ? Math.max(...versions) - Math.min(...versions)
       : 0,
-    laggards: behind
-      .filter((r) => newest - r.snapshot_version > graceMicros)
-      .map((r) => r.replica),
-    // Behind, but not for long enough to mean anything. Named separately so a
-    // screen can say "still catching up" instead of either crying wolf or
+    // How long the newest snapshot has been published, which is the number
+    // the classification below actually turns on.
+    snapshotAgeSeconds: availableForSeconds,
+    laggards: stuck ? behind.map((r) => r.replica) : [],
+    // Behind, but not for long enough to mean anything yet. Named separately
+    // so a screen can say "still catching up" instead of either crying wolf or
     // showing an unexplained delay as perfect health.
-    converging: behind
-      .filter((r) => newest - r.snapshot_version <= graceMicros)
-      .map((r) => r.replica),
+    converging: stuck ? [] : behind.map((r) => r.replica),
     backends,
     backendsUp: backends.filter((b) => b.healthy).length,
     backendsSplit: backends.filter((b) => b.split),
