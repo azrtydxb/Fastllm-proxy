@@ -5030,6 +5030,11 @@ struct NodeView {
     /// When the control plane last probed one of its endpoints successfully.
     last_probed_at: Option<chrono::DateTime<chrono::Utc>>,
     engines: Vec<String>,
+    /// The endpoints this node registered, so a topology view can draw the
+    /// agent next to the backends it is responsible for. Aggregated away
+    /// before this existed, which left the agent and its own endpoints as two
+    /// unrelated rows on the same screen.
+    hosts: Vec<String>,
 }
 
 async fn list_nodes(
@@ -5043,6 +5048,7 @@ async fn list_nodes(
         Option<chrono::DateTime<chrono::Utc>>,
         Option<chrono::DateTime<chrono::Utc>>,
         Option<Vec<String>>,
+        Option<Vec<String>>,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT node,
@@ -5050,7 +5056,8 @@ async fn list_nodes(
                 count(degraded_since),
                 max(lease_expires_at),
                 max(last_seen_at),
-                array_remove(array_agg(DISTINCT engine), NULL)
+                array_remove(array_agg(DISTINCT engine), NULL),
+                array_remove(array_agg(DISTINCT api_base), NULL)
            FROM providers
           WHERE kind = 'dynamic' AND node IS NOT NULL
        GROUP BY node
@@ -5063,13 +5070,22 @@ async fn list_nodes(
     Ok(Json(
         rows.into_iter()
             .map(
-                |(node, endpoints, degraded, lease_expires_at, last_probed_at, engines)| NodeView {
+                |(
+                    node,
+                    endpoints,
+                    degraded,
+                    lease_expires_at,
+                    last_probed_at,
+                    engines,
+                    hosts,
+                )| NodeView {
                     node,
                     endpoints,
                     degraded,
                     lease_expires_at,
                     last_probed_at,
                     engines: engines.unwrap_or_default(),
+                    hosts: hosts.unwrap_or_default(),
                 },
             )
             .collect(),

@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
 import { fleetSummary, convergenceGrace, useSnapshotLag } from "../fleet.js";
+import { FleetMap } from "./FleetMap.jsx";
 import {
   Banner,
   Card,
@@ -73,11 +74,15 @@ function fmtWhen(iso) {
 export function Fleet({ onUnauthorised, config }) {
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [fleet, nodes] = await Promise.all([
+      const [fleet, nodes, health] = await Promise.all([
         api.get("/admin/fleet"),
         api.get("/admin/nodes"),
+        // The control plane's own state. Everything else on this screen is
+        // what the *replicas* say; without this the management plane would be
+        // the one box in the picture with nothing behind it.
+        api.get("/admin/health"),
       ]);
-      return { fleet, nodes };
+      return { fleet, nodes, health };
     },
     {
       onUnauthorised,
@@ -98,6 +103,23 @@ export function Fleet({ onUnauthorised, config }) {
   return (
     <Stack>
       <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>
+
+      {/* The shape of the thing, before the tables that enumerate it. What a
+          table cannot show: that the control plane is beside the request path
+          rather than on it, that every worker reaches every backend, and that
+          an agent is why a host is on this screen at all. */}
+      <Card
+        title="Topology"
+        subtitle="planes, workers and the hosts they reach — health and counters in place"
+      >
+        <FleetMap
+          reports={reports}
+          nodes={nodes}
+          summary={summary}
+          config={config}
+          health={data?.health}
+        />
+      </Card>
 
       {/* The other half of the fleet. A proxy reports what it can reach; an
           agent decides what there is to reach at all — it registers this

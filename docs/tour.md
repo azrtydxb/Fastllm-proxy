@@ -96,7 +96,17 @@ the window rolls over.
 
 ![The Fleet screen: every proxy replica with its snapshot version, uptime and per-backend health](images/ui-fleet.png)
 
-Per replica, deliberately unmerged. A replica on an older snapshot answers
+The screen opens with a **topology**: the management plane, the worker
+replicas, and the engine hosts, with each box carrying its own health and
+counters. It is there for the three things a table cannot show — that the
+control plane sits beside the request path rather than on it, that every worker
+reaches every backend rather than one each, and that an agent is why a host is
+listed at all. An endpoint no agent registered says "registered by hand" rather
+than borrowing one, and every arrow carries the interval it actually runs on,
+read from the deployment's own configuration.
+
+The tables below it are the detail. Per replica, deliberately unmerged. A
+replica on an older snapshot answers
 `/health` with `ok` and misbehaves only on whatever changed — most often a key
 it has never seen — so the snapshot version per replica is the thing to look at
 when one replica behaves differently from the others.

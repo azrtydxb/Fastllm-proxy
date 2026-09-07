@@ -177,6 +177,24 @@ const SCREENS = [
       "dgx-spark",
       "lapsed",
       "1 degraded",
+      // The topology, which is the part a table cannot say: the three planes,
+      // a worker's own counters in place, the host an agent registered, and
+      // the host nobody did.
+      "MANAGEMENT PLANE",
+      "DATA PLANE — WORKERS",
+      "ENGINE HOSTS",
+      "control plane",
+      "10.42.1.7:8000",
+      "agent dgx-spark",
+      // An endpoint no agent registered must say so rather than borrow one.
+      "registered by hand",
+      // Both flows between the planes, each with the interval it runs on,
+      // taken from the deployment config rather than captioned from memory.
+      "snapshot · 5s",
+      "health · 10s",
+      // A lapsed lease is the state the screen exists to show, and it has to
+      // survive into the picture and not only the table.
+      "agent dgx-spark2 · lapsed",
     ],
   ],
   ["settings", ["Deployment-wide fallback", "Danger zone", "12h", "fast only"]],

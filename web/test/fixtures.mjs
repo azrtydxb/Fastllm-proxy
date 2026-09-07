@@ -109,6 +109,14 @@ const FIXTURES = {
           requests_total: 900,
           errors_total: 0,
         },
+        {
+          api_base: "http://10.42.2.9:8000/v1",
+          model: "bge-m3",
+          healthy: true,
+          inflight: 0,
+          requests_total: 500,
+          errors_total: 0,
+        },
       ],
       process: {
         requests_ok: 41900,
@@ -216,6 +224,9 @@ const FIXTURES = {
       lease_expires_at: "2099-01-01T00:00:00Z",
       last_probed_at: "2026-08-09T10:00:00Z",
       engines: ["vllm"],
+      // What this agent registered, which is what lets the topology draw it
+      // beside its own endpoints instead of as an unrelated row.
+      hosts: ["http://10.42.1.7:8000/v1"],
     },
     {
       node: "dgx-spark2",
@@ -224,6 +235,7 @@ const FIXTURES = {
       lease_expires_at: "2020-01-01T00:00:00Z",
       last_probed_at: null,
       engines: [],
+      hosts: ["http://10.42.2.9:8000/v1"],
     },
   ],
   // A pool: several provider models chosen between by one policy. What a rule
