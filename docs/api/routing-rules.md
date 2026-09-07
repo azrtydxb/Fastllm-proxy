@@ -18,7 +18,7 @@ list is a **fallback chain**, not just a split.
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                              | snapshot               |
 | `max_inflight_per_backend`                      | how busy this rule's own targets are                                                  | **live cluster state** |
 | `class`                                         | which prompt class the classifier assigned — see [semantic routing](../classifier.md) |
-| `min/max_request_cost_micros`                   | what this request would cost, at the cheapest model this frontend model can reach     | **prices** |
+| `min/max_request_cost_micros`                   | what this request would cost, at the cheapest model this frontend model can reach     | **prices**             |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window                                                                     | **clock**              |
 
 The last two rows are marked because they matter: every other condition is a
@@ -57,7 +57,7 @@ every five minutes while it produces no reading, and after fifteen minutes it
 is assumed not to have metrics and dropped from the scrape — so a deployment of
 hosted providers costs a handful of requests per provider for the life of the
 process rather than a poll every few minutes for ever. A backend that answers
-with something that is *not* engine metrics — a 404, or a Prometheus body with
+with something that is _not_ engine metrics — a 404, or a Prometheus body with
 no scheduler families in it — settles sooner, on the second such answer, since
 the endpoint has said as much itself. Editing an endpoint starts the detection
 over.
@@ -77,11 +77,11 @@ Every rule has an **action**, and every action is terminal — the matching rule
 decides everything about the request, which is what lets a dry-run answer
 "which rule decided this" with one rule name instead of a trace.
 
-| action | what it does |
-| --- | --- |
+| action            | what it does                                                                    |
+| ----------------- | ------------------------------------------------------------------------------- |
 | `route` (default) | send the request to this rule's targets, in the order the policy below produces |
-| `deny` | refuse, with `deny_status` (4xx only) and `deny_message` |
-| `jump` | continue evaluation in another frontend model's chain, named by `jump_to` |
+| `deny`            | refuse, with `deny_status` (4xx only) and `deny_message`                        |
+| `jump`            | continue evaluation in another frontend model's chain, named by `jump_to`       |
 
 `route`, `failover`, `balance` and `split` are deliberately **not** four
 actions: all four mean "order a chain, try the head, fall down the list on
@@ -96,7 +96,7 @@ rather than as policy working.
 **A `jump` that would close a loop is refused when you create it**, by walking
 the jumps already stored. The proxy also caps how far it will follow a chain,
 because a snapshot can arrive from a hand-edited database — but that is a
-backstop, not the mechanism. A jump whose destination has since been *deleted*
+backstop, not the mechanism. A jump whose destination has since been _deleted_
 is treated as no match, so the request falls through to the next rule; failing
 instead would turn deleting one frontend model into an outage for every other
 one that referenced it.
@@ -104,7 +104,7 @@ one that referenced it.
 Any rule may also carry a **`tag`**, which is copied onto the usage rows that
 rule produced. That is a field rather than an action: a rule that tags still
 has to route, or there would be no usage row to label. It is what makes spend
-answerable per *decision* rather than only per model.
+answerable per _decision_ rather than only per model.
 
 ```jsonc
 // Refuse rather than route: expressible for the first time.
@@ -119,35 +119,52 @@ answerable per *decision* rather than only per model.
 {"position": 1, "class": "coding", "targets": ["big"], "tag": "team-research"}
 ```
 
-## Choosing among a rule's targets
+## Targets, pools, and the three levels
 
-By default a rule's targets are a **weighted split**: a deterministic pick on
-the request prefix, so a conversation stays on one side of a canary rather than
-flipping per request, then the rest of the list in declaration order as the
-failover chain.
+**A rule's targets are an ordered failover chain and nothing else.** They are
+tried in the order they are written, first to last, on `5xx`, `429` or an
+unreachable upstream. There is no policy on a rule and no weighted split
+between its targets: a target list means what it says.
 
-A rule can name a `policy` instead, and it applies to that rule's own targets:
+Choosing between several models _at once_ is what a **pool** is for. A pool is
+a named, reusable group of provider models with one policy, and a rule points
+at it as a single target:
 
-| policy | picks |
-| --- | --- |
-| `cache-affinity` | the target holding this prefix's KV cache |
-| `least-loaded` | fewest in-flight requests |
-| `lowest-latency` | lowest recent mean latency |
-| `round-robin` | strict rotation |
-| `cheapest` | lowest published price; a target nobody has priced is skipped, not read as free |
+```jsonc
+// A pool, created once on Model pools.
+{"name": "leastloaded-gemma", "policy": "least-loaded",
+ "members": ["gemma-a", "gemma-b"]}
 
-Per rule, because that is the level the targets are at — "least-connections
-across the two local boxes, then plain failover to the cloud when they are
-full" is two rules wanting two different answers, and one setting for the whole
-frontend model could not say it. A rule with no policy inherits the frontend
-model's, which is also what the *default* targets use since they have no rule
-of their own.
+// Any number of rules can then point at it.
+{"position": 0, "class": "code", "targets": ["leastloaded-gemma", "gpt-5"]}
+```
 
-**This is not the same knob as a model's own load balancing.** Routing happens
-twice: once to choose a model, and once to choose which of that model's
-backends serves it. This table is the first. The second is
-`provider_models.policy`, set on the Models screen, and it takes the same
-values — see [providers](../providers.md).
+Naming it is the point. `leastloaded-gemma` and `lowestlatency-gemma` can hold
+the same members and differ only in how they choose — which a policy buried in
+one rule's target list could never express, and which no screen could show.
+
+| policy           | picks                                                                   |
+| ---------------- | ----------------------------------------------------------------------- |
+| _(unset)_        | weighted split by member weight, deterministic per conversation         |
+| `cache-affinity` | the member holding this prefix's KV cache                               |
+| `least-loaded`   | fewest in-flight requests                                               |
+| `lowest-latency` | lowest recent mean latency                                              |
+| `round-robin`    | strict rotation                                                         |
+| `cheapest`       | lowest published price; an unpriced member is skipped, not read as free |
+
+**A pool expands in place.** Its chosen member leads, then its _other_ members,
+then the chain's next target — so a pool degrades into a failover chain of its
+own members before giving up, which is what makes it safe to use as a single
+target.
+
+That leaves three levels, each answering a different question and each set in
+exactly one place:
+
+|                  | decides                           | set on          |
+| ---------------- | --------------------------------- | --------------- |
+| a rule's targets | the order to try things in        | Frontend models |
+| a pool           | which of several models serves    | Model pools     |
+| a provider model | which of its own providers serves | Provider models |
 
 Some shapes worth stealing:
 

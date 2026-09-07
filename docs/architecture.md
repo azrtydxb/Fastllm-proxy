@@ -146,13 +146,14 @@ Two decisions in that flow are load-bearing:
   still needs its own grant.
 
   This reversed the earlier rule, which required a grant on the resolved
-  provider model. That rule pinned every grant to a provider model's *name*, so
+  provider model. That rule pinned every grant to a provider model's _name_, so
   renaming one revoked access silently — migration 0029 did exactly that in
   production. See
   `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`.
 
   The "served here" check runs _before_ authorisation, so an unknown model is a
   404 for everyone and 403-vs-404 cannot be used to probe what exists.
+
 - **Usage is read from a fixed-size tail buffer, parsed once at the end** —
   never per frame. The response is still forwarded as opaque bytes. A
   translated response is the exception in the cheaper direction: its token
@@ -217,6 +218,13 @@ split exists to prevent.
   With classes, the fast tier is ~115µs of pure CPU; the refined tier is loaded
   only if some rule names a class that refines a fast-tier one, so a deployment
   that does not use it cannot pay for it. See [semantic routing](classifier.md).
+- **Load balancing is an object, not a setting.** A model pool is a named group
+  of provider models with one policy; a rule points at it as a single target.
+  That splits three questions that were previously tangled in one control: the
+  order to try things in (a rule's targets), which of several models serves (a
+  pool), and which of a model's own providers serves (the provider model). Each
+  is set in exactly one place, and a pool is reusable across rules — which a
+  policy attached to one rule's target list could never be.
 - **Every routing rule is terminal.** A rule that matches decides everything
   about the request — route it, refuse it, or delegate the whole decision to
   another frontend model's chain. Firewalls have non-terminating rules that

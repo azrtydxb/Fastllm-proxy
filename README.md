@@ -59,24 +59,24 @@ Tool calling translates in both directions on native backends, streaming include
 
 Two words, used consistently from here on:
 
-|                    |                                                                                                                                |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+|                    |                                                                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Provider model** | What a request is routed _to_: one name, and every provider that serves it. Two hosts running the same model are one provider model with two backends, and form one pool |
-| **Frontend model** | What a client asks _for_: a name that resolves, by rules and weights, to a chain of provider models — and where two of them are balanced against each other |
+| **Frontend model** | What a client asks _for_: a name that resolves, by rules, to a chain of provider models and pools                                                                        |
 
 **A client names a frontend model, and only a frontend model.** Provider models
 are inventory: they exist to be pointed at, not asked for. That is what keeps a
 provider model's name out of the client contract, so renaming one — or a
 registration service replacing one on a lease — is not a breaking change for
 callers. (A `File`-mode deployment has no frontend models, so there the model
-*is* the name.)
+_is_ the name.)
 
 The admin API spells them `/admin/provider-models` and
 `/admin/frontend-models`, and the tables are `provider_models` and
 `frontend_models`: one word for one thing, from the schema through to the
 screen.
 
-A **frontend model** is a client-facing name with an ordered list of rules and a fallback chain. First rule whose conditions match wins; conditions within a rule are AND'd; targets are weighted _and_ ordered, so a rule is both a split and a failover chain.
+A **frontend model** is a client-facing name with an ordered list of rules and a fallback chain. First rule whose conditions match wins; conditions within a rule are AND'd; a rule's targets are tried in the order they are written. Balancing across several models at once is a **model pool** — a named group with one policy, pointed at as a single target — so a target list is an order and nothing else.
 
 Route on any of these:
 
@@ -89,7 +89,7 @@ Route on any of these:
 | `headers`                                       | exact header values — the client labels its own workload                                                                                               |
 | _context window_                                | not a condition — a model whose declared `context_length` cannot hold the prompt plus the requested generation is automatically demoted down the chain |
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                                                                                               |
-| `max_inflight_per_backend`                      | how busy this rule's own targets are — the engine's own count where it publishes `/metrics`, so the ceiling holds across several proxies                |
+| `max_inflight_per_backend`                      | how busy this rule's own targets are — the engine's own count where it publishes `/metrics`, so the ceiling holds across several proxies               |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window, wrapping midnight                                                                                                                   |
 
 ```jsonc

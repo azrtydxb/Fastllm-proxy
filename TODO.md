@@ -316,6 +316,39 @@ master key. `/health` and `/metrics` are deliberately open so probes and
 Prometheus work without a key, and both already leak backend addresses — a UI
 on the same terms is consistent, but it is a more inviting target on a VIP.
 
+## Model pools: load balancing becomes a thing you name — done (2026-09-07)
+
+A policy set on a list could not be reused and could not be seen from the
+screen it applied to, and it was settable in three overlapping places — on a
+frontend model, on each rule, and on a provider model. Asked what the control
+at the top of the Frontend models screen governed, there was no short answer,
+which is usually the sign.
+
+A pool is the same idea made into an object with a name: several provider
+models and one policy for choosing between them. `leastloaded-gemma` and
+`lowestlatency-gemma` can hold the same members and differ only in how they
+choose, and either can be pointed at from as many rules as like.
+
+The division that falls out of it is the real gain:
+
+a rule's targets an ordered failover chain, tried in order
+a pool how to choose between several models at once
+a provider model how to choose between its own providers
+
+So `routing_rules.policy` and `frontend_models.policy` are gone, and with them
+the weighted split between a rule's targets — weight moved to pool members,
+where it is the one thing it ever meant. `order_candidates` no longer takes a
+policy; a pool target expands in place, its chosen member first and its others
+next, so a pool degrades into a failover chain of its own before the outer
+chain moves on.
+
+Rules also became editable in place, and draggable. Refusing to let conditions
+be edited was justified on the grounds that a rule could otherwise change
+meaning under a position somebody had reviewed — weak, since position was
+editable all along, and it cost several writes to express one intent.
+
+Migration 0048.
+
 ## A model on more than one provider, and rules that do more than route — done (2026-09-07)
 
 Two changes that turned out to depend on each other.

@@ -79,22 +79,25 @@ for every rule, so it does not depend on which rule is asking. Pairs with
 ones somewhere cheaper is not this; that is the `cheapest` policy below. All
 targets unpriced means no cost, and the rule declines.
 
-## Two levels of balancing, and they are different questions
+## Three levels, and they answer different questions
 
-**A rule's `policy` chooses between *models*** — its own targets. Values:
-`cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`, `cheapest`;
-absent means the frontend model's, then the weighted split. `PATCH
-/admin/rules/{id}` sets it. Per rule, so "least-connections locally, then plain
-failover to the cloud" is expressible.
+**A rule's targets are an ordered failover chain.** No policy, no weighted
+split — tried in the order written. `POST /admin/rules/{id}/targets` takes
+either `provider_model_id` **or** `model_pool_id`, never both.
 
-**A provider model's `policy` chooses between *backends*** — the providers
-serving that one model, which are interchangeable copies. Same values, set with
-`PATCH /admin/provider-models/{id}`, absent means the deployment's `--policy`.
-This is the level prefix-cache affinity matters at, and it only became
-meaningful when a model gained more than one backend (migration 0045).
+**A pool** (`/admin/model-pools`) is a named group of provider models with one
+policy: `cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`,
+`cheapest`, or unset for the weighted split by member weight. Two pools may
+hold the same members and differ only in policy — that is what naming it buys.
+A pool expands in place: its chosen member, then its others, then the chain's
+next target.
 
-`cheapest` exists at both levels and means the same thing at each: the lowest
-published price, with unpriced ranked last rather than read as free.
+**A provider model's `policy`** chooses between its own attachments (the
+providers serving that one model). Set with `PATCH
+/admin/provider-models/{id}`.
+
+`routing_rules.policy` and `frontend_models.policy` no longer exist; a rule
+that balanced across its targets is a rule pointing at a pool.
 
 ## Traps
 
