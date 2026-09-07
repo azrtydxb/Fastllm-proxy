@@ -5070,22 +5070,16 @@ async fn list_nodes(
     Ok(Json(
         rows.into_iter()
             .map(
-                |(
-                    node,
-                    endpoints,
-                    degraded,
-                    lease_expires_at,
-                    last_probed_at,
-                    engines,
-                    hosts,
-                )| NodeView {
-                    node,
-                    endpoints,
-                    degraded,
-                    lease_expires_at,
-                    last_probed_at,
-                    engines: engines.unwrap_or_default(),
-                    hosts: hosts.unwrap_or_default(),
+                |(node, endpoints, degraded, lease_expires_at, last_probed_at, engines, hosts)| {
+                    NodeView {
+                        node,
+                        endpoints,
+                        degraded,
+                        lease_expires_at,
+                        last_probed_at,
+                        engines: engines.unwrap_or_default(),
+                        hosts: hosts.unwrap_or_default(),
+                    }
                 },
             )
             .collect(),
