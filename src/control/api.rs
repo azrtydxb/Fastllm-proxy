@@ -1421,9 +1421,18 @@ async fn post_provider(
             }
             k.to_string()
         }
+        // Where the details came from, not where the host happens to live.
+        // `cloud` means this deployment already knows the address, the
+        // protocol and the header — everything but the credential — because it
+        // came from the catalogue. A typed address is `static` whether it
+        // points at a LAN box or at a public vendor: nothing was preconfigured
+        // and the operator filled it in.
+        //
+        // Guessing from the hostname made a hand-typed public URL `cloud`,
+        // which then claimed a provenance it did not have and hid the protocol
+        // control from the one case that needs it.
         _ if entry.is_some() => "cloud".to_string(),
-        _ if is_private_host(&host) => "static".to_string(),
-        _ => "cloud".to_string(),
+        _ => "static".to_string(),
     };
 
     // `post_backend` finds an existing provider by exactly this tuple, so a
@@ -3004,26 +3013,6 @@ impl NewBackend {
 /// Fill in the auth defaults a protocol implies, so an operator adding an
 /// Anthropic backend does not have to know that it wants a raw key in
 /// `x-api-key` rather than a bearer token — and cannot get it wrong.
-/// Whether an endpoint looks like it is on our own network.
-///
-/// This only picks the initial `kind` label for a newly created provider, so
-/// being wrong is a cosmetic matter an operator can correct — nothing routes,
-/// authenticates or expires on it. It exists because "static" and "cloud"
-/// differ in how they are *configured* (a typed address versus a catalogue
-/// entry), and guessing right the overwhelming majority of the time is better
-/// than making every operator answer a question they did not ask.
-fn is_private_host(host: &str) -> bool {
-    let h = host.split(':').next().unwrap_or(host);
-    h == "localhost"
-        || h.starts_with("127.")
-        || h.starts_with("10.")
-        || h.starts_with("192.168.")
-        || h.strip_prefix("172.")
-            .and_then(|rest| rest.split('.').next())
-            .and_then(|octet| octet.parse::<u8>().ok())
-            .is_some_and(|octet| (16..=31).contains(&octet))
-}
-
 fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
     match protocol {
         "anthropic" => ("x-api-key", None),
@@ -3289,11 +3278,10 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
             // thing, so an operator sees the name they were reading before it
             // was a record. The suffix only appears when that is ambiguous.
             let host = host_of(&api_base);
-            let kind = if is_private_host(&host) {
-                "static"
-            } else {
-                "cloud"
-            };
+            // An address, and nothing else: `static` by definition. Only the
+            // catalogue makes a `cloud` provider, and only an agent a
+            // `dynamic` one.
+            let kind = "static";
             let name = unique_provider_name(ctx, &host).await?;
             sqlx::query_scalar(
                 "INSERT INTO providers (name, kind, api_base, protocol, auth_header, \

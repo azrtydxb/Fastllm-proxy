@@ -37,8 +37,10 @@ comes from:
   header that vendor wants its key in, which is the half that is easy to get
   wrong.
 - **Custom endpoint** — type the address of anything else: a vLLM on the LAN,
-  an Ollama on a workstation, a gateway of your own. Protocol defaults to
-  `openai`, which is what almost everything speaks.
+  an Ollama on a workstation, a public vendor the catalogue does not list. This
+  is a `static` provider whether the host is on your network or the internet:
+  `cloud` means *we* preconfigured it, not that it is somewhere far away.
+  Protocol defaults to `openai`, which is what almost everything speaks.
 
 Nothing is served by adding a provider. It carries the endpoint and the
 credential; which of its models to expose is a separate, deliberate step on

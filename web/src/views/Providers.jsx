@@ -195,10 +195,9 @@ export function Providers({ onUnauthorised, go }) {
     setEdit({
       name: g.host,
       api_base: g.origin,
-      // Seeded only where the form offers it, so a catalogue provider's
-      // protocol is not re-sent — and cannot be changed by a form that never
-      // showed it.
-      protocol: g.catalogue_key ? undefined : [...g.protocols][0] || "openai",
+      // Seeded only where the form offers it, so a protocol the form never
+      // showed cannot be re-sent, let alone changed.
+      protocol: g.kind === "static" ? [...g.protocols][0] || "openai" : undefined,
     });
   };
 
@@ -225,9 +224,6 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
-      // Set only when this provider came from a catalogue entry, which is
-      // exactly the case where its wire protocol is already known.
-      catalogue_key: p.catalogue_key,
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -662,11 +658,13 @@ export function Providers({ onUnauthorised, go }) {
                           }
                         />
                       </Field>
-                      {/* A provider from the catalogue came with its wire
-                          protocol; asking again invites someone to change it
-                          to something the vendor does not speak. A typed
-                          address is the only case where nobody has said. */}
-                      {!g.catalogue_key && (
+                      {/* Only a static provider is one where an operator
+                          fills the details in. A cloud provider arrived
+                          preconfigured and a dynamic one came from an agent;
+                          in both, the protocol is already known and offering
+                          it invites setting a vendor to something it does not
+                          speak. */}
+                      {g.kind === "static" && (
                         <Field label="Protocol">
                           <select
                             value={edit.protocol ?? "openai"}

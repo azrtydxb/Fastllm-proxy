@@ -81,14 +81,13 @@ source for _why_ anything is the way it is; this file is the summary.
   `upstream closed the connection before sending a response`. Any upstream
   answering `Connection: close` hit it, which is legal and happens under load.
   Found because a test stub did exactly that.
-- **The edit form stops asking a provider from the catalogue for its
-  protocol.** Choosing a vendor is how the protocol got set; offering it again
-  as a dropdown invites setting a vendor to something it does not speak. A
-  typed address still asks, because there nobody has said. Providers that
-  predate the catalogue are linked to the entry they already are (migration
-  0044), matched on the address being exactly the catalogue's — a gateway in
-  front of a vendor, or a region filled into a placeholder, does not match and
-  stays unlinked, which is the honest answer for it.
+- **`kind` says where a provider's details came from, not where its host
+  lives.** `cloud` is preconfigured from the catalogue and needs only a
+  credential; `dynamic` comes from an agent; `static` is one an operator typed
+  in and filled out. A hand-typed address was being labelled `cloud` whenever
+  its hostname was public, which claimed a provenance it did not have. The
+  edit form offers the protocol for `static` only — the other two already know
+  it.
 - **A provider can be edited, and is dialled before it is saved.** Add, edit and
   remove on the Providers screen: name, address, protocol, kind, auth header and
   scheme, and the credential, all in one form opened by clicking the card. The
