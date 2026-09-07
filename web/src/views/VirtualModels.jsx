@@ -83,6 +83,7 @@ export function VirtualModels({ onUnauthorised }) {
   const [selected, setSelected] = useState(null);
   const [creating, setCreating] = useState("");
   const [sim, setSim] = useState(null);
+  const [dragging, setDragging] = useState(null);
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
@@ -103,6 +104,31 @@ export function VirtualModels({ onUnauthorised }) {
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const vm = data.vms.find((v) => v.id === selected) || data.vms[0] || null;
+
+  // Reordering writes `position` on every rule whose index moved. The whole
+  // set is renumbered rather than swapping two rows: positions are what "first
+  // match wins" reads, and leaving gaps or duplicates in them would make the
+  // order depend on the database's tie-breaking rather than on the operator.
+  const reorder = async (vm, from, to) => {
+    if (from === null || from === to) return;
+    const next = [...vm.rules];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    const ok = await attempt(
+      () =>
+        Promise.all(
+          next.map((r, position) =>
+            r.position === position
+              ? null
+              : api.patch(`/admin/rules/${r.id}`, { position }),
+          ),
+        ),
+      setError,
+      onUnauthorised,
+    );
+    setDragging(null);
+    if (ok) reload();
+  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -281,12 +307,32 @@ export function VirtualModels({ onUnauthorised }) {
               return (
                 <Card
                   key={r.id}
-                  style={{ borderLeft: "3px solid var(--accent)" }}
+                  draggable
+                  onDragStart={() => setDragging(i)}
+                  onDragEnd={() => setDragging(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    reorder(vm, dragging, i);
+                  }}
+                  style={{
+                    borderLeft: "3px solid var(--accent)",
+                    opacity: dragging === i ? 0.4 : 1,
+                    cursor: "grab",
+                  }}
                 >
                   <Row
                     gap={10}
                     style={{ marginBottom: 12, flexWrap: "nowrap" }}
                   >
+                    {/* First match wins, so the order is the rule set's
+                        meaning and not decoration. */}
+                    <span
+                      title="Drag to reorder — first match wins"
+                      style={{ color: "var(--fg-5)", cursor: "grab" }}
+                    >
+                      ⠿
+                    </span>
                     <Pill tone="accent" mono>
                       rule {i}
                     </Pill>
