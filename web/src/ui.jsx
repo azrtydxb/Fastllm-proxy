@@ -146,7 +146,7 @@ const TONES = {
   quiet: ["#1a1e24", "var(--line)", "var(--fg-3)"],
 };
 
-export function Pill({ tone = "neutral", mono, children, style }) {
+export function Pill({ tone = "neutral", mono, children, style, ...rest }) {
   const [bg, border, color] = TONES[tone] || TONES.neutral;
   return (
     <span
@@ -161,6 +161,7 @@ export function Pill({ tone = "neutral", mono, children, style }) {
         width: "fit-content",
         ...style,
       }}
+      {...rest}
     >
       {children}
     </span>
@@ -243,7 +244,7 @@ export function Label({ children, style }) {
   );
 }
 
-export function Muted({ children, style }) {
+export function Muted({ children, style, ...rest }) {
   return (
     <span
       style={{
@@ -251,15 +252,23 @@ export function Muted({ children, style }) {
         color: "var(--fg-4)",
         ...style,
       }}
+      {...rest}
     >
       {children}
     </span>
   );
 }
 
-export function Mono({ children, style }) {
+// `...rest` is load-bearing, not tidiness. Without it this component silently
+// swallowed `onClick` and `title`, which is what made `Renamable` unclickable
+// everywhere it was used — the control rendered, showed a text cursor, and did
+// nothing. A presentational wrapper that drops handlers fails in exactly that
+// way: no error, no warning, just a dead control.
+export function Mono({ children, style, ...rest }) {
   return (
-    <span style={{ fontFamily: "var(--mono)", ...style }}>{children}</span>
+    <span style={{ fontFamily: "var(--mono)", ...style }} {...rest}>
+      {children}
+    </span>
   );
 }
 

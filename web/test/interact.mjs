@@ -316,6 +316,49 @@ await click(byText("+ Add rule"));
   }
 }
 
+// Renaming. The control renders a text cursor and looks live; before this it
+// was inert everywhere it appeared, because the presentational wrapper it is
+// built from accepted only `children` and `style` and silently dropped the
+// `onClick`. Nothing failed — the click simply went nowhere.
+await goto("models");
+{
+  sent.length = 0;
+  const name = $("span").find(
+    (el) =>
+      el.children.length === 0 &&
+      el.textContent.trim() === "local-qwen" &&
+      el.style.cursor === "text",
+  );
+  check("a model name is a rename control", !!name, "no renamable span found");
+  if (name) {
+    await click(name);
+    const box = $("input").find((i) => i.value === "local-qwen");
+    check(
+      "clicking it opens an editor",
+      !!box,
+      "the click did nothing — a wrapper is dropping onClick again",
+    );
+    if (box) {
+      await fill(box, "renamed-qwen");
+      await act(async () => {
+        box.dispatchEvent(
+          new dom.window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+          }),
+        );
+      });
+      await settle();
+      const call = lastCall("PATCH", "/admin/provider-models/");
+      check(
+        "and saving sends the new name",
+        call?.body?.name === "renamed-qwen",
+        `sent ${JSON.stringify(call?.body)}`,
+      );
+    }
+  }
+}
+
 // Adding a target. The field is `provider_model_id`; sending `model_id` is a
 // 422 the server rejects wholesale, and that is exactly what shipped for
 // several days after the rename -- every "+ target" button in the app was
