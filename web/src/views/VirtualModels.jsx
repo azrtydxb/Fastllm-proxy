@@ -261,63 +261,6 @@ export function VirtualModels({ onUnauthorised }) {
                     First rule whose conditions match wins · conditions
                     AND&rsquo;d · targets ordered as a fallback chain
                   </div>
-                  {/* This is the *default* policy, and saying so matters:
-                      it governs the Defaults below, and each rule inherits it
-                      unless it sets its own. Labelled plainly "LOAD BALANCING"
-                      it read as one setting for the whole model, which stopped
-                      being true once rules carried their own. */}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      marginTop: 8,
-                    }}
-                  >
-                    <span
-                      style={{
-                        font: "600 10px var(--sans)",
-                        color: "var(--fg-5)",
-                        letterSpacing: "0.04em",
-                      }}
-                    >
-                      DEFAULT LOAD BALANCING
-                    </span>
-                    <select
-                      value={vm.policy || ""}
-                      onChange={(e) =>
-                        savePolicy(
-                          vm.id,
-                          e.target.value === "" ? null : e.target.value,
-                        )
-                      }
-                    >
-                      <option value="">
-                        weighted split — by target weight, deterministic per
-                        conversation
-                      </option>
-                      {POLICIES.map(([value, label]) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  {/* The question this screen kept raising: there are two
-                      levels, and only one of them is here. */}
-                  <div
-                    style={{
-                      font: "400 11px var(--sans)",
-                      color: "var(--fg-5)",
-                      marginTop: 6,
-                      maxWidth: 640,
-                    }}
-                  >
-                    Applies to the Defaults below; every rule inherits it until
-                    it picks its own. This chooses between <b>models</b> — how a
-                    single model balances its own providers is set on that model
-                    in Provider&nbsp;models.
-                  </div>
                 </div>
                 <Spacer />
                 <Button
@@ -425,7 +368,7 @@ export function VirtualModels({ onUnauthorised }) {
                       style={{ fontSize: 11, maxWidth: 260 }}
                     >
                       <option value="">
-                        inherit — {vm.policy || "weighted split"}
+                        same as Defaults — {vm.policy || "weighted split"}
                       </option>
                       {POLICIES.map(([value, label]) => (
                         <option key={value} value={value}>
@@ -578,10 +521,50 @@ export function VirtualModels({ onUnauthorised }) {
 
             <Card
               title="Defaults"
-              subtitle={`used when no rule matches · chosen between by ${
-                vm.policy || "weighted split"
-              } · the deployment fallback is appended after these`}
+              subtitle="used when no rule matches · the deployment fallback is appended after these"
             >
+              {/* The policy lives here, not in the header. Above the rules it
+                  read as governing them, which it does not: it governs this
+                  list, and is what a rule inherits until it sets its own. With
+                  one target here it does nothing at all, and saying so beats
+                  leaving a control whose effect is invisible. */}
+              <Row gap={8} style={{ marginBottom: 10, flexWrap: "nowrap" }}>
+                <span
+                  style={{
+                    font: "600 10px var(--sans)",
+                    color: "var(--fg-5)",
+                    letterSpacing: "0.04em",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  CHOSEN BETWEEN BY
+                </span>
+                <select
+                  value={vm.policy || ""}
+                  onChange={(e) =>
+                    savePolicy(
+                      vm.id,
+                      e.target.value === "" ? null : e.target.value,
+                    )
+                  }
+                  style={{ maxWidth: 460 }}
+                >
+                  <option value="">
+                    weighted split — by target weight, deterministic per
+                    conversation
+                  </option>
+                  {POLICIES.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <Muted>
+                  {vm.default_targets.length < 2
+                    ? "no effect with one target — it applies once there are two, and is what a rule inherits unless it picks its own"
+                    : "and what a rule inherits unless it picks its own"}
+                </Muted>
+              </Row>
               <Row gap={8}>
                 {vm.default_targets.length === 0 && (
                   <Muted>none configured</Muted>

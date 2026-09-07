@@ -417,18 +417,30 @@ await goto("models");
     "a PATCH was sent for input that cannot be read",
   );
 
-  // Load balancing, on the frontend model — where the things being balanced
-  // are. It sat on the provider model until migration 0038, and after the
-  // provider split that meant choosing between one backend.
+  // Load balancing, at both levels. There are two policy selects on this
+  // screen now and they write to different routes, so each is found by the
+  // wording of its inherit option rather than by "the first one with
+  // lowest-latency in it" — which silently picked whichever came first in the
+  // DOM and asserted against the wrong endpoint.
+  const policySelect = (kind) =>
+    $("select").find(
+      (el) =>
+        [...el.options].some((o) => o.value === "lowest-latency") &&
+        // A rule's inherit option reads "same as Defaults — weighted split",
+        // so "contains weighted split" matches both selects. The rule select
+        // is the one naming Defaults; the Defaults select is the one that
+        // does not.
+        ([...el.options].some((o) => o.textContent.includes("same as Defaults"))
+          ? kind === "rule"
+          : kind === "defaults"),
+    );
+
   sent.length = 0;
   await goto("routing");
-  const lb = $("select").find((el) =>
-    [...el.options].some((o) => o.value === "lowest-latency"),
-  );
-  await fill(lb, "lowest-latency");
+  await fill(policySelect("defaults"), "lowest-latency");
   const lbCall = lastCall("PATCH", "/admin/frontend-models/");
   check(
-    "a frontend model's policy is sent as policy",
+    "the Defaults policy is sent as policy on the frontend model",
     lbCall?.body?.policy === "lowest-latency",
     `sent ${JSON.stringify(lbCall?.body?.policy)}`,
   );
@@ -437,15 +449,28 @@ await goto("models");
   // PATCH treats an absent field as "leave alone".
   sent.length = 0;
   await goto("routing");
-  const lb2 = $("select").find((el) =>
-    [...el.options].some((o) => o.value === "lowest-latency"),
-  );
-  await fill(lb2, "");
+  await fill(policySelect("defaults"), "");
   check(
     "clearing it sends an explicit null",
     lastCall("PATCH", "/admin/frontend-models/")?.body?.policy === null,
     `sent ${JSON.stringify(lastCall("PATCH", "/admin/frontend-models/")?.body?.policy)}`,
   );
+
+  // A rule's own policy is a different object and a different route. Nothing
+  // asserted that before, so the two could have been wired to the same one.
+  sent.length = 0;
+  await goto("routing");
+  const ruleLb = policySelect("rule");
+  check("a rule has its own policy control", !!ruleLb);
+  if (ruleLb) {
+    await fill(ruleLb, "cheapest");
+    const rc = lastCall("PATCH", "/admin/rules/");
+    check(
+      "a rule's policy goes to /admin/rules/{id}, not to the frontend model",
+      rc?.body?.policy === "cheapest",
+      `sent ${JSON.stringify(rc?.body)}`,
+    );
+  }
 
   // Price sync: the preview, then the override that makes an already-priced
   // model reachable at all — including one stuck at a wrong 0.
