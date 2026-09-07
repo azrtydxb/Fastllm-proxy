@@ -36,7 +36,7 @@ DOMAINS: dict[str, list[str]] = {
     "fastllm-roles": [r"^/admin/roles"],
     "fastllm-models": [r"^/admin/provider-models", r"^/admin/providers", r"^/admin/provider-catalogue", r"^/admin/backends/", r"^/admin/fallback-model$"],
     "fastllm-routing": [r"^/admin/frontend-model", r"^/admin/rules", r"^/admin/rule-targets/",
-                        r"^/admin/routing/"],
+                        r"^/admin/routing/", r"^/admin/model-pool"],
     "fastllm-classifier": [r"^/admin/prompt-classes"],
     "fastllm-limits-budgets": [r"^/admin/limits$", r"^/admin/budgets$", r"^/limits/reconcile$",
                                r"^/admin/prices/"],

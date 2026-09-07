@@ -43,6 +43,12 @@ Only real traffic exercises that condition.
 | `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
 | `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`*, `model_pool_id`*, `weight`*, `position` |
 | `POST` | `/admin/frontend-models/{id}/rules` | Add a routing rule. First match wins, and the matching rule decides everything — every action is terminal | `position`, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`*, `match_condition` |
+| `DELETE` | `/admin/model-pool-members/{id}` | Remove one model from its pool | — |
+| `GET` | `/admin/model-pools` | Named groups of provider models, each with one policy for choosing between them | — |
+| `POST` | `/admin/model-pools` | Create a pool. Its name must not collide with a provider model or a frontend model, because routing resolves targets by name | `name`, `description`*, `policy`* |
+| `PATCH` | `/admin/model-pools/{id}` | Rename a pool, change its description, or change how it chooses between its members. A rename carries onto the targets pointing at it | `name`*, `description`*, `policy`* |
+| `DELETE` | `/admin/model-pools/{id}` | Delete a pool. Refused while any rule target or default still routes to it, rather than cascading into rules that point at a name which no longer resolves | — |
+| `POST` | `/admin/model-pools/{id}/members` | Add a provider model to a pool. The same model twice is refused: a member counted twice is one machine counted twice | `provider_model_id`, `weight`*, `position`* |
 | `POST` | `/admin/routing/dry-run` | Which rule would decide, and what the chain resolves to, without dispatching | `model`, `principal_id`*, `streaming`*, `prompt_tokens`*, `max_tokens`*, `headers`*, `class`*, `class_refines`* |
 | `DELETE` | `/admin/rule-targets/{id}` | Delete rule-targets id | — |
 | `PATCH` | `/admin/rules/{id}` | Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first | `position`*, `match_condition`*, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`* |
