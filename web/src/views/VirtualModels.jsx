@@ -261,9 +261,11 @@ export function VirtualModels({ onUnauthorised }) {
                     First rule whose conditions match wins · conditions
                     AND&rsquo;d · targets ordered as a fallback chain
                   </div>
-                  {/* Load balancing, named. The weights were always a load
-                      balancer; nothing said so, and there was no way to ask
-                      for anything but a weighted split. */}
+                  {/* This is the *default* policy, and saying so matters:
+                      it governs the Defaults below, and each rule inherits it
+                      unless it sets its own. Labelled plainly "LOAD BALANCING"
+                      it read as one setting for the whole model, which stopped
+                      being true once rules carried their own. */}
                   <div
                     style={{
                       display: "flex",
@@ -279,7 +281,7 @@ export function VirtualModels({ onUnauthorised }) {
                         letterSpacing: "0.04em",
                       }}
                     >
-                      LOAD BALANCING
+                      DEFAULT LOAD BALANCING
                     </span>
                     <select
                       value={vm.policy || ""}
@@ -300,6 +302,21 @@ export function VirtualModels({ onUnauthorised }) {
                         </option>
                       ))}
                     </select>
+                  </div>
+                  {/* The question this screen kept raising: there are two
+                      levels, and only one of them is here. */}
+                  <div
+                    style={{
+                      font: "400 11px var(--sans)",
+                      color: "var(--fg-5)",
+                      marginTop: 6,
+                      maxWidth: 640,
+                    }}
+                  >
+                    Applies to the Defaults below; every rule inherits it until
+                    it picks its own. This chooses between <b>models</b> — how a
+                    single model balances its own providers is set on that model
+                    in Provider&nbsp;models.
                   </div>
                 </div>
                 <Spacer />
@@ -561,7 +578,9 @@ export function VirtualModels({ onUnauthorised }) {
 
             <Card
               title="Defaults"
-              subtitle="used when no rule matches · the deployment fallback is appended after these"
+              subtitle={`used when no rule matches · chosen between by ${
+                vm.policy || "weighted split"
+              } · the deployment fallback is appended after these`}
             >
               <Row gap={8}>
                 {vm.default_targets.length === 0 && (
