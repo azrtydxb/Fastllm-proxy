@@ -23,6 +23,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `GET` | `/admin/audit` | The change log, newest first, keyset-paginated | — |
 | `GET` | `/admin/fleet` | What each proxy replica reports, kept per replica and never merged | — |
 | `GET` | `/admin/health` | Read health | — |
+| `GET` | `/admin/nodes` | The hosts registering their own endpoints, rolled up per node. An agent is not a row: it is a `node` several dynamic providers share, and its lease is what says it is alive | — |
 | `GET` | `/admin/timeseries` | Bucketed traffic, latency and spend. Empty buckets come back as explicit zeros; latency is null where there was nothing to measure | — |
 | `GET` | `/admin/usage` | Aggregate usage and spend, grouped by model, principal, frontend model or day | — |
 | `GET` | `/metrics` | Prometheus text. Unauthenticated | — |
