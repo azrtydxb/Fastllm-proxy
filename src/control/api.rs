@@ -3471,6 +3471,17 @@ struct RuleView {
     /// How this rule chooses among its own targets. `None` means the frontend
     /// model's, and then the weighted split.
     policy: Option<String>,
+    /// `route`, `deny` or `jump`.
+    action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deny_status: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deny_message: Option<String>,
+    /// The frontend model a `jump` continues in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jump_to: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
     #[serde(flatten)]
     match_condition: MatchConditionJson,
     targets: Vec<TargetView>,
@@ -3512,9 +3523,22 @@ async fn list_virtual_models(
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing frontend models", &e))?;
-    type RuleRow = (Uuid, Uuid, i32, serde_json::Value, Option<String>);
+    type RuleRow = (
+        Uuid,
+        Uuid,
+        i32,
+        serde_json::Value,
+        Option<String>,
+        String,
+        Option<i32>,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+    );
     let rules: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, frontend_model_id, position, match_json, policy FROM routing_rules
+        "SELECT id, frontend_model_id, position, match_json, policy, action, \
+                deny_status, deny_message, jump_to, tag
+         FROM routing_rules
          ORDER BY frontend_model_id, position",
     )
     .fetch_all(&ctx.pool)
@@ -3560,23 +3584,41 @@ async fn list_virtual_models(
                 let rule_views = rules
                     .iter()
                     .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
-                    .map(|(rule_id, _, position, match_json, rule_policy)| {
-                        // A rule whose `match_json` cannot parse is still
-                        // listed rather than hidden — an operator diagnosing
-                        // why `build_snapshot` dropped it (see that
-                        // function's doc comment) needs to see it exists,
-                        // not have it vanish from both the database view
-                        // and the runtime snapshot.
-                        let match_condition: MatchConditionJson =
-                            serde_json::from_value(match_json.clone()).unwrap_or_default();
-                        RuleView {
-                            id: *rule_id,
-                            position: *position,
-                            policy: rule_policy.clone(),
-                            match_condition,
-                            targets: to_targets(*rule_id, &rule_targets),
-                        }
-                    })
+                    .map(
+                        |(
+                            rule_id,
+                            _,
+                            position,
+                            match_json,
+                            rule_policy,
+                            action,
+                            deny_status,
+                            deny_message,
+                            jump_to,
+                            tag,
+                        )| {
+                            // A rule whose `match_json` cannot parse is still
+                            // listed rather than hidden — an operator diagnosing
+                            // why `build_snapshot` dropped it (see that
+                            // function's doc comment) needs to see it exists,
+                            // not have it vanish from both the database view
+                            // and the runtime snapshot.
+                            let match_condition: MatchConditionJson =
+                                serde_json::from_value(match_json.clone()).unwrap_or_default();
+                            RuleView {
+                                id: *rule_id,
+                                position: *position,
+                                policy: rule_policy.clone(),
+                                action: action.clone(),
+                                deny_status: *deny_status,
+                                deny_message: deny_message.clone(),
+                                jump_to: *jump_to,
+                                tag: tag.clone(),
+                                match_condition,
+                                targets: to_targets(*rule_id, &rule_targets),
+                            }
+                        },
+                    )
                     .collect();
                 FrontendModelView {
                     id: vm_id,
@@ -3807,8 +3849,122 @@ struct NewRule {
     /// model's, and then the weighted split.
     #[serde(default)]
     policy: Option<String>,
+    /// `route` (the default), `deny` or `jump`.
+    #[serde(default)]
+    action: Option<String>,
+    /// For `deny`: the status to refuse with, and why. 4xx only.
+    #[serde(default)]
+    deny_status: Option<i32>,
+    #[serde(default)]
+    deny_message: Option<String>,
+    /// For `jump`: the frontend model whose chain to continue in.
+    #[serde(default)]
+    jump_to: Option<Uuid>,
+    /// A label carried onto the usage rows this rule produced.
+    #[serde(default)]
+    tag: Option<String>,
     #[serde(flatten)]
     match_condition: MatchConditionJson,
+}
+
+/// Check an action's own fields, and refuse a `jump` that would loop.
+///
+/// The loop check runs here rather than on the request path because a cycle is
+/// a configuration error, and a request should not be paying to discover one.
+/// The proxy still caps how far it will follow a chain — a snapshot can arrive
+/// from a hand-edited database — but that is a backstop, not the mechanism.
+async fn validated_action(
+    ctx: &Ctx,
+    frontend_model_id: Uuid,
+    action: Option<&str>,
+    deny_status: Option<i32>,
+    jump_to: Option<Uuid>,
+) -> Result<String, ApiError> {
+    let action = action
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .unwrap_or("route");
+    match action {
+        "route" => {
+            if deny_status.is_some() || jump_to.is_some() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "deny_status and jump_to belong to the deny and jump actions; a route rule \
+                     sends the request to its targets"
+                        .to_string(),
+                ));
+            }
+        }
+        "deny" => {
+            let Some(status) = deny_status else {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "a deny rule needs a deny_status; without one it would refuse with a status \
+                     nobody chose"
+                        .to_string(),
+                ));
+            };
+            if !(400..500).contains(&status) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "deny_status must be 4xx, not {status}: a refusal answered with a 5xx \
+                         tells every client library to retry something that will never be \
+                         allowed, and reads as the gateway failing rather than as policy working"
+                    ),
+                ));
+            }
+        }
+        "jump" => {
+            let Some(target) = jump_to else {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "a jump rule needs a jump_to naming the frontend model to continue in"
+                        .to_string(),
+                ));
+            };
+            if target == frontend_model_id {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "a frontend model cannot jump to itself".to_string(),
+                ));
+            }
+            // Walk the jumps already stored, from the destination. Reaching
+            // this rule's own frontend model means adding it would close a
+            // loop.
+            let mut seen = std::collections::HashSet::new();
+            let mut frontier = vec![target];
+            while let Some(id) = frontier.pop() {
+                if id == frontend_model_id {
+                    return Err(api_error(
+                        StatusCode::BAD_REQUEST,
+                        "that jump would make a loop: the frontend model it points at already \
+                         leads back here"
+                            .to_string(),
+                    ));
+                }
+                if !seen.insert(id) {
+                    continue;
+                }
+                let next: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT jump_to FROM routing_rules \
+                     WHERE frontend_model_id = $1 AND jump_to IS NOT NULL",
+                )
+                .bind(id)
+                .fetch_all(&ctx.pool)
+                .await
+                .map_err(|e| db_error("checking for a routing loop", &e))?;
+                frontier.extend(next);
+            }
+        }
+        other => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("unknown action {other:?}; expected route, deny or jump"),
+            ));
+        }
+    }
+    Ok(action.to_string())
 }
 
 async fn post_rule(
@@ -3824,16 +3980,36 @@ async fn post_rule(
     crate::routing::validate_match_json(&body.match_condition)
         .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
     let policy = validated_policy(body.policy.as_deref())?;
+    let action = validated_action(
+        &ctx,
+        frontend_model_id,
+        body.action.as_deref(),
+        body.deny_status,
+        body.jump_to,
+    )
+    .await?;
+    let tag = body
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO routing_rules (frontend_model_id, position, match_json, policy)
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO routing_rules (frontend_model_id, position, match_json, policy, \
+                                    action, deny_status, deny_message, jump_to, tag)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(frontend_model_id)
     .bind(body.position)
     .bind(match_json)
     .bind(policy)
+    .bind(&action)
+    .bind(body.deny_status)
+    .bind(&body.deny_message)
+    .bind(body.jump_to)
+    .bind(&tag)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -4200,6 +4376,21 @@ struct DryRunResult {
     matched_rule: Option<usize>,
     /// `false` when the name is a provider model, which resolves to itself.
     frontend_model: bool,
+    /// Set when a rule would refuse the request outright. `candidates` is
+    /// then empty, and the reason it is empty is this rather than "nothing is
+    /// serving" — a distinction a rule author needs, since one is their rule
+    /// working and the other is an outage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    denied: Option<DryRunDenial>,
+    /// The tag the matching rule puts on this request's usage row, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DryRunDenial {
+    status: u16,
+    message: String,
 }
 
 /// `POST /admin/routing/dry-run`: what would this request route to?
@@ -4240,6 +4431,8 @@ async fn routing_dry_run(
             candidates: vec![body.model.clone()],
             matched_rule: None,
             frontend_model: false,
+            denied: None,
+            tag: None,
         }));
     };
 
@@ -4269,13 +4462,21 @@ async fn routing_dry_run(
     // The same prefix hash a real request would produce is unavailable without
     // its body, and weighted targets are chosen from it. Zero is deterministic
     // and documented rather than random, so a dry run is reproducible.
-    let candidates = vm.resolve_candidates(&facts, 0, &registry);
     let matched_rule = vm.rules.iter().position(|r| r.matches(&facts, &registry));
+    let (candidates, denied, tag) = match vm.decide(&facts, 0, &registry, &snapshot.frontend_models)
+    {
+        crate::routing::Decision::Route { candidates, tag } => (candidates, None, tag),
+        crate::routing::Decision::Deny { status, message } => {
+            (Vec::new(), Some(DryRunDenial { status, message }), None)
+        }
+    };
 
     Ok(Json(DryRunResult {
         candidates,
         matched_rule,
         frontend_model: true,
+        denied,
+        tag,
     }))
 }
 
@@ -6060,6 +6261,7 @@ async fn post_usage(
     let mut status: Vec<Option<i16>> = Vec::with_capacity(submitted);
     let mut requested_model: Vec<Option<String>> = Vec::with_capacity(submitted);
     let mut backend_ids: Vec<Option<Uuid>> = Vec::with_capacity(submitted);
+    let mut tags: Vec<Option<String>> = Vec::with_capacity(submitted);
     let mut reported_cost: Vec<Option<i64>> = Vec::with_capacity(submitted);
     let mut usage_reported: Vec<bool> = Vec::with_capacity(submitted);
     let mut refusal: Vec<Option<String>> = Vec::with_capacity(submitted);
@@ -6074,6 +6276,7 @@ async fn post_usage(
         status.push(e.status.map(|v| v as i16));
         requested_model.push(e.requested_model.clone());
         backend_ids.push(e.backend_id);
+        tags.push(e.tag.clone());
         reported_cost.push(e.cost_micros.map(|c| c.min(i64::MAX as u64) as i64));
         usage_reported.push(e.usage_reported);
         // Serialised through the enum rather than formatted ad hoc, so the
@@ -6107,19 +6310,19 @@ async fn post_usage(
         "WITH input AS (
             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::bigint[], $4::bigint[], \
                 $5::timestamptz[], $6::int[], $7::int[], $8::smallint[], $9::text[], \
-                $10::bigint[], $11::boolean[], $12::text[], $13::uuid[])
+                $10::bigint[], $11::boolean[], $12::text[], $13::uuid[], $14::text[])
                 AS t(principal_id, model_name, prompt_tokens, completion_tokens, at,
                      duration_ms, ttft_ms, status, requested_model, reported_cost,
-                     usage_reported, refusal, backend_id)
+                     usage_reported, refusal, backend_id, tag)
          )
          INSERT INTO usage_events (principal_id, provider_model_id, model_backend_id, model_name,
                                    provider_name, prompt_tokens, completion_tokens, at,
                                    duration_ms, ttft_ms, status, requested_model, usage_reported,
-                                   refusal, cost_micros)
+                                   refusal, tag, cost_micros)
          SELECT i.principal_id, m.id, mb.id, i.model_name, pr.name,
                 i.prompt_tokens, i.completion_tokens, i.at,
                 i.duration_ms, i.ttft_ms, i.status, i.requested_model, i.usage_reported,
-                i.refusal,
+                i.refusal, i.tag,
                 -- Computed here, from the price at the time the request
                 -- happened, and stored. Deriving it on read would let a later
                 -- price change silently rewrite history; what a request cost is
@@ -6192,6 +6395,7 @@ async fn post_usage(
     .bind(&usage_reported)
     .bind(&refusal)
     .bind(&backend_ids)
+    .bind(&tags)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| db_error("usage ingestion", &e))?;
@@ -8787,6 +8991,11 @@ mod tests {
             Json(NewRule {
                 position: 0,
                 policy: None,
+                action: None,
+                deny_status: None,
+                deny_message: None,
+                jump_to: None,
+                tag: None,
                 match_condition: MatchConditionJson {
                     roles: vec!["canary".into()],
                     ..Default::default()
@@ -9120,6 +9329,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            tag: None,
             backend_id: None,
             cost_micros: None,
         }
@@ -10580,6 +10790,11 @@ mod tests {
             Json(NewRule {
                 position: 0,
                 policy: None,
+                action: None,
+                deny_status: None,
+                deny_message: None,
+                jump_to: None,
+                tag: None,
                 match_condition: MatchConditionJson {
                     stream: Some(true),
                     ..Default::default()

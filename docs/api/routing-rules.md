@@ -52,6 +52,54 @@ Anything not detected as an engine falls back to this replica's own count, and
 so does a backend whose last reading has gone stale, so the condition degrades
 to its old behaviour rather than to "idle".
 
+## What a rule does when it matches
+
+Every rule has an **action**, and every action is terminal — the matching rule
+decides everything about the request, which is what lets a dry-run answer
+"which rule decided this" with one rule name instead of a trace.
+
+| action | what it does |
+| --- | --- |
+| `route` (default) | send the request to this rule's targets, in the order the policy below produces |
+| `deny` | refuse, with `deny_status` (4xx only) and `deny_message` |
+| `jump` | continue evaluation in another frontend model's chain, named by `jump_to` |
+
+`route`, `failover`, `balance` and `split` are deliberately **not** four
+actions: all four mean "order a chain, try the head, fall down the list on
+failure" and differ only in how the head is picked, which is what `policy`
+says.
+
+**`deny` is 4xx only**, refused at write time otherwise. A refusal answered
+with a 5xx tells every client library in the world to retry a request that will
+never be allowed, and reads in an error-rate chart as the gateway failing
+rather than as policy working.
+
+**A `jump` that would close a loop is refused when you create it**, by walking
+the jumps already stored. The proxy also caps how far it will follow a chain,
+because a snapshot can arrive from a hand-edited database — but that is a
+backstop, not the mechanism. A jump whose destination has since been *deleted*
+is treated as no match, so the request falls through to the next rule; failing
+instead would turn deleting one frontend model into an outage for every other
+one that referenced it.
+
+Any rule may also carry a **`tag`**, which is copied onto the usage rows that
+rule produced. That is a field rather than an action: a rule that tags still
+has to route, or there would be no usage row to label. It is what makes spend
+answerable per *decision* rather than only per model.
+
+```jsonc
+// Refuse rather than route: expressible for the first time.
+{"position": 0, "roles": ["batch"], "min_prompt_tokens": 200000,
+ "action": "deny", "deny_status": 413,
+ "deny_message": "batch keys are capped at 200k-token prompts"}
+
+// Shared policy, written once and referenced.
+{"position": 0, "action": "jump", "jump_to": "<house-policy id>"}
+
+// Attribute this rule's spend without changing where it routes.
+{"position": 1, "class": "coding", "targets": ["big"], "tag": "team-research"}
+```
+
 ## Choosing among a rule's targets
 
 By default a rule's targets are a **weighted split**: a deterministic pick on

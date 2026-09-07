@@ -590,6 +590,24 @@ pub struct WireRoutingRule {
     /// that learns a new policy must not stop an older proxy routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
+    /// `route`, `deny` or `jump`. Absent is `route`, which is what every rule
+    /// meant before migration 0047 — so a snapshot from an older control
+    /// plane decodes with the meaning it was written with.
+    ///
+    /// An action this build does not know also reads as `route`: refusing to
+    /// decode would stop an older proxy routing at all, where routing is the
+    /// behaviour it already had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_message: Option<String>,
+    /// The frontend model a `jump` continues in, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -827,6 +845,26 @@ impl Snapshot {
                             utc_offset_minutes: r.conditions.time.utc_offset_minutes,
                             class: r.conditions.class.class.clone(),
                             policy: r.policy.map(|p| p.as_str().to_string()),
+                            action: match &r.action {
+                                crate::routing::RuleAction::Route => None,
+                                crate::routing::RuleAction::Deny { .. } => Some("deny".into()),
+                                crate::routing::RuleAction::Jump(_) => Some("jump".into()),
+                            },
+                            deny_status: match &r.action {
+                                crate::routing::RuleAction::Deny { status, .. } => Some(*status),
+                                _ => None,
+                            },
+                            deny_message: match &r.action {
+                                crate::routing::RuleAction::Deny { message, .. } => {
+                                    Some(message.clone())
+                                }
+                                _ => None,
+                            },
+                            jump_to: match &r.action {
+                                crate::routing::RuleAction::Jump(name) => Some(name.clone()),
+                                _ => None,
+                            },
+                            tag: r.tag.clone(),
                             targets: r
                                 .targets
                                 .iter()
@@ -1025,6 +1063,29 @@ impl Snapshot {
                                         .policy
                                         .as_deref()
                                         .and_then(crate::router::Policy::parse),
+                                    // Anything unrecognised is `route`: see
+                                    // `WireRoutingRule::action`. A `deny` with
+                                    // no status and a `jump` with no
+                                    // destination are the same case — the
+                                    // field that gives the action meaning is
+                                    // missing, so it has none.
+                                    action: match r.action.as_deref() {
+                                        Some("deny") => match r.deny_status {
+                                            Some(status) => crate::routing::RuleAction::Deny {
+                                                status,
+                                                message: r.deny_message.clone().unwrap_or_else(
+                                                    || "refused by policy".to_string(),
+                                                ),
+                                            },
+                                            None => crate::routing::RuleAction::Route,
+                                        },
+                                        Some("jump") => match r.jump_to.clone() {
+                                            Some(name) => crate::routing::RuleAction::Jump(name),
+                                            None => crate::routing::RuleAction::Route,
+                                        },
+                                        _ => crate::routing::RuleAction::Route,
+                                    },
+                                    tag: r.tag.clone(),
                                     targets: r
                                         .targets
                                         .into_iter()

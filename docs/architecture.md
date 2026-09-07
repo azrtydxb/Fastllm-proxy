@@ -217,6 +217,14 @@ split exists to prevent.
   With classes, the fast tier is ~115µs of pure CPU; the refined tier is loaded
   only if some rule names a class that refines a fast-tier one, so a deployment
   that does not use it cannot pay for it. See [semantic routing](classifier.md).
+- **Every routing rule is terminal.** A rule that matches decides everything
+  about the request — route it, refuse it, or delegate the whole decision to
+  another frontend model's chain. Firewalls have non-terminating rules that
+  mark and continue; that is deliberately not copied, because "first match
+  wins and the matching rule decided" is what lets `/admin/routing/dry-run`
+  answer with one rule name rather than a trace. Modifiers (a usage `tag`, a
+  target-selection `policy`) are fields on a routing rule, never separate
+  passes.
 - **Two routing conditions are deliberately non-deterministic.**
   `max_inflight_per_backend` reads live in-flight counters — the engine's own,
   scraped from its Prometheus `/metrics` by each proxy in the background, so

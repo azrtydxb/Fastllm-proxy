@@ -37,7 +37,7 @@ change here — it is the only way to check a rule does what you meant.
 | `PATCH` | `/admin/frontend-models/{id}` | Change how a frontend model chooses between its targets | `name`*, `policy`* |
 | `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
 | `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`, `weight`*, `position` |
-| `POST` | `/admin/frontend-models/{id}/rules` | Create frontend-models id rules | `position`, `policy`*, `match_condition` |
+| `POST` | `/admin/frontend-models/{id}/rules` | Add a routing rule. First match wins, and the matching rule decides everything — every action is terminal | `position`, `policy`*, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`*, `match_condition` |
 | `POST` | `/admin/routing/dry-run` | Which rule would decide, and what the chain resolves to, without dispatching | `model`, `principal_id`*, `streaming`*, `prompt_tokens`*, `max_tokens`*, `headers`*, `class`*, `class_refines`* |
 | `DELETE` | `/admin/rule-targets/{id}` | Delete rule-targets id | — |
 | `PATCH` | `/admin/rules/{id}` | Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first | `policy`*, `position`* |
@@ -47,6 +47,25 @@ change here — it is the only way to check a rule does what you meant.
 *\* optional field*
 
 <!-- END GENERATED: endpoints -->
+
+## Actions
+
+Every rule has one, and every one is terminal — no rule contributes and passes
+on, so `dry-run` names a single deciding rule.
+
+- `route` (default) — the rule's targets, ordered by its `policy`.
+- `deny` — refuse. Needs `deny_status`, **4xx only** (a 5xx would have every
+  client library retrying something that is never going to be allowed).
+- `jump` — continue in another frontend model's chain (`jump_to`), so shared
+  policy is written once. A loop is refused at write time; a destination that
+  was deleted is treated as no match and falls through.
+
+`tag` is a field, not an action: it labels the usage rows the rule produced,
+so spend is answerable per decision. A rule that tags still routes.
+
+A `deny` shows up in `dry-run` as a `denied` object with the status and
+message, and an empty `candidates` — which is a different thing from "nothing
+is serving", and the distinction is the point.
 
 ## Two levels of balancing, and they are different questions
 

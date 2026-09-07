@@ -312,7 +312,7 @@ fn resolve_target_models(
     facts: &crate::routing::RequestFacts<'_>,
     prefix: u64,
     registry: &Registry,
-) -> Result<Vec<String>, Response<ResBody>> {
+) -> Result<(Vec<String>, Option<String>), Response<ResBody>> {
     let Some(vm) = snapshot.frontend_models.get(requested_model) else {
         // `File` mode has no frontend models at all — routing is a control
         // plane feature, and a config file defines models directly. So a
@@ -325,7 +325,7 @@ fn resolve_target_models(
         // 0034 gives every provider model one. So this is the File-mode
         // carve-out and not a hole in the rule below.
         if snapshot.frontend_models.is_empty() {
-            return Ok(vec![requested_model.to_string()]);
+            return Ok((vec![requested_model.to_string()], None));
         }
         // A frontend model is the only name a client may use.
         //
@@ -354,13 +354,28 @@ fn resolve_target_models(
             ),
         ));
     };
-    let candidates = vm.resolve_candidates(facts, prefix, registry);
+    // `decide` rather than `resolve_candidates` because a rule may now refuse
+    // outright, and because a jump has to be able to reach the other frontend
+    // models.
+    let (candidates, tag) = match vm.decide(facts, prefix, registry, &snapshot.frontend_models) {
+        crate::routing::Decision::Route { candidates, tag } => (candidates, tag),
+        // A refusal is the rule working, not the gateway failing, so it
+        // carries the operator's own status and message rather than
+        // anything synthesised here.
+        crate::routing::Decision::Deny { status, message } => {
+            return Err(error_response(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+                "refused_by_policy",
+                &message,
+            ));
+        }
+    };
     if candidates.is_empty() {
         // The deployment-wide fallback, if there is one. A frontend model whose
         // targets have all gone is exactly the case a fallback exists for, and
         // reaching for it here is cheaper than telling the caller no.
         if let Some(fallback) = snapshot.fallback_model.as_ref() {
-            return Ok(vec![fallback.clone()]);
+            return Ok((vec![fallback.clone()], tag));
         }
         // 503, not 404.
         //
@@ -384,7 +399,7 @@ fn resolve_target_models(
             ),
         ));
     }
-    Ok(candidates)
+    Ok((candidates, tag))
 }
 
 /// One span per request, carrying the fields worth asking a trace about.
@@ -578,7 +593,7 @@ async fn proxy_request(
         class: class_name,
         class_refines,
     };
-    let candidates =
+    let (candidates, routing_tag) =
         match resolve_target_models(&requested_model, snapshot, &facts, prefix, &registry) {
             Ok(c) => c,
             Err(rejection) => {
@@ -1074,6 +1089,7 @@ async fn proxy_request(
                                     != candidate_model.as_str())
                                 .then(|| requested_model.to_string()),
                                 backend_id: backend.backend_id,
+                                tag: routing_tag.clone(),
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             }
@@ -1119,6 +1135,7 @@ async fn proxy_request(
                                     != candidate_model.as_str())
                                 .then(|| requested_model.to_string()),
                                 backend_id: backend.backend_id,
+                                tag: routing_tag.clone(),
                                 status: status.as_u16(),
                                 reporter: state.usage.clone(),
                             });
@@ -1310,6 +1327,9 @@ fn record_refusal(
         ttft_ms: None,
         status: Some(status.as_u16()),
         requested_model: None,
+        // A refusal has no rule tag to carry: the ones recorded here are
+        // rejections before routing decided anything.
+        tag: None,
         // A refusal never reached a backend, so there is no attachment to
         // price it against — and nothing to price either.
         backend_id: None,
@@ -1461,6 +1481,8 @@ struct UsageTracking {
     requested_model: Option<String>,
     /// Which attachment answered; see `usage::UsageEvent::backend_id`.
     backend_id: Option<uuid::Uuid>,
+    /// The routing rule's `tag`, carried onto the usage row.
+    tag: Option<String>,
     status: u16,
     reporter: UsageReporter,
 }
@@ -1505,6 +1527,7 @@ impl UsageTracking {
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
             status: Some(self.status),
             requested_model: self.requested_model,
+            tag: self.tag,
             backend_id: self.backend_id,
             cost_micros: tokens.as_ref().and_then(|t| t.cost_micros),
         });
@@ -3096,6 +3119,7 @@ model_list:
         };
         let target = resolve_target_models("vm", &snapshot, &facts, 0, &registry)
             .expect("the frontend model has a viable default target")
+            .0
             .remove(0);
         assert_eq!(target, "concrete-a");
 
@@ -3132,6 +3156,7 @@ model_list:
         };
         let target = resolve_target_models("concrete-a", &snapshot, &facts, 0, &registry)
             .unwrap()
+            .0
             .remove(0);
         assert_eq!(target, "concrete-a");
     }

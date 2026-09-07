@@ -39,6 +39,8 @@ pub struct UsageSink {
     /// Which attachment answered, so the control plane can price it at that
     /// provider's rate. See `usage::UsageEvent::backend_id`.
     pub backend_id: Option<uuid::Uuid>,
+    /// The routing rule's `tag`, carried onto the usage row.
+    pub tag: Option<String>,
     pub status: u16,
     pub reporter: UsageReporter,
 }
@@ -77,6 +79,7 @@ impl UsageSink {
             ttft_ms: timing.and_then(|t| t.ttft_ms()),
             status: Some(self.status),
             requested_model: self.requested_model,
+            tag: self.tag,
             backend_id: self.backend_id,
             // A translated backend's usage comes from the translator, which
             // reports tokens and not money; the control plane prices it.

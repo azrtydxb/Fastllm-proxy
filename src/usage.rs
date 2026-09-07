@@ -88,6 +88,11 @@ pub struct UsageEvent {
     /// one that actually answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    /// The `tag` of the routing rule that decided this request, when it had
+    /// one — for attributing spend to the decision that caused it rather than
+    /// only to the model that served it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     /// Which `model_backends` row served this, echoed from
     /// `snapshot::BackendDef::backend_id`.
     ///
@@ -348,6 +353,7 @@ mod tests {
             ttft_ms: None,
             status: None,
             requested_model: None,
+            tag: None,
             backend_id: None,
             cost_micros: None,
         }

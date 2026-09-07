@@ -110,6 +110,20 @@ type ResolveFn =
 type ResolveCandidatesFn =
     for<'a> fn(&'a FrontendModelDef, &'a RequestFacts<'a>, u64, &'a Registry) -> Vec<String>;
 
+/// And for `decide`, which is what `proxy_request` calls now — the two above
+/// are wrappers over it. It takes the frontend model map by reference for
+/// `RuleAction::Jump`; that is another slice of the same in-memory snapshot,
+/// not a handle to anything that does I/O, and it is `&` rather than owned so
+/// this cannot quietly become a lookup.
+#[allow(dead_code)]
+type DecideFn = for<'a> fn(
+    &'a FrontendModelDef,
+    &'a RequestFacts<'a>,
+    u64,
+    &'a Registry,
+    &'a HashMap<String, FrontendModelDef>,
+) -> fastllm_proxy::routing::Decision;
+
 /// Same reasoning again for `FrontendModelDef::resolve` (P1 routing rules,
 /// `src/routing.rs`): were it `async fn`, or were `&Registry` swapped for a
 /// pool/client, this coercion fails to compile. `&Registry` itself stays in
@@ -119,6 +133,7 @@ type ResolveCandidatesFn =
 const _VIRTUAL_MODEL_RESOLVE_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveFn = FrontendModelDef::resolve;
 const _VIRTUAL_MODEL_RESOLVE_CANDIDATES_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveCandidatesFn =
     FrontendModelDef::resolve_candidates;
+const _VIRTUAL_MODEL_DECIDE_IS_SYNC_AND_TAKES_NO_HANDLE: DecideFn = FrontendModelDef::decide;
 
 /// Same reasoning again for `TailBuffer::push` (P3 usage accounting's
 /// per-frame side, `src/tail_buffer.rs`): were it `async fn`, or were it
@@ -227,22 +242,22 @@ fn limiter_check_body_contains_no_await_or_io_tokens() {
 /// snapshot time, per `src/routing.rs`'s doc comments — reconciled *into*
 /// the snapshot ahead of time, not looked up per request.
 ///
-/// Scans the candidate-list form rather than `resolve`, which is now a
-/// three-line wrapper over it: guarding the wrapper would say nothing about
-/// the function that does the work.
+/// Scans `decide`, which does the work: `resolve` and `resolve_candidates` are
+/// both wrappers over it now, and guarding a wrapper would say nothing about
+/// the function underneath.
 #[test]
 fn frontend_model_resolve_body_contains_no_await_or_io_tokens() {
     let source = include_str!("../src/routing.rs");
-    let body = extract_fn_body(source, "pub fn resolve_candidates(");
+    let body = extract_fn_body(source, "pub fn decide(");
 
     assert!(
         body.contains("order_candidates"),
-        "sanity check failed: `FrontendModelDef::resolve_candidates` no longer calls \
+        "sanity check failed: `FrontendModelDef::decide` no longer calls \
          `order_candidates`; either the function was rewritten (update this \
          test to match) or the extraction above grabbed the wrong span"
     );
 
-    assert_no_await_or_io_tokens(&body, "FrontendModelDef::resolve_candidates");
+    assert_no_await_or_io_tokens(&body, "FrontendModelDef::decide");
 }
 
 /// `TailBuffer::push` (P3 usage accounting's per-frame side): a bounded

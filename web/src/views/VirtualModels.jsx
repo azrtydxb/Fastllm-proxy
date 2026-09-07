@@ -365,6 +365,23 @@ export function VirtualModels({ onUnauthorised }) {
                     <Pill tone="accent" mono>
                       rule {i}
                     </Pill>
+                    {r.action === "deny" && (
+                      <Pill tone="warn" mono>
+                        deny {r.deny_status}
+                      </Pill>
+                    )}
+                    {r.action === "jump" && (
+                      <Pill tone="quiet" mono>
+                        jump →{" "}
+                        {data.vms.find((o) => o.id === r.jump_to)?.name ||
+                          "deleted"}
+                      </Pill>
+                    )}
+                    {r.tag && (
+                      <Pill tone="quiet" mono>
+                        tag {r.tag}
+                      </Pill>
+                    )}
                     <Muted>
                       {chips.length === 0
                         ? "no conditions — matches everything that reaches it"
@@ -525,7 +542,13 @@ export function VirtualModels({ onUnauthorised }) {
             })}
 
             <AddRule
-              vm={vm}
+              vm={{
+                ...vm,
+                // Every other frontend model, for a `jump` destination. A
+                // model cannot jump to itself, and the API refuses a jump
+                // that would close a loop.
+                siblings: data.vms.filter((o) => o.id !== vm.id),
+              }}
               models={data.models}
               onError={setError}
               onDone={reload}
@@ -786,9 +809,17 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
         // condition and answers 201 — a catch-all rule with no error anywhere.
         const rule = await api.post(`/admin/frontend-models/${vm.id}/rules`, {
           position: vm.rules.length,
+          // Every action is terminal, so this is the whole of what the rule
+          // does once it matches — there is no second pass.
+          action: c.action || undefined,
+          deny_status:
+            c.action === "deny" ? Number(c.deny_status || 403) : undefined,
+          deny_message: c.action === "deny" ? c.deny_message : undefined,
+          jump_to: c.action === "jump" ? c.jump_to : undefined,
+          tag: c.tag || undefined,
           ...match_condition,
         });
-        if (c.model_id) {
+        if (c.model_id && c.action !== "deny" && c.action !== "jump") {
           await api.post(`/admin/rules/${rule.id}/targets`, {
             model_id: c.model_id,
             weight: 100,
@@ -813,6 +844,65 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
         left blank is simply not part of the condition.
       </Muted>
       <Grid cols={4} gap={10} style={{ marginTop: 12 }}>
+        <Field
+          label="ACTION"
+          hint="route sends it to the targets below; deny refuses; jump continues in another frontend model's rules"
+        >
+          <select
+            value={c.action || ""}
+            onChange={(e) => set({ action: e.target.value })}
+          >
+            <option value="">route — to this rule's targets</option>
+            <option value="deny">deny — refuse with a status</option>
+            <option value="jump">jump — continue in another chain</option>
+          </select>
+        </Field>
+        {c.action === "deny" && (
+          <>
+            <Field
+              label="DENY STATUS"
+              hint="4xx only — a 5xx would tell every client library to retry something that will never be allowed"
+            >
+              <input
+                placeholder="402"
+                value={c.deny_status || ""}
+                onChange={(e) => set({ deny_status: e.target.value })}
+              />
+            </Field>
+            <Field label="DENY MESSAGE">
+              <input
+                placeholder="batch keys may not use the big model"
+                value={c.deny_message || ""}
+                onChange={(e) => set({ deny_message: e.target.value })}
+              />
+            </Field>
+          </>
+        )}
+        {c.action === "jump" && (
+          <Field label="JUMP TO">
+            <select
+              value={c.jump_to || ""}
+              onChange={(e) => set({ jump_to: e.target.value })}
+            >
+              <option value="">frontend model…</option>
+              {(vm.siblings || []).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field
+          label="TAG"
+          hint="carried onto this rule's usage rows, so spend can be attributed to the decision"
+        >
+          <input
+            placeholder="team-research"
+            value={c.tag || ""}
+            onChange={(e) => set({ tag: e.target.value })}
+          />
+        </Field>
         <Field label="PROMPT CLASS">
           <input
             placeholder="coding"

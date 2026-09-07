@@ -867,10 +867,27 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
             .fetch_all(pool)
             .await?;
 
-    type RuleRow = (Uuid, Uuid, serde_json::Value, Option<String>);
+    type RuleRow = (
+        Uuid,
+        Uuid,
+        serde_json::Value,
+        Option<String>,
+        String,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    // `jump_to` is resolved to the target frontend model's *name* here rather
+    // than carried as an id: the request path matches frontend models by name
+    // already, so nothing on it then has to turn an id into one. A jump whose
+    // frontend model was deleted yields NULL and is dropped below.
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, frontend_model_id, match_json, policy FROM routing_rules \
-         ORDER BY frontend_model_id, position",
+        "SELECT r.id, r.frontend_model_id, r.match_json, r.policy, r.action, \
+                r.deny_status, r.deny_message, jm.name, r.tag \
+         FROM routing_rules r \
+         LEFT JOIN frontend_models jm ON jm.id = r.jump_to \
+         ORDER BY r.frontend_model_id, r.position",
     )
     .fetch_all(pool)
     .await?;
@@ -940,38 +957,90 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
         let rules = rule_rows
             .iter()
             .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
-            .filter_map(|(rule_id, _, match_json, rule_policy)| {
-                let parsed: MatchConditionJson = match serde_json::from_value(match_json.clone()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        // Dropped, not defaulted to "matches everyone": a
-                        // rule whose condition failed to parse must not
-                        // silently become the rule that matches every
-                        // request — see the module doc comment on
-                        // `build_snapshot` for the same "contain the
-                        // failure to the one bad row" pattern applied to an
-                        // undecryptable backend.
-                        tracing::error!(
-                            error = %e,
-                            frontend_model = %vm_name,
-                            rule_id = %rule_id,
-                            "dropping routing rule: match_json failed to parse; excluded from \
-                             this snapshot rather than matching every request or failing the \
-                             whole rebuild"
-                        );
-                        return None;
-                    }
-                };
-                Some(RoutingRule {
-                    conditions: parsed.into_conditions(),
-                    targets: targets_for(*rule_id, &rule_target_rows),
-                    // Unset falls back to the frontend model's, which is what
-                    // every existing rule does — see `RoutingRule::policy`.
-                    policy: rule_policy
-                        .as_deref()
-                        .and_then(crate::router::Policy::parse),
-                })
-            })
+            .filter_map(
+                |(
+                    rule_id,
+                    _,
+                    match_json,
+                    rule_policy,
+                    action,
+                    deny_status,
+                    deny_message,
+                    jump_name,
+                    tag,
+                )| {
+                    let parsed: MatchConditionJson = match serde_json::from_value(
+                        match_json.clone(),
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            // Dropped, not defaulted to "matches everyone": a
+                            // rule whose condition failed to parse must not
+                            // silently become the rule that matches every
+                            // request — see the module doc comment on
+                            // `build_snapshot` for the same "contain the
+                            // failure to the one bad row" pattern applied to an
+                            // undecryptable backend.
+                            tracing::error!(
+                                error = %e,
+                                frontend_model = %vm_name,
+                                rule_id = %rule_id,
+                                "dropping routing rule: match_json failed to parse; excluded from \
+                                 this snapshot rather than matching every request or failing the \
+                                 whole rebuild"
+                            );
+                            return None;
+                        }
+                    };
+                    // A `deny` with no status, or a `jump` whose destination has
+                    // been deleted, is dropped rather than degraded into a route:
+                    // both would otherwise become a rule that matches and then
+                    // sends the request to this rule's targets, which for a
+                    // refusal is the opposite of what it says.
+                    let action = match action.as_str() {
+                        "deny" => match deny_status {
+                            Some(status) => crate::routing::RuleAction::Deny {
+                                status: (*status).clamp(400, 499) as u16,
+                                message: deny_message
+                                    .clone()
+                                    .unwrap_or_else(|| "refused by policy".to_string()),
+                            },
+                            None => {
+                                tracing::error!(
+                                    frontend_model = %vm_name,
+                                    rule_id = %rule_id,
+                                    "dropping routing rule: action is deny with no deny_status"
+                                );
+                                return None;
+                            }
+                        },
+                        "jump" => match jump_name {
+                            Some(name) => crate::routing::RuleAction::Jump(name.clone()),
+                            None => {
+                                tracing::warn!(
+                                    frontend_model = %vm_name,
+                                    rule_id = %rule_id,
+                                    "dropping routing rule: action is jump but its destination \
+                                     frontend model no longer exists"
+                                );
+                                return None;
+                            }
+                        },
+                        _ => crate::routing::RuleAction::Route,
+                    };
+                    Some(RoutingRule {
+                        conditions: parsed.into_conditions(),
+                        targets: targets_for(*rule_id, &rule_target_rows),
+                        // Unset falls back to the frontend model's, which is what
+                        // every existing rule does — see `RoutingRule::policy`.
+                        policy: rule_policy
+                            .as_deref()
+                            .and_then(crate::router::Policy::parse),
+                        action,
+                        tag: tag.clone(),
+                    })
+                },
+            )
             .collect();
         let default_targets = targets_for(vm_id, &default_target_rows);
         frontend_models.insert(

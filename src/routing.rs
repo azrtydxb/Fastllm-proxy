@@ -38,7 +38,7 @@ use crate::snapshot::{Principal, PrincipalId};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use hyper::HeaderMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Bytes-per-token used to turn a raw request body size into an estimated
 /// prompt token count, per the design doc: real tokenisation on the request
@@ -551,6 +551,15 @@ pub struct RuleConditions {
 pub struct RoutingRule {
     pub conditions: RuleConditions,
     pub targets: Vec<WeightedTarget>,
+    /// What this rule does once it matches. `Route` is the default and what
+    /// every rule did before migration 0047.
+    pub action: RuleAction,
+    /// A label carried onto the usage rows this rule produced, so spend can be
+    /// attributed to the decision that caused it.
+    ///
+    /// Not an action of its own: a rule that tags still has to route, or there
+    /// would be no usage row to put the label on.
+    pub tag: Option<String>,
     /// How to choose among *this rule's* targets. `None` falls back to the
     /// frontend model's, and then to the weighted split.
     ///
@@ -561,6 +570,70 @@ pub struct RoutingRule {
     /// could not say it.
     pub policy: Option<crate::router::Policy>,
 }
+
+/// What a matching rule does.
+///
+/// `route`, `failover`, `balance` and `split` are deliberately not four
+/// variants: all four mean "order a chain, try the head, fall down the list on
+/// failure" and differ only in how the head is chosen, which is what
+/// `RoutingRule::policy` says. This enum is for the things that are not
+/// routing at all.
+///
+/// Every variant is terminal. Firewalls have non-terminating rules that mark
+/// and continue; that is tempting and rejected, because "first match wins and
+/// the matching rule decides everything" is what lets a dry-run answer "which
+/// rule decided this" with one rule name rather than a trace.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RuleAction {
+    /// Send it to this rule's targets.
+    #[default]
+    Route,
+    /// Refuse, with a status the client can act on and a message saying why.
+    ///
+    /// The status is 4xx by construction (the column is CHECK-constrained): a
+    /// refusal answered with a 5xx would tell every client library to retry
+    /// something that will never be allowed, and would read in an error-rate
+    /// chart as the gateway failing rather than as policy working.
+    Deny { status: u16, message: String },
+    /// Continue in another frontend model's chain, so a shared block of policy
+    /// is written once instead of repeated per frontend model.
+    ///
+    /// Carried as the frontend model's *name* for the same reason targets are:
+    /// the request path already has names, and nothing on it then has to turn
+    /// an id into one.
+    Jump(String),
+}
+
+/// What routing decided, which is no longer always "these models".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Try these, in order.
+    Route {
+        candidates: Vec<String>,
+        /// The tag of the rule that decided, for the usage row.
+        tag: Option<String>,
+    },
+    /// Refuse before dispatching anything.
+    Deny { status: u16, message: String },
+}
+
+impl Decision {
+    /// The empty route, which callers treat as "nothing serving".
+    fn nothing() -> Self {
+        Self::Route {
+            candidates: Vec::new(),
+            tag: None,
+        }
+    }
+}
+
+/// How many `jump`s one request may follow.
+///
+/// The control plane refuses to create a cycle, so this is a backstop rather
+/// than the mechanism — but a snapshot can also arrive from an older control
+/// plane or a hand-edited database, and a routing loop must cost a bounded
+/// number of comparisons rather than hanging a request thread.
+const MAX_JUMPS: usize = 8;
 
 /// Everything a rule is matched against, gathered once per request.
 ///
@@ -689,27 +762,95 @@ impl FrontendModelDef {
         prefix_hash: u64,
         registry: &Registry,
     ) -> Vec<String> {
-        for rule in &self.rules {
-            if rule.matches(facts, registry) {
-                return order_candidates(
-                    &rule.targets,
-                    prefix_hash,
-                    registry,
-                    facts.needed_tokens(),
-                    // The rule's own, or the frontend model's where it has
-                    // none — so an existing deployment that set one policy for
-                    // the whole model keeps behaving exactly as it did.
-                    rule.policy.or(self.policy),
-                );
+        match self.decide(facts, prefix_hash, registry, &HashMap::new()) {
+            Decision::Route { candidates, .. } => candidates,
+            // A caller that cannot express a refusal gets the same answer it
+            // got before refusals existed: nothing routable, which it already
+            // has to handle.
+            Decision::Deny { .. } => Vec::new(),
+        }
+    }
+
+    /// The full answer: a chain to try, or a refusal.
+    ///
+    /// `models` is every frontend model, for `RuleAction::Jump` — a rule that
+    /// delegates to a shared block of policy rather than repeating it. Pass an
+    /// empty map where jumps cannot happen; a jump that finds nothing is
+    /// treated as no match, so the request falls through to the next rule
+    /// rather than failing.
+    pub fn decide(
+        &self,
+        facts: &RequestFacts<'_>,
+        prefix_hash: u64,
+        registry: &Registry,
+        models: &HashMap<String, FrontendModelDef>,
+    ) -> Decision {
+        let mut current = self;
+        for _ in 0..MAX_JUMPS {
+            let mut jumped = None;
+            for rule in &current.rules {
+                if !rule.matches(facts, registry) {
+                    continue;
+                }
+                match &rule.action {
+                    RuleAction::Deny { status, message } => {
+                        return Decision::Deny {
+                            status: *status,
+                            message: message.clone(),
+                        };
+                    }
+                    RuleAction::Jump(name) => {
+                        // A jump with nowhere to go is not a match. Refusing
+                        // instead would turn deleting a frontend model into an
+                        // outage for every other one that referenced it.
+                        if let Some(next) = models.get(name) {
+                            jumped = Some(next);
+                            break;
+                        }
+                        continue;
+                    }
+                    RuleAction::Route => {
+                        return Decision::Route {
+                            candidates: order_candidates(
+                                &rule.targets,
+                                prefix_hash,
+                                registry,
+                                facts.needed_tokens(),
+                                // The rule's own, or the frontend model's
+                                // where it has none — so a deployment that set
+                                // one policy for the whole model keeps
+                                // behaving exactly as it did.
+                                rule.policy.or(current.policy),
+                            ),
+                            tag: rule.tag.clone(),
+                        };
+                    }
+                }
+            }
+            match jumped {
+                Some(next) => current = next,
+                None => {
+                    return Decision::Route {
+                        candidates: order_candidates(
+                            &current.default_targets,
+                            prefix_hash,
+                            registry,
+                            facts.needed_tokens(),
+                            current.policy,
+                        ),
+                        tag: None,
+                    }
+                }
             }
         }
-        order_candidates(
-            &self.default_targets,
-            prefix_hash,
-            registry,
-            facts.needed_tokens(),
-            self.policy,
-        )
+        // Only reachable from a cycle the control plane should have refused.
+        // Nothing routable rather than a panic or an unbounded walk; the
+        // caller's own "no target serving" path then reports it.
+        tracing::warn!(
+            frontend_model = %self.name,
+            "routing gave up after {MAX_JUMPS} jumps; the rule chain contains a cycle"
+        );
+        Decision::nothing()
     }
 }
 
@@ -992,11 +1133,15 @@ mod tests {
             rules: vec![
                 RoutingRule {
                     policy: None,
+                    action: RuleAction::Route,
+                    tag: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("first", 1)],
                 },
                 RoutingRule {
                     policy: None,
+                    action: RuleAction::Route,
+                    tag: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("second", 1)],
                 },
@@ -1020,6 +1165,8 @@ mod tests {
             rules: vec![
                 RoutingRule {
                     policy: None,
+                    action: RuleAction::Route,
+                    tag: None,
                     conditions: RuleConditions {
                         caller: CallerMatch {
                             principals: [crate::snapshot::tid(999)].into_iter().collect(),
@@ -1031,6 +1178,8 @@ mod tests {
                 },
                 RoutingRule {
                     policy: None,
+                    action: RuleAction::Route,
+                    tag: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("catch-all", 1)],
                 },
@@ -1116,6 +1265,8 @@ mod tests {
         let reg = registry_with(&["m"]);
         let rule = RoutingRule {
             policy: None,
+            action: RuleAction::Route,
+            tag: None,
             conditions: RuleConditions {
                 caller: CallerMatch {
                     roles: ["canary".to_string()].into_iter().collect(),
@@ -1291,6 +1442,8 @@ mod tests {
     fn rule_with(conditions: RuleConditions, model: &str) -> RoutingRule {
         RoutingRule {
             policy: None,
+            action: RuleAction::Route,
+            tag: None,
             conditions,
             targets: vec![target(model, 1)],
         }
@@ -1446,6 +1599,197 @@ mod tests {
         assert!(
             !plenty_left.matches(&facts_with(Some(&unlimited), 0, None, &headers), &reg),
             "unlimited is not 0% used; both bounds must decline to match"
+        );
+    }
+
+    // --- actions ---------------------------------------------------------
+
+    /// A rule that refuses. Before this, "this role may not send 200k-token
+    /// prompts" could only be expressed by routing it somewhere cheap and
+    /// hoping.
+    #[test]
+    fn a_deny_rule_refuses_instead_of_routing() {
+        let reg = registry_with(&["m"]);
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Deny {
+                    status: 402,
+                    message: "batch keys do not get the big model".into(),
+                },
+                tag: None,
+                conditions: RuleConditions {
+                    caller: CallerMatch {
+                        roles: ["batch".to_string()].into_iter().collect(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                // Targets present on purpose: a deny must refuse rather than
+                // quietly serving what it happens to list.
+                targets: vec![WeightedTarget {
+                    model: "m".into(),
+                    weight: 1,
+                }],
+            }],
+            default_targets: vec![WeightedTarget {
+                model: "m".into(),
+                weight: 1,
+            }],
+            policy: None,
+        };
+        let headers = HeaderMap::new();
+        let batch = principal(crate::snapshot::tid(1), &["batch"]);
+        assert_eq!(
+            vm.decide(
+                &facts_with(Some(&batch), 0, None, &headers),
+                0,
+                &reg,
+                &HashMap::new()
+            ),
+            Decision::Deny {
+                status: 402,
+                message: "batch keys do not get the big model".into()
+            }
+        );
+        // And everyone else still routes, through the defaults.
+        assert!(matches!(
+            vm.decide(&facts_with(None, 0, None, &headers), 0, &reg, &HashMap::new()),
+            Decision::Route { ref candidates, .. } if candidates == &["m".to_string()]
+        ));
+    }
+
+    /// A jump continues in another frontend model's chain, so shared policy is
+    /// written once.
+    #[test]
+    fn a_jump_continues_in_another_frontend_models_rules() {
+        let reg = registry_with(&["cheap", "big"]);
+        let shared = FrontendModelDef {
+            name: "house-policy".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Route,
+                tag: Some("house".into()),
+                conditions: RuleConditions {
+                    shape: ShapeMatch {
+                        min_prompt_tokens: Some(1000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                targets: vec![WeightedTarget {
+                    model: "big".into(),
+                    weight: 1,
+                }],
+            }],
+            default_targets: vec![WeightedTarget {
+                model: "cheap".into(),
+                weight: 1,
+            }],
+            policy: None,
+        };
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Jump("house-policy".into()),
+                tag: None,
+                conditions: RuleConditions::default(),
+                targets: Vec::new(),
+            }],
+            default_targets: Vec::new(),
+            policy: None,
+        };
+        let mut models = HashMap::new();
+        models.insert("house-policy".to_string(), shared);
+        let headers = HeaderMap::new();
+
+        // The shared chain's own rule decides, and its tag comes with it.
+        assert_eq!(
+            vm.decide(&facts_with(None, 5000, None, &headers), 0, &reg, &models),
+            Decision::Route {
+                candidates: vec!["big".into()],
+                tag: Some("house".into())
+            }
+        );
+        // And the shared chain's defaults catch what it does not match.
+        assert!(matches!(
+            vm.decide(&facts_with(None, 10, None, &headers), 0, &reg, &models),
+            Decision::Route { ref candidates, .. } if candidates == &["cheap".to_string()]
+        ));
+    }
+
+    /// A jump whose destination has been deleted is not a match, so the
+    /// request falls through. Refusing instead would turn deleting one
+    /// frontend model into an outage for every other one referencing it.
+    #[test]
+    fn a_jump_to_nowhere_falls_through_rather_than_failing() {
+        let reg = registry_with(&["m"]);
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Jump("deleted".into()),
+                tag: None,
+                conditions: RuleConditions::default(),
+                targets: Vec::new(),
+            }],
+            default_targets: vec![WeightedTarget {
+                model: "m".into(),
+                weight: 1,
+            }],
+            policy: None,
+        };
+        assert!(matches!(
+            vm.decide(
+                &facts_with(None, 0, None, &HeaderMap::new()),
+                0,
+                &reg,
+                &HashMap::new()
+            ),
+            Decision::Route { ref candidates, .. } if candidates == &["m".to_string()]
+        ));
+    }
+
+    /// A cycle the control plane should have refused costs a bounded number of
+    /// comparisons rather than hanging the request thread.
+    #[test]
+    fn a_jump_cycle_terminates() {
+        let reg = registry_with(&["m"]);
+        let loop_rule = |to: &str| RoutingRule {
+            policy: None,
+            action: RuleAction::Jump(to.into()),
+            tag: None,
+            conditions: RuleConditions::default(),
+            targets: Vec::new(),
+        };
+        let a = FrontendModelDef {
+            name: "a".into(),
+            rules: vec![loop_rule("b")],
+            default_targets: Vec::new(),
+            policy: None,
+        };
+        let b = FrontendModelDef {
+            name: "b".into(),
+            rules: vec![loop_rule("a")],
+            default_targets: Vec::new(),
+            policy: None,
+        };
+        let mut models = HashMap::new();
+        models.insert("a".to_string(), a.clone());
+        models.insert("b".to_string(), b);
+        assert_eq!(
+            a.decide(
+                &facts_with(None, 0, None, &HeaderMap::new()),
+                0,
+                &reg,
+                &models
+            ),
+            Decision::Route {
+                candidates: Vec::new(),
+                tag: None
+            }
         );
     }
 
@@ -1774,6 +2118,8 @@ mod tests {
             name: "vm".into(),
             rules: vec![RoutingRule {
                 policy: None,
+                action: RuleAction::Route,
+                tag: None,
                 conditions: RuleConditions {
                     caller: CallerMatch {
                         principals: [crate::snapshot::tid(999)].into_iter().collect(),
@@ -1809,6 +2155,8 @@ mod tests {
             name: "vm".into(),
             rules: vec![RoutingRule {
                 policy: None,
+                action: RuleAction::Route,
+                tag: None,
                 conditions: RuleConditions::default(),
                 targets: vec![],
             }],

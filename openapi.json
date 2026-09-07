@@ -2170,9 +2170,57 @@
     },
     "/admin/frontend-models/{id}/rules": {
       "post": {
-        "summary": "Create frontend-models id rules",
+        "summary": "Add a routing rule. First match wins, and the matching rule decides everything — every action is terminal",
         "operationId": "post_admin_frontend_models_id_rules",
         "tags": ["admin"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["position"],
+                "properties": {
+                  "position": {
+                    "type": "integer",
+                    "description": "Evaluation order. First match wins"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": ["route", "deny", "jump"],
+                    "default": "route",
+                    "description": "route sends the request to this rule's targets; deny refuses; jump continues in another frontend model's chain"
+                  },
+                  "deny_status": {
+                    "type": "integer",
+                    "description": "Required for deny, 4xx only. A refusal answered with a 5xx tells every client library to retry something that will never be allowed"
+                  },
+                  "deny_message": {
+                    "type": "string",
+                    "description": "What the client is told, verbatim"
+                  },
+                  "jump_to": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Required for jump. A jump that would close a loop is refused here rather than discovered on the request path"
+                  },
+                  "policy": {
+                    "type": "string",
+                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest"],
+                    "description": "How to choose among this rule's targets. Absent means the frontend model's, then the weighted split"
+                  },
+                  "tag": {
+                    "type": "string",
+                    "description": "Carried onto the usage rows this rule produced, so spend can be attributed to the decision that caused it"
+                  }
+                },
+                "additionalProperties": {
+                  "description": "Match conditions are flattened into this object, not nested: roles, class, min/max_prompt_tokens, min/max_max_tokens, stream, headers, min/max_budget_used_percent, max_inflight_per_backend, after, before, days, utc_offset_minutes"
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK"
