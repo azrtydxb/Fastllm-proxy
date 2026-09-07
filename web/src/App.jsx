@@ -23,6 +23,7 @@ import { Agents } from "./views/Agents.jsx";
 import { McpServers } from "./views/McpServers.jsx";
 import { Providers } from "./views/Providers.jsx";
 import { Models } from "./views/Models.jsx";
+import { ModelPools } from "./views/ModelPools.jsx";
 import { VirtualModels } from "./views/VirtualModels.jsx";
 import { PromptClasses } from "./views/PromptClasses.jsx";
 import { Keys } from "./views/Keys.jsx";
@@ -59,10 +60,16 @@ const SCREENS = {
     subtitle: "what requests are routed to — one name on one provider",
     view: Models,
   },
+  pools: {
+    title: "Model pools",
+    subtitle:
+      "named groups of provider models with one policy — what a rule points at instead of listing models",
+    view: ModelPools,
+  },
   routing: {
     title: "Frontend models",
     subtitle:
-      "what clients ask for — rules, weights and failover chains. The only name a client uses",
+      "what clients ask for — conditions, actions and failover chains. The only name a client uses",
     view: VirtualModels,
   },
   classes: {

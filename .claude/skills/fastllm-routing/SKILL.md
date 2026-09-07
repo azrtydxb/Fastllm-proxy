@@ -38,16 +38,16 @@ Only real traffic exercises that condition.
 |---|---|---|---|
 | `DELETE` | `/admin/frontend-model-defaults/{id}` | Delete frontend-model-defaults id | — |
 | `GET` | `/admin/frontend-models` | Read frontend-models | — |
-| `POST` | `/admin/frontend-models` | Create frontend-models | `name`, `description`*, `targets`, `policy`* |
-| `PATCH` | `/admin/frontend-models/{id}` | Change how a frontend model chooses between its targets | `name`*, `policy`* |
+| `POST` | `/admin/frontend-models` | Create frontend-models | `name`, `description`* |
+| `PATCH` | `/admin/frontend-models/{id}` | Change how a frontend model chooses between its targets | `name`*, `description`* |
 | `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
-| `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`, `weight`*, `position` |
-| `POST` | `/admin/frontend-models/{id}/rules` | Add a routing rule. First match wins, and the matching rule decides everything — every action is terminal | `position`, `policy`*, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`*, `match_condition` |
+| `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`*, `model_pool_id`*, `weight`*, `position` |
+| `POST` | `/admin/frontend-models/{id}/rules` | Add a routing rule. First match wins, and the matching rule decides everything — every action is terminal | `position`, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`*, `match_condition` |
 | `POST` | `/admin/routing/dry-run` | Which rule would decide, and what the chain resolves to, without dispatching | `model`, `principal_id`*, `streaming`*, `prompt_tokens`*, `max_tokens`*, `headers`*, `class`*, `class_refines`* |
 | `DELETE` | `/admin/rule-targets/{id}` | Delete rule-targets id | — |
-| `PATCH` | `/admin/rules/{id}` | Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first | `policy`*, `position`* |
+| `PATCH` | `/admin/rules/{id}` | Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first | `position`*, `match_condition`*, `action`*, `deny_status`*, `deny_message`*, `jump_to`*, `tag`* |
 | `DELETE` | `/admin/rules/{id}` | Delete rules id | — |
-| `POST` | `/admin/rules/{id}/targets` | Create rules id targets | `provider_model_id`, `weight`*, `position` |
+| `POST` | `/admin/rules/{id}/targets` | Create rules id targets | `provider_model_id`*, `model_pool_id`*, `weight`*, `position` |
 
 *\* optional field*
 

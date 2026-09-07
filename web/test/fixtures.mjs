@@ -206,6 +206,25 @@ const FIXTURES = {
   // Zero is the normal state; the Settings screen turns non-zero into a
   // warning that the database and the published snapshot have diverged.
   "/admin/health": { snapshot_rebuild_failures: 0 },
+  // A pool: several provider models chosen between by one policy. What a rule
+  // points at instead of listing the models.
+  "/admin/model-pools": [
+    {
+      id: "00000000-0000-4000-8000-000000000030",
+      name: "leastloaded-local",
+      description: "",
+      policy: "least-loaded",
+      members: [
+        {
+          id: "00000000-0000-4000-8000-000000000031",
+          provider_model_id: "00000000-0000-4000-8000-000000000003",
+          model: "local-qwen",
+          weight: 100,
+          position: 0,
+        },
+      ],
+    },
+  ],
   "/admin/provider-models": [
     {
       // One model, two machines — the shape migration 0045 makes possible and

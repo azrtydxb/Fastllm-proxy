@@ -1060,6 +1060,63 @@
         ]
       }
     },
+    "/admin/model-pools": {
+      "get": {
+        "summary": "Named groups of provider models, each with one policy for choosing between them",
+        "operationId": "get_admin_model_pools",
+        "tags": ["admin"],
+        "responses": { "200": { "description": "OK" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" } },
+        "security": [{ "session": [] }]
+      },
+      "post": {
+        "summary": "Create a pool. Its name must not collide with a provider model or a frontend model, because routing resolves targets by name",
+        "operationId": "post_admin_model_pools",
+        "tags": ["admin"],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"], "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest", null], "description": "How to choose between members. Null is the weighted split" } } } } } },
+        "responses": { "201": { "description": "Created" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "The name is taken by a pool, a provider model or a frontend model" } },
+        "security": [{ "session": [] }]
+      }
+    },
+    "/admin/model-pools/{id}": {
+      "patch": {
+        "summary": "Rename a pool, change its description, or change how it chooses between its members. A rename carries onto the targets pointing at it",
+        "operationId": "patch_admin_model_pools_id",
+        "tags": ["admin"],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"] } } } } } },
+        "responses": { "204": { "description": "Updated" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "404": { "description": "No such pool" } },
+        "security": [{ "session": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+      },
+      "delete": {
+        "summary": "Delete a pool. Refused while any rule target or default still routes to it, rather than cascading into rules that point at a name which no longer resolves",
+        "operationId": "delete_admin_model_pools_id",
+        "tags": ["admin"],
+        "responses": { "204": { "description": "Deleted" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "Targets still route to it" } },
+        "security": [{ "session": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+      }
+    },
+    "/admin/model-pools/{id}/members": {
+      "post": {
+        "summary": "Add a provider model to a pool. The same model twice is refused: a member counted twice is one machine counted twice",
+        "operationId": "post_admin_model_pools_id_members",
+        "tags": ["admin"],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["provider_model_id"], "properties": { "provider_model_id": { "type": "string", "format": "uuid" }, "weight": { "type": "integer", "description": "Only consulted by the weighted split; the other policies read load, latency or price" }, "position": { "type": "integer" } } } } } },
+        "responses": { "201": { "description": "Created" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "Already a member" } },
+        "security": [{ "session": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+      }
+    },
+    "/admin/model-pool-members/{id}": {
+      "delete": {
+        "summary": "Remove one model from its pool",
+        "operationId": "delete_admin_model_pool_members_id",
+        "tags": ["admin"],
+        "responses": { "204": { "description": "Deleted" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "404": { "description": "No such member" } },
+        "security": [{ "session": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+      }
+    },
     "/admin/prices/sync": {
       "post": {
         "summary": "Create prices sync",

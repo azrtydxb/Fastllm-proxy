@@ -79,28 +79,6 @@ function conditionChips(rule) {
   return out;
 }
 
-// How targets are chosen between. Settable per rule, and on the frontend model
-// for the default targets — the one target list that has no rule of its own.
-// A rule with none falls back to the frontend model's.
-//
-// Per rule because that is the level the targets are at: "least connections
-// across the two local boxes, then plain failover to the cloud when they are
-// full" is two rules wanting two different answers.
-//
-// "" is the weighted split, which is what a target list has always meant: a
-// deterministic pick on the request prefix, so a conversation stays on one
-// side of a split rather than flipping per request.
-const POLICIES = [
-  [
-    "cache-affinity",
-    "cache affinity — a shared prefix returns to the node holding its KV cache",
-  ],
-  ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
-  ["lowest-latency", "lowest latency — for backends that are not equally fast"],
-  ["round-robin", "round robin — strict rotation, cache-blind"],
-  ["cheapest", "cheapest — the lowest published price, unpriced ranked last"],
-];
-
 export function VirtualModels({ onUnauthorised }) {
   const [selected, setSelected] = useState(null);
   const [creating, setCreating] = useState("");
@@ -108,13 +86,14 @@ export function VirtualModels({ onUnauthorised }) {
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [vms, models, principals, fallback] = await Promise.all([
+      const [vms, models, principals, fallback, pools] = await Promise.all([
         api.get("/admin/frontend-models"),
         api.get("/admin/provider-models"),
         api.get("/admin/principals"),
         api.get("/admin/fallback-model"),
+        api.get("/admin/model-pools"),
       ]);
-      return { vms, models, principals, fallback };
+      return { vms, models, principals, fallback, pools };
     },
     { onUnauthorised },
   );
@@ -124,24 +103,6 @@ export function VirtualModels({ onUnauthorised }) {
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
   const vm = data.vms.find((v) => v.id === selected) || data.vms[0] || null;
-
-  const savePolicy = async (id, policy) => {
-    const ok = await attempt(
-      () => api.patch(`/admin/frontend-models/${id}`, { policy }),
-      setError,
-      onUnauthorised,
-    );
-    if (ok) reload();
-  };
-
-  const saveRulePolicy = async (id, policy) => {
-    const ok = await attempt(
-      () => api.patch(`/admin/rules/${id}`, { policy }),
-      setError,
-      onUnauthorised,
-    );
-    if (ok) reload();
-  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -352,30 +313,6 @@ export function VirtualModels({ onUnauthorised }) {
                         : `${chips.length} condition${chips.length === 1 ? "" : "s"}, all must hold`}
                     </Muted>
                     <Spacer />
-                    {/* Per rule, so "least connections locally, then plain
-                        failover to the cloud" is expressible — one setting for
-                        the whole frontend model could not say it. Unset
-                        inherits the frontend model's. */}
-                    <select
-                      value={r.policy || ""}
-                      title="How this rule chooses among its own targets"
-                      onChange={(e) =>
-                        saveRulePolicy(
-                          r.id,
-                          e.target.value === "" ? null : e.target.value,
-                        )
-                      }
-                      style={{ fontSize: 11, maxWidth: 260 }}
-                    >
-                      <option value="">
-                        same as Defaults — {vm.policy || "weighted split"}
-                      </option>
-                      {POLICIES.map(([value, label]) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
                     <Button
                       variant="smallDanger"
                       onClick={async () => {
@@ -486,12 +423,12 @@ export function VirtualModels({ onUnauthorised }) {
                     ))}
                     <AddTarget
                       models={data.models}
-                      onAdd={async (provider_model_id, weight) => {
+                      pools={data.pools}
+                      onAdd={async (target) => {
                         const ok = await attempt(
                           () =>
                             api.post(`/admin/rules/${r.id}/targets`, {
-                              provider_model_id,
-                              weight,
+                              ...target,
                               position: r.targets.length,
                             }),
                           setError,
@@ -523,48 +460,6 @@ export function VirtualModels({ onUnauthorised }) {
               title="Defaults"
               subtitle="used when no rule matches · the deployment fallback is appended after these"
             >
-              {/* The policy lives here, not in the header. Above the rules it
-                  read as governing them, which it does not: it governs this
-                  list, and is what a rule inherits until it sets its own. With
-                  one target here it does nothing at all, and saying so beats
-                  leaving a control whose effect is invisible. */}
-              <Row gap={8} style={{ marginBottom: 10, flexWrap: "nowrap" }}>
-                <span
-                  style={{
-                    font: "600 10px var(--sans)",
-                    color: "var(--fg-5)",
-                    letterSpacing: "0.04em",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  CHOSEN BETWEEN BY
-                </span>
-                <select
-                  value={vm.policy || ""}
-                  onChange={(e) =>
-                    savePolicy(
-                      vm.id,
-                      e.target.value === "" ? null : e.target.value,
-                    )
-                  }
-                  style={{ maxWidth: 460 }}
-                >
-                  <option value="">
-                    weighted split — by target weight, deterministic per
-                    conversation
-                  </option>
-                  {POLICIES.map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-                <Muted>
-                  {vm.default_targets.length < 2
-                    ? "no effect with one target — it applies once there are two, and is what a rule inherits unless it picks its own"
-                    : "and what a rule inherits unless it picks its own"}
-                </Muted>
-              </Row>
               <Row gap={8}>
                 {vm.default_targets.length === 0 && (
                   <Muted>none configured</Muted>
@@ -656,12 +551,12 @@ export function VirtualModels({ onUnauthorised }) {
                 )}
                 <AddTarget
                   models={data.models}
-                  onAdd={async (provider_model_id, weight) => {
+                  pools={data.pools}
+                  onAdd={async (target) => {
                     const ok = await attempt(
                       () =>
                         api.post(`/admin/frontend-models/${vm.id}/defaults`, {
-                          provider_model_id,
-                          weight,
+                          ...target,
                           position: vm.default_targets.length,
                         }),
                       setError,
@@ -679,10 +574,13 @@ export function VirtualModels({ onUnauthorised }) {
   );
 }
 
-function AddTarget({ models, onAdd }) {
+// A target is a provider model *or* a pool, and the picker offers both — a
+// pool is how you point a rule at several models at once, so the choice
+// between "one model" and "a load-balanced group" is made right here rather
+// than by a policy somewhere else on the page.
+function AddTarget({ models, pools, onAdd }) {
   const [open, setOpen] = useState(false);
-  const [modelId, setModelId] = useState("");
-  const [weight, setWeight] = useState("100");
+  const [pick, setPick] = useState("");
   if (!open) {
     return (
       <button
@@ -703,39 +601,43 @@ function AddTarget({ models, onAdd }) {
   return (
     <Row gap={6} style={{ flexWrap: "nowrap" }}>
       <select
-        value={modelId}
-        onChange={(e) => setModelId(e.target.value)}
+        value={pick}
+        onChange={(e) => setPick(e.target.value)}
         style={{ fontSize: 12 }}
       >
-        <option value="">model…</option>
-        {/* The name alone identifies it again: since migration 0045 a model
-            served by two hosts is one model with two attachments, so there is
-            no second row to tell it apart from. What is worth showing is how
-            many places it can actually run — none means it is not routable. */}
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name}
-            {m.backends.length === 0
-              ? " · no provider"
-              : m.backends.length > 1
-                ? ` · ${m.backends.length} providers`
-                : ` · ${m.backends[0].provider_name}`}
-          </option>
-        ))}
+        <option value="">model or pool…</option>
+        <optgroup label="Pools — several models, one policy">
+          {(pools || []).map((p) => (
+            <option key={p.id} value={`pool:${p.id}`}>
+              {p.name} · {p.members.length} member
+              {p.members.length === 1 ? "" : "s"} ·{" "}
+              {p.policy || "weighted split"}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Provider models">
+          {models.map((m) => (
+            <option key={m.id} value={`model:${m.id}`}>
+              {m.name}
+              {m.backends.length === 0
+                ? " · no provider"
+                : m.backends.length > 1
+                  ? ` · ${m.backends.length} providers`
+                  : ` · ${m.backends[0].provider_name}`}
+            </option>
+          ))}
+        </optgroup>
       </select>
-      <input
-        value={weight}
-        onChange={(e) => setWeight(e.target.value)}
-        style={{ width: 64, fontSize: 12 }}
-        title="weight"
-      />
       <Button
         variant="secondary"
         onClick={() => {
-          if (!modelId) return;
-          onAdd(modelId, Number(weight) || 100);
+          if (!pick) return;
+          const [kind, id] = pick.split(":");
+          onAdd(
+            kind === "pool" ? { model_pool_id: id } : { provider_model_id: id },
+          );
           setOpen(false);
-          setModelId("");
+          setPick("");
         }}
       >
         add

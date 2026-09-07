@@ -111,6 +111,9 @@ const SCREENS = [
   ["models", ["local-qwen", "claude-sonnet", "unpriced", "cache 300s"]],
   // "engineering" and "batch" only appear inside condition chips, so this
   // fails if the conditions are read from the wrong shape again.
+  // A pool with its policy and its one member: the screen exists to make
+  // "which models, chosen how" answerable at a glance.
+  ["pools", ["leastloaded-local", "least loaded", "local-qwen", "1 member"]],
   [
     "routing",
     ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"],
