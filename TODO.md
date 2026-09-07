@@ -145,8 +145,9 @@ drifted from what an operator actually needs to see. Closed in two commits:
   no symptom. (Found by the test: `sum()` over a bigint returns _numeric_ in
   Postgres, so every total failed to decode at runtime with nothing wrong in
   the SQL.)
-- `PATCH /admin/models/{id}` — a price could be set at creation and never
-  corrected.
+- `PATCH /admin/provider-models/{id}` — a model could be created and never
+  corrected. (Prices moved off the model in 2026-09-07's attachment work and
+  are corrected with `PATCH /admin/backends/{id}` instead; see below.)
 - `POST /health-report` + `GET /admin/fleet` — backend health lives in the data
   plane and the control plane had never seen it, so a UI's only option was to
   scrape every proxy's `/metrics` and know where they all were. Per replica and
@@ -314,6 +315,60 @@ Also worth deciding before building it: whether the dashboard sits behind the
 master key. `/health` and `/metrics` are deliberately open so probes and
 Prometheus work without a key, and both already leak backend addresses — a UI
 on the same terms is consistent, but it is a more inviting target on a VIP.
+
+## A model on more than one provider, and rules that do more than route — done (2026-09-07)
+
+Two changes that turned out to depend on each other.
+
+**Attachments.** A provider model belonged to exactly one provider, so one model
+served by two machines was two rows — two prices to keep in step, two context
+windows to keep equal, and names like `bge-m3@192.168.10.245:8890`. Worse,
+`Registry` groups backends into a pool per model name and `router.rs` chooses
+within that pool, so every pool held exactly one backend and the
+prefix-cache-affinity balancer picked one item from a list of one on every
+request. `model_backends` is the join table the provider decomposition should
+have had. What stays on the model is what the weights determine; what moves is
+what the provider determines — including prices, because the same model costs
+different amounts at different vendors, and `upstream_model`, because
+OpenRouter calls it `google/gemini-2.5-flash` where Google calls it
+`gemini-2.5-flash`.
+
+Usage is priced from the attachment that answered, so the proxy now reports
+which one that was. An event without that id prices by model name, which is
+exact while a model has one attachment and declines to guess when it has
+several rather than billing local traffic at cloud rates.
+
+`target_provider_name` went with it. Its own code said it existed because "the
+same model name on two hosts is the normal case" — the case this removes.
+
+**Rule actions.** A rule could only mean "send it to these targets", which left
+"this role may not send 200k-token prompts" inexpressible. `route`, `failover`,
+`balance` and `split` are deliberately not four actions — all four order a
+chain and try the head, differing only in how the head is chosen, which is what
+the new per-rule `policy` says. So the enum is for what is not routing:
+`deny` (4xx only, refused at write time otherwise — a 5xx would have every
+client library retrying something that will never be allowed) and `jump`
+(continue in another frontend model's chain, with loops refused when created).
+Every action is terminal, which is what lets a dry-run name one deciding rule
+rather than print a trace; `tag` is therefore a field, not an action.
+
+Also: `policy` moved from the frontend model onto the rule, where its targets
+are, so "least-connections locally, then plain failover to the cloud" is
+sayable; `provider_models.policy` makes the second level settable at all;
+`cheapest` joins the four policies, ranking unpriced last rather than free; and
+`min/max_request_cost_micros` prices a request at the cheapest model the
+frontend model can reach — one number per request, so it does not depend on
+which rule is asking.
+
+Migrations 0045, 0046, 0047. Demonstrated against the live cluster: a `deny`
+returning a real 413 to a real client, a `jump` whose tag reached
+`usage_events`, and a local-then-spill chain that spilled to the cloud when
+both Sparks reported their engines at the ceiling.
+
+**One limit worth knowing.** A dry-run cannot evaluate
+`max_inflight_per_backend`: it runs on the control plane, whose registry has no
+in-flight counters and no engine scrape, so every backend looks idle and a
+spill rule always reports as still matching. Only real traffic exercises it.
 
 ## Multi-provider support
 
