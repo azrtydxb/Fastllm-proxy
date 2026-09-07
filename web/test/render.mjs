@@ -186,6 +186,25 @@ await act(async () => {
 await settle();
 
 let failures = 0;
+// A screen with no nav entry is unreachable to anyone who does not know its
+// URL. The app keeps SCREENS and NAV as separate lists, so adding to one and
+// forgetting the other is silent -- the screen renders perfectly in this very
+// suite and nobody can navigate to it. `deployment` is deliberately
+// conditional; see `visibleNav`.
+{
+  const app = await vite.ssrLoadModule("/src/App.jsx");
+  const navIds = new Set(app.NAV.flatMap((g) => g.items.map((i) => i.id)));
+  const orphans = Object.keys(app.SCREENS).filter((id) => !navIds.has(id));
+  if (orphans.length) {
+    console.log(
+      `  nav: FAILED — screens with no menu entry: ${orphans.join(", ")}`,
+    );
+    failures++;
+  } else {
+    console.log(`  nav: every screen has a menu entry (${navIds.size})`);
+  }
+}
+
 for (const [screen, expected] of SCREENS) {
   problems.length = 0;
   // A screen that throws while rendering takes React's whole root down, so it

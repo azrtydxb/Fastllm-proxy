@@ -34,7 +34,7 @@ import { Fleet } from "./views/Fleet.jsx";
 import { Settings } from "./views/Settings.jsx";
 import { Deployment } from "./views/Deployment.jsx";
 
-const SCREENS = {
+export const SCREENS = {
   overview: {
     title: "Overview",
     subtitle: "control plane, fleet and backends",
@@ -125,7 +125,7 @@ const SCREENS = {
   },
 };
 
-const NAV = [
+export const NAV = [
   {
     label: "OBSERVE",
     items: [
@@ -139,6 +139,7 @@ const NAV = [
     items: [
       { id: "providers", label: "Providers" },
       { id: "models", label: "Provider models" },
+      { id: "pools", label: "Model pools" },
       { id: "routing", label: "Frontend models" },
       { id: "classes", label: "Prompt classes" },
       { id: "mcp", label: "MCP servers" },
