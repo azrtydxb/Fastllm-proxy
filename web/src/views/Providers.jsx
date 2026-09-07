@@ -195,7 +195,10 @@ export function Providers({ onUnauthorised, go }) {
     setEdit({
       name: g.host,
       api_base: g.origin,
-      protocol: [...g.protocols][0] || "openai",
+      // Seeded only where the form offers it, so a catalogue provider's
+      // protocol is not re-sent — and cannot be changed by a form that never
+      // showed it.
+      protocol: g.catalogue_key ? undefined : [...g.protocols][0] || "openai",
     });
   };
 
@@ -222,6 +225,9 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
+      // Set only when this provider came from a catalogue entry, which is
+      // exactly the case where its wire protocol is already known.
+      catalogue_key: p.catalogue_key,
       bases: new Set([p.api_base]),
       models: new Set(),
       protocols: new Set([p.protocol]),
@@ -656,18 +662,24 @@ export function Providers({ onUnauthorised, go }) {
                           }
                         />
                       </Field>
-                      <Field label="Protocol">
-                        <select
-                          value={edit.protocol ?? "openai"}
-                          onChange={(e) =>
-                            setEdit({ ...edit, protocol: e.target.value })
-                          }
-                        >
-                          <option value="openai">openai</option>
-                          <option value="anthropic">anthropic</option>
-                          <option value="gemini">gemini</option>
-                        </select>
-                      </Field>
+                      {/* A provider from the catalogue came with its wire
+                          protocol; asking again invites someone to change it
+                          to something the vendor does not speak. A typed
+                          address is the only case where nobody has said. */}
+                      {!g.catalogue_key && (
+                        <Field label="Protocol">
+                          <select
+                            value={edit.protocol ?? "openai"}
+                            onChange={(e) =>
+                              setEdit({ ...edit, protocol: e.target.value })
+                            }
+                          >
+                            <option value="openai">openai</option>
+                            <option value="anthropic">anthropic</option>
+                            <option value="gemini">gemini</option>
+                          </select>
+                        </Field>
+                      )}
                       <Field
                         label="Credential"
                         hint="Leave empty to keep the one already stored — this form cannot read it back."
