@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
-import { fleetSummary } from "../fleet.js";
+import { fleetSummary, convergenceGrace } from "../fleet.js";
 import {
   Banner,
   Card,
@@ -88,7 +88,7 @@ export function Fleet({ onUnauthorised, config }) {
   if (loading && !data) return <Loading />;
   const reports = data?.fleet || [];
   const nodes = data?.nodes || [];
-  const summary = fleetSummary(reports);
+  const summary = fleetSummary(reports, config);
 
   return (
     <Stack>
@@ -187,7 +187,7 @@ export function Fleet({ onUnauthorised, config }) {
         </Banner>
       )}
 
-      {summary.snapshotSpread > 0 && (
+      {summary.laggards.length > 0 && (
         <Banner tone="bad">
           {/* Each laggard's own version, not `max - spread`: that expression is
               the minimum, so with three distinct versions it reported every
@@ -204,7 +204,27 @@ export function Fleet({ onUnauthorised, config }) {
           <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
             {" "}
             — it answers /health with ok and lists the right models, and
-            misbehaves only on whatever changed.
+            misbehaves only on whatever changed. Longer than the{" "}
+            {convergenceGrace(config)}s a poll and a health report can account
+            for, so this is not the fleet catching up.
+          </span>
+        </Banner>
+      )}
+
+      {/* Behind, but only by as much as the two timers allow. Shown, because
+          an operator who just saved a change wants to see it land — but not as
+          an alert, which is what it used to be and what made the banner flap
+          from replica to replica after every write. */}
+      {summary.laggards.length === 0 && summary.converging.length > 0 && (
+        <Banner tone="muted">
+          {summary.converging.join(", ")}{" "}
+          {summary.converging.length === 1 ? "is" : "are"} still picking up the
+          snapshot of {fmtSnapshot(summary.snapshotVersion)}
+          <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>
+            {" "}
+            — normal: proxies poll every {config?.config_poll_seconds ?? 5}s and
+            report every {config?.health_report_interval_seconds ?? 10}s, so a
+            replica reads behind for a few seconds after every change.
           </span>
         </Banner>
       )}

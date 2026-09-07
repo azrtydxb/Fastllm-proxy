@@ -75,24 +75,68 @@ export function mergeBackends(reports) {
     );
 }
 
-/** Fleet-wide facts that do not belong to any one backend. */
-export function fleetSummary(reports) {
+/**
+ * How long the fleet is allowed to take to agree, in seconds.
+ *
+ * Two independent timers sit between publishing a snapshot and seeing every
+ * replica report it: a proxy polls for a new snapshot every
+ * `config_poll_seconds`, and reports its health every
+ * `health_report_interval_seconds`. A replica that polls just before a write
+ * lands and reports just before its next poll therefore shows the previous
+ * version for the sum of the two — with nothing wrong anywhere.
+ *
+ * Treating any spread at all as a fault reported that ordinary convergence as
+ * an alert: after every configuration change the fleet banner went red for a
+ * few seconds, cleared, then went red again naming a different replica as each
+ * one reported in. An alert that fires on healthy behaviour is one an operator
+ * learns to ignore, which costs the real split it exists to surface.
+ *
+ * The extra margin covers timer drift and the report round trip. Clock skew
+ * between hosts does not enter it: versions are stamped by the control plane,
+ * so this compares two numbers from the same clock.
+ */
+export function convergenceGrace(config) {
+  return (
+    (config?.config_poll_seconds ?? 5) +
+    (config?.health_report_interval_seconds ?? 10) +
+    5
+  );
+}
+
+/**
+ * Fleet-wide facts that do not belong to any one backend.
+ *
+ * `config` is optional: without it the grace period falls back to the shipped
+ * defaults, which is right for callers that do not read spread anyway.
+ */
+export function fleetSummary(reports, config) {
   const list = reports || [];
   const versions = list.map((r) => r.snapshot_version);
   const backends = mergeBackends(list);
+  const newest = versions.length ? Math.max(...versions) : null;
+  const graceMicros = convergenceGrace(config) * 1e6;
+  // Behind at all, and behind for longer than convergence can explain. The
+  // first is normal and worth showing quietly; only the second is a fault.
+  const behind = list.filter(
+    (r) => newest !== null && r.snapshot_version < newest,
+  );
   return {
     replicas: list.length,
     // The check `docs/api.md` recommends, which no single replica can make:
     // a version spread means one is serving an older configuration while
     // answering /health perfectly happily.
-    snapshotVersion: versions.length ? Math.max(...versions) : null,
+    snapshotVersion: newest,
     snapshotSpread: versions.length
       ? Math.max(...versions) - Math.min(...versions)
       : 0,
-    laggards: list
-      .filter(
-        (r) => versions.length && r.snapshot_version < Math.max(...versions),
-      )
+    laggards: behind
+      .filter((r) => newest - r.snapshot_version > graceMicros)
+      .map((r) => r.replica),
+    // Behind, but not for long enough to mean anything. Named separately so a
+    // screen can say "still catching up" instead of either crying wolf or
+    // showing an unexplained delay as perfect health.
+    converging: behind
+      .filter((r) => newest - r.snapshot_version <= graceMicros)
       .map((r) => r.replica),
     backends,
     backendsUp: backends.filter((b) => b.healthy).length,

@@ -155,6 +155,15 @@ Compare `snapshot_version` per replica on the **Fleet** screen. A replica on an
 older snapshot answers `/health` with `ok` and misbehaves only on whatever
 changed — most often a key it has never seen.
 
+A few seconds of disagreement right after a write is normal and is not an
+alert. Each proxy polls for a new snapshot every `config_poll_seconds` and
+reports its health every `health_report_interval_seconds`, so a replica can
+_report_ the previous version for the sum of the two — 15s on the defaults —
+with nothing wrong. The Fleet screen says "still picking up the snapshot" for
+that, and only raises the red banner past that window plus a margin for timer
+drift. If you are checking by hand, apply the same allowance rather than
+reading any spread at all as a fault.
+
 ## Backends
 
 ### A backend keeps being marked unhealthy

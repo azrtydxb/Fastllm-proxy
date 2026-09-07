@@ -86,7 +86,7 @@ export function Overview({ onUnauthorised, config, go }) {
   // honest alternative, and the chart says so. Sampled in an effect rather
   // than during render so a re-render for any other reason cannot fabricate a
   // sample interval of zero.
-  const requestsTotal = data ? fleetSummary(data.fleet).requests : null;
+  const requestsTotal = data ? fleetSummary(data.fleet, config).requests : null;
   useEffect(() => {
     if (requestsTotal === null) return;
     const now = Date.now();
@@ -105,7 +105,7 @@ export function Overview({ onUnauthorised, config, go }) {
   if (!data)
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
-  const summary = fleetSummary(data.fleet);
+  const summary = fleetSummary(data.fleet, config);
 
   // Protocol lives in the model configuration, not in a health report — the
   // report carries what a proxy observed, and the protocol is not something it
@@ -145,7 +145,7 @@ export function Overview({ onUnauthorised, config, go }) {
         </Banner>
       )}
 
-      {summary.snapshotSpread > 0 && (
+      {summary.laggards.length > 0 && (
         <Banner
           tone="bad"
           action={
@@ -220,10 +220,16 @@ export function Overview({ onUnauthorised, config, go }) {
           unit="requests"
           foot={
             summary.snapshotVersion
-              ? `snapshot ${fmtSnapshot(summary.snapshotVersion)}${summary.snapshotSpread ? " · fleet split" : " · fleet in sync"}`
+              ? `snapshot ${fmtSnapshot(summary.snapshotVersion)}${
+                  summary.laggards.length
+                    ? " · fleet split"
+                    : summary.converging.length
+                      ? " · converging"
+                      : " · fleet in sync"
+                }`
               : "no replica reporting"
           }
-          tone={summary.snapshotSpread ? "warn" : "accent"}
+          tone={summary.laggards.length ? "warn" : "accent"}
         />
       </Grid>
 
@@ -236,11 +242,22 @@ export function Overview({ onUnauthorised, config, go }) {
             <Row gap={10}>
               <Muted>live from each proxy · merged by (api_base, model)</Muted>
               {summary.snapshotVersion !== null && (
-                <Pill tone={summary.snapshotSpread ? "bad" : "ok"} mono>
+                <Pill
+                  tone={
+                    summary.laggards.length
+                      ? "bad"
+                      : summary.converging.length
+                        ? "quiet"
+                        : "ok"
+                  }
+                  mono
+                >
                   <span title={`snapshot version ${summary.snapshotVersion}`}>
-                    {summary.snapshotSpread
+                    {summary.laggards.length
                       ? `${fmtSnapshot(summary.snapshotVersion)} · ${summary.laggards.length} behind`
-                      : `${fmtSnapshot(summary.snapshotVersion)} · in sync`}
+                      : summary.converging.length
+                        ? `${fmtSnapshot(summary.snapshotVersion)} · ${summary.converging.length} converging`
+                        : `${fmtSnapshot(summary.snapshotVersion)} · in sync`}
                   </span>
                 </Pill>
               )}

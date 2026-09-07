@@ -666,12 +666,18 @@ export function ErrorNote({ children, onDismiss }) {
 }
 
 export function Banner({ tone = "warn", children, action }) {
+  // `muted` is for a state worth showing but not worth alarming about --
+  // normal convergence, chiefly. Without it such a notice fell through to the
+  // amber default, which is how routine behaviour ended up looking like a
+  // warning and taught operators to skim past the colour entirely.
   const [line, fg, glow] =
     tone === "bad"
       ? ["var(--bad-line)", "var(--bad-fg)", "rgba(229,72,77,.10)"]
       : tone === "ok"
         ? ["var(--ok-line)", "var(--ok-fg)", "rgba(47,184,132,.10)"]
-        : ["var(--warn-line)", "var(--warn-fg)", "rgba(217,154,43,.10)"];
+        : tone === "muted"
+          ? ["var(--line)", "var(--fg-3)", "transparent"]
+          : ["var(--warn-line)", "var(--warn-fg)", "rgba(217,154,43,.10)"];
   return (
     <div
       style={{

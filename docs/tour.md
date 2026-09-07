@@ -101,6 +101,12 @@ Per replica, deliberately unmerged. A replica on an older snapshot answers
 it has never seen — so the snapshot version per replica is the thing to look at
 when one replica behaves differently from the others.
 
+The screen distinguishes a replica that is *catching up* from one that is
+*stuck*. Polling and health reporting are on separate timers, so a spread of a
+few seconds follows every configuration change; that shows as a quiet "still
+picking up the snapshot" note. Only a replica further behind than those two
+timers can explain gets the red banner.
+
 ## Audit log — every change, and who made it
 
 ![The Audit log: append-only record of every mutating admin call with actor and target](images/ui-audit.png)

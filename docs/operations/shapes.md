@@ -252,7 +252,7 @@ What changes as the data plane grows:
 | **Prefix affinity dilutes**      | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct                                   |
 | **Health is per replica**        | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom                       |
 | **Rate limits are per replica**  | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property |
-| **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows           |
+| **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows. Expect a few seconds of spread after every write: poll and report are separate timers, so only a replica behind by more than their sum is stuck rather than catching up |
 
 For the request path itself, `--workers` and `--pool-max-idle` are the knobs
 that matter, and [the performance chapter](../performance.md) has the
