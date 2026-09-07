@@ -107,8 +107,10 @@ between version numbers — versions are stamped when the configuration last
 changed, so the gap measures the control plane's edit history, not any
 replica's health. Polling and reporting are on separate timers, so lagging
 briefly after a change is normal and shows as a quiet "still picking up the
-snapshot" note. Only a replica that is still behind a snapshot older than those
-two timers can explain gets the red banner.
+snapshot" note. The red banner needs either a snapshot that has been available
+for longer than those timers can explain, or a replica the screen has watched
+stay behind that long — the second being what catches a frozen replica on a
+gateway busy enough that the snapshot is never old.
 
 ## Audit log — every change, and who made it
 

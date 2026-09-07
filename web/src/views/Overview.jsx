@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api, query } from "../api.js";
 import { useLoader } from "../load.js";
-import { fleetSummary, rateBetween, backendKey } from "../fleet.js";
+import {
+  fleetSummary,
+  rateBetween,
+  backendKey,
+  useSnapshotLag,
+} from "../fleet.js";
 import { Legend, RANGES, TimeChart, useTimeseries } from "../charts.jsx";
 import { TimeseriesModal } from "./TimeseriesModal.jsx";
 import {
@@ -87,6 +92,9 @@ export function Overview({ onUnauthorised, config, go }) {
   // than during render so a re-render for any other reason cannot fabricate a
   // sample interval of zero.
   const requestsTotal = data ? fleetSummary(data.fleet, config).requests : null;
+  // Before the early returns below, so the watched history is not reset by a
+  // render that happens to have no data yet.
+  const lag = useSnapshotLag(data?.fleet || [], config);
   useEffect(() => {
     if (requestsTotal === null) return;
     const now = Date.now();
@@ -105,7 +113,7 @@ export function Overview({ onUnauthorised, config, go }) {
   if (!data)
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
 
-  const summary = fleetSummary(data.fleet, config);
+  const summary = { ...fleetSummary(data.fleet, config), ...lag };
 
   // Protocol lives in the model configuration, not in a health report — the
   // report carries what a proxy observed, and the protocol is not something it

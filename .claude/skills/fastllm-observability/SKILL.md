@@ -56,9 +56,14 @@ the content changed — so the gap between two consecutive versions is the time
 between two real config changes, not any replica's lag. A replica one version
 behind can show a gap of a second or of a minute at identical health.
 
-Judge it by how long the newest version has been available instead: proxies
-poll every `config_poll_seconds` and report health every
-`health_report_interval_seconds` (both in `GET /admin/config`), so only a
-replica still behind a snapshot older than their sum is genuinely stuck.
+Judge it by time instead. Proxies poll every `config_poll_seconds` and report
+health every `health_report_interval_seconds` (both in `GET /admin/config`), so
+a replica is stuck only if the newest snapshot has been available for longer
+than their sum — or if it has been behind across several samples spanning that
+long. The second test is the one that works on a busy gateway, where
+`Budget.tokens_used` being part of the snapshot means traffic alone republishes
+it every few seconds and nothing is ever old. One `GET /admin/fleet` cannot
+distinguish a stuck replica from a converging one there; take a few, spaced.
+
 Reading any spread at all as a fault reports a healthy fleet as split after
 every change.

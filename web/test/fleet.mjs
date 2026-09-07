@@ -6,7 +6,7 @@
 // and says nothing about any replica's health. What decides it is how long the
 // newest snapshot has been available. These cases pin that in both directions.
 import assert from "node:assert/strict";
-import { fleetSummary, convergenceGrace } from "../src/fleet.js";
+import { fleetSummary, convergenceGrace, classifyLag } from "../src/fleet.js";
 
 const CONFIG = { config_poll_seconds: 5, health_report_interval_seconds: 10 };
 const GRACE = 20; // 5 + 10 + 5
@@ -150,6 +150,112 @@ check("a snapshot stamped in the future raises nothing", () => {
     NOW_MS,
   );
   assert.deepEqual(s.laggards, []);
+});
+
+// --- the second detection path -------------------------------------------
+//
+// `Budget.tokens_used` is part of the snapshot content, so traffic alone
+// republishes it every few seconds. On a gateway serving requests the newest
+// snapshot is therefore never old, and the age signal above goes blind. What
+// still persists is that one replica keeps being behind.
+
+// Simulate polling: a fleet where the newest version keeps advancing (busy
+// gateway) and one replica is frozen at an old version.
+const pollFrozen = (seconds, config = CONFIG) => {
+  let behindSince = {};
+  let out = null;
+  for (let t = 0; t <= seconds; t += 5) {
+    const now = NOW_MS + t * 1000;
+    // The control plane republished 2s ago, every time.
+    const fresh = (now - 2000) * 1000;
+    out = classifyLag(
+      [on("a", fresh), on("frozen", publishedAgo(600))],
+      config,
+      now,
+      behindSince,
+    );
+    behindSince = out.behindSince;
+  }
+  return out;
+};
+
+check(
+  "a busy gateway keeps the newest snapshot too young to judge by age",
+  () => {
+    const first = pollFrozen(0);
+    assert.ok(first.snapshotAgeSeconds < GRACE);
+    assert.deepEqual(
+      first.laggards,
+      [],
+      "nothing is provable on the first poll",
+    );
+    assert.deepEqual(first.converging, ["frozen"]);
+  },
+);
+
+check(
+  "but a replica behind continuously past the grace is still caught",
+  () => {
+    const later = pollFrozen(GRACE + 10);
+    assert.ok(
+      later.snapshotAgeSeconds < GRACE,
+      "age alone still proves nothing",
+    );
+    assert.deepEqual(later.laggards, ["frozen"]);
+    assert.deepEqual(later.converging, []);
+  },
+);
+
+check("a replica that catches up loses its history and its alert", () => {
+  // Throughout, the leader's snapshot is kept 2s old so the age signal never
+  // fires and this tests the history path alone.
+  const fresh = (now) => (now - 2000) * 1000;
+  let behindSince = {};
+  for (let t = 0; t <= GRACE - 5; t += 5) {
+    const now = NOW_MS + t * 1000;
+    behindSince = classifyLag(
+      [on("a", fresh(now)), on("frozen", publishedAgo(600))],
+      CONFIG,
+      now,
+      behindSince,
+    ).behindSince;
+  }
+  assert.ok(behindSince.frozen, "the clock is running");
+
+  // It catches up: the clock must be dropped, not left running.
+  const at = NOW_MS + GRACE * 1000;
+  const caught = classifyLag(
+    [on("a", fresh(at)), on("frozen", fresh(at))],
+    CONFIG,
+    at,
+    behindSince,
+  );
+  assert.deepEqual(caught.laggards, []);
+  assert.deepEqual(caught.behindSince, {}, "history is dropped, not carried");
+
+  // Behind again later starts a fresh clock rather than resuming the old one.
+  const then = NOW_MS + (GRACE + 5) * 1000;
+  const again = classifyLag(
+    [on("a", fresh(then)), on("frozen", publishedAgo(600))],
+    CONFIG,
+    then,
+    caught.behindSince,
+  );
+  assert.deepEqual(
+    again.laggards,
+    [],
+    "a new spell of lag is not instantly an alert",
+  );
+  assert.deepEqual(again.converging, ["frozen"]);
+});
+
+check("without history classifyLag is the age signal alone", () => {
+  const idle = classifyLag(
+    [on("a", publishedAgo(300)), on("b", publishedAgo(400))],
+    CONFIG,
+    NOW_MS,
+  );
+  assert.deepEqual(idle.laggards, ["b"]);
 });
 
 console.log(failures ? `\n${failures} failed` : "\nfleet: all passed");

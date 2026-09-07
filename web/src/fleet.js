@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 // Merging what the replicas report into what an operator can read.
 //
 // `GET /admin/fleet` deliberately returns one report per replica and merges
@@ -96,60 +98,102 @@ export function convergenceGrace(config) {
 }
 
 /**
+ * Sort the replicas that are behind into "catching up" and "stuck".
+ *
+ * The version gap is not the answer, and this is the trap. A version is the
+ * microsecond the control plane built that snapshot, and it republishes only
+ * when the content actually changed, so two consecutive versions are separated
+ * by however long it happened to be between two real changes. A replica
+ * exactly one version behind shows a "lag" of whatever that gap was -- seven
+ * seconds here, twenty-three there, both healthy. Thresholding it measures the
+ * control plane's edit history and calls a converging fleet split.
+ *
+ * Two signals do answer it, and each covers the other's blind spot:
+ *
+ * 1. **The newest snapshot is older than the grace.** Then every replica has
+ *    had its chance and anyone still behind is stuck -- however small the gap.
+ *    This needs no history, so a stuck fleet is named the moment the screen
+ *    opens. It goes blind on a busy gateway: `Budget.tokens_used` is part of
+ *    the snapshot content (see `Snapshot::content_eq`), so traffic alone
+ *    republishes it every few seconds and the newest version is never old.
+ *
+ * 2. **This replica has been behind continuously for longer than the grace.**
+ *    That catches the frozen replica the first signal misses, because being
+ *    behind is what persists even while the version it is behind of keeps
+ *    moving. It needs history, so it cannot fire until the screen has been
+ *    watching for that long -- which is exactly when signal 1 is strongest.
+ *
+ * `behindSince` carries that history between calls: replica -> the timestamp
+ * it was first seen behind, dropped again as soon as it catches up. Pure, with
+ * the clock and the map passed in, so both paths are testable without either.
+ */
+export function classifyLag(reports, config, now, behindSince = {}) {
+  const list = reports || [];
+  const versions = list.map((r) => r.snapshot_version);
+  const newest = versions.length ? Math.max(...versions) : null;
+  const grace = convergenceGrace(config);
+  const behind =
+    newest === null ? [] : list.filter((r) => r.snapshot_version < newest);
+
+  // Only the clock enters here, and only through `now`. Skew against the
+  // control plane shortens or lengthens the grace a little; a snapshot stamped
+  // in the future fails quiet, because a false silence costs one poll and a
+  // false alarm costs trust in the banner.
+  const snapshotAgeSeconds = newest === null ? 0 : (now * 1000 - newest) / 1e6;
+  const settled = snapshotAgeSeconds > grace;
+
+  const next = {};
+  const laggards = [];
+  const converging = [];
+  for (const r of behind) {
+    const since = behindSince[r.replica] ?? now;
+    next[r.replica] = since;
+    const behindForSeconds = (now - since) / 1000;
+    if (settled || behindForSeconds > grace) laggards.push(r.replica);
+    else converging.push(r.replica);
+  }
+  return { laggards, converging, behindSince: next, snapshotAgeSeconds };
+}
+
+/**
+ * The stateful half of [`classifyLag`], holding the history across polls.
+ *
+ * The map lives in a ref rather than state: it must not itself trigger a
+ * render, and recording "first seen behind" is idempotent, so a double render
+ * cannot make a replica look later than it is.
+ */
+export function useSnapshotLag(reports, config) {
+  const behindSince = useRef({});
+  const result = classifyLag(reports, config, Date.now(), behindSince.current);
+  behindSince.current = result.behindSince;
+  return result;
+}
+
+/**
  * Fleet-wide facts that do not belong to any one backend.
  *
- * `config` supplies the convergence grace; `now` is injectable so the
- * classification can be tested without a clock.
+ * The lag classification here is the history-free half only — right for
+ * callers that read counters rather than lag. Screens that show the banner use
+ * [`useSnapshotLag`], which also catches a replica frozen while the snapshot
+ * keeps moving underneath it.
  */
 export function fleetSummary(reports, config, now = Date.now()) {
   const list = reports || [];
   const versions = list.map((r) => r.snapshot_version);
   const backends = mergeBackends(list);
-  const newest = versions.length ? Math.max(...versions) : null;
-  const behind =
-    newest === null ? [] : list.filter((r) => r.snapshot_version < newest);
-
-  // Whether a behind replica is *stuck* or merely *catching up* is a question
-  // about time, and specifically not about the size of the version gap.
-  //
-  // A version is the wall-clock microsecond at which the control plane built
-  // that snapshot, and it only republishes when the content actually changed
-  // (`rebuild_once` compares first). So consecutive versions are separated by
-  // however long it happened to be between two real changes -- seven seconds
-  // here, twenty-three there -- and a replica exactly one version behind shows
-  // a "lag" of whatever that gap was. Reading that number as staleness is what
-  // made the banner fire: it measured the control plane's edit history, not
-  // any replica's health.
-  //
-  // What does answer the question is how long the newest snapshot has been
-  // *available*. Once it has existed for longer than a poll and a report can
-  // account for, every replica has had its chance and anyone still behind is
-  // genuinely stuck -- however small the version gap. Before that, nobody is
-  // late yet, however large it is.
-  //
-  // Both terms come from the control plane's clock except `now`; skew there
-  // only shortens or lengthens the grace slightly, and a clock far enough
-  // behind fails quiet rather than crying wolf.
-  const availableForSeconds = newest === null ? 0 : (now * 1000 - newest) / 1e6;
-  const stuck = availableForSeconds > convergenceGrace(config);
-
+  const lag = classifyLag(list, config, now);
   return {
     replicas: list.length,
     // The check `docs/api.md` recommends, which no single replica can make:
     // a version spread means one is serving an older configuration while
     // answering /health perfectly happily.
-    snapshotVersion: newest,
+    snapshotVersion: versions.length ? Math.max(...versions) : null,
     snapshotSpread: versions.length
       ? Math.max(...versions) - Math.min(...versions)
       : 0,
-    // How long the newest snapshot has been published, which is the number
-    // the classification below actually turns on.
-    snapshotAgeSeconds: availableForSeconds,
-    laggards: stuck ? behind.map((r) => r.replica) : [],
-    // Behind, but not for long enough to mean anything yet. Named separately
-    // so a screen can say "still catching up" instead of either crying wolf or
-    // showing an unexplained delay as perfect health.
-    converging: stuck ? [] : behind.map((r) => r.replica),
+    snapshotAgeSeconds: lag.snapshotAgeSeconds,
+    laggards: lag.laggards,
+    converging: lag.converging,
     backends,
     backendsUp: backends.filter((b) => b.healthy).length,
     backendsSplit: backends.filter((b) => b.split),

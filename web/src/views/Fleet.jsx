@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
-import { fleetSummary, convergenceGrace } from "../fleet.js";
+import { fleetSummary, convergenceGrace, useSnapshotLag } from "../fleet.js";
 import {
   Banner,
   Card,
@@ -84,11 +84,16 @@ export function Fleet({ onUnauthorised, config }) {
     },
   );
   usePoll(reload, POLL_MS);
+  // Before the early return: the history this keeps only spans the time the
+  // screen is open, and a hook skipped on the loading render would reset it.
+  const lag = useSnapshotLag(data?.fleet || [], config);
 
   if (loading && !data) return <Loading />;
   const reports = data?.fleet || [];
   const nodes = data?.nodes || [];
-  const summary = fleetSummary(reports, config);
+  // `lag` last: it is the same classification with the watched history added,
+  // which `fleetSummary` alone cannot see.
+  const summary = { ...fleetSummary(reports, config), ...lag };
 
   return (
     <Stack>

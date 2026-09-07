@@ -165,12 +165,22 @@ microsecond at which the control plane built that snapshot, and it only
 republishes when the content actually changed. Two consecutive versions are
 therefore separated by however long it happened to be between two real changes,
 so a replica exactly one version behind can show a gap of a second or of a
-minute with no difference in health. What decides it is how long the newest
-snapshot has been *available*: once it has existed longer than a poll and a
-report can account for, a replica still on the old one is genuinely stuck. The
-Fleet screen says "still picking up the snapshot" until then and only raises
-the red banner after — and reports the snapshot's age in it, which is the
-number to reason with.
+minute with no difference in health. What decides it is time, by either of two
+signals:
+
+- **The newest snapshot has been available longer than a poll and a report can
+  account for** (15s on the defaults, plus a small margin). Everyone has had
+  their chance, so anyone still behind is stuck.
+- **A replica has been behind continuously for longer than that.** This is the
+  one that matters on a busy gateway: `Budget.tokens_used` is part of the
+  snapshot content, so traffic alone republishes it every few seconds and the
+  newest snapshot is never old enough for the first signal to prove anything.
+  Being behind is what persists while the version it is behind of keeps moving.
+
+The Fleet screen says "still picking up the snapshot" until one of those holds
+and only raises the red banner after, reporting the snapshot's age with it. The
+second signal only counts time the screen has been open, so leave it open for a
+few polls before concluding a replica is fine.
 
 ## Backends
 
