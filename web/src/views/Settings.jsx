@@ -39,12 +39,13 @@ export function Settings({ onUnauthorised, config }) {
 
   const { data, error, loading, reload, setError } = useLoader(
     async () => {
-      const [models, fallback, cfg] = await Promise.all([
+      const [models, fallback, cfg, health] = await Promise.all([
         api.get("/admin/provider-models"),
         api.get("/admin/fallback-model"),
         api.get("/admin/config"),
+        api.get("/admin/health"),
       ]);
-      return { models, fallback, cfg };
+      return { models, fallback, cfg, health };
     },
     { onUnauthorised },
   );
@@ -263,6 +264,28 @@ export function Settings({ onUnauthorised, config }) {
           />
         </Card>
       </Grid>
+
+      {/* A write commits before `refresh` rebuilds the snapshot, and a failed
+          rebuild is deliberately not turned into a 5xx on the route that
+          caused it. This counter is the only thing that makes that divergence
+          between the database and what the proxies are serving visible, so it
+          has to be somewhere an operator looks. */}
+      <Card title="Snapshot">
+        <Row gap={10}>
+          <Pill
+            tone={data.health?.snapshot_rebuild_failures ? "bad" : "ok"}
+            mono
+          >
+            {data.health?.snapshot_rebuild_failures ?? "?"} rebuild failure
+            {data.health?.snapshot_rebuild_failures === 1 ? "" : "s"}
+          </Pill>
+          <Muted>
+            {data.health?.snapshot_rebuild_failures
+              ? "The database and the snapshot the proxies are serving have diverged. Rebuild below, and check the control plane log for why."
+              : "Every admin write since this control plane started has reached the published snapshot."}
+          </Muted>
+        </Row>
+      </Card>
 
       <Card
         title="Danger zone"

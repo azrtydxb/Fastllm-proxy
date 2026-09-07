@@ -203,6 +203,9 @@ const FIXTURES = {
       model_count: 1,
     },
   ],
+  // Zero is the normal state; the Settings screen turns non-zero into a
+  // warning that the database and the published snapshot have diverged.
+  "/admin/health": { snapshot_rebuild_failures: 0 },
   "/admin/provider-models": [
     {
       // One model, two machines — the shape migration 0045 makes possible and

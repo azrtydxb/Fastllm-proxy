@@ -17,6 +17,7 @@ import {
   Stack,
   Table,
   Tr,
+  Renamable,
 } from "../ui.jsx";
 
 // Three tabs over the same RBAC model: who exists, what each role may do, and
@@ -172,9 +173,21 @@ export function Principals({ onUnauthorised }) {
                           {p.name.slice(0, 2).toUpperCase()}
                         </div>
                         <div style={{ minWidth: 0 }}>
-                          <div style={{ font: "500 12px var(--sans)" }}>
-                            {p.name}
-                          </div>
+                          <Renamable
+                            value={p.name}
+                            style={{ font: "500 12px var(--sans)" }}
+                            hint="Click to rename. Keys, roles, limits, budgets and usage all reference the id, so nothing breaks; usage history keeps the name it was billed under."
+                            onSave={(name) =>
+                              attempt(
+                                () =>
+                                  api.patch(`/admin/principals/${p.id}`, {
+                                    name,
+                                  }),
+                                setError,
+                                onUnauthorised,
+                              ).then((ok) => ok && reload())
+                            }
+                          />
                           {p.email && (
                             <div
                               style={{
@@ -392,9 +405,22 @@ export function Principals({ onUnauthorised }) {
               <Stack gap={8}>
                 {data.roles.map((r) => (
                   <Row key={r.id} style={{ flexWrap: "nowrap" }}>
-                    <Mono style={{ font: "500 12px var(--mono)" }}>
-                      {r.name}
-                    </Mono>
+                    <Renamable
+                      value={r.name}
+                      style={{ font: "500 12px var(--mono)" }}
+                      hint="Click to rename. Holders and grants reference the role's id, so renaming changes only the name it is addressed by."
+                      onSave={(name) =>
+                        attempt(
+                          () =>
+                            api.patch(
+                              `/admin/roles/${encodeURIComponent(r.name)}`,
+                              { name },
+                            ),
+                          setError,
+                          onUnauthorised,
+                        ).then((ok) => ok && reload())
+                      }
+                    />
                     <Spacer />
                     <Muted>
                       {
@@ -407,6 +433,26 @@ export function Principals({ onUnauthorised }) {
                         ? ""
                         : "s"}
                     </Muted>
+                    {/* The server refuses while anyone still holds it, rather
+                        than revoking everybody's access in one write. */}
+                    <Button
+                      variant="smallDanger"
+                      onClick={async () => {
+                        if (!window.confirm(`Delete the role ${r.name}?`))
+                          return;
+                        const ok = await attempt(
+                          () =>
+                            api.del(
+                              `/admin/roles/${encodeURIComponent(r.name)}`,
+                            ),
+                          setError,
+                          onUnauthorised,
+                        );
+                        if (ok) reload();
+                      }}
+                    >
+                      delete
+                    </Button>
                   </Row>
                 ))}
                 <NewRole
