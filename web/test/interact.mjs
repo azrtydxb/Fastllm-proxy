@@ -568,6 +568,34 @@ await goto("models");
     }
   }
 
+  // API keys hide revoked ones by default: a revoked key cannot authenticate
+  // anything, and on a deployment that rotates them it is most of the list.
+  // The screen should answer "what can get in right now".
+  await goto("keys");
+  {
+    const root = () => document.getElementById("root").textContent;
+    check(
+      "a revoked key is hidden by default",
+      !root().includes("sk-dead0000"),
+      "the revoked key is on screen without asking",
+    );
+    check(
+      "the active one is not",
+      root().includes("sk-abcd1234"),
+      "the active key is missing",
+    );
+    const toggle = containing("show revoked");
+    check("there is a way to see them", !!toggle);
+    if (toggle) {
+      await click(toggle);
+      check(
+        "and it shows them",
+        root().includes("sk-dead0000"),
+        "clicking show revoked did nothing",
+      );
+    }
+  }
+
   // Cost is not a load-balancing policy: a price is fixed, so a balancer set
   // to it never balances. It decides routing through a rule condition instead.
   await goto("pools");

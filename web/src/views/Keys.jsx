@@ -43,6 +43,11 @@ export function Keys({ onUnauthorised }) {
     days: "90",
   });
   const [created, setCreated] = useState(null);
+  // A revoked key is history: it cannot authenticate anything, and on a
+  // deployment that rotates keys it is most of the list. Hidden by default so
+  // the screen answers "what can get in right now", which is the question
+  // being asked almost every time it is opened.
+  const [showRevoked, setShowRevoked] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const { data, error, loading, reload, setError } = useLoader(
@@ -59,6 +64,9 @@ export function Keys({ onUnauthorised }) {
   if (loading && !data) return <Loading />;
   if (!data)
     return <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote>;
+
+  const revokedCount = data.keys.filter((k) => k.disabled).length;
+  const shown = showRevoked ? data.keys : data.keys.filter((k) => !k.disabled);
 
   const create = async (e) => {
     e.preventDefault();
@@ -187,11 +195,33 @@ export function Keys({ onUnauthorised }) {
       </Card>
 
       <Card>
-        {data.keys.length === 0 ? (
-          <Empty>No keys yet.</Empty>
+        <Row gap={10} style={{ marginBottom: 10 }}>
+          <Muted>
+            {shown.length} of {data.keys.length} key
+            {data.keys.length === 1 ? "" : "s"}
+            {revokedCount > 0 && !showRevoked
+              ? ` · ${revokedCount} revoked hidden`
+              : ""}
+          </Muted>
+          <Spacer />
+          {revokedCount > 0 && (
+            <Button
+              variant="small"
+              onClick={() => setShowRevoked(!showRevoked)}
+            >
+              {showRevoked ? "hide revoked" : `show revoked (${revokedCount})`}
+            </Button>
+          )}
+        </Row>
+        {shown.length === 0 ? (
+          <Empty>
+            {data.keys.length === 0
+              ? "No keys yet."
+              : "Every key here is revoked — show them to see the history."}
+          </Empty>
         ) : (
           <Table cols={COLS}>
-            {data.keys.map((k) => {
+            {shown.map((k) => {
               const expired =
                 k.expires_at && new Date(k.expires_at) < new Date();
               return (
