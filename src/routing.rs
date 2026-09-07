@@ -72,8 +72,37 @@ pub fn estimate_prompt_tokens(body_len: usize) -> u64 {
 /// to keep them summing to 100.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WeightedTarget {
+    /// The provider model to route to, or the pool's own name when this
+    /// target is a pool.
     pub model: String,
     pub weight: u32,
+    /// The members to choose between, when this target is a **pool**. Empty
+    /// for a plain provider model, which is the common case.
+    ///
+    /// A pool is a named, reusable group — `leastloaded-gemma` and
+    /// `lowestlatency-gemma` may hold the same members and differ only in
+    /// `policy`, which is the thing a policy buried in a rule's target list
+    /// could never do.
+    pub members: Vec<WeightedTarget>,
+    /// How to choose among `members`. `None` is the weighted split. Only
+    /// meaningful on a pool; a plain target has nothing to choose between.
+    pub policy: Option<crate::router::Policy>,
+}
+
+impl WeightedTarget {
+    /// A plain provider model, which is what almost every target is.
+    pub fn model(name: impl Into<String>, weight: u32) -> Self {
+        Self {
+            model: name.into(),
+            weight,
+            members: Vec::new(),
+            policy: None,
+        }
+    }
+
+    fn is_pool(&self) -> bool {
+        !self.members.is_empty()
+    }
 }
 
 /// Who is calling. Empty on both sides means "anyone" — a caller condition
@@ -622,15 +651,6 @@ pub struct RoutingRule {
     /// Not an action of its own: a rule that tags still has to route, or there
     /// would be no usage row to put the label on.
     pub tag: Option<String>,
-    /// How to choose among *this rule's* targets. `None` falls back to the
-    /// frontend model's, and then to the weighted split.
-    ///
-    /// Per rule rather than per frontend model because that is the level the
-    /// targets are at: "least-connections across the two local boxes, then
-    /// plain failover to the cloud when they are full" is two rules wanting
-    /// two different answers, and one setting for the whole frontend model
-    /// could not say it.
-    pub policy: Option<crate::router::Policy>,
 }
 
 /// What a matching rule does.
@@ -781,14 +801,6 @@ pub struct FrontendModelDef {
     /// matching rule's own targets turn out to be unroutable (see
     /// [`FrontendModelDef::resolve`]'s doc comment).
     pub default_targets: Vec<WeightedTarget>,
-    /// How to choose between the targets that survive rule evaluation.
-    ///
-    /// `None` is the weighted split — a deterministic pick on the request
-    /// prefix — which is what a target list has always meant and stays the
-    /// default. The others answer the case migration 0028 was written for and
-    /// could not reach: targets that are *not* equivalent, where the right
-    /// choice depends on what they are rather than on a fixed share.
-    pub policy: Option<crate::router::Policy>,
 }
 
 impl FrontendModelDef {
@@ -932,11 +944,6 @@ impl FrontendModelDef {
                                 prefix_hash,
                                 registry,
                                 facts.needed_tokens(),
-                                // The rule's own, or the frontend model's
-                                // where it has none — so a deployment that set
-                                // one policy for the whole model keeps
-                                // behaving exactly as it did.
-                                rule.policy.or(current.policy),
                             ),
                             tag: rule.tag.clone(),
                         };
@@ -955,7 +962,6 @@ impl FrontendModelDef {
                             prefix_hash,
                             registry,
                             facts.needed_tokens(),
-                            current.policy,
                         ),
                         tag: None,
                     }
@@ -1100,25 +1106,24 @@ fn order_candidates(
     prefix_hash: u64,
     registry: &Registry,
     needed_tokens: u64,
-    policy: Option<crate::router::Policy>,
 ) -> Vec<String> {
-    let chosen = policy
-        .and_then(|p| choose_by_policy(targets, p, registry, prefix_hash))
-        .or_else(|| choose_weighted(targets, prefix_hash));
-    let Some(chosen) = chosen else {
-        return Vec::new();
-    };
-    // Weighted pick first, then the rest in declaration order — declaration
-    // order is the operator's stated preference, and honouring it is what
-    // makes a target list readable as a fallback chain.
-    let mut ordered: Vec<String> = std::iter::once(chosen.model.clone())
-        .chain(
-            targets
-                .iter()
-                .map(|t| t.model.clone())
-                .filter(|m| *m != chosen.model),
-        )
-        .collect();
+    // A rule's targets are an ordered failover chain and nothing else: tried
+    // in the order they are written, first to last. Choosing *between*
+    // several models at once is what a pool is for, and a pool is one target
+    // here like any other.
+    //
+    // That division is the whole point of pools. Before them a policy sat on
+    // the rule and governed its target list, which meant a target list was
+    // secretly two things at once — an order of preference and a set to
+    // balance across — and no screen could show which.
+    let mut ordered: Vec<String> = Vec::new();
+    for target in targets {
+        if target.is_pool() {
+            ordered.extend(expand_pool(target, prefix_hash, registry));
+        } else {
+            ordered.push(target.model.clone());
+        }
+    }
     ordered.dedup();
     // Stable, so a healthy pool is preferred without disturbing the relative
     // order of equals. Unhealthy targets are kept rather than dropped: when
@@ -1150,6 +1155,31 @@ fn order_candidates(
         });
     }
     ordered
+}
+
+/// One pool, flattened into the chain: the member its policy prefers, then the
+/// rest in declaration order.
+///
+/// The rest are kept rather than dropped so a pool degrades into a failover
+/// chain of its own members — if the chosen one refuses this request, the
+/// others are still tried before the rule's next target, which is what makes a
+/// pool safe to use as a single target.
+fn expand_pool(pool: &WeightedTarget, prefix_hash: u64, registry: &Registry) -> Vec<String> {
+    let chosen = pool
+        .policy
+        .and_then(|p| choose_by_policy(&pool.members, p, registry, prefix_hash))
+        .or_else(|| choose_weighted(&pool.members, prefix_hash));
+    let Some(chosen) = chosen else {
+        return Vec::new();
+    };
+    std::iter::once(chosen.model.clone())
+        .chain(
+            pool.members
+                .iter()
+                .map(|m| m.model.clone())
+                .filter(|m| *m != chosen.model),
+        )
+        .collect()
 }
 
 #[cfg(test)]
@@ -1237,9 +1267,23 @@ mod tests {
     }
 
     fn target(model: &str, weight: u32) -> WeightedTarget {
+        WeightedTarget::model(model, weight)
+    }
+
+    /// A pool target: several members, chosen between by `policy`.
+    fn pool(
+        name: &str,
+        policy: Option<crate::router::Policy>,
+        members: &[(&str, u32)],
+    ) -> WeightedTarget {
         WeightedTarget {
-            model: model.to_string(),
-            weight,
+            model: name.to_string(),
+            weight: 100,
+            members: members
+                .iter()
+                .map(|(m, w)| WeightedTarget::model(*m, *w))
+                .collect(),
+            policy,
         }
     }
 
@@ -1267,14 +1311,12 @@ mod tests {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
-                    policy: None,
                     action: RuleAction::Route,
                     tag: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("first", 1)],
                 },
                 RoutingRule {
-                    policy: None,
                     action: RuleAction::Route,
                     tag: None,
                     conditions: RuleConditions::default(),
@@ -1282,7 +1324,6 @@ mod tests {
                 },
             ],
             default_targets: vec![target("default", 1)],
-            policy: None,
         };
         let reg = registry_with(&["first", "second", "default"]);
         assert_eq!(
@@ -1299,7 +1340,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
-                    policy: None,
                     action: RuleAction::Route,
                     tag: None,
                     conditions: RuleConditions {
@@ -1312,7 +1352,6 @@ mod tests {
                     targets: vec![target("only-for-999", 1)],
                 },
                 RoutingRule {
-                    policy: None,
                     action: RuleAction::Route,
                     tag: None,
                     conditions: RuleConditions::default(),
@@ -1320,7 +1359,6 @@ mod tests {
                 },
             ],
             default_targets: vec![],
-            policy: None,
         };
         let reg = registry_with(&["only-for-999", "catch-all"]);
         let caller = principal(crate::snapshot::tid(1), &[]);
@@ -1399,7 +1437,6 @@ mod tests {
     fn combined_caller_and_shape_conditions_both_must_hold() {
         let reg = registry_with(&["m"]);
         let rule = RoutingRule {
-            policy: None,
             action: RuleAction::Route,
             tag: None,
             conditions: RuleConditions {
@@ -1450,7 +1487,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: targets,
-            policy: None,
         };
         let prefix = 0xdead_beef_1234_5678u64;
         let first = vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), prefix, &reg);
@@ -1465,13 +1501,15 @@ mod tests {
 
     #[test]
     fn distinct_prefixes_distribute_close_to_the_configured_weights() {
-        let targets = vec![target("a", 1), target("b", 3)];
+        // The weighted split lives in a pool now. A target list is an ordered
+        // failover chain and splits nothing, so this is the shape that still
+        // divides traffic by weight — and the one an operator writes when they
+        // want a canary.
         let reg = registry_with(&["a", "b"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![],
-            default_targets: targets,
-            policy: None,
+            default_targets: vec![pool("ab", None, &[("a", 1), ("b", 3)])],
         };
         let mut a = 0u32;
         let mut b = 0u32;
@@ -1515,7 +1553,6 @@ mod tests {
             // weight 100 on primary so `choose_weighted` always picks it
             // first, isolating the failover behaviour from the split.
             default_targets: vec![target("primary", 100), target("secondary", 1)],
-            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1532,7 +1569,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
-            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1550,7 +1586,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
-            policy: None,
         };
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
@@ -1576,7 +1611,6 @@ mod tests {
 
     fn rule_with(conditions: RuleConditions, model: &str) -> RoutingRule {
         RoutingRule {
-            policy: None,
             action: RuleAction::Route,
             tag: None,
             conditions,
@@ -1748,7 +1782,6 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Deny {
                     status: 402,
                     message: "batch keys do not get the big model".into(),
@@ -1763,16 +1796,9 @@ mod tests {
                 },
                 // Targets present on purpose: a deny must refuse rather than
                 // quietly serving what it happens to list.
-                targets: vec![WeightedTarget {
-                    model: "m".into(),
-                    weight: 1,
-                }],
+                targets: vec![WeightedTarget::model("m", 1)],
             }],
-            default_targets: vec![WeightedTarget {
-                model: "m".into(),
-                weight: 1,
-            }],
-            policy: None,
+            default_targets: vec![WeightedTarget::model("m", 1)],
         };
         let headers = HeaderMap::new();
         let batch = principal(crate::snapshot::tid(1), &["batch"]);
@@ -1803,7 +1829,6 @@ mod tests {
         let shared = FrontendModelDef {
             name: "house-policy".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Route,
                 tag: Some("house".into()),
                 conditions: RuleConditions {
@@ -1813,28 +1838,19 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                targets: vec![WeightedTarget {
-                    model: "big".into(),
-                    weight: 1,
-                }],
+                targets: vec![WeightedTarget::model("big", 1)],
             }],
-            default_targets: vec![WeightedTarget {
-                model: "cheap".into(),
-                weight: 1,
-            }],
-            policy: None,
+            default_targets: vec![WeightedTarget::model("cheap", 1)],
         };
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Jump("house-policy".into()),
                 tag: None,
                 conditions: RuleConditions::default(),
                 targets: Vec::new(),
             }],
             default_targets: Vec::new(),
-            policy: None,
         };
         let mut models = HashMap::new();
         models.insert("house-policy".to_string(), shared);
@@ -1864,17 +1880,12 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Jump("deleted".into()),
                 tag: None,
                 conditions: RuleConditions::default(),
                 targets: Vec::new(),
             }],
-            default_targets: vec![WeightedTarget {
-                model: "m".into(),
-                weight: 1,
-            }],
-            policy: None,
+            default_targets: vec![WeightedTarget::model("m", 1)],
         };
         assert!(matches!(
             vm.decide(
@@ -1893,7 +1904,6 @@ mod tests {
     fn a_jump_cycle_terminates() {
         let reg = registry_with(&["m"]);
         let loop_rule = |to: &str| RoutingRule {
-            policy: None,
             action: RuleAction::Jump(to.into()),
             tag: None,
             conditions: RuleConditions::default(),
@@ -1903,13 +1913,11 @@ mod tests {
             name: "a".into(),
             rules: vec![loop_rule("b")],
             default_targets: Vec::new(),
-            policy: None,
         };
         let b = FrontendModelDef {
             name: "b".into(),
             rules: vec![loop_rule("a")],
             default_targets: Vec::new(),
-            policy: None,
         };
         let mut models = HashMap::new();
         models.insert("a".to_string(), a.clone());
@@ -1926,6 +1934,84 @@ mod tests {
                 tag: None
             }
         );
+    }
+
+    // --- pools -----------------------------------------------------------
+
+    /// The division pools exist to make: a rule's targets are tried in the
+    /// order they are written, and choosing *between* several at once is what
+    /// a pool does. Before pools a target list was secretly both.
+    #[test]
+    fn a_rules_targets_are_a_failover_chain_in_declaration_order() {
+        let reg = registry_with(&["first", "second", "third"]);
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![],
+            default_targets: vec![
+                target("first", 1),
+                target("second", 100),
+                target("third", 100),
+            ],
+        };
+        // The heavy weights do not promote anything: weight is a pool's
+        // business now, and a chain is an order.
+        for prefix in [0, 7, 999_983, u64::MAX] {
+            let chain =
+                vm.resolve_candidates(&facts_with(None, 0, None, &HeaderMap::new()), prefix, &reg);
+            assert_eq!(chain, vec!["first", "second", "third"]);
+        }
+    }
+
+    /// A pool inside a chain: its policy picks the head, and the rest of its
+    /// members stay ahead of the next target so the pool degrades into its own
+    /// failover chain before giving up.
+    #[test]
+    fn a_pool_expands_in_place_and_keeps_its_other_members() {
+        let reg = registry_with(&["a", "b", "cloud"]);
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![],
+            default_targets: vec![
+                pool(
+                    "local",
+                    Some(crate::router::Policy::LeastLoaded),
+                    &[("a", 1), ("b", 1)],
+                ),
+                target("cloud", 1),
+            ],
+        };
+        let busy = &reg.pool("a").unwrap()[0];
+        let _g = crate::registry::InflightGuard::acquire(std::sync::Arc::clone(busy));
+
+        let chain = vm.resolve_candidates(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg);
+        assert_eq!(
+            chain,
+            vec!["b", "a", "cloud"],
+            "least-loaded picks b, a stays as the pool's own fallback, cloud last"
+        );
+    }
+
+    /// The same members in two pools that differ only in policy — the thing a
+    /// policy buried in a rule's target list could never express.
+    #[test]
+    fn two_pools_over_the_same_members_can_choose_differently() {
+        let reg = registry_with(&["a", "b"]);
+        let busy = &reg.pool("a").unwrap()[0];
+        let _g = crate::registry::InflightGuard::acquire(std::sync::Arc::clone(busy));
+
+        let with = |p: Option<crate::router::Policy>| {
+            FrontendModelDef {
+                name: "vm".into(),
+                rules: vec![],
+                default_targets: vec![pool("p", p, &[("a", 1), ("b", 1)])],
+            }
+            .resolve_candidates(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)[0]
+                .clone()
+        };
+        assert_eq!(with(Some(crate::router::Policy::LeastLoaded)), "b");
+        // Round robin on the same prefix is a pure function of it, so it does
+        // not care that `a` is busy.
+        assert_eq!(with(Some(crate::router::Policy::RoundRobin)), "a");
     }
 
     // --- cost conditions -------------------------------------------------
@@ -1948,7 +2034,6 @@ mod tests {
         let deny = |max: u64| FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Deny {
                     status: 402,
                     message: "too expensive".into(),
@@ -1966,16 +2051,9 @@ mod tests {
             // Both reachable, so the cheap one sets the price — "how little
             // could this cost however it is routed".
             default_targets: vec![
-                WeightedTarget {
-                    model: "dear".into(),
-                    weight: 1,
-                },
-                WeightedTarget {
-                    model: "cheap".into(),
-                    weight: 1,
-                },
+                WeightedTarget::model("dear", 1),
+                WeightedTarget::model("cheap", 1),
             ],
-            policy: None,
         };
         let headers = HeaderMap::new();
         // 1000 prompt tokens at $1/Mtok and 500 generated at $2/Mtok = 2000
@@ -2003,7 +2081,6 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Deny {
                     status: 402,
                     message: "too expensive".into(),
@@ -2018,11 +2095,7 @@ mod tests {
                 },
                 targets: Vec::new(),
             }],
-            default_targets: vec![WeightedTarget {
-                model: "m".into(),
-                weight: 1,
-            }],
-            policy: None,
+            default_targets: vec![WeightedTarget::model("m", 1)],
         };
         assert!(matches!(
             vm.decide(
@@ -2140,7 +2213,6 @@ mod tests {
                 rule_with(RuleConditions::default(), "cloud"),
             ],
             default_targets: vec![],
-            policy: None,
         };
         let headers = HeaderMap::new();
         assert_eq!(
@@ -2291,7 +2363,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 0)],
-            policy: None,
         };
         let headers = HeaderMap::new();
         let chain = vm.resolve_candidates(&facts_with(None, 0, None, &headers), 0, &reg);
@@ -2305,7 +2376,6 @@ mod tests {
             name: "vm".into(),
             rules: vec![],
             default_targets: vec![target("a", 1), target("a", 1)],
-            policy: None,
         };
         let headers = HeaderMap::new();
         let chain = vm.resolve_candidates(&facts_with(None, 0, None, &headers), 0, &reg);
@@ -2371,7 +2441,6 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Route,
                 tag: None,
                 conditions: RuleConditions {
@@ -2384,7 +2453,6 @@ mod tests {
                 targets: vec![target("only-for-999", 1)],
             }],
             default_targets: vec![target("default-model", 1)],
-            policy: None,
         };
         let reg = registry_with(&["only-for-999", "default-model"]);
         assert_eq!(
@@ -2408,14 +2476,12 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
-                policy: None,
                 action: RuleAction::Route,
                 tag: None,
                 conditions: RuleConditions::default(),
                 targets: vec![],
             }],
             default_targets: vec![target("default-model", 1)],
-            policy: None,
         };
         let reg = registry_with(&["default-model"]);
         assert_eq!(
@@ -2441,24 +2507,18 @@ mod tests {
     fn a_model_too_small_for_the_prompt_is_demoted_not_dropped() {
         let registry = registry_with_context(&[("small", Some(8_192)), ("big", Some(262_144))]);
         let targets = vec![
-            WeightedTarget {
-                model: "small".into(),
-                weight: 100,
-            },
-            WeightedTarget {
-                model: "big".into(),
-                weight: 1,
-            },
+            WeightedTarget::model("small", 100),
+            WeightedTarget::model("big", 1),
         ];
 
         // Comfortably inside both: the declared weights decide, and `small`
         // carries almost all of them.
-        let small_request = order_candidates(&targets, 0, &registry, 1_000, None);
+        let small_request = order_candidates(&targets, 0, &registry, 1_000);
         assert_eq!(small_request[0], "small");
 
         // Past what `small` can hold: `big` leads, and `small` is still
         // present as a last resort rather than removed.
-        let big_request = order_candidates(&targets, 0, &registry, 100_000, None);
+        let big_request = order_candidates(&targets, 0, &registry, 100_000);
         assert_eq!(big_request[0], "big", "the model that fits must lead");
         assert!(
             big_request.contains(&"small".to_string()),
@@ -2474,16 +2534,10 @@ mod tests {
     fn a_model_with_no_declared_window_is_never_demoted() {
         let registry = registry_with_context(&[("unknown", None), ("small", Some(8_192))]);
         let targets = vec![
-            WeightedTarget {
-                model: "unknown".into(),
-                weight: 100,
-            },
-            WeightedTarget {
-                model: "small".into(),
-                weight: 1,
-            },
+            WeightedTarget::model("unknown", 100),
+            WeightedTarget::model("small", 1),
         ];
-        let ordered = order_candidates(&targets, 0, &registry, 100_000, None);
+        let ordered = order_candidates(&targets, 0, &registry, 100_000);
         assert_eq!(
             ordered[0], "unknown",
             "undeclared must not be treated as too small"

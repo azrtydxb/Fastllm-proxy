@@ -526,6 +526,16 @@ pub struct WireModelDef {
 pub struct WireWeightedTarget {
     pub model: String,
     pub weight: u32,
+    /// Non-empty when this target is a **pool** — the members to choose
+    /// between. Absent from a control plane older than pools, which decodes
+    /// as a plain provider model: exactly what such a target was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<WireWeightedTarget>,
+    /// How to choose among `members`. Absent is the weighted split, and an
+    /// unrecognised value reads as absent — a control plane that learns a new
+    /// policy must not stop an older proxy routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -589,11 +599,6 @@ pub struct WireRoutingRule {
     pub min_request_cost_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_cost_micros: Option<u64>,
-    /// How to choose among this rule's targets. Absent means the frontend
-    /// model's, and an unrecognised value reads as absent — a control plane
-    /// that learns a new policy must not stop an older proxy routing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<String>,
     /// `route`, `deny` or `jump`. Absent is `route`, which is what every rule
     /// meant before migration 0047 — so a snapshot from an older control
     /// plane decodes with the meaning it was written with.
@@ -636,11 +641,26 @@ pub struct WireFrontendModel {
     pub name: String,
     pub rules: Vec<WireRoutingRule>,
     pub default_targets: Vec<WireWeightedTarget>,
-    /// Same spelling `--policy` uses, and absent for the weighted split.
-    /// A proxy that meets a policy it does not know falls back rather than
-    /// refusing to route, so a new policy cannot stop an older proxy working.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<String>,
+}
+
+/// A target and, when it is a pool, its members — one level deep, because a
+/// pool holds provider models and never another pool.
+fn target_to_wire(t: &WeightedTarget) -> WireWeightedTarget {
+    WireWeightedTarget {
+        model: t.model.clone(),
+        weight: t.weight,
+        members: t.members.iter().map(target_to_wire).collect(),
+        policy: t.policy.map(|p| p.as_str().to_string()),
+    }
+}
+
+fn target_from_wire(t: WireWeightedTarget) -> WeightedTarget {
+    WeightedTarget {
+        model: t.model,
+        weight: t.weight,
+        members: t.members.into_iter().map(target_from_wire).collect(),
+        policy: t.policy.as_deref().and_then(crate::router::Policy::parse),
+    }
 }
 
 impl Snapshot {
@@ -850,7 +870,6 @@ impl Snapshot {
                             class: r.conditions.class.class.clone(),
                             min_request_cost_micros: r.conditions.cost.min_micros,
                             max_request_cost_micros: r.conditions.cost.max_micros,
-                            policy: r.policy.map(|p| p.as_str().to_string()),
                             action: match &r.action {
                                 crate::routing::RuleAction::Route => None,
                                 crate::routing::RuleAction::Deny { .. } => Some("deny".into()),
@@ -871,25 +890,10 @@ impl Snapshot {
                                 _ => None,
                             },
                             tag: r.tag.clone(),
-                            targets: r
-                                .targets
-                                .iter()
-                                .map(|t| WireWeightedTarget {
-                                    model: t.model.clone(),
-                                    weight: t.weight,
-                                })
-                                .collect(),
+                            targets: r.targets.iter().map(target_to_wire).collect(),
                         })
                         .collect(),
-                    default_targets: vm
-                        .default_targets
-                        .iter()
-                        .map(|t| WireWeightedTarget {
-                            model: t.model.clone(),
-                            weight: t.weight,
-                        })
-                        .collect(),
-                    policy: vm.policy.map(|p| p.as_str().to_string()),
+                    default_targets: vm.default_targets.iter().map(target_to_wire).collect(),
                 })
                 .collect(),
             open: self.open,
@@ -1069,10 +1073,6 @@ impl Snapshot {
                                             max_micros: r.max_request_cost_micros,
                                         },
                                     },
-                                    policy: r
-                                        .policy
-                                        .as_deref()
-                                        .and_then(crate::router::Policy::parse),
                                     // Anything unrecognised is `route`: see
                                     // `WireRoutingRule::action`. A `deny` with
                                     // no status and a `jump` with no
@@ -1096,25 +1096,14 @@ impl Snapshot {
                                         _ => crate::routing::RuleAction::Route,
                                     },
                                     tag: r.tag.clone(),
-                                    targets: r
-                                        .targets
-                                        .into_iter()
-                                        .map(|t| WeightedTarget {
-                                            model: t.model,
-                                            weight: t.weight,
-                                        })
-                                        .collect(),
+                                    targets: r.targets.into_iter().map(target_from_wire).collect(),
                                 })
                                 .collect(),
                             default_targets: vm
                                 .default_targets
                                 .into_iter()
-                                .map(|t| WeightedTarget {
-                                    model: t.model,
-                                    weight: t.weight,
-                                })
+                                .map(target_from_wire)
                                 .collect(),
-                            policy: vm.policy.as_deref().and_then(crate::router::Policy::parse),
                         },
                     )
                 })
@@ -1191,10 +1180,10 @@ mod tests {
     fn a_model_survives_the_round_trip_through_the_wire_format() {
         let snap = Snapshot {
             models: vec![ModelDef {
-                policy: None,
                 name: "m".into(),
                 cache_ttl: Some(std::time::Duration::from_secs(120)),
                 context_length: None,
+                policy: None,
                 backends: vec![],
             }],
             ..Snapshot::default()
@@ -1352,10 +1341,10 @@ mod tests {
             .unwrap()
             .allow_all = false;
         snap.models.push(ModelDef {
-            policy: None,
             name: "qwen3".into(),
             cache_ttl: None,
             context_length: None,
+            policy: None,
             backends: vec![crate::snapshot::BackendDef {
                 api_base: "http://node-a:8000".into(),
                 upstream_model: "qwen3-upstream".into(),

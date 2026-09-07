@@ -862,16 +862,14 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<Uui
 /// stay far easier to follow than one join across five tables with `weight`
 /// and `position` columns that would otherwise need disambiguating aliases.
 async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, FrontendModelDef>> {
-    let vm_rows: Vec<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT id, name, policy FROM frontend_models")
-            .fetch_all(pool)
-            .await?;
+    let vm_rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM frontend_models")
+        .fetch_all(pool)
+        .await?;
 
     type RuleRow = (
         Uuid,
         Uuid,
         serde_json::Value,
-        Option<String>,
         String,
         Option<i32>,
         Option<String>,
@@ -883,7 +881,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // already, so nothing on it then has to turn an id into one. A jump whose
     // frontend model was deleted yields NULL and is dropped below.
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT r.id, r.frontend_model_id, r.match_json, r.policy, r.action, \
+        "SELECT r.id, r.frontend_model_id, r.match_json, r.action, \
                 r.deny_status, r.deny_message, jm.name, r.tag \
          FROM routing_rules r \
          LEFT JOIN frontend_models jm ON jm.id = r.jump_to \
@@ -917,30 +915,78 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // A target that resolves to neither yields no pool and is simply not
     // routable, which is the state the request path already handles for a
     // model whose every backend is down.
-    type TargetRow = (Uuid, String, i32, i32); // owning id (rule_id or frontend_model_id), model name, weight, position
+    // A target may name a **pool** instead of a provider model, in which case
+    // the pool's own id comes back and its members are resolved below. The
+    // same name-or-id rule applies to both: the id is the binding so a rename
+    // carries, the stored name is what survives a deletion.
+    type TargetRow = (Uuid, String, i32, i32, Option<Uuid>); // owner, name, weight, position, pool
     let rule_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT rt.rule_id, COALESCE(pm.name, rt.target_model_name), rt.weight, rt.position
+        "SELECT rt.rule_id, COALESCE(mp.name, pm.name, rt.target_model_name), \
+                rt.weight, rt.position, mp.id
          FROM rule_targets rt
          LEFT JOIN provider_models pm ON pm.id = rt.provider_model_id
+         LEFT JOIN model_pools mp ON mp.id = rt.model_pool_id
          ORDER BY rt.rule_id, rt.position",
     )
     .fetch_all(pool)
     .await?;
     let default_target_rows: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.frontend_model_id, COALESCE(pm.name, vd.target_model_name), vd.weight, \
-                vd.position
+        "SELECT vd.frontend_model_id, COALESCE(mp.name, pm.name, vd.target_model_name), \
+                vd.weight, vd.position, mp.id
          FROM frontend_model_defaults vd
          LEFT JOIN provider_models pm ON pm.id = vd.provider_model_id
+         LEFT JOIN model_pools mp ON mp.id = vd.model_pool_id
          ORDER BY vd.frontend_model_id, vd.position",
     )
     .fetch_all(pool)
     .await?;
 
+    // Every pool's members, flattened once rather than per target: a pool is
+    // typically pointed at from several rules, and re-reading it for each
+    // would be the same rows over again.
+    type PoolMemberRow = (Uuid, String, i32);
+    let pool_member_rows: Vec<PoolMemberRow> = sqlx::query_as(
+        "SELECT mpm.pool_id, pm.name, mpm.weight
+         FROM model_pool_members mpm
+         JOIN provider_models pm ON pm.id = mpm.provider_model_id
+         ORDER BY mpm.pool_id, mpm.position",
+    )
+    .fetch_all(pool)
+    .await?;
+    let pool_policies: Vec<(Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, policy FROM model_pools")
+            .fetch_all(pool)
+            .await?;
+
     let targets_for = |owner_id: Uuid, rows: &[TargetRow]| -> Vec<WeightedTarget> {
         rows.iter()
             .filter(|(id, ..)| *id == owner_id)
-            .map(|(_, model, weight, _)| WeightedTarget {
+            .map(|(_, model, weight, _, pool_id)| WeightedTarget {
                 model: model.clone(),
+                // A pool contributes its members and its policy; a plain
+                // provider model contributes neither, which is how
+                // `order_candidates` tells them apart.
+                members: pool_id
+                    .map(|pid| {
+                        pool_member_rows
+                            .iter()
+                            .filter(|(p, ..)| *p == pid)
+                            .map(|(_, name, w)| {
+                                crate::routing::WeightedTarget::model(
+                                    name.clone(),
+                                    (*w).max(0) as u32,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                policy: pool_id.and_then(|pid| {
+                    pool_policies
+                        .iter()
+                        .find(|(p, _)| *p == pid)
+                        .and_then(|(_, pol)| pol.as_deref())
+                        .and_then(crate::router::Policy::parse)
+                }),
                 // `weight` is `INT` in Postgres (see the migration) and this
                 // schema never writes it negative; a value that somehow is
                 // (hand-written SQL, a future bug) is clamped to 0 rather
@@ -953,22 +999,12 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     };
 
     let mut frontend_models = HashMap::new();
-    for (vm_id, vm_name, vm_policy) in vm_rows {
+    for (vm_id, vm_name) in vm_rows {
         let rules = rule_rows
             .iter()
             .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
             .filter_map(
-                |(
-                    rule_id,
-                    _,
-                    match_json,
-                    rule_policy,
-                    action,
-                    deny_status,
-                    deny_message,
-                    jump_name,
-                    tag,
-                )| {
+                |(rule_id, _, match_json, action, deny_status, deny_message, jump_name, tag)| {
                     let parsed: MatchConditionJson = match serde_json::from_value(
                         match_json.clone(),
                     ) {
@@ -1031,11 +1067,6 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                     Some(RoutingRule {
                         conditions: parsed.into_conditions(),
                         targets: targets_for(*rule_id, &rule_target_rows),
-                        // Unset falls back to the frontend model's, which is what
-                        // every existing rule does — see `RoutingRule::policy`.
-                        policy: rule_policy
-                            .as_deref()
-                            .and_then(crate::router::Policy::parse),
                         action,
                         tag: tag.clone(),
                     })
@@ -1049,12 +1080,6 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                 name: vm_name,
                 rules,
                 default_targets,
-                // Parsed here rather than constrained in the database, same
-                // reasoning migration 0028 gave: a proxy meeting a policy it
-                // does not know falls back to the weighted split instead of
-                // refusing to route, and a CHECK constraint would make adding
-                // a policy a migration.
-                policy: vm_policy.as_deref().and_then(crate::router::Policy::parse),
             },
         );
     }
@@ -1403,22 +1428,13 @@ mod tests {
         assert_eq!(
             rule.targets,
             vec![
-                crate::routing::WeightedTarget {
-                    model: primary.clone(),
-                    weight: 70
-                },
-                crate::routing::WeightedTarget {
-                    model: secondary.clone(),
-                    weight: 30
-                },
+                crate::routing::WeightedTarget::model(primary.clone(), 70),
+                crate::routing::WeightedTarget::model(secondary.clone(), 30),
             ]
         );
         assert_eq!(
             vm.default_targets,
-            vec![crate::routing::WeightedTarget {
-                model: fallback.clone(),
-                weight: 100
-            }]
+            vec![crate::routing::WeightedTarget::model(fallback.clone(), 100)]
         );
     }
 

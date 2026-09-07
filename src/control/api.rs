@@ -3468,9 +3468,6 @@ struct TargetView {
 struct RuleView {
     id: Uuid,
     position: i32,
-    /// How this rule chooses among its own targets. `None` means the frontend
-    /// model's, and then the weighted split.
-    policy: Option<String>,
     /// `route`, `deny` or `jump`.
     action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3497,8 +3494,6 @@ struct FrontendModelView {
     /// `frontend_model_defaults` for why this is its own table rather than an
     /// always-true rule.
     default_targets: Vec<TargetView>,
-    /// How targets are chosen between. Absent is the weighted split.
-    policy: Option<String>,
 }
 
 // (id, owner_id, provider_model_id, model_name, weight, position) — `owner_id` is
@@ -3518,8 +3513,8 @@ async fn list_virtual_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<FrontendModelView>>, ApiError> {
-    let vms: Vec<(Uuid, String, String, Option<String>)> =
-        sqlx::query_as("SELECT id, name, description, policy FROM frontend_models ORDER BY name")
+    let vms: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, name, description FROM frontend_models ORDER BY name")
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing frontend models", &e))?;
@@ -3528,7 +3523,6 @@ async fn list_virtual_models(
         Uuid,
         i32,
         serde_json::Value,
-        Option<String>,
         String,
         Option<i32>,
         Option<String>,
@@ -3536,7 +3530,7 @@ async fn list_virtual_models(
         Option<String>,
     );
     let rules: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, frontend_model_id, position, match_json, policy, action, \
+        "SELECT id, frontend_model_id, position, match_json, action, \
                 deny_status, deny_message, jump_to, tag
          FROM routing_rules
          ORDER BY frontend_model_id, position",
@@ -3580,7 +3574,7 @@ async fn list_virtual_models(
 
     Ok(Json(
         vms.into_iter()
-            .map(|(vm_id, name, description, policy)| {
+            .map(|(vm_id, name, description)| {
                 let rule_views = rules
                     .iter()
                     .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
@@ -3590,7 +3584,6 @@ async fn list_virtual_models(
                             _,
                             position,
                             match_json,
-                            rule_policy,
                             action,
                             deny_status,
                             deny_message,
@@ -3608,7 +3601,6 @@ async fn list_virtual_models(
                             RuleView {
                                 id: *rule_id,
                                 position: *position,
-                                policy: rule_policy.clone(),
                                 action: action.clone(),
                                 deny_status: *deny_status,
                                 deny_message: deny_message.clone(),
@@ -3626,7 +3618,6 @@ async fn list_virtual_models(
                     description,
                     rules: rule_views,
                     default_targets: to_targets(vm_id, &default_targets),
-                    policy,
                 }
             })
             .collect(),
@@ -3639,17 +3630,6 @@ struct NewFrontendModel {
     name: String,
     #[serde(default)]
     description: String,
-    /// How to choose between this frontend model's targets:
-    /// `cache-affinity`, `least-loaded`, `round-robin` or `lowest-latency`.
-    /// Unset is the weighted split, which is what a target list has always
-    /// meant and stays the default.
-    ///
-    /// This lives here rather than on a provider model because a provider
-    /// model has one provider and therefore one backend — there is nothing
-    /// for a policy to choose between. Targets are the things that need
-    /// choosing between (migration 0038).
-    #[serde(default)]
-    policy: Option<String>,
 }
 
 async fn post_frontend_model(
@@ -3670,14 +3650,12 @@ async fn post_frontend_model(
     // that reads it — the proxy falls back to the weighted split on a policy
     // it does not know, which is right for forward compatibility and wrong as
     // a response to a typo.
-    let policy = validated_policy(body.policy.as_deref())?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO frontend_models (name, description, policy) VALUES ($1, $2, $3) \
+        "INSERT INTO frontend_models (name, description) VALUES ($1, $2) \
          RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
-    .bind(policy)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -3705,10 +3683,8 @@ struct PatchFrontendModel {
     /// difference between this and renaming a provider model.
     #[serde(default)]
     name: Option<String>,
-    /// `null` clears it back to the weighted split; omitting it leaves the
-    /// policy alone.
-    #[serde(default, deserialize_with = "double_option")]
-    policy: Option<Option<String>>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// `PATCH /admin/frontend-models/{id}` — change how targets are chosen between.
@@ -3722,10 +3698,6 @@ async fn patch_frontend_model(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchFrontendModel>,
 ) -> Result<StatusCode, ApiError> {
-    let policy = match &body.policy {
-        Some(inner) => validated_policy(inner.as_deref())?,
-        None => None,
-    };
     if let Some(name) = body.name.as_deref().map(str::trim) {
         if name.is_empty() {
             return Err(api_error(
@@ -3736,13 +3708,10 @@ async fn patch_frontend_model(
         rename_frontend_model(&ctx, id, name).await?;
     }
     let done = sqlx::query(
-        "UPDATE frontend_models \
-            SET policy = CASE WHEN $2 THEN $3 ELSE policy END \
-          WHERE id = $1",
+        "UPDATE frontend_models SET description = COALESCE($2, description) WHERE id = $1",
     )
     .bind(id)
-    .bind(body.policy.is_some())
-    .bind(policy)
+    .bind(body.description.as_deref())
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("frontend model update", &e))?;
@@ -3845,10 +3814,6 @@ struct NewRule {
     /// Where this rule sits in its frontend model's evaluation order —
     /// load-bearing, not cosmetic: the first matching rule wins.
     position: i32,
-    /// How to choose among this rule's targets. Absent means the frontend
-    /// model's, and then the weighted split.
-    #[serde(default)]
-    policy: Option<String>,
     /// `route` (the default), `deny` or `jump`.
     #[serde(default)]
     action: Option<String>,
@@ -3979,7 +3944,6 @@ async fn post_rule(
     // catching by review instead of by test.
     crate::routing::validate_match_json(&body.match_condition)
         .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
-    let policy = validated_policy(body.policy.as_deref())?;
     let action = validated_action(
         &ctx,
         frontend_model_id,
@@ -3997,14 +3961,13 @@ async fn post_rule(
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO routing_rules (frontend_model_id, position, match_json, policy, \
+        "INSERT INTO routing_rules (frontend_model_id, position, match_json, \
                                     action, deny_status, deny_message, jump_to, tag)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(frontend_model_id)
     .bind(body.position)
     .bind(match_json)
-    .bind(policy)
     .bind(&action)
     .bind(body.deny_status)
     .bind(&body.deny_message)
@@ -4051,13 +4014,26 @@ async fn post_rule(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchRule {
-    /// How to choose among this rule's targets. `null` clears it back to the
-    /// frontend model's.
-    #[serde(default, deserialize_with = "double_option")]
-    policy: Option<Option<String>>,
-    /// Where this rule sits in its frontend model's evaluation order.
+    /// Where this rule sits in its frontend model's evaluation order. First
+    /// match wins, so this is what reordering writes.
     #[serde(default)]
     position: Option<i32>,
+    /// The whole condition set, replaced rather than merged: conditions are
+    /// AND'd, so a partial update has no meaning that is not surprising —
+    /// clearing one of five by omitting it, or keeping it by omitting it, are
+    /// both defensible and neither is guessable from the request.
+    #[serde(default)]
+    match_condition: Option<MatchConditionJson>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    deny_status: Option<i32>,
+    #[serde(default)]
+    deny_message: Option<String>,
+    #[serde(default)]
+    jump_to: Option<Uuid>,
+    #[serde(default, deserialize_with = "double_option")]
+    tag: Option<Option<String>>,
 }
 
 async fn patch_rule(
@@ -4066,17 +4042,73 @@ async fn patch_rule(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchRule>,
 ) -> Result<StatusCode, ApiError> {
-    let policy = validated_policy(body.policy.clone().flatten().as_deref())?;
+    // Which frontend model this rule belongs to, because a `jump` may not
+    // close a loop back to it and `validated_action` needs to know where
+    // "here" is.
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT frontend_model_id FROM routing_rules WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| db_error("reading a rule", &e))?;
+    let Some(owner) = owner else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no rule with id {id}; GET /admin/frontend-models lists each rule's id"),
+        ));
+    };
+
+    let match_json = match body.match_condition.as_ref() {
+        None => None,
+        Some(c) => {
+            crate::routing::validate_match_json(c)
+                .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
+            Some(serde_json::to_value(c).map_err(|e| {
+                db_error(
+                    "encoding the match condition",
+                    &sqlx::Error::Protocol(e.to_string()),
+                )
+            })?)
+        }
+    };
+    let action = match body.action.as_deref() {
+        None => None,
+        Some(_) => Some(
+            validated_action(
+                &ctx,
+                owner,
+                body.action.as_deref(),
+                body.deny_status,
+                body.jump_to,
+            )
+            .await?,
+        ),
+    };
+    let tag = body
+        .tag
+        .clone()
+        .map(|t| t.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()));
+
     let done = sqlx::query(
         "UPDATE routing_rules SET
-           policy   = CASE WHEN $2 THEN $3 ELSE policy   END,
-           position = COALESCE($4, position)
+           position     = COALESCE($2, position),
+           match_json   = COALESCE($3, match_json),
+           action       = COALESCE($4, action),
+           deny_status  = CASE WHEN $4 IS NULL THEN deny_status ELSE $5 END,
+           deny_message = CASE WHEN $4 IS NULL THEN deny_message ELSE $6 END,
+           jump_to      = CASE WHEN $4 IS NULL THEN jump_to ELSE $7 END,
+           tag          = CASE WHEN $8 THEN $9 ELSE tag END
          WHERE id = $1",
     )
     .bind(id)
-    .bind(body.policy.is_some())
-    .bind(policy)
     .bind(body.position)
+    .bind(match_json)
+    .bind(action.as_deref())
+    .bind(body.deny_status)
+    .bind(body.deny_message.as_deref())
+    .bind(body.jump_to)
+    .bind(body.tag.is_some())
+    .bind(tag.flatten())
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("routing rule update", &e))?;
@@ -4113,12 +4145,67 @@ async fn delete_rule(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewTarget {
-    provider_model_id: Uuid,
+    /// The provider model to route to. Exactly one of this and
+    /// `model_pool_id` — a target is one thing or the other, and accepting
+    /// both would leave the caller unsure which they had pointed at.
+    #[serde(default)]
+    provider_model_id: Option<Uuid>,
+    /// A pool, when the target is a load-balanced group rather than a single
+    /// model.
+    #[serde(default)]
+    model_pool_id: Option<Uuid>,
     #[serde(default = "default_target_weight")]
     weight: i32,
     /// Failover order within the chain — see
     /// `crate::routing::FrontendModelDef::resolve`'s doc comment.
     position: i32,
+}
+
+/// The name and id a target should be written with, whichever kind it is.
+///
+/// Resolved here rather than in the INSERT so both routes share one set of
+/// error messages, and so "exactly one of the two" is enforced in one place.
+async fn resolve_target(
+    ctx: &Ctx,
+    body: &NewTarget,
+) -> Result<(Option<Uuid>, Option<Uuid>, String), ApiError> {
+    match (body.provider_model_id, body.model_pool_id) {
+        (Some(_), Some(_)) => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "a target is either a provider model or a pool, not both".to_string(),
+        )),
+        (None, None) => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "one of provider_model_id or model_pool_id is required".to_string(),
+        )),
+        (Some(id), None) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM provider_models WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .map_err(|e| db_error("reading a provider model", &e))?;
+            let name = name.ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("no provider model with id {id}"),
+                )
+            })?;
+            Ok((Some(id), None, name))
+        }
+        (None, Some(id)) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM model_pools WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .map_err(|e| db_error("reading a pool", &e))?;
+            let name = name.ok_or_else(|| {
+                api_error(StatusCode::BAD_REQUEST, format!("no pool with id {id}"))
+            })?;
+            Ok((None, Some(id), name))
+        }
+    }
 }
 
 /// A single target with no sibling has nothing to split against, so a
@@ -4128,25 +4215,348 @@ fn default_target_weight() -> i32 {
     100
 }
 
+// --- Model pools ------------------------------------------------------
+//
+// A named, reusable group of provider models with a policy. `leastloaded-gemma`
+// and `lowestlatency-gemma` may hold the same members and differ only in how
+// they choose, which is the thing a policy buried in a rule's target list
+// could never do.
+//
+// Three levels of choice, each set in exactly one place: a rule's targets are
+// an ordered failover chain, a pool chooses between several models at once,
+// and a provider model chooses between its own providers.
+
+#[derive(Serialize)]
+struct PoolMemberView {
+    id: Uuid,
+    provider_model_id: Option<Uuid>,
+    model: String,
+    weight: i32,
+    position: i32,
+}
+
+#[derive(Serialize)]
+struct PoolView {
+    id: Uuid,
+    name: String,
+    description: String,
+    /// `None` is the weighted split, which is what a target list has always
+    /// meant.
+    policy: Option<String>,
+    members: Vec<PoolMemberView>,
+}
+
+async fn list_pools(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+) -> Result<Json<Vec<PoolView>>, ApiError> {
+    let pools: Vec<(Uuid, String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, name, description, policy FROM model_pools ORDER BY name")
+            .fetch_all(&ctx.pool)
+            .await
+            .map_err(|e| db_error("listing pools", &e))?;
+    type MemberRow = (Uuid, Uuid, Option<Uuid>, String, i32, i32);
+    let members: Vec<MemberRow> = sqlx::query_as(
+        "SELECT mpm.pool_id, mpm.id, pm.id, pm.name, mpm.weight, mpm.position
+         FROM model_pool_members mpm
+         JOIN provider_models pm ON pm.id = mpm.provider_model_id
+         ORDER BY mpm.pool_id, mpm.position",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| db_error("listing pool members", &e))?;
+
+    Ok(Json(
+        pools
+            .into_iter()
+            .map(|(id, name, description, policy)| PoolView {
+                id,
+                name,
+                description,
+                policy,
+                members: members
+                    .iter()
+                    .filter(|(pool_id, ..)| *pool_id == id)
+                    .map(|(_, mid, pmid, model, weight, position)| PoolMemberView {
+                        id: *mid,
+                        provider_model_id: *pmid,
+                        model: model.clone(),
+                        weight: *weight,
+                        position: *position,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewPool {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    policy: Option<String>,
+}
+
+async fn post_pool(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Json(body): Json<NewPool>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "name cannot be empty".to_string(),
+        ));
+    }
+    // A pool and a provider model share the namespace routing resolves
+    // targets in, so one that shadowed the other would make a target
+    // ambiguous — and which won would depend on join order.
+    let clash: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_models WHERE name = $1)
+             OR EXISTS(SELECT 1 FROM frontend_models WHERE name = $1)",
+    )
+    .bind(name)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("checking the name", &e))?;
+    if clash {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "{name:?} is already a provider model or frontend model; a pool needs its own \
+                 name because routing resolves targets by name"
+            ),
+        ));
+    }
+    let policy = validated_policy(body.policy.as_deref())?;
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO model_pools (name, description, policy) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(name)
+    .bind(&body.description)
+    .bind(policy)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("a pool named {name:?} already exists"),
+            )
+        } else {
+            db_error("pool creation", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": name })),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchPool {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    /// `null` clears it back to the weighted split.
+    #[serde(default, deserialize_with = "double_option")]
+    policy: Option<Option<String>>,
+}
+
+async fn patch_pool(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchPool>,
+) -> Result<StatusCode, ApiError> {
+    let policy = validated_policy(body.policy.clone().flatten().as_deref())?;
+    let done = sqlx::query(
+        "UPDATE model_pools SET
+           name        = COALESCE($2, name),
+           description = COALESCE($3, description),
+           policy      = CASE WHEN $4 THEN $5 ELSE policy END
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(
+        body.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty()),
+    )
+    .bind(body.description.as_deref())
+    .bind(body.policy.is_some())
+    .bind(policy)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                "a pool by that name already exists".to_string(),
+            )
+        } else {
+            db_error("pool update", &e)
+        }
+    })?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no pool with id {id}"),
+        ));
+    }
+    // A rename has to carry onto the targets pointing at it, which are bound
+    // by name — the same rule a provider model rename follows.
+    sqlx::query(
+        "UPDATE rule_targets t SET target_model_name = mp.name
+           FROM model_pools mp WHERE mp.id = t.model_pool_id AND mp.id = $1",
+    )
+    .bind(id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("renaming a pool on its targets", &e))?;
+    sqlx::query(
+        "UPDATE frontend_model_defaults t SET target_model_name = mp.name
+           FROM model_pools mp WHERE mp.id = t.model_pool_id AND mp.id = $1",
+    )
+    .bind(id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("renaming a pool on its defaults", &e))?;
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_pool(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    // Refused while anything still routes to it, rather than cascading: the
+    // targets are ON DELETE SET NULL, so a cascade would silently leave rules
+    // pointing at a name that no longer resolves.
+    let used: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM rule_targets WHERE model_pool_id = $1)
+              + (SELECT count(*) FROM frontend_model_defaults WHERE model_pool_id = $1)",
+    )
+    .bind(id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| db_error("counting pool users", &e))?;
+    if used > 0 {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!("{used} target(s) still route to this pool; remove them first"),
+        ));
+    }
+    let done = sqlx::query("DELETE FROM model_pools WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("pool deletion", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no pool with id {id}"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewPoolMember {
+    provider_model_id: Uuid,
+    #[serde(default = "default_target_weight")]
+    weight: i32,
+    #[serde(default)]
+    position: i32,
+}
+
+async fn post_pool_member(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(pool_id): Path<Uuid>,
+    Json(body): Json<NewPoolMember>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO model_pool_members (pool_id, provider_model_id, weight, position)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(pool_id)
+    .bind(body.provider_model_id)
+    .bind(body.weight)
+    .bind(body.position)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            api_error(
+                StatusCode::CONFLICT,
+                "that model is already in this pool; a member twice over is one machine \
+                 counted twice"
+                    .to_string(),
+            )
+        } else if is_foreign_key_violation(&e) {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "no such pool or provider model".to_string(),
+            )
+        } else {
+            db_error("adding a pool member", &e)
+        }
+    })?;
+    refresh(&ctx).await;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
+}
+
+async fn delete_pool_member(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let done = sqlx::query("DELETE FROM model_pool_members WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| db_error("removing a pool member", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no pool member with id {id}"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn post_rule_target(
     State(ctx): State<Ctx>,
     _perm: RequireConfigWrite,
     Path(rule_id): Path<Uuid>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (pm_id, pool_id, name) = resolve_target(&ctx, &body).await?;
     let id: Uuid = sqlx::query_scalar(
-        // The name is copied from the model at write time and is what the
-        // target is really bound to — the id only records which row carries
-        // that name today, and goes NULL if it is deleted.
-        "INSERT INTO rule_targets (rule_id, provider_model_id, \
+        // The name is copied at write time and is what the target is really
+        // bound to — the id only records which row carries that name today,
+        // and goes NULL if it is deleted.
+        "INSERT INTO rule_targets (rule_id, provider_model_id, model_pool_id, \
                                    target_model_name, weight, position)
-         SELECT $1, pm.id, pm.name, $3, $4
-           FROM provider_models pm
-          WHERE pm.id = $2
-         RETURNING id",
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(rule_id)
-    .bind(body.provider_model_id)
+    .bind(pm_id)
+    .bind(pool_id)
+    .bind(&name)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -4155,10 +4565,7 @@ async fn post_rule_target(
         if is_foreign_key_violation(&e) {
             api_error(
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "no rule with id {rule_id} or no model with id {}; a target needs both to exist",
-                    body.provider_model_id
-                ),
+                format!("no rule with id {rule_id}; a target needs the rule to exist"),
             )
         } else if is_unique_violation(&e) {
             api_error(
@@ -4202,17 +4609,18 @@ async fn post_default_target(
     Path(frontend_model_id): Path<Uuid>,
     Json(body): Json<NewTarget>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (pm_id, pool_id, name) = resolve_target(&ctx, &body).await?;
     let id: Uuid = sqlx::query_scalar(
         // Same as a rule's target: bound by name, with the id as a cache.
         "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
-                                              target_model_name, weight, position)
-         SELECT $1, pm.id, pm.name, $3, $4
-           FROM provider_models pm
-          WHERE pm.id = $2
-         RETURNING id",
+                                              model_pool_id, target_model_name, \
+                                              weight, position)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(frontend_model_id)
-    .bind(body.provider_model_id)
+    .bind(pm_id)
+    .bind(pool_id)
+    .bind(&name)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -4222,9 +4630,8 @@ async fn post_default_target(
             api_error(
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "no frontend model with id {frontend_model_id} or no model with id {}; a \
-                     default target needs both to exist",
-                    body.provider_model_id
+                    "no frontend model with id {frontend_model_id}; a default target needs the \
+                     frontend model to exist"
                 ),
             )
         } else if is_unique_violation(&e) {
@@ -7537,6 +7944,13 @@ pub async fn serve(
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
         .route("/admin/rules/{id}/targets", post(post_rule_target))
+        .route("/admin/model-pools", get(list_pools).post(post_pool))
+        .route(
+            "/admin/model-pools/{id}",
+            axum::routing::patch(patch_pool).delete(delete_pool),
+        )
+        .route("/admin/model-pools/{id}/members", post(post_pool_member))
+        .route("/admin/model-pool-members/{id}", delete(delete_pool_member))
         .route("/admin/rule-targets/{id}", delete(delete_rule_target))
         .route(
             "/admin/frontend-models/{id}/defaults",
@@ -8343,7 +8757,6 @@ mod tests {
             Json(NewFrontendModel {
                 name: fm_name.clone(),
                 description: String::new(),
-                policy: None,
             }),
         )
         .await
@@ -8354,7 +8767,8 @@ mod tests {
             RequireConfigWrite,
             Path(fm_id),
             Json(NewTarget {
-                provider_model_id: model_id,
+                provider_model_id: Some(model_id),
+                model_pool_id: None,
                 weight: default_target_weight(),
                 position: 0,
             }),
@@ -8975,7 +9389,6 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: vm_name.clone(),
-                policy: None,
                 description: String::new(),
             }),
         )
@@ -8990,7 +9403,6 @@ mod tests {
             Path(vm_id),
             Json(NewRule {
                 position: 0,
-                policy: None,
                 action: None,
                 deny_status: None,
                 deny_message: None,
@@ -9011,7 +9423,8 @@ mod tests {
             RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
-                provider_model_id: primary_id,
+                provider_model_id: Some(primary_id),
+                model_pool_id: None,
                 weight: 100,
                 position: 0,
             }),
@@ -9024,7 +9437,8 @@ mod tests {
             RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
-                provider_model_id: secondary_id,
+                provider_model_id: Some(secondary_id),
+                model_pool_id: None,
                 weight: 100,
                 position: 0,
             }),
@@ -9102,7 +9516,6 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: name.clone(),
-                policy: None,
                 description: String::new(),
             }),
         )
@@ -9117,7 +9530,6 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: other_name.clone(),
-                policy: None,
                 description: String::new(),
             }),
         )
@@ -10773,7 +11185,6 @@ mod tests {
             RequireConfigWrite,
             Json(NewFrontendModel {
                 name: vm_name.clone(),
-                policy: None,
                 description: String::new(),
             }),
         )
@@ -10789,7 +11200,6 @@ mod tests {
             Path(vm_id),
             Json(NewRule {
                 position: 0,
-                policy: None,
                 action: None,
                 deny_status: None,
                 deny_message: None,
@@ -10809,7 +11219,8 @@ mod tests {
             RequireConfigWrite,
             Path(rule_id),
             Json(NewTarget {
-                provider_model_id: fast_id,
+                provider_model_id: Some(fast_id),
+                model_pool_id: None,
                 weight: 100,
                 position: 0,
             }),
@@ -10821,7 +11232,8 @@ mod tests {
             RequireConfigWrite,
             Path(vm_id),
             Json(NewTarget {
-                provider_model_id: slow_id,
+                provider_model_id: Some(slow_id),
+                model_pool_id: None,
                 weight: 100,
                 position: 0,
             }),

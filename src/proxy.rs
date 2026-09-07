@@ -3067,11 +3067,7 @@ model_list:
             crate::routing::FrontendModelDef {
                 name: "vm".into(),
                 rules: vec![],
-                default_targets: vec![crate::routing::WeightedTarget {
-                    model: "concrete-a".into(),
-                    weight: 100,
-                }],
-                policy: None,
+                default_targets: vec![crate::routing::WeightedTarget::model("concrete-a", 100)],
             },
         );
         let snapshot = Snapshot {

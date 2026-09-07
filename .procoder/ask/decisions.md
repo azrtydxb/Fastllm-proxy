@@ -628,3 +628,28 @@ existing one -- your login was not touched.
   principal in the audit log.
 - Delete `claude-ops` and leave `pascal` as it is. Smallest footprint, but
   nobody can use the admin UI or API until the password question is settled.
+
+## Where does load balancing live once model pools exist?
+
+A model pool is a named, reusable group of provider models with a policy --
+`leastloaded-gemma` and `lowestlatency-gemma` can both contain the same model
+and differ only in how they choose. Rule targets and frontend-model defaults
+can then point at either a plain provider model or a pool.
+
+That makes the existing policy controls redundant, or nearly so. Today a policy
+can be set in three places: on the frontend model (governing its defaults), on
+each rule (governing that rule's targets), and on a provider model (governing
+its own attachments -- a different level, and unaffected by this).
+
+- Pools carry it, and the other two go. A rule's targets become purely an
+  ordered failover chain and a pool is the only way to balance between models.
+  One concept in one place, which is the simplification asked for. Existing
+  rules keep working: a rule with several targets falls back down the list as
+  it always did, and anyone wanting the old weighted split makes a pool.
+- Pools carry it, and the other two stay as they are. Nothing existing changes
+  and both styles work, but load balancing is then configurable in three
+  places, which is the confusion that prompted this.
+- Pools carry it, and the frontend model keeps one for its defaults only. The
+  defaults are a target list with no rule of its own, so they have nowhere else
+  to put a policy -- unless a default target is simply allowed to be a pool,
+  which it would be.
