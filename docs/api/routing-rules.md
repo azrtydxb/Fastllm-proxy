@@ -18,6 +18,7 @@ list is a **fallback chain**, not just a split.
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                              | snapshot               |
 | `max_inflight_per_backend`                      | how busy this rule's own targets are                                                  | **live cluster state** |
 | `class`                                         | which prompt class the classifier assigned — see [semantic routing](../classifier.md) |
+| `min/max_request_cost_micros`                   | what this request would cost, at the cheapest model this frontend model can reach     | **prices** |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window                                                                     | **clock**              |
 
 The last two rows are marked because they matter: every other condition is a
@@ -25,6 +26,24 @@ pure function of the request, so the same request always routes the same way
 and prefix affinity means something. A load- or time-dependent rule gives that
 up by design — two identical requests a second apart can legitimately land on
 different models. Worth choosing knowingly.
+
+**What a cost condition is priced against.** There is a circularity to get out
+of the way: what a request costs depends on which model serves it, and which
+model serves it is what the rule is deciding. Comparing against the rule's own
+targets would make the condition answer a different question in every rule, and
+a `deny` rule has no targets at all. So the figure is the cost **at the
+cheapest model this frontend model could reach** — one number per request,
+computed once before any rule is tested, the same for every rule in the chain.
+Well defined, order-independent, and monotone: if the cheapest option is over
+the cap, every option is.
+
+That settles what it is good for. "Refuse anything that would cost more than
+$0.50 however I route it" is exactly this question, which is why it pairs with
+`deny`. "Send the expensive ones somewhere cheaper" is not a condition at all —
+that is the `cheapest` policy, one level down. A frontend model whose reachable
+models are all unpriced has no cost for the request, and a rule naming either
+bound does not match: unpriced is unknown, and a guard that fired on unknown
+would refuse traffic on the strength of a blank field.
 
 **What `max_inflight_per_backend` counts.** The engine's own number where it
 publishes one. Every proxy reads each backend's Prometheus `/metrics` in the

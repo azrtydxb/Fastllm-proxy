@@ -136,6 +136,8 @@ pub struct Backend {
     /// backend is unpriced. Pre-added at build time so `Policy::Cheapest`
     /// compares one number per candidate instead of two.
     price_per_mtok: Option<i64>,
+    input_price_per_mtok: Option<i64>,
+    output_price_per_mtok: Option<i64>,
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
@@ -227,6 +229,8 @@ impl Backend {
                 (None, None) => None,
                 (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
             },
+            input_price_per_mtok: def.input_price_per_mtok,
+            output_price_per_mtok: def.output_price_per_mtok,
             // Optimistic: a backend serves traffic until a health check says
             // otherwise. Starting unhealthy would blackhole every request in
             // the window before the first sweep completes.
@@ -252,6 +256,17 @@ impl Backend {
     #[inline]
     pub fn price_per_mtok(&self) -> Option<i64> {
         self.price_per_mtok
+    }
+
+    /// The two figures separately, for costing a request whose prompt and
+    /// generation are billed at different rates. `None` is unpriced.
+    #[inline]
+    pub fn prices(&self) -> Option<(i64, i64)> {
+        self.price_per_mtok?;
+        Some((
+            self.input_price_per_mtok.unwrap_or(0),
+            self.output_price_per_mtok.unwrap_or(0),
+        ))
     }
 
     #[inline]

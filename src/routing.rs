@@ -431,6 +431,13 @@ pub struct MatchConditionJson {
     pub days: Vec<u8>,
     #[serde(default)]
     pub utc_offset_minutes: i16,
+    /// What this request would cost, in micro-units, at the cheapest model
+    /// this frontend model can reach. See `CostMatch` for why that is the
+    /// figure and not "what it costs at this rule's targets".
+    #[serde(default)]
+    pub min_request_cost_micros: Option<u64>,
+    #[serde(default)]
+    pub max_request_cost_micros: Option<u64>,
     /// Name of a prompt class this rule requires. See `crate::classifier`.
     #[serde(default)]
     pub class: Option<String>,
@@ -483,6 +490,14 @@ pub fn validate_match_json(c: &MatchConditionJson) -> Result<(), String> {
     if c.class.as_deref().is_some_and(str::is_empty) {
         return Err("class must not be empty".to_string());
     }
+    if let (Some(min), Some(max)) = (c.min_request_cost_micros, c.max_request_cost_micros) {
+        if min > max {
+            return Err(format!(
+                "min_request_cost_micros ({min}) is above max_request_cost_micros ({max}), so \
+                 this rule can never match"
+            ));
+        }
+    }
     if !(-1440..=1440).contains(&c.utc_offset_minutes) {
         return Err("utc_offset_minutes must be between -1440 and 1440".to_string());
     }
@@ -529,6 +544,10 @@ impl MatchConditionJson {
                 utc_offset_minutes: self.utc_offset_minutes,
             },
             class: ClassMatch { class: self.class },
+            cost: CostMatch {
+                min_micros: self.min_request_cost_micros,
+                max_micros: self.max_request_cost_micros,
+            },
         }
     }
 }
@@ -543,6 +562,49 @@ pub struct RuleConditions {
     pub load: LoadMatch,
     pub time: TimeMatch,
     pub class: ClassMatch,
+    pub cost: CostMatch,
+}
+
+/// What this request is going to cost, in micro-units.
+///
+/// There is a circularity to get out of the way: the cost of a request depends
+/// on which model serves it, and which model serves it is what the rule is
+/// deciding. Comparing against the rule's own targets would make the condition
+/// answer a different question in every rule, and a `deny` rule has no targets
+/// at all.
+///
+/// So the figure is **the cost at the cheapest place this frontend model could
+/// serve it** — one number per request, computed once before any rule is
+/// tested, the same for every rule in the chain. That makes it well defined,
+/// order-independent, and monotone: if the cheapest option is over the cap,
+/// every option is.
+///
+/// Which also settles what it is good for. "Refuse anything that would cost
+/// more than $0.50 however I route it" is exactly this question. "Send the
+/// expensive ones somewhere cheaper" is not a condition at all — that is the
+/// `cheapest` policy, one level down.
+///
+/// A frontend model whose reachable models are all unpriced has no cost for
+/// this request, and a rule that names either bound does not match. Unpriced
+/// is unknown, and a guard that fired on unknown would refuse traffic on the
+/// strength of a blank field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CostMatch {
+    pub min_micros: Option<u64>,
+    pub max_micros: Option<u64>,
+}
+
+impl CostMatch {
+    fn matches(&self, estimated: Option<u64>) -> bool {
+        if self.min_micros.is_none() && self.max_micros.is_none() {
+            return true;
+        }
+        let Some(cost) = estimated else {
+            return false;
+        };
+        !self.min_micros.is_some_and(|min| cost < min)
+            && !self.max_micros.is_some_and(|max| cost > max)
+    }
 }
 
 /// One rule in a frontend model's ordered chain: match conditions AND'd
@@ -681,12 +743,28 @@ impl RoutingRule {
     /// resolved to — "why did this route there" is the question a rule author
     /// has, and the answer is a rule index.
     pub fn matches(&self, facts: &RequestFacts<'_>, registry: &Registry) -> bool {
+        self.matches_with_cost(facts, registry, None)
+    }
+
+    /// The full form, with the request's estimated cost supplied.
+    ///
+    /// Passed in rather than computed here because it is a property of the
+    /// whole frontend model and of the request, not of this rule — see
+    /// `CostMatch`. `None` means it was not computed, and any rule naming a
+    /// cost bound then declines.
+    pub fn matches_with_cost(
+        &self,
+        facts: &RequestFacts<'_>,
+        registry: &Registry,
+        estimated_cost: Option<u64>,
+    ) -> bool {
         let c = &self.conditions;
         c.shape
             .matches(facts.prompt_tokens, facts.max_tokens, facts.streaming)
             && c.class.matches(facts.class, facts.class_refines)
             && c.caller.matches(facts.caller)
             && c.budget.matches(facts.caller)
+            && c.cost.matches(estimated_cost)
             && c.time.matches(facts.now)
             && c.headers.matches(facts.headers)
             && c.load.matches(&self.targets, registry)
@@ -771,6 +849,39 @@ impl FrontendModelDef {
         }
     }
 
+    /// What this request would cost at the cheapest model this frontend model
+    /// can reach, in micro-units. `None` when nothing reachable is priced.
+    ///
+    /// Every target of every rule *and* the defaults, because the question is
+    /// "how little could this cost however it is routed" and a rule cannot be
+    /// tested against a set that depends on which rule is being tested. Prompt
+    /// tokens at the input rate plus the requested generation at the output
+    /// rate; a request that named no `max_tokens` is priced on its prompt
+    /// alone rather than on a number nobody chose.
+    ///
+    /// A handful of integer comparisons over the registry's own maps — the
+    /// same shape as `LoadMatch`, and no I/O.
+    fn estimated_cost(&self, facts: &RequestFacts<'_>, registry: &Registry) -> Option<u64> {
+        let cheapest = self
+            .rules
+            .iter()
+            .flat_map(|r| r.targets.iter())
+            .chain(self.default_targets.iter())
+            .filter_map(|t| registry.pool(&t.model))
+            .flat_map(|pool| pool.iter().filter_map(|b| b.prices()))
+            .min_by_key(|(input, output)| input.saturating_add(*output))?;
+        let (input, output) = cheapest;
+        let prompt = facts.prompt_tokens.saturating_mul(input.max(0) as u64);
+        let generated = facts
+            .max_tokens
+            .unwrap_or(0)
+            .saturating_mul(output.max(0) as u64);
+        // Rounded, not truncated, for the same reason `usage_events.cost_micros`
+        // is: a small request often costs single-digit micro-units, and
+        // truncating every one of them undercounts systematically.
+        Some((prompt.saturating_add(generated).saturating_add(500_000)) / 1_000_000)
+    }
+
     /// The full answer: a chain to try, or a refusal.
     ///
     /// `models` is every frontend model, for `RuleAction::Jump` — a rule that
@@ -786,10 +897,15 @@ impl FrontendModelDef {
         models: &HashMap<String, FrontendModelDef>,
     ) -> Decision {
         let mut current = self;
+        // Once, before any rule is tested, and recomputed after a jump because
+        // the reachable set is then a different frontend model's. See
+        // `CostMatch` for why it is a property of the model rather than of the
+        // rule being tested.
+        let mut cost = current.estimated_cost(facts, registry);
         for _ in 0..MAX_JUMPS {
             let mut jumped = None;
             for rule in &current.rules {
-                if !rule.matches(facts, registry) {
+                if !rule.matches_with_cost(facts, registry, cost) {
                     continue;
                 }
                 match &rule.action {
@@ -828,7 +944,10 @@ impl FrontendModelDef {
                 }
             }
             match jumped {
-                Some(next) => current = next,
+                Some(next) => {
+                    current = next;
+                    cost = current.estimated_cost(facts, registry);
+                }
                 None => {
                     return Decision::Route {
                         candidates: order_candidates(
@@ -1041,6 +1160,22 @@ mod tests {
     use crate::snapshot::Principal;
     use std::collections::HashSet as Set;
     use std::sync::Arc;
+
+    fn priced_model(name: &str, input: i64, output: i64) -> crate::snapshot::ModelDef {
+        crate::snapshot::ModelDef {
+            name: name.into(),
+            cache_ttl: None,
+            context_length: None,
+            policy: None,
+            backends: vec![crate::snapshot::BackendDef {
+                api_base: format!("http://{name}:8000/v1"),
+                upstream_model: name.into(),
+                input_price_per_mtok: Some(input),
+                output_price_per_mtok: Some(output),
+                ..Default::default()
+            }],
+        }
+    }
 
     fn registry_with(models: &[&str]) -> Registry {
         let entries = models
@@ -1791,6 +1926,125 @@ mod tests {
                 tag: None
             }
         );
+    }
+
+    // --- cost conditions -------------------------------------------------
+
+    /// Priced from the cheapest reachable model, so the answer does not depend
+    /// on which rule is asking — see `CostMatch`.
+    #[test]
+    fn a_cost_condition_prices_the_request_at_the_cheapest_reachable_model() {
+        let snapshot = crate::snapshot::Snapshot {
+            models: vec![
+                priced_model("cheap", 1_000_000, 2_000_000),
+                priced_model("dear", 30_000_000, 60_000_000),
+            ],
+            ..Default::default()
+        };
+        let reg =
+            Registry::build_from_snapshot(&snapshot, &crate::registry::Interner::default(), None)
+                .unwrap();
+
+        let deny = |max: u64| FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Deny {
+                    status: 402,
+                    message: "too expensive".into(),
+                },
+                tag: None,
+                conditions: RuleConditions {
+                    cost: CostMatch {
+                        min_micros: Some(max),
+                        max_micros: None,
+                    },
+                    ..Default::default()
+                },
+                targets: Vec::new(),
+            }],
+            // Both reachable, so the cheap one sets the price — "how little
+            // could this cost however it is routed".
+            default_targets: vec![
+                WeightedTarget {
+                    model: "dear".into(),
+                    weight: 1,
+                },
+                WeightedTarget {
+                    model: "cheap".into(),
+                    weight: 1,
+                },
+            ],
+            policy: None,
+        };
+        let headers = HeaderMap::new();
+        // 1000 prompt tokens at $1/Mtok and 500 generated at $2/Mtok = 2000
+        // micro-units on the cheap model; on the dear one it would be 60000.
+        let facts = facts_with(None, 1000, Some(500), &headers);
+
+        assert!(matches!(
+            deny(2000).decide(&facts, 0, &reg, &HashMap::new()),
+            Decision::Deny { .. }
+        ));
+        assert!(
+            matches!(
+                deny(2001).decide(&facts, 0, &reg, &HashMap::new()),
+                Decision::Route { .. }
+            ),
+            "priced on the cheapest reachable model, not the dearest"
+        );
+    }
+
+    /// Unpriced is unknown, so a cost guard declines rather than refusing
+    /// traffic on the strength of a blank field.
+    #[test]
+    fn a_cost_condition_does_not_match_when_nothing_is_priced() {
+        let reg = registry_with(&["m"]);
+        let vm = FrontendModelDef {
+            name: "vm".into(),
+            rules: vec![RoutingRule {
+                policy: None,
+                action: RuleAction::Deny {
+                    status: 402,
+                    message: "too expensive".into(),
+                },
+                tag: None,
+                conditions: RuleConditions {
+                    cost: CostMatch {
+                        min_micros: Some(1),
+                        max_micros: None,
+                    },
+                    ..Default::default()
+                },
+                targets: Vec::new(),
+            }],
+            default_targets: vec![WeightedTarget {
+                model: "m".into(),
+                weight: 1,
+            }],
+            policy: None,
+        };
+        assert!(matches!(
+            vm.decide(
+                &facts_with(None, 10_000, Some(1000), &HeaderMap::new()),
+                0,
+                &reg,
+                &HashMap::new()
+            ),
+            Decision::Route { .. }
+        ));
+    }
+
+    /// A range that can never hold is a rule that silently never fires, which
+    /// is the failure this repo keeps catching by review.
+    #[test]
+    fn an_impossible_cost_range_is_refused_at_write_time() {
+        let c = MatchConditionJson {
+            min_request_cost_micros: Some(500),
+            max_request_cost_micros: Some(100),
+            ..Default::default()
+        };
+        assert!(validate_match_json(&c).is_err());
     }
 
     // --- load conditions -------------------------------------------------

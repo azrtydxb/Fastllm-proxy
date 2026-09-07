@@ -585,6 +585,10 @@ pub struct WireRoutingRule {
     pub utc_offset_minutes: i16,
     #[serde(default)]
     pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_request_cost_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_cost_micros: Option<u64>,
     /// How to choose among this rule's targets. Absent means the frontend
     /// model's, and an unrecognised value reads as absent — a control plane
     /// that learns a new policy must not stop an older proxy routing.
@@ -844,6 +848,8 @@ impl Snapshot {
                             days: r.conditions.time.days.clone(),
                             utc_offset_minutes: r.conditions.time.utc_offset_minutes,
                             class: r.conditions.class.class.clone(),
+                            min_request_cost_micros: r.conditions.cost.min_micros,
+                            max_request_cost_micros: r.conditions.cost.max_micros,
                             policy: r.policy.map(|p| p.as_str().to_string()),
                             action: match &r.action {
                                 crate::routing::RuleAction::Route => None,
@@ -1058,6 +1064,10 @@ impl Snapshot {
                                             utc_offset_minutes: r.utc_offset_minutes,
                                         },
                                         class: ClassMatch { class: r.class },
+                                        cost: crate::routing::CostMatch {
+                                            min_micros: r.min_request_cost_micros,
+                                            max_micros: r.max_request_cost_micros,
+                                        },
                                     },
                                     policy: r
                                         .policy

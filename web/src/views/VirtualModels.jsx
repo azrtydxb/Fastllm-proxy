@@ -794,6 +794,12 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
       match_condition.max_inflight_per_backend = Number(
         c.max_inflight_per_backend,
       );
+    // Typed in dollars, stored in micro-units — the unit every price in this
+    // schema uses.
+    if (c.min_request_cost)
+      match_condition.min_request_cost_micros = Math.round(
+        Number(c.min_request_cost) * 1e6,
+      );
     if (c.header_name && c.header_value)
       match_condition.headers = {
         [c.header_name.toLowerCase()]: c.header_value,
@@ -946,6 +952,16 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
           <input
             value={c.min_budget_used_percent || ""}
             onChange={(e) => set({ min_budget_used_percent: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="REQUEST COST ≥ $"
+          hint="priced at the cheapest model this frontend model can reach — most useful with deny"
+        >
+          <input
+            placeholder="0.50"
+            value={c.min_request_cost || ""}
+            onChange={(e) => set({ min_request_cost: e.target.value })}
           />
         </Field>
         <Field label="INFLIGHT/BACKEND ≤">

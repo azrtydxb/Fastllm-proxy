@@ -67,6 +67,13 @@ A `deny` shows up in `dry-run` as a `denied` object with the status and
 message, and an empty `candidates` — which is a different thing from "nothing
 is serving", and the distinction is the point.
 
+**Cost as a condition** (`min/max_request_cost_micros`) is priced at the
+cheapest model the frontend model can reach — one number per request, the same
+for every rule, so it does not depend on which rule is asking. Pairs with
+`deny` ("refuse anything over $0.50 however I route it"). Sending the expensive
+ones somewhere cheaper is not this; that is the `cheapest` policy below. All
+targets unpriced means no cost, and the rule declines.
+
 ## Two levels of balancing, and they are different questions
 
 **A rule's `policy` chooses between *models*** — its own targets. Values:
