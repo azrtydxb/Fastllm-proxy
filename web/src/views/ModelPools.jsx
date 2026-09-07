@@ -39,6 +39,15 @@ const POLICIES = [
   ["cheapest", "cheapest — lowest published price; unpriced ranks last"],
 ];
 
+// Where a model actually runs, for the picker and the member chips. A name on
+// its own does not say: `bge-m3` is one model on two Sparks, and an operator
+// choosing a pool member needs to see which machines they are pulling in.
+function where(model) {
+  if (!model || model.backends.length === 0)
+    return "no provider — not routable";
+  return model.backends.map((b) => b.provider_name).join(", ");
+}
+
 export function ModelPools({ onUnauthorised }) {
   const [creating, setCreating] = useState("");
   const [adding, setAdding] = useState({});
@@ -191,6 +200,15 @@ export function ModelPools({ onUnauthorised }) {
                     <Mono style={{ font: "400 12px var(--mono)" }}>
                       {m.model}
                     </Mono>
+                    {/* Which machines this member brings with it. A model can
+                        be served by several providers, and the pool is
+                        choosing between models — that second level is the
+                        model's own policy, set on Provider models. */}
+                    <Muted style={{ font: "400 10px var(--mono)" }}>
+                      {where(
+                        data.models.find((x) => x.id === m.provider_model_id),
+                      )}
+                    </Muted>
                     {/* Weight only bites on the weighted split; the other
                         policies read load, latency or price instead. */}
                     <Muted style={{ font: "400 10px var(--mono)" }}>
@@ -219,7 +237,7 @@ export function ModelPools({ onUnauthorised }) {
                     <option value="">provider model…</option>
                     {available.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.name}
+                        {m.name} · {where(m)}
                       </option>
                     ))}
                   </select>
@@ -249,6 +267,17 @@ export function ModelPools({ onUnauthorised }) {
                   </Button>
                 </div>
               </Row>
+              {/* The question this screen kept raising: one model served by
+                  two machines looks like two things, and adding it looks like
+                  adding one. Both are true, at different levels. */}
+              <div style={{ marginTop: 8 }}>
+                <Muted>
+                  A member is a <b>model</b>, and brings every provider serving
+                  it. This pool chooses between members; which provider serves a
+                  given member is that model&rsquo;s own load balancing, set on
+                  Provider&nbsp;models.
+                </Muted>
+              </div>
             </div>
           </Card>
         );

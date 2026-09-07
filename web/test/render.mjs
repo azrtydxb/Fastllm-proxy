@@ -113,7 +113,20 @@ const SCREENS = [
   // fails if the conditions are read from the wrong shape again.
   // A pool with its policy and its one member: the screen exists to make
   // "which models, chosen how" answerable at a glance.
-  ["pools", ["leastloaded-local", "least loaded", "local-qwen", "1 member"]],
+  // The provider names matter as much as the model name: `local-qwen` runs on
+  // two hosts, and an operator picking a pool member cannot tell what they are
+  // pulling in from a bare name.
+  [
+    "pools",
+    [
+      "leastloaded-local",
+      "least loaded",
+      "local-qwen",
+      "1 member",
+      "10.42.1.7:8000",
+      "10.42.1.8:8000",
+    ],
+  ],
   [
     "routing",
     ["gpt-router", "class =", "coding", "engineering", "batch", "Defaults"],
