@@ -33,14 +33,20 @@ compares the ceiling against what vLLM or SGLang says is running plus queued.
 That matters as soon as there is more than one proxy: a per-replica counter
 means two proxies each admit up to the ceiling, so a limit of 2 spills at
 about 4, and traffic that reached the engine without passing through FastLLM
-is invisible. Which backends have this is detected, not configured. Each is asked once;
-one that answers with something that is not engine metrics — a 404, or a
-Prometheus body with no scheduler families in it — is asked once more five
-minutes later and then never again, so a deployment of hosted providers pays
-two requests per provider and nothing after that. A backend that does not
-answer *at all* keeps being retried, because an engine part way through
-loading a model is indistinguishable from one that is down. Editing an
-endpoint starts the detection over.
+is invisible. Which backends have this is detected, not configured. Each is asked once, then
+every five minutes while it produces no reading, and after fifteen minutes it
+is assumed not to have metrics and dropped from the scrape — so a deployment of
+hosted providers costs a handful of requests per provider for the life of the
+process rather than a poll every few minutes for ever. A backend that answers
+with something that is *not* engine metrics — a 404, or a Prometheus body with
+no scheduler families in it — settles sooner, on the second such answer, since
+the endpoint has said as much itself. Editing an endpoint starts the detection
+over.
+
+The one verdict that is revisited is the one reached by deadline: nothing ever
+replied, so "it has no metrics" was an inference, and an engine that took
+longer than fifteen minutes to load a model would be written off by it. Such a
+backend gets exactly one more question if it later passes a health probe.
 
 Anything not detected as an engine falls back to this replica's own count, and
 so does a backend whose last reading has gone stale, so the condition degrades
