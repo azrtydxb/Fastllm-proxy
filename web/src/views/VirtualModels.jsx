@@ -75,10 +75,13 @@ function conditionChips(rule) {
   return out;
 }
 
-// How a frontend model chooses between its targets. It used to live on the
-// provider model, where after the provider split it chose between one thing —
-// a provider model has one provider and therefore one backend. The targets are
-// what need choosing between.
+// How targets are chosen between. Settable per rule, and on the frontend model
+// for the default targets — the one target list that has no rule of its own.
+// A rule with none falls back to the frontend model's.
+//
+// Per rule because that is the level the targets are at: "least connections
+// across the two local boxes, then plain failover to the cloud when they are
+// full" is two rules wanting two different answers.
 //
 // "" is the weighted split, which is what a target list has always meant: a
 // deterministic pick on the request prefix, so a conversation stays on one
@@ -91,6 +94,7 @@ const POLICIES = [
   ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
   ["lowest-latency", "lowest latency — for backends that are not equally fast"],
   ["round-robin", "round robin — strict rotation, cache-blind"],
+  ["cheapest", "cheapest — the lowest published price, unpriced ranked last"],
 ];
 
 export function VirtualModels({ onUnauthorised }) {
@@ -120,6 +124,15 @@ export function VirtualModels({ onUnauthorised }) {
   const savePolicy = async (id, policy) => {
     const ok = await attempt(
       () => api.patch(`/admin/frontend-models/${id}`, { policy }),
+      setError,
+      onUnauthorised,
+    );
+    if (ok) reload();
+  };
+
+  const saveRulePolicy = async (id, policy) => {
+    const ok = await attempt(
+      () => api.patch(`/admin/rules/${id}`, { policy }),
       setError,
       onUnauthorised,
     );
@@ -358,6 +371,30 @@ export function VirtualModels({ onUnauthorised }) {
                         : `${chips.length} condition${chips.length === 1 ? "" : "s"}, all must hold`}
                     </Muted>
                     <Spacer />
+                    {/* Per rule, so "least connections locally, then plain
+                        failover to the cloud" is expressible — one setting for
+                        the whole frontend model could not say it. Unset
+                        inherits the frontend model's. */}
+                    <select
+                      value={r.policy || ""}
+                      title="How this rule chooses among its own targets"
+                      onChange={(e) =>
+                        saveRulePolicy(
+                          r.id,
+                          e.target.value === "" ? null : e.target.value,
+                        )
+                      }
+                      style={{ fontSize: 11, maxWidth: 260 }}
+                    >
+                      <option value="">
+                        inherit — {vm.policy || "weighted split"}
+                      </option>
+                      {POLICIES.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
                     <Button
                       variant="smallDanger"
                       onClick={async () => {

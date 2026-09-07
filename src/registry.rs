@@ -132,6 +132,10 @@ pub struct Backend {
     /// can name the attachment that served and be priced at that provider's
     /// rate. Never interpreted here.
     pub backend_id: Option<uuid::Uuid>,
+    /// Input plus output price per million tokens, or `None` when this
+    /// backend is unpriced. Pre-added at build time so `Policy::Cheapest`
+    /// compares one number per candidate instead of two.
+    price_per_mtok: Option<i64>,
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
@@ -215,6 +219,14 @@ impl Backend {
             protocol: def.protocol,
             default_max_tokens: def.default_max_tokens,
             backend_id: def.backend_id,
+            // Either figure alone is enough to call a backend priced: a
+            // provider that charges for input and nothing for output is a
+            // real arrangement, and reading the missing half as "unknown"
+            // would drop it out of `Cheapest` entirely.
+            price_per_mtok: match (def.input_price_per_mtok, def.output_price_per_mtok) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+            },
             // Optimistic: a backend serves traffic until a health check says
             // otherwise. Starting unhealthy would blackhole every request in
             // the window before the first sweep completes.
@@ -233,6 +245,13 @@ impl Backend {
     #[inline]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// What this backend charges per million tokens, in and out together.
+    /// `None` is unpriced — see `router::Policy::Cheapest`.
+    #[inline]
+    pub fn price_per_mtok(&self) -> Option<i64> {
+        self.price_per_mtok
     }
 
     #[inline]

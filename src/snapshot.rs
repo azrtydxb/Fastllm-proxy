@@ -176,6 +176,15 @@ pub struct BackendDef {
     /// did not set it. `None` means such a request is refused rather than
     /// silently capped at a number nobody chose.
     pub default_max_tokens: Option<u32>,
+    /// Micro-units per million tokens at this provider, for
+    /// `router::Policy::Cheapest`. `None` is unpriced, which that policy
+    /// ranks last rather than free.
+    ///
+    /// Carried into the snapshot only because routing may consult it; the
+    /// authoritative pricing of a *request* still happens in the control
+    /// plane at ingest, from the attachment the proxy names below.
+    pub input_price_per_mtok: Option<i64>,
+    pub output_price_per_mtok: Option<i64>,
     /// Which `model_backends` row this is, so a usage event can say which
     /// attachment served and be priced at that provider's rate.
     ///
@@ -200,6 +209,8 @@ impl Default for BackendDef {
             auth_header: "authorization".into(),
             auth_scheme: Some("Bearer".into()),
             default_max_tokens: None,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
             backend_id: None,
         }
     }
@@ -467,6 +478,10 @@ pub struct WireBackendDef {
     pub auth_scheme: Option<String>,
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
+    #[serde(default)]
+    pub input_price_per_mtok: Option<i64>,
+    #[serde(default)]
+    pub output_price_per_mtok: Option<i64>,
     /// Absent from a control plane older than this field, and from `File`
     /// mode. A usage event without it is priced the old way — by model name —
     /// which is exact whenever the model has one attachment.
@@ -570,6 +585,11 @@ pub struct WireRoutingRule {
     pub utc_offset_minutes: i16,
     #[serde(default)]
     pub class: Option<String>,
+    /// How to choose among this rule's targets. Absent means the frontend
+    /// model's, and an unrecognised value reads as absent — a control plane
+    /// that learns a new policy must not stop an older proxy routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -747,6 +767,8 @@ impl Snapshot {
                             auth_header: b.auth_header.clone(),
                             auth_scheme: b.auth_scheme.clone(),
                             default_max_tokens: b.default_max_tokens,
+                            input_price_per_mtok: b.input_price_per_mtok,
+                            output_price_per_mtok: b.output_price_per_mtok,
                             backend_id: b.backend_id,
                         })
                         .collect(),
@@ -804,6 +826,7 @@ impl Snapshot {
                             days: r.conditions.time.days.clone(),
                             utc_offset_minutes: r.conditions.time.utc_offset_minutes,
                             class: r.conditions.class.class.clone(),
+                            policy: r.policy.map(|p| p.as_str().to_string()),
                             targets: r
                                 .targets
                                 .iter()
@@ -926,6 +949,8 @@ impl Snapshot {
                                 auth_header: b.auth_header,
                                 auth_scheme: b.auth_scheme,
                                 default_max_tokens: b.default_max_tokens,
+                                input_price_per_mtok: b.input_price_per_mtok,
+                                output_price_per_mtok: b.output_price_per_mtok,
                                 backend_id: b.backend_id,
                             })
                         })
@@ -996,6 +1021,10 @@ impl Snapshot {
                                         },
                                         class: ClassMatch { class: r.class },
                                     },
+                                    policy: r
+                                        .policy
+                                        .as_deref()
+                                        .and_then(crate::router::Policy::parse),
                                     targets: r
                                         .targets
                                         .into_iter()

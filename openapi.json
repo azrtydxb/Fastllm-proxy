@@ -1784,6 +1784,61 @@
       }
     },
     "/admin/rules/{id}": {
+      "patch": {
+        "summary": "Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first",
+        "operationId": "patch_admin_rules_id",
+        "tags": ["admin"],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "type": ["string", "null"],
+                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", "cheapest", null],
+                    "description": "How to choose among this rule's targets. Null clears it back to the frontend model's, and then to the weighted split"
+                  },
+                  "position": {
+                    "type": "integer",
+                    "description": "Where this rule sits in its frontend model's evaluation order. First match wins"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No such rule"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
       "delete": {
         "summary": "Delete rules id",
         "operationId": "delete_admin_rules_id",

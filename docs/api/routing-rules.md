@@ -52,6 +52,36 @@ Anything not detected as an engine falls back to this replica's own count, and
 so does a backend whose last reading has gone stale, so the condition degrades
 to its old behaviour rather than to "idle".
 
+## Choosing among a rule's targets
+
+By default a rule's targets are a **weighted split**: a deterministic pick on
+the request prefix, so a conversation stays on one side of a canary rather than
+flipping per request, then the rest of the list in declaration order as the
+failover chain.
+
+A rule can name a `policy` instead, and it applies to that rule's own targets:
+
+| policy | picks |
+| --- | --- |
+| `cache-affinity` | the target holding this prefix's KV cache |
+| `least-loaded` | fewest in-flight requests |
+| `lowest-latency` | lowest recent mean latency |
+| `round-robin` | strict rotation |
+| `cheapest` | lowest published price; a target nobody has priced is skipped, not read as free |
+
+Per rule, because that is the level the targets are at — "least-connections
+across the two local boxes, then plain failover to the cloud when they are
+full" is two rules wanting two different answers, and one setting for the whole
+frontend model could not say it. A rule with no policy inherits the frontend
+model's, which is also what the *default* targets use since they have no rule
+of their own.
+
+**This is not the same knob as a model's own load balancing.** Routing happens
+twice: once to choose a model, and once to choose which of that model's
+backends serves it. This table is the first. The second is
+`provider_models.policy`, set on the Models screen, and it takes the same
+values — see [providers](../providers.md).
+
 Some shapes worth stealing:
 
 ```jsonc

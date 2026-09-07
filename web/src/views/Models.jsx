@@ -66,7 +66,7 @@ function BackendPrice({ backend, onSave }) {
   if (!editing) {
     const priced = backend.input_price_per_mtok !== null;
     return (
-      <Mono
+      <span
         onClick={() => setEditing(true)}
         title="Click to edit what this provider charges for this model"
         style={{
@@ -78,7 +78,7 @@ function BackendPrice({ backend, onSave }) {
         {priced
           ? `${fmtPrice(backend.input_price_per_mtok)} / ${fmtPrice(backend.output_price_per_mtok ?? 0)}`
           : "unpriced"}
-      </Mono>
+      </span>
     );
   }
   return (
@@ -130,6 +130,22 @@ function priceRange(backends) {
   const hi = `${fmtPrice(Math.max(...ins))} / ${fmtPrice(Math.max(...outs))}`;
   return lo === hi ? lo : `${lo} – ${hi}`;
 }
+
+// How a model chooses between its own backends, once it has more than one.
+// A different question from the frontend model's policy, which chooses between
+// *models*: these are interchangeable copies of one model, so this is about
+// which machine is warmest or cheapest rather than about capability or cost
+// tier.
+const POOL_POLICIES = [
+  [
+    "cache-affinity",
+    "cache affinity — a conversation returns to the node holding its KV cache",
+  ],
+  ["least-loaded", "least loaded — fewest in-flight requests, cache-blind"],
+  ["lowest-latency", "lowest latency — when the machines are not equally fast"],
+  ["round-robin", "round robin — strict rotation, cache-blind"],
+  ["cheapest", "cheapest — lowest published price; unpriced ranks last"],
+];
 
 /** Dollars per Mtok as typed, to the micro-units the API stores. */
 function dollarsToMicros(raw) {
@@ -819,6 +835,7 @@ function PriceEditor({ model, onSave }) {
   const [ttl, setTtl] = useState(model.cache_ttl_seconds ?? "");
   const [context, setContext] = useState(model.context_length ?? "");
   const [description, setDescription] = useState(model.description || "");
+  const [policy, setPolicy] = useState(model.policy || "");
 
   // Absent, cleared and mistyped are three different things and only the
   // first two are intentional. `JSON.stringify` renders NaN as `null`, and to
@@ -876,6 +893,19 @@ function PriceEditor({ model, onSave }) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </Field>
+        <Field
+          label="LOAD BALANCING"
+          hint="how to choose between this model's own backends — only bites once it has more than one"
+        >
+          <select value={policy} onChange={(e) => setPolicy(e.target.value)}>
+            <option value="">deployment default (--policy)</option>
+            {POOL_POLICIES.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
       </Grid>
       {bad && (
         <div style={{ marginTop: 12 }}>
@@ -900,6 +930,9 @@ function PriceEditor({ model, onSave }) {
                 // would leave an operator believing they had set a limit.
                 context_length:
                   context === "" ? null : positive(context, "context length"),
+                // Empty is an explicit null: it clears the override so the
+                // pool falls back to the deployment's `--policy`.
+                policy: policy === "" ? null : policy,
                 // Empty is an explicit null: it clears the override so the
                 description,
               });

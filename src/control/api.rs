@@ -1898,6 +1898,9 @@ struct ModelView {
     /// Absent is a third state, not zero — routing demotes a model only when
     /// the figure is known and too small.
     context_length: Option<i64>,
+    /// How this model's backends are chosen between. `None` is the
+    /// deployment's `--policy`.
+    policy: Option<String>,
     /// Everywhere this model runs. Empty is a real state and not an error: a
     /// model can outlive the provider it was attached to. It is not routable,
     /// and the UI shows it as needing attention rather than hiding it.
@@ -1910,9 +1913,16 @@ async fn list_models(
     State(ctx): State<Ctx>,
     _perm: RequireRead,
 ) -> Result<Json<Vec<ModelView>>, ApiError> {
-    type ModelRow = (Uuid, String, String, Option<i32>, Option<i64>);
+    type ModelRow = (
+        Uuid,
+        String,
+        String,
+        Option<i32>,
+        Option<i64>,
+        Option<String>,
+    );
     let models: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, description, cache_ttl_seconds, context_length \
+        "SELECT id, name, description, cache_ttl_seconds, context_length, policy \
          FROM provider_models ORDER BY name",
     )
     .fetch_all(&ctx.pool)
@@ -1960,12 +1970,13 @@ async fn list_models(
         models
             .into_iter()
             .map(
-                |(id, name, description, cache_ttl_seconds, context_length)| ModelView {
+                |(id, name, description, cache_ttl_seconds, context_length, policy)| ModelView {
                     id,
                     name,
                     description,
                     cache_ttl_seconds,
                     context_length,
+                    policy,
                     backends: backends
                         .iter()
                         .filter(|(model_id, ..)| *model_id == id)
@@ -2024,6 +2035,10 @@ struct NewModel {
     /// the field was simply dropped.
     #[serde(default)]
     context_length: Option<i32>,
+    /// How to choose among this model's backends once it has more than one.
+    /// Absent means the deployment's `--policy`.
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 /// Accept only a policy this build knows, and say which ones those are.
@@ -2041,7 +2056,8 @@ fn validated_policy(policy: Option<&str>) -> Result<Option<String>, ApiError> {
             StatusCode::BAD_REQUEST,
             format!(
                 "unknown policy {raw:?}; expected one of cache-affinity, least-loaded, \
-                 round-robin, lowest-latency, or omit it to use the deployment default"
+                 round-robin, lowest-latency, cheapest, or omit it to use the deployment \
+                 default"
             ),
         )),
     }
@@ -2558,13 +2574,14 @@ async fn post_model(
     // renaming the provider model out of the way instead would revoke every
     // grant naming it (migration 0029 did that in production).
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO provider_models (name, description, cache_ttl_seconds, context_length) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO provider_models (name, description, cache_ttl_seconds, context_length, \
+             policy) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(&body.name)
     .bind(&body.description)
     .bind(body.cache_ttl_seconds)
     .bind(body.context_length)
+    .bind(validated_policy(body.policy.as_deref())?)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2611,6 +2628,10 @@ struct PatchModel {
     /// is not the same as zero — see `ModelDef::context_length`.
     #[serde(default, deserialize_with = "double_option")]
     context_length: Option<Option<i64>>,
+    /// How to choose among this model's backends. `null` clears it back to
+    /// the deployment's `--policy`.
+    #[serde(default, deserialize_with = "double_option")]
+    policy: Option<Option<String>>,
 }
 
 /// Move a grant from one name to another, inside a caller's transaction.
@@ -2834,6 +2855,10 @@ async fn patch_model(
             "cache_ttl_seconds cannot be negative; 0 or null turns caching off",
         ));
     }
+    // An explicit null clears; an absent field leaves it. `validated_policy`
+    // spells both as `None`, so the "was it present" flag below is what tells
+    // them apart.
+    let policy = validated_policy(body.policy.clone().flatten().as_deref())?;
     if let Some(name) = body.name.as_deref().map(str::trim) {
         if name.is_empty() {
             return Err(api_error(
@@ -2859,7 +2884,8 @@ async fn patch_model(
         "UPDATE provider_models SET
            description       = CASE WHEN $2 THEN $3 ELSE description       END,
            cache_ttl_seconds = CASE WHEN $4 THEN $5 ELSE cache_ttl_seconds END,
-           context_length    = CASE WHEN $6 THEN $7 ELSE context_length    END
+           context_length    = CASE WHEN $6 THEN $7 ELSE context_length    END,
+           policy            = CASE WHEN $8 THEN $9 ELSE policy            END
          WHERE id = $1",
     )
     .bind(id)
@@ -2869,6 +2895,8 @@ async fn patch_model(
     .bind(body.cache_ttl_seconds.flatten())
     .bind(body.context_length.is_some())
     .bind(body.context_length.flatten())
+    .bind(body.policy.is_some())
+    .bind(policy)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("model update", &e))?;
@@ -3440,6 +3468,9 @@ struct TargetView {
 struct RuleView {
     id: Uuid,
     position: i32,
+    /// How this rule chooses among its own targets. `None` means the frontend
+    /// model's, and then the weighted split.
+    policy: Option<String>,
     #[serde(flatten)]
     match_condition: MatchConditionJson,
     targets: Vec<TargetView>,
@@ -3481,8 +3512,9 @@ async fn list_virtual_models(
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing frontend models", &e))?;
-    let rules: Vec<(Uuid, Uuid, i32, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, frontend_model_id, position, match_json FROM routing_rules
+    type RuleRow = (Uuid, Uuid, i32, serde_json::Value, Option<String>);
+    let rules: Vec<RuleRow> = sqlx::query_as(
+        "SELECT id, frontend_model_id, position, match_json, policy FROM routing_rules
          ORDER BY frontend_model_id, position",
     )
     .fetch_all(&ctx.pool)
@@ -3528,7 +3560,7 @@ async fn list_virtual_models(
                 let rule_views = rules
                     .iter()
                     .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
-                    .map(|(rule_id, _, position, match_json)| {
+                    .map(|(rule_id, _, position, match_json, rule_policy)| {
                         // A rule whose `match_json` cannot parse is still
                         // listed rather than hidden — an operator diagnosing
                         // why `build_snapshot` dropped it (see that
@@ -3540,6 +3572,7 @@ async fn list_virtual_models(
                         RuleView {
                             id: *rule_id,
                             position: *position,
+                            policy: rule_policy.clone(),
                             match_condition,
                             targets: to_targets(*rule_id, &rule_targets),
                         }
@@ -3770,6 +3803,10 @@ struct NewRule {
     /// Where this rule sits in its frontend model's evaluation order —
     /// load-bearing, not cosmetic: the first matching rule wins.
     position: i32,
+    /// How to choose among this rule's targets. Absent means the frontend
+    /// model's, and then the weighted split.
+    #[serde(default)]
+    policy: Option<String>,
     #[serde(flatten)]
     match_condition: MatchConditionJson,
 }
@@ -3786,15 +3823,17 @@ async fn post_rule(
     // catching by review instead of by test.
     crate::routing::validate_match_json(&body.match_condition)
         .map_err(|why| api_error(StatusCode::BAD_REQUEST, why))?;
+    let policy = validated_policy(body.policy.as_deref())?;
     let match_json = serde_json::to_value(&body.match_condition)
         .expect("MatchConditionJson has no non-serialisable field");
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO routing_rules (frontend_model_id, position, match_json)
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO routing_rules (frontend_model_id, position, match_json, policy)
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(frontend_model_id)
     .bind(body.position)
     .bind(match_json)
+    .bind(policy)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -3825,6 +3864,54 @@ async fn post_rule(
             serde_json::json!({ "id": id, "frontend_model_id": frontend_model_id, "position": body.position }),
         ),
     ))
+}
+
+/// What a `PATCH /admin/rules/{id}` may change.
+///
+/// The conditions are deliberately not here: editing what a rule *matches* in
+/// place would let a rule change meaning while keeping the position that makes
+/// it first, and a rule is cheap to delete and recreate. This route exists for
+/// the settings that are about how the rule serves rather than when it fires.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchRule {
+    /// How to choose among this rule's targets. `null` clears it back to the
+    /// frontend model's.
+    #[serde(default, deserialize_with = "double_option")]
+    policy: Option<Option<String>>,
+    /// Where this rule sits in its frontend model's evaluation order.
+    #[serde(default)]
+    position: Option<i32>,
+}
+
+async fn patch_rule(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchRule>,
+) -> Result<StatusCode, ApiError> {
+    let policy = validated_policy(body.policy.clone().flatten().as_deref())?;
+    let done = sqlx::query(
+        "UPDATE routing_rules SET
+           policy   = CASE WHEN $2 THEN $3 ELSE policy   END,
+           position = COALESCE($4, position)
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(body.policy.is_some())
+    .bind(policy)
+    .bind(body.position)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| db_error("routing rule update", &e))?;
+    if done.rows_affected() == 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("no rule with id {id}; GET /admin/frontend-models lists each rule's id"),
+        ));
+    }
+    refresh(&ctx).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_rule(
@@ -7241,7 +7328,10 @@ pub async fn serve(
             get(get_fallback_model).put(put_fallback_model),
         )
         .route("/admin/frontend-models/{id}/rules", post(post_rule))
-        .route("/admin/rules/{id}", delete(delete_rule))
+        .route(
+            "/admin/rules/{id}",
+            axum::routing::patch(patch_rule).delete(delete_rule),
+        )
         .route("/admin/rules/{id}/targets", post(post_rule_target))
         .route("/admin/rule-targets/{id}", delete(delete_rule_target))
         .route(
@@ -8034,6 +8124,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8099,6 +8190,7 @@ mod tests {
                 description: None,
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8247,6 +8339,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8381,6 +8474,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8649,6 +8743,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8663,6 +8758,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8690,6 +8786,7 @@ mod tests {
             Path(vm_id),
             Json(NewRule {
                 position: 0,
+                policy: None,
                 match_condition: MatchConditionJson {
                     roles: vec!["canary".into()],
                     ..Default::default()
@@ -8784,6 +8881,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -8826,6 +8924,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9065,6 +9164,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9165,6 +9265,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9244,6 +9345,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9606,6 +9708,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9689,6 +9792,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -9927,6 +10031,7 @@ mod tests {
                     description: String::new(),
                     cache_ttl_seconds: None,
                     context_length: None,
+                    policy: None,
                 }),
             )
             .await
@@ -10029,6 +10134,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -10130,6 +10236,7 @@ mod tests {
                 description: "before".into(),
                 cache_ttl_seconds: Some(60),
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -10249,6 +10356,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -10339,6 +10447,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -10377,6 +10486,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await
@@ -10429,6 +10539,7 @@ mod tests {
                         description: String::new(),
                         cache_ttl_seconds: None,
                         context_length: None,
+                        policy: None,
                     }),
                 )
                 .await
@@ -10468,6 +10579,7 @@ mod tests {
             Path(vm_id),
             Json(NewRule {
                 position: 0,
+                policy: None,
                 match_condition: MatchConditionJson {
                     stream: Some(true),
                     ..Default::default()
@@ -10746,6 +10858,7 @@ mod tests {
                 description: String::new(),
                 cache_ttl_seconds: None,
                 context_length: None,
+                policy: None,
             }),
         )
         .await

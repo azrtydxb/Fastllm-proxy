@@ -158,9 +158,10 @@ pub async fn build_snapshot_with(
 ) -> anyhow::Result<Snapshot> {
     // Named, because the row grew a fifth column and an anonymous tuple that
     // wide stops being readable at the call site.
-    type ModelRow = (Uuid, String, Option<i32>, Option<i64>);
+    type ModelRow = (Uuid, String, Option<i32>, Option<i64>, Option<String>);
     let model_rows: Vec<ModelRow> = sqlx::query_as(
-        "SELECT id, name, cache_ttl_seconds, context_length FROM provider_models ORDER BY name",
+        "SELECT id, name, cache_ttl_seconds, context_length, policy \
+         FROM provider_models ORDER BY name",
     )
     .fetch_all(pool)
     .await?;
@@ -188,6 +189,8 @@ pub async fn build_snapshot_with(
         Option<i32>,
         String,
         Uuid,
+        Option<i64>,
+        Option<i64>,
     );
     // One row per attachment (migration 0045), so a model served by two
     // machines yields two and its pool has two members for `router.rs` to
@@ -203,7 +206,8 @@ pub async fn build_snapshot_with(
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
         "SELECT mb.provider_model_id, p.api_base, COALESCE(mb.upstream_model, m.name), \
          p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, \
-         mb.default_max_tokens, p.credential_kind, mb.id \
+         mb.default_max_tokens, p.credential_kind, mb.id, \
+         mb.input_price_per_mtok, mb.output_price_per_mtok \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
          JOIN provider_models m ON m.id = mb.provider_model_id",
@@ -212,7 +216,7 @@ pub async fn build_snapshot_with(
     .await?;
 
     let mut models = Vec::new();
-    for (id, name, cache_ttl_seconds, context_length) in &model_rows {
+    for (id, name, cache_ttl_seconds, context_length, policy) in &model_rows {
         let mut backends = Vec::new();
         for (
             _,
@@ -225,6 +229,8 @@ pub async fn build_snapshot_with(
             max_tokens,
             credential_kind,
             backend_id,
+            input_price,
+            output_price,
         ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
@@ -320,6 +326,8 @@ pub async fn build_snapshot_with(
                 auth_scheme: auth_scheme.clone(),
                 default_max_tokens: max_tokens.map(|n| n as u32),
                 backend_id: Some(*backend_id),
+                input_price_per_mtok: *input_price,
+                output_price_per_mtok: *output_price,
             });
         }
         models.push(ModelDef {
@@ -332,13 +340,16 @@ pub async fn build_snapshot_with(
             // A non-positive limit is meaningless and is read as unknown
             // rather than as a model that can accept nothing.
             context_length: context_length.filter(|c| *c > 0).map(|c| c as u64),
-            // Still unset from the database, but no longer because there is
-            // nothing to choose between: since migration 0045 a model can have
-            // several attachments and its pool really does have members. There
-            // is simply no column to read a per-model policy from yet, so
-            // every pool uses the deployment's `--policy`. `File` mode has
-            // always been able to set this per model.
-            policy: None,
+            // How to choose among this model's own backends, now that it can
+            // have several (migration 0045). Two identical local replicas
+            // sharing a prefix cache and one model offered by three vendors at
+            // different prices want different answers, and a deployment
+            // routinely holds both. NULL is the deployment's `--policy`.
+            //
+            // A spelling this build does not know reads as unset rather than
+            // failing the rebuild, so a control plane that learns a new policy
+            // cannot stop an older proxy routing.
+            policy: policy.as_deref().and_then(crate::router::Policy::parse),
             backends,
         });
     }
@@ -856,9 +867,10 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
             .fetch_all(pool)
             .await?;
 
-    type RuleRow = (Uuid, Uuid, serde_json::Value);
+    type RuleRow = (Uuid, Uuid, serde_json::Value, Option<String>);
     let rule_rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, frontend_model_id, match_json FROM routing_rules ORDER BY frontend_model_id, position",
+        "SELECT id, frontend_model_id, match_json, policy FROM routing_rules \
+         ORDER BY frontend_model_id, position",
     )
     .fetch_all(pool)
     .await?;
@@ -927,8 +939,8 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     for (vm_id, vm_name, vm_policy) in vm_rows {
         let rules = rule_rows
             .iter()
-            .filter(|(_, frontend_model_id, _)| *frontend_model_id == vm_id)
-            .filter_map(|(rule_id, _, match_json)| {
+            .filter(|(_, frontend_model_id, ..)| *frontend_model_id == vm_id)
+            .filter_map(|(rule_id, _, match_json, rule_policy)| {
                 let parsed: MatchConditionJson = match serde_json::from_value(match_json.clone()) {
                     Ok(m) => m,
                     Err(e) => {
@@ -953,6 +965,11 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                 Some(RoutingRule {
                     conditions: parsed.into_conditions(),
                     targets: targets_for(*rule_id, &rule_target_rows),
+                    // Unset falls back to the frontend model's, which is what
+                    // every existing rule does — see `RoutingRule::policy`.
+                    policy: rule_policy
+                        .as_deref()
+                        .and_then(crate::router::Policy::parse),
                 })
             })
             .collect();

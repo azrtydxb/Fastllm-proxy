@@ -37,15 +37,33 @@ change here — it is the only way to check a rule does what you meant.
 | `PATCH` | `/admin/frontend-models/{id}` | Change how a frontend model chooses between its targets | `name`*, `policy`* |
 | `DELETE` | `/admin/frontend-models/{id}` | Delete frontend-models id | — |
 | `POST` | `/admin/frontend-models/{id}/defaults` | Create frontend-models id defaults | `provider_model_id`, `weight`*, `position` |
-| `POST` | `/admin/frontend-models/{id}/rules` | Create frontend-models id rules | `position`, `match_condition` |
+| `POST` | `/admin/frontend-models/{id}/rules` | Create frontend-models id rules | `position`, `policy`*, `match_condition` |
 | `POST` | `/admin/routing/dry-run` | Which rule would decide, and what the chain resolves to, without dispatching | `model`, `principal_id`*, `streaming`*, `prompt_tokens`*, `max_tokens`*, `headers`*, `class`*, `class_refines`* |
 | `DELETE` | `/admin/rule-targets/{id}` | Delete rule-targets id | — |
+| `PATCH` | `/admin/rules/{id}` | Change how a rule chooses among its targets, or where it sits in the order. Its conditions are not editable: delete and recreate instead of letting a rule change meaning while keeping the position that makes it first | `policy`*, `position`* |
 | `DELETE` | `/admin/rules/{id}` | Delete rules id | — |
 | `POST` | `/admin/rules/{id}/targets` | Create rules id targets | `provider_model_id`, `weight`*, `position` |
 
 *\* optional field*
 
 <!-- END GENERATED: endpoints -->
+
+## Two levels of balancing, and they are different questions
+
+**A rule's `policy` chooses between *models*** — its own targets. Values:
+`cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`, `cheapest`;
+absent means the frontend model's, then the weighted split. `PATCH
+/admin/rules/{id}` sets it. Per rule, so "least-connections locally, then plain
+failover to the cloud" is expressible.
+
+**A provider model's `policy` chooses between *backends*** — the providers
+serving that one model, which are interchangeable copies. Same values, set with
+`PATCH /admin/provider-models/{id}`, absent means the deployment's `--policy`.
+This is the level prefix-cache affinity matters at, and it only became
+meaningful when a model gained more than one backend (migration 0045).
+
+`cheapest` exists at both levels and means the same thing at each: the lowest
+published price, with unpriced ranked last rather than read as free.
 
 ## Traps
 

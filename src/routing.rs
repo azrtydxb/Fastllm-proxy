@@ -551,6 +551,15 @@ pub struct RuleConditions {
 pub struct RoutingRule {
     pub conditions: RuleConditions,
     pub targets: Vec<WeightedTarget>,
+    /// How to choose among *this rule's* targets. `None` falls back to the
+    /// frontend model's, and then to the weighted split.
+    ///
+    /// Per rule rather than per frontend model because that is the level the
+    /// targets are at: "least-connections across the two local boxes, then
+    /// plain failover to the cloud when they are full" is two rules wanting
+    /// two different answers, and one setting for the whole frontend model
+    /// could not say it.
+    pub policy: Option<crate::router::Policy>,
 }
 
 /// Everything a rule is matched against, gathered once per request.
@@ -687,7 +696,10 @@ impl FrontendModelDef {
                     prefix_hash,
                     registry,
                     facts.needed_tokens(),
-                    self.policy,
+                    // The rule's own, or the frontend model's where it has
+                    // none — so an existing deployment that set one policy for
+                    // the whole model keeps behaving exactly as it did.
+                    rule.policy.or(self.policy),
                 );
             }
         }
@@ -764,6 +776,20 @@ fn target_load(registry: &Registry, model: &str) -> (usize, u64) {
     }
 }
 
+/// The cheapest published price across a target's pool, or `None` when nothing
+/// serving it is priced.
+///
+/// The minimum rather than an average: what this target costs is what it costs
+/// when it runs, and the pool's own `Policy::Cheapest` is what would send it to
+/// that provider. A model with no pool at all has no price to compare.
+fn target_price(registry: &Registry, model: &str) -> Option<i64> {
+    registry
+        .pool(model)?
+        .iter()
+        .filter_map(|b| b.price_per_mtok())
+        .min()
+}
+
 /// Pick the target this policy prefers, or `None` to fall back to the weighted
 /// split.
 ///
@@ -794,6 +820,18 @@ fn choose_by_policy<'a>(
         // number and using it keeps this function a pure one, so two proxies
         // deciding independently still agree on a given request.
         Policy::RoundRobin => targets.get(prefix_hash as usize % targets.len().max(1)),
+        // The cheapest *model*, which is a different question from the
+        // cheapest backend one level down: these targets are different models
+        // with different capabilities, and a model is only as expensive as its
+        // least expensive provider. A target nobody has priced is skipped
+        // rather than read as free — the same rule `Policy::Cheapest` follows
+        // inside a pool — and if none is priced this declines and the weighted
+        // split decides.
+        Policy::Cheapest => targets
+            .iter()
+            .filter_map(|t| target_price(registry, &t.model).map(|p| (p, t)))
+            .min_by_key(|(p, _)| *p)
+            .map(|(_, t)| t),
     }
 }
 
@@ -953,10 +991,12 @@ mod tests {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
+                    policy: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("first", 1)],
                 },
                 RoutingRule {
+                    policy: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("second", 1)],
                 },
@@ -979,6 +1019,7 @@ mod tests {
             name: "vm".into(),
             rules: vec![
                 RoutingRule {
+                    policy: None,
                     conditions: RuleConditions {
                         caller: CallerMatch {
                             principals: [crate::snapshot::tid(999)].into_iter().collect(),
@@ -989,6 +1030,7 @@ mod tests {
                     targets: vec![target("only-for-999", 1)],
                 },
                 RoutingRule {
+                    policy: None,
                     conditions: RuleConditions::default(),
                     targets: vec![target("catch-all", 1)],
                 },
@@ -1073,6 +1115,7 @@ mod tests {
     fn combined_caller_and_shape_conditions_both_must_hold() {
         let reg = registry_with(&["m"]);
         let rule = RoutingRule {
+            policy: None,
             conditions: RuleConditions {
                 caller: CallerMatch {
                     roles: ["canary".to_string()].into_iter().collect(),
@@ -1247,6 +1290,7 @@ mod tests {
 
     fn rule_with(conditions: RuleConditions, model: &str) -> RoutingRule {
         RoutingRule {
+            policy: None,
             conditions,
             targets: vec![target(model, 1)],
         }
@@ -1729,6 +1773,7 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
+                policy: None,
                 conditions: RuleConditions {
                     caller: CallerMatch {
                         principals: [crate::snapshot::tid(999)].into_iter().collect(),
@@ -1763,6 +1808,7 @@ mod tests {
         let vm = FrontendModelDef {
             name: "vm".into(),
             rules: vec![RoutingRule {
+                policy: None,
                 conditions: RuleConditions::default(),
                 targets: vec![],
             }],

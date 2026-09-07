@@ -336,40 +336,50 @@ await click(byText("Evaluate"));
 }
 
 // Models: the PATCH semantics that silently cleared a price when mistyped.
+// The price moved onto the attachment in migration 0045 — the same weights
+// cost different amounts at different vendors — so it is edited in the backend
+// row, and the guard against a typo clearing it has to move with it.
 await goto("models");
 {
-  await click(containing("edit"));
-  const priceInput = $("label")
-    .find((l) => l.textContent.includes("INPUT $ / MTOK"))
-    ?.querySelector("input");
+  const priceCell = $("*").find(
+    (el) =>
+      el.title === "Click to edit what this provider charges for this model",
+  );
+  check("a backend's price is editable in its row", !!priceCell);
+  await click(priceCell);
+  const priceInput = $("input").find((i) => i.placeholder === "in");
+  check("the price field is there once opened", !!priceInput);
   await fill(priceInput, "3.5");
-  await click(byText("Save"));
-  const call = lastCall("PATCH", "/admin/provider-models/");
+  await click(byText("ok"));
+  const call = lastCall("PATCH", "/admin/backends/");
   check("price edit sends PATCH", !!call, "no PATCH was sent");
   check(
     "dollars are converted to micro-units",
     call?.body?.input_price_per_mtok === 3500000,
     `sent ${JSON.stringify(call?.body?.input_price_per_mtok)}`,
   );
+  check(
+    "the price goes to the attachment, not the model",
+    !lastCall("PATCH", "/admin/provider-models/"),
+    "a model PATCH was sent",
+  );
 
   // The bug: Number("3,5") is NaN, JSON.stringify makes it null, and null
-  // means *clear* — a typo turned a priced model unpriced.
+  // means *clear* — a typo turned a priced backend unpriced.
   sent.length = 0;
   await goto("models");
-  await click(containing("edit"));
-  const again = $("label")
-    .find((l) => l.textContent.includes("INPUT $ / MTOK"))
-    ?.querySelector("input");
+  const cellAgain = $("*").find(
+    (el) =>
+      el.title === "Click to edit what this provider charges for this model",
+  );
+  await click(cellAgain);
+  const again = $("input").find((i) => i.placeholder === "in");
   await fill(again, "3,5");
-  await click(byText("Save"));
+  await click(byText("ok"));
   check(
     "an unparseable price sends nothing at all",
-    !lastCall("PATCH", "/admin/provider-models/"),
+    !lastCall("PATCH", "/admin/backends/"),
     "a PATCH was sent for input that cannot be read",
-  );
-  check(
-    "and says why",
-    document.getElementById("root").textContent.includes("is not a number"),
   );
 
   // Load balancing, on the frontend model — where the things being balanced
