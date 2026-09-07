@@ -537,3 +537,55 @@ rule, so `dry-run` can still name the one rule that decided.
 - `deny`, `jump` and `tag` (label the usage rows a rule produced, for
   chargeback). Cheap to add, but only worth it if per-rule cost attribution is
   something you actually want to report on.
+
+## Which Qwen3.5-9B build goes on Spark 1, if any?
+
+Spark 1 (192.168.10.245) has 26.1 GiB available beside the 35B and bge-m3.
+Spark 2 has 10.2 GiB and cannot take this model at any context -- the
+shortfall is weights plus runtime, not something a smaller context window
+fixes.
+
+The model is a hybrid: `full_attention_interval: 4`, so only 8 of its 32
+layers cache anything, at 32 KiB per token. KV is therefore cheap (8 GiB at
+the full 262k context) and the weights dominate the decision.
+
+- `kaitchup/Qwen3.5-9B-autoround-NVFP4`, 8.26 GiB, compressed-tensors
+  `nvfp4-pack-quantized`. Totals ~19 GiB at full 262k context, ~7 GiB spare.
+  The most headroom, and well clear of earlyoom's trigger band.
+- `kaitchup/Qwen3.5-9B-autoround-NVFP4-linearattn-BF16`, 10.43 GiB. Leaves the
+  linear-attention layers unquantised, which for this architecture is the
+  quality-preserving choice. ~21 GiB at full context, ~5 GiB spare.
+- `davidyu-nv/Qwen3.5-9B-NVFP4-MSE`, 12.37 GiB, modelopt format -- the same
+  quantisation path as the 27B already running on Spark 2, so the loader is
+  proven on this hardware. But 14 downloads, and the largest of the three.
+- The official BF16 weights, 19.31 GiB. Needs the context cut to ~32-64k to
+  fit at all, leaving 2-3 GiB -- inside the band where earlyoom, which is
+  configured to kill vLLM first, would act.
+
+## What price do the self-hosted models carry?
+
+Six of nine models are self-hosted and carry no price: bge-m3 on both Sparks,
+bge-reranker-v2-m3, qwen3-6-35b-a3b-nvfp4, qwen3-8-27b-nvfp4 and qwen3.5-9b.
+No public catalogue lists them -- OpenRouter and LiteLLM price only the models
+they sell -- so `sync-prices` reports them unmatched and always will.
+
+Pricing itself works: a real request to gemini recorded `cost_micros=19`
+against OpenRouter's own `1.93e-05`. The visible symptom is a consequence of
+the blank fields, not of a fault. 99.99% of traffic is local, so the spend view
+reads ~0 with ~300k requests flagged `unpriced_requests`, and `Sync prices...`
+reports `updated: 0`.
+
+Unpriced means *unknown* everywhere in this codebase, never zero. That is why
+`router::Policy::Cheapest` skips an unpriced backend rather than preferring it,
+and why a cost condition declines rather than firing.
+
+- Set all six to 0. True at the margin, and it makes both consequences behave
+  as expected: spend stops reporting hundreds of thousands of unpriced
+  requests, and `cheapest` prefers the hardware you already own instead of
+  routing past it to a cloud vendor.
+- Set an amortised figure per Mtok (power, hardware, depreciation), so local
+  traffic shows a real cost and cloud-vs-local comparisons are like for like.
+  Needs a number only you can supply.
+- Leave them unpriced. Honest -- nobody has measured what a local token costs
+  -- but the Usage screen keeps looking empty and `cheapest` stays unusable for
+  any rule that mixes local and cloud targets.

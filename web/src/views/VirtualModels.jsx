@@ -41,6 +41,8 @@ const CONDITION_LABELS = {
   min_budget_used_percent: "budget_used% ≥",
   max_budget_used_percent: "budget_used% ≤",
   max_inflight_per_backend: "inflight/backend ≤",
+  min_request_cost_micros: "request cost ≥",
+  max_request_cost_micros: "request cost ≤",
   after: "after",
   before: "before",
   days: "weekday ∈",
@@ -65,6 +67,8 @@ function conditionChips(rule) {
     if (Array.isArray(v)) {
       if (v.length === 0) continue;
       out.push([label, v.join(", ")]);
+    } else if (key.endsWith("_request_cost_micros")) {
+      out.push([label, `$${(v / 1e6).toFixed(6).replace(/0+$/, "0")}`]);
     } else {
       out.push([label, String(v)]);
     }
@@ -1196,7 +1200,16 @@ function DryRun({ vm, principals, state, setState, onError }) {
           </Muted>
         </div>
       )}
-      {result && result.candidates.length === 0 && (
+      {result?.denied && (
+        <div style={{ marginTop: 10 }}>
+          <Muted style={{ color: "var(--warn-fg)" }}>
+            Refused by rule {result.matched_rule}: the caller would get{" "}
+            <b>{result.denied.status}</b> — {result.denied.message}. This is the
+            rule working, not a missing target.
+          </Muted>
+        </div>
+      )}
+      {result && !result.denied && result.candidates.length === 0 && (
         <div style={{ marginTop: 10 }}>
           <Muted style={{ color: "var(--warn-fg)" }}>
             The chain is empty: this request would 404. Every candidate was
@@ -1205,6 +1218,32 @@ function DryRun({ vm, principals, state, setState, onError }) {
           </Muted>
         </div>
       )}
+      {result?.tag && (
+        <div style={{ marginTop: 6 }}>
+          <Muted>
+            Usage for this request would be tagged <b>{result.tag}</b>.
+          </Muted>
+        </div>
+      )}
+      {/* The one condition a dry-run cannot answer. It runs on the control
+          plane, which builds a registry with no in-flight counters and no
+          engine scrape, so a spill rule always looks like it still matches.
+          Saying so beats letting an operator conclude their rule is broken. */}
+      {result &&
+        vm.rules.some(
+          (r) =>
+            r.max_inflight_per_backend !== undefined &&
+            r.max_inflight_per_backend !== null,
+        ) && (
+          <div style={{ marginTop: 6 }}>
+            <Muted style={{ color: "var(--warn-fg)" }}>
+              A rule here uses inflight/backend, which reads live load. The
+              dry-run runs on the control plane and cannot see it, so that rule
+              always evaluates as though every backend were idle — only real
+              traffic shows the spill.
+            </Muted>
+          </div>
+        )}
     </Card>
   );
 }
