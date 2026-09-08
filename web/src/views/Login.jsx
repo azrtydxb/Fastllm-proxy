@@ -72,7 +72,23 @@ export function Login({ onLoggedIn, error: outerError }) {
           <img
             src="/logo.webp"
             alt="FastLLM Proxy"
-            style={{ width: 280, maxWidth: "100%", display: "block" }}
+            // The artwork is opaque and rectangular, and its backdrop is
+            // near-black against the page's #0b0c0e -- so what made it sit on
+            // top of the page was the hard edge, not the tone. Feathering that
+            // edge to transparent dissolves it; the asset is untouched.
+            //
+            // `screen` was tried first and is worse: the backdrop is a dark
+            // blue gradient rather than true black, so screening lifted it
+            // into a *brighter* rectangle instead of removing it.
+            style={{
+              width: 280,
+              maxWidth: "100%",
+              display: "block",
+              maskImage:
+                "radial-gradient(ellipse 68% 40% at 50% 50%, #000 30%, transparent 88%)",
+              WebkitMaskImage:
+                "radial-gradient(ellipse 68% 40% at 50% 50%, #000 30%, transparent 88%)",
+            }}
           />
           <div
             style={{
