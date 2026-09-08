@@ -42,6 +42,20 @@ Folded from `usage_events`, one row per request. A model with no price
 contributes nothing to spend and is counted as _unpriced_ rather than as zero,
 so a spend figure never quietly understates.
 
+## Model pools — several models, one policy
+
+![The Model pools screen: a named pool of provider models with the policy that chooses between them](images/ui-pools.png)
+
+A pool is a named group of provider models plus the policy that picks between
+them — least-loaded, fastest, prefix-affinity, or a weighted split. It exists so
+the same model on two hosts, or two different models that serve the same
+purpose, can be pointed at as one target. Frontend model rules choose a pool the
+same way they choose a single model, and the same model can sit in several pools
+under different policies.
+
+Cheapest is deliberately not a policy here: choosing on price is a routing
+decision made before a target is picked, not a way of balancing within one.
+
 ## Frontend models — one name, many targets
 
 ![The Frontend models screen: rules with their conditions and weighted targets, and a dry-run panel](images/ui-frontend-models.png)
@@ -94,7 +108,7 @@ the window rolls over.
 
 ## Fleet — what each replica can see
 
-![The Fleet screen: every proxy replica with its snapshot version, uptime and per-backend health](images/ui-fleet.png)
+![The Fleet screen: the topology of control plane, worker replicas and engine hosts, each with its own health and counters](images/ui-fleet.png)
 
 The screen opens with a **topology**: the management plane, the worker
 replicas, and the engine hosts, with each box carrying its own health and

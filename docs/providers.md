@@ -119,7 +119,7 @@ hosts in one pool.
 In the UI, on **Providers**, press **Add provider** and give it a credential.
 Then on **Provider models**:
 
-![The Provider models screen: each model with its provider, credential state, prices, cache TTL and context window](images/ui-models.png)
+![The Provider models screen: each model with its provider, credential state, prices, cache TTL and context window](images/ui-provider-models.png)
 
 press **Add model**. The dialog asks for the provider first, then reads that
 endpoint's own answer to `GET /v1/models` and offers what it serves — not what

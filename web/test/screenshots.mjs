@@ -100,8 +100,13 @@ await shot("overview", "Overview");
 await shot("metrics", "Metrics");
 await shot("usage", "Usage & spend");
 await shot("providers", "Providers");
-await shot("models", "Models");
-await shot("virtual-models", "Virtual models");
+// These three screens were renamed, and the names here are what the nav is
+// searched for -- so the script threw rather than photographing the wrong one,
+// which is the behaviour `shot` exists to have. `pools` is a screen that did
+// not exist when this list was written.
+await shot("provider-models", "Provider models");
+await shot("pools", "Model pools");
+await shot("frontend-models", "Frontend models");
 await shot("prompt-classes", "Prompt classes");
 await shot("mcp", "MCP servers");
 await shot("agents", "Agents");
