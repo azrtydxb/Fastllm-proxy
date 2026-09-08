@@ -25,6 +25,12 @@ jobs:
     # same base as the Dockerfile, so CI and the image agree on the compiler.
     container:
       image: rust:1-bookworm
+    env:
+      # Pinned into the workspace so `actions/cache` can see it, the same
+      # reason `HF_HOME` is set that way below. The `cargo` binary itself
+      # stays on PATH from the image; only the registry, git checkouts and
+      # build artifacts move here.
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
     # A sibling service container, reachable by its service name — not
     # localhost, which is the `test` container's own loopback, not the
     # runner's. Same Postgres major version CNPG runs in deploy/control.yaml.
@@ -39,6 +45,28 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # These runners are ephemeral pods, so "cached by the runner" lasts
+      # exactly one pod — the same reason the classifier model is cached
+      # further down. Without this, every run downloads the whole dependency
+      # tree and compiles it from nothing five times over: clippy, test, test
+      # with `control`, clippy with `classifier-tier2`, and test with
+      # `classifier` are five different feature sets and so five different
+      # sets of artifacts. That was most of this job's ten minutes, and none
+      # of it was work the diff had changed.
+      #
+      # Keyed on the lockfile because that is what decides the dependency
+      # build; `restore-keys` still gives a warm `target/` when it changes, and
+      # cargo's own fingerprinting rebuilds whatever a toolchain bump
+      # invalidated rather than trusting stale artifacts.
+      - name: Cache cargo and build artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cargo-home/registry
+            .cargo-home/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-
       - name: Toolchain
         run: rustup component add rustfmt clippy
       - name: Format
