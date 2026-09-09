@@ -536,14 +536,23 @@ pub async fn build_snapshot_with(
 
     let frontend_models = build_virtual_models(pool).await?;
 
-    type KeyRow = (Vec<u8>, Uuid, Option<chrono::DateTime<chrono::Utc>>, bool);
+    // `id` rides along so a usage report can name the key it authenticated
+    // with, which is what lets `api_keys.last_used_at` be written at ingest
+    // rather than on the request path.
+    type KeyRow = (
+        Vec<u8>,
+        Uuid,
+        Option<chrono::DateTime<chrono::Utc>>,
+        bool,
+        Uuid,
+    );
     let key_rows: Vec<KeyRow> =
-        sqlx::query_as("SELECT hash, principal_id, expires_at, disabled FROM api_keys")
+        sqlx::query_as("SELECT hash, principal_id, expires_at, disabled, id FROM api_keys")
             .fetch_all(pool)
             .await?;
 
     let mut keys = HashMap::new();
-    for (hash, principal, expires, disabled) in key_rows {
+    for (hash, principal, expires, disabled, id) in key_rows {
         let Ok(hash): Result<[u8; 32], _> = hash.try_into() else {
             continue;
         };
@@ -553,6 +562,7 @@ pub async fn build_snapshot_with(
                 principal,
                 expires_at: expires.map(|d| d.into()),
                 disabled,
+                id: Some(id),
             },
         );
     }

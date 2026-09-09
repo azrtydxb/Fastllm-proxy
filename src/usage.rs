@@ -37,6 +37,15 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageEvent {
     pub principal_id: crate::snapshot::PrincipalId,
+    /// Which key authenticated the request, when one did.
+    ///
+    /// `None` for a `--master-key` or an open snapshot, neither of which has
+    /// an `api_keys` row, and for an event from a proxy older than this field
+    /// — hence `#[serde(default)]`. The control plane uses it to stamp
+    /// `api_keys.last_used_at` at ingest, which is the only place that write
+    /// can happen: the request path does no I/O.
+    #[serde(default)]
+    pub key_id: Option<crate::snapshot::KeyId>,
     /// Model *name*, not an internal database id: the data plane only ever
     /// knows the model the way the snapshot named it
     /// (`snapshot::ModelDef::name`). The control plane resolves this to
@@ -343,6 +352,7 @@ mod tests {
     fn event(principal_id: crate::snapshot::PrincipalId) -> UsageEvent {
         UsageEvent {
             principal_id,
+            key_id: None,
             model: "m".into(),
             prompt_tokens: 1,
             completion_tokens: 1,

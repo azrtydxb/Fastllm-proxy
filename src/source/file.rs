@@ -163,6 +163,9 @@ impl SnapshotSource for FileSource {
                     principal: id,
                     expires_at: k.expires_at.as_deref().map(parse_rfc3339).transpose()?,
                     disabled: false,
+                    // A file-mode key has no `api_keys` row, so there is
+                    // nothing to stamp a last-used time on.
+                    id: None,
                 },
             );
         }

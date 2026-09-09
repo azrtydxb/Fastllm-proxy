@@ -33,6 +33,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// counterpart of `proxy::UsageTracking`.
 pub struct UsageSink {
     pub principal_id: PrincipalId,
+    /// Which key authenticated; carried onto the usage row so the control
+    /// plane can stamp `api_keys.last_used_at`.
+    pub key_id: Option<crate::snapshot::KeyId>,
     pub model: String,
     /// What the client asked for, when it differs from `model`.
     pub requested_model: Option<String>,
@@ -68,6 +71,7 @@ impl UsageSink {
             .is_some_and(|u| u.prompt_tokens != 0 || u.completion_tokens != 0);
         self.reporter.record(UsageEvent {
             principal_id: self.principal_id,
+            key_id: self.key_id,
             model: self.model,
             prompt_tokens: usage.as_ref().map_or(0, |u| u.prompt_tokens),
             completion_tokens: usage.as_ref().map_or(0, |u| u.completion_tokens),

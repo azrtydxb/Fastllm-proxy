@@ -45,6 +45,18 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 creation; there is no endpoint that returns it later. If it is lost, issue a new
 one and delete the old.
 
+**`last_used_at` is stamped at usage ingest, not at authentication.** The
+request path does no I/O, so the write happens when the proxy flushes its usage
+batch — the timestamp lags real use by up to one flush interval. A request
+refused by a rate limit or budget still counts as use, because the key did
+authenticate.
+
+It is **blank for any key whose last use predates this being written at all**,
+and cannot be backfilled: `usage_events` records the principal, not the key, so
+history cannot say which of a principal's keys served a request. Read "never" on
+an old key as "not since this was fixed", and check
+`GET /admin/usage?group_by=principal` before concluding a key is dead.
+
 **A principal's budget and limits are separate sub-resources** (`/budget`,
 `/limits`), each with its own `PUT` and `DELETE`. Deleting the principal is not
 the same as clearing them.

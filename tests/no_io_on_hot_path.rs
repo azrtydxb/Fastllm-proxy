@@ -208,9 +208,13 @@ fn authorize_body_contains_no_await_or_io_tokens() {
     let source = include_str!("../src/proxy.rs");
     let body = extract_fn_body(source, "fn authorize<'a>(");
 
+    // `authenticate_key` rather than `authenticate`: the key id is carried out
+    // so usage ingest can stamp `api_keys.last_used_at` off the request path.
+    // Both are the same pure in-memory lookup, which is the property this file
+    // guards — the prefix matches either.
     assert!(
-        body.contains("snapshot.authenticate("),
-        "sanity check failed: `authorize` no longer calls `snapshot.authenticate`; \
+        body.contains("snapshot.authenticate"),
+        "sanity check failed: `authorize` no longer calls `snapshot.authenticate*`; \
          either the function was rewritten (update this test to match) or the \
          extraction above grabbed the wrong span"
     );
@@ -296,6 +300,7 @@ fn authorisation_reads_only_the_snapshot() {
             principal: fastllm_proxy::snapshot::tid(1),
             expires_at: None,
             disabled: false,
+            id: None,
         },
     );
     let mut principals = HashMap::new();

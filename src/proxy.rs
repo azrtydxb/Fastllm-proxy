@@ -148,7 +148,7 @@ pub async fn handle(
     // `allowed_models: HashSet<String>`) that used to happen on every
     // authenticated request via `.cloned()`.
     let snapshot = state.snapshot.load_full();
-    let principal = match authorize(&req, &snapshot) {
+    let (principal, auth_key_id) = match authorize(&req, &snapshot) {
         Ok(p) => p,
         Err(rejection) => {
             // Counted here rather than inside `authorize`, which has no access
@@ -156,7 +156,7 @@ pub async fn handle(
             state
                 .telemetry
                 .record_rejection(crate::telemetry::Rejection::Unauthenticated);
-            return Ok(rejection);
+            return Ok(*rejection);
         }
     };
 
@@ -225,7 +225,7 @@ pub async fn handle(
 
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
-        return Ok(proxy_request(req, state, subpath, principal, &snapshot).await);
+        return Ok(proxy_request(req, state, subpath, principal, auth_key_id, &snapshot).await);
     }
 
     Ok(error_response(
@@ -434,6 +434,9 @@ async fn proxy_request(
     state: Arc<AppState>,
     subpath: String,
     principal: Option<&Principal>,
+    // Which key authenticated, travelling with the principal so every usage
+    // row this function writes can name it.
+    key_id: Option<crate::snapshot::KeyId>,
     snapshot: &Snapshot,
 ) -> Response<ResBody> {
     // Taken before the body is even collected, so the measurement covers
@@ -737,6 +740,7 @@ async fn proxy_request(
         record_refusal(
             &state,
             principal,
+            key_id,
             denied,
             StatusCode::FORBIDDEN,
             crate::usage::Refusal::Authorisation,
@@ -765,6 +769,7 @@ async fn proxy_request(
                 record_refusal(
                     &state,
                     Some(principal),
+                    key_id,
                     &target_model,
                     StatusCode::PAYMENT_REQUIRED,
                     crate::usage::Refusal::Budget,
@@ -812,6 +817,7 @@ async fn proxy_request(
                     record_refusal(
                         &state,
                         Some(principal),
+                        key_id,
                         &target_model,
                         StatusCode::TOO_MANY_REQUESTS,
                         crate::usage::Refusal::RateLimit,
@@ -1084,6 +1090,7 @@ async fn proxy_request(
                         let sink = needs_usage.then_some(principal).flatten().map(|p| {
                             protocol::body::UsageSink {
                                 principal_id: p.id,
+                                key_id,
                                 model: candidate_model.clone(),
                                 requested_model: (requested_model.as_str()
                                     != candidate_model.as_str())
@@ -1127,6 +1134,7 @@ async fn proxy_request(
                                 tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
                                 metrics: state.telemetry.model(candidate_model),
                                 principal_id: p.id,
+                                key_id,
                                 model: candidate_model.clone(),
                                 // Only when it differs: storing the same name
                                 // twice on every row would be noise in the one
@@ -1220,6 +1228,7 @@ async fn proxy_request(
     record_refusal(
         &state,
         principal,
+        key_id,
         &target_model,
         StatusCode::BAD_GATEWAY,
         crate::usage::Refusal::NoBackend,
@@ -1307,6 +1316,7 @@ fn rewrite_model_if_needed(
 fn record_refusal(
     state: &AppState,
     principal: Option<&Principal>,
+    key_id: Option<crate::snapshot::KeyId>,
     model: &str,
     status: StatusCode,
     refusal: crate::usage::Refusal,
@@ -1317,6 +1327,10 @@ fn record_refusal(
     }
     state.usage.record(UsageEvent {
         principal_id: p.id,
+        // A refused request still proves the key was used: it authenticated,
+        // then failed a limit. Leaving it off here would make a key that only
+        // ever gets rate-limited look like one nobody has ever touched.
+        key_id,
         model: model.to_string(),
         prompt_tokens: 0,
         completion_tokens: 0,
@@ -1472,6 +1486,9 @@ struct UsageTracking {
     /// reported to the control plane.
     metrics: Option<Arc<crate::telemetry::ModelMetrics>>,
     principal_id: PrincipalId,
+    /// Which key authenticated, so the control plane can stamp its
+    /// `last_used_at` when it ingests this batch.
+    key_id: Option<crate::snapshot::KeyId>,
     /// The resolved provider model name (`snapshot::ModelDef::name`), not
     /// the client-requested one — see `usage::UsageEvent::model`'s doc
     /// comment for why the data plane only ever reports the name the way the
@@ -1516,6 +1533,7 @@ impl UsageTracking {
         }
         self.reporter.record(UsageEvent {
             principal_id: self.principal_id,
+            key_id: self.key_id,
             model: self.model,
             prompt_tokens: tokens.as_ref().map_or(0, |t| t.prompt_tokens),
             completion_tokens: tokens.as_ref().map_or(0, |t| t.completion_tokens),
@@ -1670,12 +1688,23 @@ impl Body for TrackedBody {
 /// cost of an allocation on every one, which is the wrong trade for an
 /// interface shared with the rest of the request path's error responses.
 #[allow(clippy::result_large_err)]
+/// Returns the principal and the key row that proved it.
+///
+/// The key id is carried so usage rows can name the key, which is what lets
+/// the control plane stamp `api_keys.last_used_at` at ingest. It is `None` for
+/// an open snapshot and for a `--master-key`, neither of which has a row.
+type Authorized<'a> = (Option<&'a Principal>, Option<crate::snapshot::KeyId>);
+
+/// The rejection is boxed because `Response<ResBody>` is 128 bytes and
+/// `clippy::result_large_err` — denied in CI — fires once the success side is
+/// no longer a bare pointer. It costs one allocation on the rejection path,
+/// which is the path that already gives up on the request.
 fn authorize<'a>(
     req: &Request<Incoming>,
     snapshot: &'a Snapshot,
-) -> Result<Option<&'a Principal>, Response<ResBody>> {
+) -> Result<Authorized<'a>, Box<Response<ResBody>>> {
     if snapshot.open {
-        return Ok(None);
+        return Ok((None, None));
     }
     let token = req
         .headers()
@@ -1684,24 +1713,24 @@ fn authorize<'a>(
         .and_then(bearer_token);
 
     let Some(token) = token else {
-        return Err(error_response(
+        return Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_api_key",
             "missing or invalid bearer token",
-        ));
+        )));
     };
-    match snapshot.authenticate(token, SystemTime::now()) {
-        Ok(p) => Ok(Some(p)),
-        Err(AuthError::Expired) => Err(error_response(
+    match snapshot.authenticate_key(token, SystemTime::now()) {
+        Ok((p, key_id)) => Ok((Some(p), key_id)),
+        Err(AuthError::Expired) => Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "expired_api_key",
             "this api key has expired",
-        )),
-        Err(_) => Err(error_response(
+        ))),
+        Err(_) => Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_api_key",
             "missing or invalid bearer token",
-        )),
+        ))),
     }
 }
 
@@ -2843,6 +2872,7 @@ mod tests {
         record_refusal(
             &state,
             None,
+            None,
             "some-model",
             StatusCode::FORBIDDEN,
             crate::usage::Refusal::Authorisation,
@@ -2869,6 +2899,7 @@ mod tests {
         record_refusal(
             &state,
             Some(&principal),
+            None,
             "",
             StatusCode::BAD_GATEWAY,
             crate::usage::Refusal::NoBackend,
@@ -2884,6 +2915,7 @@ mod tests {
         record_refusal(
             &state,
             Some(&principal),
+            None,
             "some-model",
             StatusCode::BAD_GATEWAY,
             crate::usage::Refusal::NoBackend,

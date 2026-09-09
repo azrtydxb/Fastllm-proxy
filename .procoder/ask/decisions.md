@@ -25,3 +25,28 @@ Options:
 - **Leave it alone.** 25 minutes is tolerable and the pipeline is understood.
 
 **Decided:** cache cargo and `target/` in the `test` job. The other two remain open.
+
+## Out-of-band access to the DGX Sparks now that wifi is off
+
+Both nodes are ethernet-only: `piwifi` autoconnect set to `no`, the radio
+disabled, and `wlP9s9` down on each. That removes the failure mode where a
+wired fault silently demotes an inference node to a 2.4 GHz link and it keeps
+serving, slowly, with nothing alerting.
+
+It also removes the only network path in. A switch-port or cable fault on
+`enP7s7` now means a console or physical trip, on a pair of boxes that already
+need a power cycle when they thrash on memory.
+
+Options:
+
+- **Leave it as done — ethernet only, radio off on both.** Matches the request
+  exactly. No emergency path.
+- **Re-enable the radio on one node with `ipv4.never-default yes`.** Keeps a
+  way in if the wired link dies, while the wifi can never install a default
+  route, so it cannot silently carry traffic. Half the fleet stays reachable.
+- **Re-enable on both with `never-default`.** Emergency path everywhere, same
+  no-default-route guarantee, but two hosts hold a second address on the /24
+  again.
+
+**Decided:** leave it as done — ethernet only, radio off on both. Recovery from a
+wired fault is a console or physical trip, accepted deliberately.

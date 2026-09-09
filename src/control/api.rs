@@ -6858,11 +6858,67 @@ async fn post_usage(
 
     let accepted = accepted_rows.len();
     apply_usage_to_budgets(&ctx.pool, &accepted_rows).await;
+    stamp_key_last_used(&ctx.pool, &body.events).await;
 
     Ok(Json(UsageBatchResponse {
         accepted,
         dropped: submitted - accepted,
     }))
+}
+
+/// Record when each key in the batch was last used.
+///
+/// This is the only place the write can happen. Authentication is a pure
+/// in-memory snapshot lookup on the request path, which does no I/O by design
+/// (`tests/no_io_on_hot_path.rs` fails the build if a pool is threaded into
+/// it), so stamping the row there is not an option. Usage ingest already runs
+/// off that path, in a batch, and already knows which key served each event.
+///
+/// One `UPDATE` per *distinct* key in the batch rather than per event, for the
+/// same reason [`apply_usage_to_budgets`] groups first: a batch is many events
+/// for a handful of keys.
+///
+/// `GREATEST` rather than a plain assignment because batches arrive out of
+/// order — two proxies flush independently, and a retry can deliver an older
+/// batch after a newer one. Assigning would let a late batch drag the
+/// timestamp backwards and make a key that is in use look staler than it is.
+///
+/// Failure is logged and swallowed, like the budget update above: the durable
+/// row in `usage_events` is already committed, and a missed stamp costs an
+/// approximate timestamp, not data.
+async fn stamp_key_last_used(pool: &PgPool, events: &[crate::usage::UsageEvent]) {
+    let mut latest: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    for e in events {
+        // `None` for a master key or an open snapshot -- neither has a row to
+        // stamp -- and for an event from a proxy older than the field.
+        let Some(id) = e.key_id else { continue };
+        latest
+            .entry(id)
+            .and_modify(|at| {
+                if e.at > *at {
+                    *at = e.at;
+                }
+            })
+            .or_insert(e.at);
+    }
+    if latest.is_empty() {
+        return;
+    }
+    let ids: Vec<Uuid> = latest.keys().copied().collect();
+    let ats: Vec<chrono::DateTime<chrono::Utc>> = ids.iter().map(|id| latest[id]).collect();
+    if let Err(e) = sqlx::query(
+        "UPDATE api_keys k
+            SET last_used_at = GREATEST(COALESCE(k.last_used_at, to_timestamp(0)), t.at)
+           FROM UNNEST($1::uuid[], $2::timestamptz[]) AS t(id, at)
+          WHERE k.id = t.id",
+    )
+    .bind(&ids)
+    .bind(&ats)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(error = %e, "stamping api_keys.last_used_at failed");
+    }
 }
 
 /// The other half of `budgets.tokens_used` being "the running counter the
@@ -9595,6 +9651,106 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
     }
 
+    /// `api_keys.last_used_at` was a column nothing ever wrote, so every key
+    /// reported "never used" — including keys serving daily traffic. The write
+    /// cannot go where it intuitively belongs (authentication) because that is
+    /// the request path and does no I/O, so it happens here, at usage ingest.
+    ///
+    /// This is a database test rather than a unit test because the whole thing
+    /// is one SQL statement, and SQL is invisible to the compiler: a wrong
+    /// column name or a broken `UNNEST` type list compiles perfectly and fails
+    /// only against a real Postgres.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn usage_ingest_stamps_the_key_it_names() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("api_keys", "name", "last-used-test-")
+            .track_prefix("principals", "name", "last-used-test-");
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let principal_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO principals (name, kind) VALUES ($1, 'service_account') RETURNING id",
+        )
+        .bind(format!("last-used-test-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let key_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO api_keys (principal_id, hash, prefix, name) \
+             VALUES ($1, $2, 'sk-lastused', $3) RETURNING id",
+        )
+        .bind(principal_id)
+        .bind(vec![7u8; 32])
+        .bind(format!("last-used-test-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let unused: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = $1")
+                .bind(key_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(unused.is_none(), "a key starts having never been used");
+
+        // Truncated to microseconds up front: `timestamptz` has microsecond
+        // resolution and Rust's `DateTime` has nanosecond, so a round trip
+        // through Postgres is lossy and comparing the two directly fails on
+        // digits the database was never going to keep.
+        let recent =
+            chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+        let mut event = usage_event(principal_id, "whatever");
+        event.key_id = Some(key_id);
+        event.at = recent;
+        stamp_key_last_used(&pool, std::slice::from_ref(&event)).await;
+
+        let stamped: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = $1")
+                .bind(key_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stamped,
+            Some(recent),
+            "ingesting an event naming the key stamps it"
+        );
+
+        // Batches arrive out of order — two proxies flush independently, and a
+        // retry can deliver an older batch after a newer one. An older event
+        // must not drag the timestamp backwards, or a key in active use starts
+        // reading as stale.
+        let mut older = usage_event(principal_id, "whatever");
+        older.key_id = Some(key_id);
+        older.at = recent - chrono::Duration::hours(1);
+        stamp_key_last_used(&pool, std::slice::from_ref(&older)).await;
+
+        let after_old: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = $1")
+                .bind(key_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            after_old,
+            Some(recent),
+            "an older batch does not move the stamp backwards"
+        );
+
+        // An event with no key — a master key, an open snapshot, or a proxy
+        // older than the field — must be skipped rather than panicking or
+        // stamping some arbitrary row.
+        let keyless = usage_event(principal_id, "whatever");
+        assert!(keyless.key_id.is_none());
+        stamp_key_last_used(&pool, std::slice::from_ref(&keyless)).await;
+    }
+
     /// The regression this task's Critical review finding described:
     /// `import` runs in a separate process, and the documented outage-fix is
     /// a hand-written `UPDATE` against Postgres — neither goes through the
@@ -9773,6 +9929,7 @@ mod tests {
     fn usage_event(principal_id: Uuid, model: &str) -> UsageEvent {
         UsageEvent {
             principal_id,
+            key_id: None,
             model: model.to_string(),
             prompt_tokens: 10,
             completion_tokens: 5,

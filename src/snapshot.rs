@@ -24,6 +24,11 @@ use std::time::SystemTime;
 /// lookup that already happens once per request against a `HashMap` that is
 /// rebuilt only on a snapshot swap.
 pub type PrincipalId = uuid::Uuid;
+/// A row in `api_keys`. Carried into the data plane so a usage report can
+/// say *which key* was used, not only which principal — a principal may
+/// hold several, and "which of my keys is dead" is the question
+/// `api_keys.last_used_at` exists to answer.
+pub type KeyId = uuid::Uuid;
 
 /// A deterministic `PrincipalId` from a small number, for tests.
 ///
@@ -156,6 +161,11 @@ pub struct KeyEntry {
     pub principal: PrincipalId,
     pub expires_at: Option<SystemTime>,
     pub disabled: bool,
+    /// `None` for a key that has no database row behind it: the synthetic
+    /// entry a `--master-key` produces, and the legacy single-key path.
+    /// Nothing can record a last-used time for those, and pretending
+    /// otherwise would attribute their traffic to whichever row sorted first.
+    pub id: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +420,11 @@ pub struct WireKeyEntry {
     pub principal: PrincipalId,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub disabled: bool,
+    /// Absent from a snapshot written before this field existed, so a proxy
+    /// restoring an old on-disk cache still decodes it — it simply reports no
+    /// key id until the next snapshot arrives.
+    #[serde(default)]
+    pub id: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -689,6 +704,22 @@ impl Snapshot {
     }
 
     pub fn authenticate(&self, token: &str, now: SystemTime) -> Result<&Principal, AuthError> {
+        self.authenticate_key(token, now).map(|(p, _)| p)
+    }
+
+    /// Authenticate, and say which key row it was.
+    ///
+    /// The id rides along to usage reporting so the control plane can stamp
+    /// `api_keys.last_used_at` when it ingests the batch. It deliberately does
+    /// not do that here: this is the request path, and
+    /// `tests/no_io_on_hot_path.rs` pins this function as a plain synchronous
+    /// lookup with no pool or client in its signature. Returning the id keeps
+    /// the write where a write already happens.
+    pub fn authenticate_key(
+        &self,
+        token: &str,
+        now: SystemTime,
+    ) -> Result<(&Principal, Option<KeyId>), AuthError> {
         let entry = self.keys.get(&hash_key(token)).ok_or(AuthError::Unknown)?;
         if entry.disabled {
             return Err(AuthError::Disabled);
@@ -696,9 +727,11 @@ impl Snapshot {
         if entry.expires_at.is_some_and(|e| e <= now) {
             return Err(AuthError::Expired);
         }
-        self.principals
+        let principal = self
+            .principals
             .get(&entry.principal)
-            .ok_or(AuthError::Unknown)
+            .ok_or(AuthError::Unknown)?;
+        Ok((principal, entry.id))
     }
 
     /// Synthesise a single allow-all principal from a `--master-key`/
@@ -737,6 +770,7 @@ impl Snapshot {
                 principal: LEGACY_PRINCIPAL,
                 expires_at: None,
                 disabled: false,
+                id: None,
             },
         );
         self.open = false;
@@ -761,6 +795,7 @@ impl Snapshot {
                             principal: entry.principal,
                             expires_at: entry.expires_at.map(chrono::DateTime::<chrono::Utc>::from),
                             disabled: entry.disabled,
+                            id: entry.id,
                         },
                     )
                 })
@@ -921,6 +956,7 @@ impl Snapshot {
                     principal: entry.principal,
                     expires_at: entry.expires_at.map(SystemTime::from),
                     disabled: entry.disabled,
+                    id: entry.id,
                 },
             );
         }
@@ -1129,6 +1165,7 @@ impl Snapshot {
                             principal: p,
                             expires_at: e,
                             disabled: d,
+                            id: None,
                         },
                     )
                 })
@@ -1415,6 +1452,7 @@ mod tests {
                 principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
+                id: None,
             },
         );
         keys.insert(
@@ -1423,6 +1461,7 @@ mod tests {
                 principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
+                id: None,
             },
         );
         keys.insert(
@@ -1431,6 +1470,7 @@ mod tests {
                 principal: crate::snapshot::tid(1),
                 expires_at: None,
                 disabled: false,
+                id: None,
             },
         );
 
