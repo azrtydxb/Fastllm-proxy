@@ -14,7 +14,7 @@ description: Operate and diagnose the FastLLM deployment on the kw Kubernetes cl
 | Gateway VIP | `192.168.10.125`, alt `192.168.10.126` |
 | Admin VIP | `192.168.10.129:4001` (HTTPS, self-signed — use `-k`) |
 | Postgres dev VIP | `192.168.10.127:5432` |
-| Registry | `192.168.10.123` (zot, in the `registry` namespace) |
+| Registry | `192.168.10.131` (Nexus, in the `nexus` namespace) |
 | Manifests | `deploy/` — applied continuously, so they are the source of truth |
 
 ## Diagnose in dependency order
@@ -29,7 +29,7 @@ Work down. Each step is worthless until the one above it passes.
 2. **Workloads not scaled to zero** — a clean shutdown scales deployments and
    statefulsets to 0. Recover the intended count from
    `kubectl.kubernetes.io/last-applied-configuration` rather than assuming 1.
-3. **Registry up** — the image lives in-cluster. If `registry/zot` is scaled to
+3. **Registry up** — the image lives in-cluster. If `nexus/nexus` is scaled to
    0, everything else is `ImagePullBackOff` for a reason that has nothing to do
    with the workload.
 4. **Postgres present** — a CNPG cluster can report `Cluster in healthy state`

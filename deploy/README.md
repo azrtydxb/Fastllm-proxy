@@ -3,18 +3,18 @@
 Plain manifests, applied continuously to one cluster. The reusable form is the [Helm chart](../charts/fastllm-proxy).
 
 Not on Kubernetes? [`docker-compose.split.yml`](docker-compose.split.yml) in this directory is the same
-two-plane split on a single host, and [docs/operations.md](../docs/operations.md#choosing-a-shape)
+two-plane split on a single host, and [docs/operations.md](../docs/operations/shapes.md#choosing-a-shape)
 walks through all five shapes from a bare binary up to this one.
 
 |           |                                                                                                             |
 | --------- | ----------------------------------------------------------------------------------------------------------- |
 | Namespace | `fastllm`                                                                                                   |
-| Image     | `192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy:main` (zot, anonymous pull)                               |
+| Image     | `192.168.10.131/azrtydxb/fastllm-proxy/proxy:main` (Nexus, anonymous pull)                                  |
 | VIP       | `192.168.10.126` via kube-vip — proxy traffic only, see below                                               |
 | Backends  | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
 > **These are one cluster's manifests, not a template.** They carry concrete
-> values for the cluster they run on — a private registry at `192.168.10.123`,
+> values for the cluster they run on — a private registry at `192.168.10.131`,
 > kube-vip VIPs at `.125`/`.126` (gateway) and `.129` (admin), and a
 > `cluster-ca` ClusterIssuer. They are kept concrete on purpose: a manifest
 > full of `<PLACEHOLDER>` cannot be applied, so it silently stops being tested,
@@ -129,7 +129,7 @@ node drain does not leave the cluster without a controller, with its own
 ```bash
 kubectl apply -f operator/deploy/crd.yaml -f operator/deploy/rbac.yaml -f operator/deploy/operator.yaml
 kubectl -n fastllm-system set image deploy/fastllm-operator \
-  operator=192.168.10.123/azrtydxb/fastllm-proxy/operator:sha-<commit>
+  operator=192.168.10.131/azrtydxb/fastllm-proxy/operator:sha-<commit>
 ```
 
 (The manifest ships the public `ghcr.io` tag; this cluster pulls the sha build

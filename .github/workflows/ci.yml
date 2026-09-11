@@ -14,8 +14,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  REGISTRY: 192.168.10.123:5000
-  IMAGE: 192.168.10.123:5000/azrtydxb/fastllm-proxy/proxy
+  # Nexus replaced Zot. Push goes to :5000 (the hosted repo's own connector,
+  # because deploying to a Nexus group needs a PRO-licensed writable member);
+  # deployments pull the same image from 443 with no port suffix.
+  REGISTRY: 192.168.10.131:5000
+  IMAGE: 192.168.10.131:5000/azrtydxb/fastllm-proxy/proxy
 
 jobs:
   test:
@@ -45,28 +48,41 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # These runners are ephemeral pods, so "cached by the runner" lasts
-      # exactly one pod — the same reason the classifier model is cached
-      # further down. Without this, every run downloads the whole dependency
-      # tree and compiles it from nothing five times over: clippy, test, test
-      # with `control`, clippy with `classifier-tier2`, and test with
-      # `classifier` are five different feature sets and so five different
-      # sets of artifacts. That was most of this job's ten minutes, and none
-      # of it was work the diff had changed.
+      # Dependency *sources* now come from the Nexus cargo proxy on the LAN, so
+      # they are no longer worth shipping to GitHub and back. What still is:
+      # compiled artifacts. `target/` is what makes this job expensive —
+      # clippy, test, test with `control`, clippy with `classifier-tier2` and
+      # test with `classifier` are five feature sets and so five sets of
+      # artifacts, and none of it is work the diff changed.
       #
-      # Keyed on the lockfile because that is what decides the dependency
-      # build; `restore-keys` still gives a warm `target/` when it changes, and
-      # cargo's own fingerprinting rebuilds whatever a toolchain bump
-      # invalidated rather than trusting stale artifacts.
-      - name: Cache cargo and build artifacts
+      # Dropping the registry and git directories from the cache is the point
+      # of this change. The uplink is ~10 Mbit, and uploading the dependency
+      # tree cost minutes per run to save seconds the proxy now saves for free.
+      - name: Trust the cluster CA
+        run: |
+          curl -sk -o /tmp/cluster-ca.crt \
+            https://192.168.10.131:8443/repository/public/cluster-ca.crt
+          echo "CARGO_HTTP_CAINFO=/tmp/cluster-ca.crt" >> "$GITHUB_ENV"
+          echo "SSL_CERT_FILE=/tmp/cluster-ca.crt" >> "$GITHUB_ENV"
+      # The remote behind this proxy is index.crates.io, not crates.io — a
+      # proxy pointed at the latter serves the web API but no sparse index,
+      # and cargo cannot use it at all.
+      - name: Point cargo at the local proxy
+        run: |
+          mkdir -p "$CARGO_HOME"
+          cat >> "$CARGO_HOME/config.toml" <<'EOF'
+          [source.crates-io]
+          replace-with = "nexus"
+
+          [source.nexus]
+          registry = "sparse+https://192.168.10.131:8443/repository/cargo/"
+          EOF
+      - name: Cache build artifacts
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: |
-            .cargo-home/registry
-            .cargo-home/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-
+          path: target
+          key: cargo-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-target-
       - name: Toolchain
         run: rustup component add rustfmt clippy
       - name: Format
@@ -135,6 +151,16 @@ jobs:
       image: node:22-bookworm-slim
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # This job had no dependency caching at all, so every run pulled the
+      # whole tree from registry.npmjs.org. The proxy serves it from the LAN
+      # and, unlike actions/cache, uploads nothing.
+      - name: Trust the cluster CA and use the local npm proxy
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates
+          curl -sk -o /tmp/cluster-ca.crt \
+            https://192.168.10.131:8443/repository/public/cluster-ca.crt
+          npm config set registry https://192.168.10.131:8443/repository/npmjs/
+          npm config set cafile /tmp/cluster-ca.crt
       - name: Install
         working-directory: web
         run: npm install
@@ -179,15 +205,15 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGE }}
 
-      - name: Set up buildx (zot insecure, Docker Hub via cluster mirror)
+      - name: Set up buildx (Nexus insecure, Docker Hub via cluster mirror)
         run: |
           cat > /tmp/buildkitd.toml <<'EOF'
-          [registry."192.168.10.123:5000"]
+          [registry."192.168.10.131:5000"]
             insecure = true
-          # Pull base images through the cluster's Zot pull-through cache rather
-          # than hitting Docker Hub anonymously and collecting 429s.
+          # Base images come through the Nexus pull-through cache rather than
+          # hitting Docker Hub anonymously and collecting 429s.
           [registry."docker.io"]
-            mirrors = ["192.168.10.123:5000"]
+            mirrors = ["192.168.10.131"]
           EOF
           docker buildx create --name fastllm --driver docker-container \
             --platform linux/arm64 --buildkitd-config /tmp/buildkitd.toml --use
