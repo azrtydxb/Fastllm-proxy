@@ -48,6 +48,7 @@ jobs:
       SCCACHE_REGION: us-east-1
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
+      SECRET_LEN_TEST: ${{ secrets.SECRET_LEN_TEST }}
     # A sibling service container, reachable by its service name — not
     # localhost, which is the `test` container's own loopback, not the
     # runner's. Same Postgres major version CNPG runs in deploy/control.yaml.
@@ -110,6 +111,10 @@ jobs:
       - name: Check object store credentials
         run: |
           echo "key length=${#AWS_ACCESS_KEY_ID}  secret length=${#AWS_SECRET_ACCESS_KEY}"
+          # Temporary control: a known 11-character org secret. If this also
+          # reports 1, the fault is in how the value is read here, not in how
+          # the secret was set. Remove once the cause is established.
+          echo "control secret length=${#SECRET_LEN_TEST} (expect 11)"
           code=$(curl -s -o /dev/null -w '%{http_code}' "${SCCACHE_ENDPOINT}/minio/health/live")
           echo "MinIO health -> $code"
           [ "$code" = "200" ] || { echo "::error::MinIO unreachable at ${SCCACHE_ENDPOINT}"; exit 1; }
