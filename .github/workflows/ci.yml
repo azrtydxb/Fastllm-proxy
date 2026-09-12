@@ -113,8 +113,15 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' "${SCCACHE_ENDPOINT}/minio/health/live")
           echo "MinIO health -> $code"
           [ "$code" = "200" ] || { echo "::error::MinIO unreachable at ${SCCACHE_ENDPOINT}"; exit 1; }
-          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] \
-            || { echo "::error::SCCACHE_S3_KEY / SCCACHE_S3_SECRET are not set on the org"; exit 1; }
+          # Length, not merely non-empty. Every credential mishap here so far has
+          # been a truncation rather than an absence: a password stored as 10
+          # characters instead of 11 when a shell ate a trailing "!", and a
+          # secret stored as 1 character when a prompt did not capture. MinIO
+          # itself refuses anything under 8, so this can never be a false alarm.
+          [ ${#AWS_ACCESS_KEY_ID} -ge 3 ] \
+            || { echo "::error::SCCACHE_S3_KEY looks wrong (length ${#AWS_ACCESS_KEY_ID})"; exit 1; }
+          [ ${#AWS_SECRET_ACCESS_KEY} -ge 8 ] \
+            || { echo "::error::SCCACHE_S3_SECRET is ${#AWS_SECRET_ACCESS_KEY} characters; MinIO requires at least 8. The secret was probably truncated when it was set."; exit 1; }
       - name: Install sccache
         run: |
           SCCACHE_VERSION=0.17.0
