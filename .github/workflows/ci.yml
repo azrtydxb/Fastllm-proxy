@@ -313,6 +313,18 @@ jobs:
       # not found" — which blocked every publish once the old Zot buildcache
       # went away. v7 tolerates it, which is what novamem does against an
       # identically missing cache.
+      # Nexus needs credentials to push. The Zot registry it replaced accepted
+      # anonymous writes, so this workflow only ever logged in to GHCR — the
+      # push now fails with "unauthorized: access to the requested resource is
+      # not authorized" without this. Pulls stay anonymous, so the Deployments
+      # still need no imagePullSecret.
+      - name: Log in to Nexus
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASSWORD }}
+
       - name: Build & push (arm64 → zot)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
