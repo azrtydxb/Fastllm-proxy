@@ -91,6 +91,24 @@ jobs:
       # sccache keeps compilation units in a Nexus raw repo on the LAN, so hits
       # are cheap in both directions. Installed before any cargo command so
       # every invocation below is wrapped.
+      # Preflight. sccache fails with an opaque "Server startup failed" and a
+      # bare 401, which is indistinguishable between a wrong password, an empty
+      # one, and a missing role. This says which, without printing the secret:
+      # a 401 here means the credential is bad, a 404 means it is good and the
+      # probe file simply does not exist yet.
+      - name: Check registry credentials
+        run: |
+          echo "user=${SCCACHE_WEBDAV_USERNAME} (len=${#SCCACHE_WEBDAV_USERNAME})"
+          echo "password length=${#SCCACHE_WEBDAV_PASSWORD}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -u "${SCCACHE_WEBDAV_USERNAME}:${SCCACHE_WEBDAV_PASSWORD}" \
+            "${SCCACHE_WEBDAV_ENDPOINT}.sccache_check")
+          echo "GET .sccache_check -> $code"
+          case "$code" in
+            401) echo "::error::Nexus rejected the credentials (401). NEXUS_USER/NEXUS_PASSWORD are wrong or the ci-sccache role is missing."; exit 1 ;;
+            200|404) echo "credentials accepted" ;;
+            *) echo "::warning::unexpected status $code" ;;
+          esac
       - name: Install sccache
         run: |
           SCCACHE_VERSION=0.17.0
