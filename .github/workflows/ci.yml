@@ -261,19 +261,31 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGE }}
 
+      # setup-buildx-action rather than `docker buildx create`: it installs a
+      # current standalone buildx, where a cache-from ref that does not exist
+      # yet is a warning. The docker CLI plugin on the runner treats it as
+      # fatal — "failed to configure registry cache importer: ... not found" —
+      # which blocked every publish after the old Zot buildcache went away.
       - name: Set up buildx (Nexus insecure, Docker Hub via cluster mirror)
-        run: |
-          cat > /tmp/buildkitd.toml <<'EOF'
-          [registry."192.168.10.131:5000"]
-            insecure = true
-          # Base images come through the Nexus pull-through cache rather than
-          # hitting Docker Hub anonymously and collecting 429s.
-          [registry."docker.io"]
-            mirrors = ["192.168.10.131"]
-          EOF
-          docker buildx create --name fastllm --driver docker-container \
-            --platform linux/arm64 --buildkitd-config /tmp/buildkitd.toml --use
-          docker buildx inspect --bootstrap
+        uses: docker/setup-buildx-action@v4
+        with:
+          platforms: linux/arm64
+          buildkitd-config-inline: |
+            # Both ports. Nexus fronts two things: :443 is the read-only group
+            # that carries the docker.io proxy the mirror below points at, and
+            # :5000 is the hosted repository, the only one that accepts a push.
+            # BuildKit runs in its own container and does not inherit the host
+            # trust store, so each needs the exemption. Without the :443 entry
+            # the mirror fails TLS and BuildKit silently falls back to Docker
+            # Hub — no error, and no benefit either.
+            [registry."192.168.10.131"]
+              insecure = true
+            [registry."192.168.10.131:5000"]
+              insecure = true
+            # Base images come through the Nexus pull-through cache rather than
+            # hitting Docker Hub anonymously and collecting 429s.
+            [registry."docker.io"]
+              mirrors = ["192.168.10.131"]
 
       # GHCR as well as the private registry, but only for a tagged release.
       # Every commit to main pushes to zot because this cluster deploys from
@@ -300,14 +312,13 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          builder: fastllm
           # arm64 only: every node in kw is arm64, and a Rust release build
           # under QEMU is not worth the wall clock.
           platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64,mode=max,image-manifest=true
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64,mode=max,image-manifest=true,ignore-error=true
 
       # The operator is a second image on the same release cycle. Small and
       # fast to build — no UI stage, no classifier models — so it rides along
@@ -317,12 +328,11 @@ jobs:
         with:
           context: .
           file: operator/Dockerfile
-          builder: fastllm
           platforms: linux/arm64
           push: true
           tags: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator:${{ steps.meta.outputs.short }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true,ignore-error=true
 
   # ---------------------------------------------------------------- release
   #
