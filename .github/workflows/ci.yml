@@ -308,8 +308,13 @@ jobs:
           v="${GITHUB_REF#refs/tags/}"
           echo "tags=ghcr.io/${GITHUB_REPOSITORY,,}:${v},ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_OUTPUT"
 
+      # build-push-action v7, not v6. v6 treats a cache-from ref that does not
+      # exist as fatal — "failed to configure registry cache importer: ...
+      # not found" — which blocked every publish once the old Zot buildcache
+      # went away. v7 tolerates it, which is what novamem does against an
+      # identically missing cache.
       - name: Build & push (arm64 → zot)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           # arm64 only: every node in kw is arm64, and a Rust release build
@@ -324,7 +329,7 @@ jobs:
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
       - name: Build & push the operator (arm64 → zot)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: operator/Dockerfile
@@ -368,7 +373,7 @@ jobs:
           docker buildx inspect --bootstrap local-arm64
       - name: Proxy (arm64, digest only)
         id: proxy
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           builder: local-arm64
@@ -376,7 +381,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (arm64, digest only)
         id: operator
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: operator/Dockerfile
@@ -412,7 +417,7 @@ jobs:
           docker buildx inspect --bootstrap local-amd64
       - name: Proxy (amd64, digest only)
         id: proxy
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           builder: local-amd64
@@ -420,7 +425,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (amd64, digest only)
         id: operator
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: operator/Dockerfile
