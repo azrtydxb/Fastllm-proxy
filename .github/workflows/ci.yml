@@ -29,11 +29,17 @@ jobs:
     container:
       image: rust:1-bookworm
     env:
-      # Pinned into the workspace so `actions/cache` can see it, the same
-      # reason `HF_HOME` is set that way below. The `cargo` binary itself
-      # stays on PATH from the image; only the registry, git checkouts and
-      # build artifacts move here.
+      # Kept in the workspace so the cargo config written below lands somewhere
+      # predictable and writable. It is no longer cached — dependency sources
+      # come from the Nexus cargo proxy and compiled artifacts from sccache,
+      # both on the LAN. The `cargo` binary itself stays on PATH from the image.
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      # sccache config. Set at job level rather than written into $GITHUB_ENV so
+      # the password is not persisted to a file on the runner.
+      RUSTC_WRAPPER: /usr/local/bin/sccache
+      SCCACHE_WEBDAV_ENDPOINT: https://192.168.10.131:8443/repository/sccache/
+      SCCACHE_WEBDAV_USERNAME: ${{ secrets.NEXUS_USER }}
+      SCCACHE_WEBDAV_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
     # A sibling service container, reachable by its service name — not
     # localhost, which is the `test` container's own loopback, not the
     # runner's. Same Postgres major version CNPG runs in deploy/control.yaml.
@@ -48,22 +54,21 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # Dependency *sources* now come from the Nexus cargo proxy on the LAN, so
-      # they are no longer worth shipping to GitHub and back. What still is:
-      # compiled artifacts. `target/` is what makes this job expensive —
-      # clippy, test, test with `control`, clippy with `classifier-tier2` and
-      # test with `classifier` are five feature sets and so five sets of
-      # artifacts, and none of it is work the diff changed.
+      # Nothing in this job round-trips to GitHub any more: dependency sources
+      # come from the Nexus cargo proxy and compiled artifacts from sccache,
+      # both on the LAN. Both need to trust the cluster CA.
       #
-      # Dropping the registry and git directories from the cache is the point
-      # of this change. The uplink is ~10 Mbit, and uploading the dependency
-      # tree cost minutes per run to save seconds the proxy now saves for free.
+      # It goes into the system trust store rather than per-tool env vars,
+      # because those only cover tools that read them: sccache is a Rust binary
+      # whose TLS backend may ignore SSL_CERT_FILE, and it fails soft — a trust
+      # error there would silently disable caching instead of failing the build.
+      # One insecure fetch, and everything after it verifies.
       - name: Trust the cluster CA
         run: |
-          curl -sk -o /tmp/cluster-ca.crt \
+          curl -sk -o /usr/local/share/ca-certificates/cluster-ca.crt \
             https://192.168.10.131:8443/repository/public/cluster-ca.crt
-          echo "CARGO_HTTP_CAINFO=/tmp/cluster-ca.crt" >> "$GITHUB_ENV"
-          echo "SSL_CERT_FILE=/tmp/cluster-ca.crt" >> "$GITHUB_ENV"
+          update-ca-certificates
+          echo "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
       # The remote behind this proxy is index.crates.io, not crates.io — a
       # proxy pointed at the latter serves the web API but no sparse index,
       # and cargo cannot use it at all.
@@ -77,12 +82,22 @@ jobs:
           [source.nexus]
           registry = "sparse+https://192.168.10.131:8443/repository/cargo/"
           EOF
-      - name: Cache build artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: target
-          key: cargo-target-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-target-
+      # sccache instead of actions/cache. The problem with actions/cache here was
+      # not the upload alone, it is that the cache is remote at all: on the last
+      # run it restored nothing (2s miss), compiled everything from scratch, and
+      # then spent 417s uploading to GitHub — a net loss of about seven minutes.
+      # Even a hit means dragging ~2 GB back across a 100 Mbit link.
+      #
+      # sccache keeps compilation units in a Nexus raw repo on the LAN, so hits
+      # are cheap in both directions. Installed before any cargo command so
+      # every invocation below is wrapped.
+      - name: Install sccache
+        run: |
+          SCCACHE_VERSION=0.17.0
+          curl -sL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz" \
+            | tar xz -C /tmp --strip-components=1 --wildcards '*/sccache'
+          install -m755 /tmp/sccache /usr/local/bin/sccache
+          sccache --version
       - name: Toolchain
         run: rustup component add rustfmt clippy
       - name: Format
@@ -140,6 +155,11 @@ jobs:
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: cargo test --features "control classifier" --locked -- --include-ignored
+      # Prints hits, misses and cache size. Without this the cache is invisible
+      # and there is no way to tell whether it is earning its keep.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # A separate job with its own container, so the Rust job stays Node-free —
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
