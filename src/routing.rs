@@ -1015,12 +1015,10 @@ pub fn choose_weighted(targets: &[WeightedTarget], prefix_hash: u64) -> Option<&
 /// chosen model's own pool (`Router::pick`), and duplicating it here would
 /// just be a second, cruder copy of the same decision.
 ///
-/// When nothing in the chain is healthy, the weighted pick is still
-/// returned rather than `None` — the same "last resort beats a synthetic
-/// 503" rule `Router::pick` follows for backends within one pool. The
-/// `proxy_request` retry loop is what eventually turns a truly dead target
-/// into a `502`, exactly as it does today for an ordinary (non-virtual)
-/// model with every backend down.
+/// When nothing in the chain is healthy, `order_candidates` still returns
+/// the models so the caller knows what it tried — `Router::pick` returns
+/// `None` for unhealthy pools and the `proxy_request` loop moves on,
+/// eventually reaching the fallback model or returning 503.
 /// Total in-flight requests across a target's pool, and its slowest recent
 /// mean latency.
 ///
@@ -1103,7 +1101,7 @@ fn order_candidates(
     // order of equals. Unhealthy targets are kept rather than dropped: when
     // nothing is healthy the request still goes somewhere and the upstream's
     // own error reaches the client, which beats a synthetic 503 — the same
-    // last-resort rule `Router::pick` follows inside a single pool.
+    // last-resort rule the caller follows when `Router::pick` returns `None`.
     ordered.sort_by_key(|m| !registry.pool_has_healthy(m));
 
     // Context-window fallback: a model whose declared window provably cannot
@@ -1552,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn every_target_unhealthy_still_returns_the_weighted_choice_as_a_last_resort() {
+    fn an_unhealthy_pool_still_appears_in_the_candidate_chain() {
         let reg = registry_with(&["primary", "secondary"]);
         reg.pool("primary").unwrap()[0].mark_probe_failed(1);
         reg.pool("secondary").unwrap()[0].mark_probe_failed(1);
@@ -1561,12 +1559,16 @@ mod tests {
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
         };
+        // Both pools are unhealthy, so `order_candidates` returns them sorted
+        // by declaration order (the weighted pick). `Router::pick` returns
+        // `None` for each pool, and `proxy_request` moves on — but the
+        // routing layer still surfaces the candidates so the caller knows
+        // what it tried.
         assert_eq!(
             vm.resolve(&facts_with(None, 0, None, &HeaderMap::new()), 0, &reg)
                 .as_deref(),
             Some("primary"),
-            "nothing healthy: fall back to the weighted pick rather than None, \
-             same as Router::pick's last-resort rule"
+            "declares the weighted pick; the proxy loop skips unhealthy pools"
         );
     }
 

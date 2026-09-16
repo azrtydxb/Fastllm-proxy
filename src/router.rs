@@ -128,21 +128,19 @@ impl Router {
 
     /// Choose a backend, skipping any already tried for this request.
     ///
-    /// Returns `None` when every healthy backend has been exhausted.
+    /// Returns `None` when the pool has no backends, every backend has been
+    /// tried for this request, or the entire pool is unhealthy. In the last
+    /// case the caller's outer loop (in `proxy_request`) moves to the next
+    /// model or the deployment-wide fallback rather than sending a request to
+    /// a backend known to be out of rotation.
     pub fn pick(&self, pool: &Pool, prefix: u64, exclude: &[BackendUid]) -> Option<Arc<Backend>> {
-        let mut candidates: Candidates = pool
+        let candidates: Candidates = pool
             .iter()
             .filter(|b| b.is_healthy() && !exclude.contains(&b.uid))
             .collect();
 
-        // Everything healthy has already failed — fall back to unhealthy
-        // backends rather than returning an error. A stale health flag should
-        // not turn a recoverable request into a 503.
         if candidates.is_empty() {
-            candidates = pool.iter().filter(|b| !exclude.contains(&b.uid)).collect();
-            if candidates.is_empty() {
-                return None;
-            }
+            return None;
         }
 
         if candidates.len() == 1 {
@@ -174,8 +172,8 @@ impl Router {
     ///
     /// Answers the retry question — "is there anywhere else to send this?" —
     /// without the side effects of actually picking (claiming a prefix,
-    /// advancing the round-robin cursor). Mirrors `pick`'s last-resort rule
-    /// that an unhealthy backend still counts as somewhere to go.
+    /// advancing the round-robin cursor). Returns true if any backend
+    /// (healthy or unhealthy) remains untried.
     pub fn has_candidate(&self, pool: &Pool, exclude: &[BackendUid]) -> bool {
         pool.iter().any(|b| !exclude.contains(&b.uid))
     }
@@ -612,15 +610,17 @@ model_list:
     }
 
     #[test]
-    fn unhealthy_backends_are_skipped_but_used_as_last_resort() {
+    fn healthy_backends_are_preferred_over_unhealthy_ones() {
         let pool = two_node_pool();
         let r = router(Policy::LeastLoaded);
         pool[0].mark_probe_failed(1);
         for _ in 0..10 {
             assert_eq!(r.pick(&pool, 0, &[]).unwrap().uid, pool[1].uid);
         }
-        // With the only healthy node excluded, the unhealthy one still beats a 503.
-        assert_eq!(r.pick(&pool, 0, &[pool[1].uid]).unwrap().uid, pool[0].uid);
+        // With the only healthy node excluded, the pool is empty — the caller's
+        // outer loop moves to the next model or the fallback rather than sending
+        // a request to a backend known to be out of rotation.
+        assert!(r.pick(&pool, 0, &[pool[1].uid]).is_none());
     }
 
     #[test]

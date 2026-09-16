@@ -50,3 +50,19 @@ Options:
 
 **Decided:** leave it as done — ethernet only, radio off on both. Recovery from a
 wired fault is a console or physical trip, accepted deliberately.
+
+## Commit and deploy the unhealthy-backend failover fix?
+
+A router-level bug caused a completely dead model to block failover: `Router::pick`
+returned an unhealthy backend instead of `None`, so `proxy_request` never moved to
+the next model or the deployment-wide fallback. `tests/failover.rs` already covers
+the end-to-end path; unit tests all pass and the gate is clean.
+
+Options:
+
+- **Commit and push, then deploy to kw.** Straightforward — the fix is small and
+  tested.
+- **Defer for now.** No one has filed a bug yet, but the behaviour is silently
+  broken and the fix is ready.
+
+**Decided:** commit, push, deploy.
