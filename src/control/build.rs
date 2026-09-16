@@ -5,6 +5,7 @@
 //! model names, and wildcards expanded against the known model list.
 
 use crate::control::gcp;
+use crate::control::oauth;
 use crate::control::secrets::{self, EncryptionKey};
 use crate::protocol::Protocol;
 use crate::routing::{FrontendModelDef, MatchConditionJson, RoutingRule, WeightedTarget};
@@ -191,6 +192,7 @@ pub async fn build_snapshot_with(
         Uuid,
         Option<i64>,
         Option<i64>,
+        Option<i32>,
     );
     // One row per attachment (migration 0045), so a model served by two
     // machines yields two and its pool has two members for `router.rs` to
@@ -207,7 +209,8 @@ pub async fn build_snapshot_with(
         "SELECT mb.provider_model_id, p.api_base, COALESCE(mb.upstream_model, m.name), \
          p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, \
          mb.default_max_tokens, p.credential_kind, mb.id, \
-         mb.input_price_per_mtok, mb.output_price_per_mtok \
+         mb.input_price_per_mtok, mb.output_price_per_mtok, \
+         mb.upstream_timeout_seconds \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
          JOIN provider_models m ON m.id = mb.provider_model_id",
@@ -231,6 +234,7 @@ pub async fn build_snapshot_with(
             backend_id,
             input_price,
             output_price,
+            upstream_timeout,
         ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
@@ -300,6 +304,29 @@ pub async fn build_snapshot_with(
                         continue;
                     }
                 }
+            } else if credential_kind == "chatgpt_oauth" {
+                match oauth::refresh_if_needed(pool, key, *backend_id).await {
+                    Ok(Some(token)) => Some(token),
+                    Ok(None) => {
+                        tracing::error!(
+                            model = %name,
+                            api_base = %base,
+                            "dropping backend: credential_kind is chatgpt_oauth but no tokens are \
+                             stored; connect a ChatGPT account first"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %format!("{e:#}"),
+                            model = %name,
+                            api_base = %base,
+                            "dropping backend: could not refresh ChatGPT OAuth tokens; excluded \
+                             from this snapshot rather than failing the whole rebuild"
+                        );
+                        continue;
+                    }
+                }
             } else {
                 api_key
             };
@@ -325,6 +352,7 @@ pub async fn build_snapshot_with(
                 auth_header: auth_header.clone(),
                 auth_scheme: auth_scheme.clone(),
                 default_max_tokens: max_tokens.map(|n| n as u32),
+                upstream_timeout_seconds: upstream_timeout.map(|t| t as u64),
                 backend_id: Some(*backend_id),
                 input_price_per_mtok: *input_price,
                 output_price_per_mtok: *output_price,
@@ -1084,6 +1112,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
             vm_name.clone(),
             FrontendModelDef {
                 name: vm_name,
+                max_model_len: None,
                 rules,
                 default_targets,
             },

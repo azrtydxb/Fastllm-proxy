@@ -132,6 +132,9 @@ pub struct Backend {
     /// can name the attachment that served and be priced at that provider's
     /// rate. Never interpreted here.
     pub backend_id: Option<uuid::Uuid>,
+    /// Per-backend upstream timeout override (seconds). `None` means the
+    /// global `--upstream-timeout` applies.
+    pub upstream_timeout_seconds: Option<u64>,
     /// Input plus output price per million tokens, or `None` when this
     /// backend is unpriced. Pre-added at build time so a caller comparing
     /// cost reads one number per candidate instead of two.
@@ -141,6 +144,12 @@ pub struct Backend {
 
     healthy: AtomicBool,
     consecutive_failures: AtomicU32,
+    /// Consecutive upstream headers timeouts — tracked separately from probe
+    /// failures because a timeout after body dispatch means the upstream is
+    /// slow or stalled, not unreachable. The rate of timeouts drives the same
+    /// unhealthy-after path so a backend that consistently times out is
+    /// ejected before every subsequent request burns the full timeout budget.
+    consecutive_timeouts: AtomicU32,
     inflight: AtomicUsize,
     /// What the engine itself says is in flight, and when it said so.
     ///
@@ -156,6 +165,12 @@ pub struct Backend {
     /// on the local count instead of pretending to be idle.
     engine_inflight: AtomicUsize,
     engine_at: AtomicU64,
+    /// Last engine metrics snapshot: when the reading was taken (milliseconds
+    /// since epoch) and the counters that the stall detector compares against.
+    engine_last_ts: AtomicU64,
+    engine_last_prompt: AtomicU64,
+    engine_last_gen: AtomicU64,
+    engine_last_kv_tokens: AtomicU32,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
     /// Exponentially weighted mean whole-request latency, in microseconds.
@@ -221,6 +236,7 @@ impl Backend {
             protocol: def.protocol,
             default_max_tokens: def.default_max_tokens,
             backend_id: def.backend_id,
+            upstream_timeout_seconds: def.upstream_timeout_seconds,
             // Either figure alone is enough to call a backend priced: a
             // provider that charges for input and nothing for output is a
             // real arrangement, and reading the missing half as "unknown"
@@ -236,9 +252,14 @@ impl Backend {
             // the window before the first sweep completes.
             healthy: AtomicBool::new(true),
             consecutive_failures: AtomicU32::new(0),
+            consecutive_timeouts: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
             engine_inflight: AtomicUsize::new(0),
             engine_at: AtomicU64::new(0),
+            engine_last_ts: AtomicU64::new(0),
+            engine_last_prompt: AtomicU64::new(0),
+            engine_last_gen: AtomicU64::new(0),
+            engine_last_kv_tokens: AtomicU32::new(0),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             latency_ewma_us: AtomicU64::new(0),
@@ -285,9 +306,54 @@ impl Backend {
 
     /// Record what the engine reported. Called by the scraper, never by a
     /// request.
-    pub fn record_engine_inflight(&self, count: usize, now_ms: u64) {
-        self.engine_inflight.store(count, Ordering::Relaxed);
+    pub fn record_engine_inflight(&self, load: &crate::engine_metrics::EngineLoad, now_ms: u64) {
+        self.engine_inflight
+            .store((load.running + load.waiting) as usize, Ordering::Relaxed);
         self.engine_at.store(now_ms.max(1), Ordering::Relaxed);
+        self.engine_last_ts.store(now_ms.max(1), Ordering::Relaxed);
+        self.engine_last_prompt
+            .store(load.prompt_tokens_total, Ordering::Relaxed);
+        self.engine_last_gen
+            .store(load.generation_tokens_total, Ordering::Relaxed);
+        self.engine_last_kv_tokens
+            .store(load.kv_cache_tokens.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// Check whether the engine has stalled since the last metrics scrape.
+    ///
+    /// A stall is one where the engine reports `running > 0` (has work) but
+    /// nothing has progressed: both token counters and KV cache tokens are
+    /// identical to the last reading. Two consecutive stall samples mark the
+    /// backend unhealthy through the same path as a dead health probe, so
+    /// that the failover loop discovers it and stops burning requests on it.
+    ///
+    /// Returns `true` if this transitioned the backend out of rotation.
+    pub fn check_stall(&self, current_running: u32, threshold: u32) -> bool {
+        let prev_prompt = self.engine_last_prompt.load(Ordering::Relaxed);
+        let prev_gen = self.engine_last_gen.load(Ordering::Relaxed);
+        let prev_kv = self.engine_last_kv_tokens.load(Ordering::Relaxed);
+
+        // Only check if we have a previous reading.
+        if prev_prompt == 0 && prev_gen == 0 && prev_kv == 0 {
+            return false;
+        }
+
+        // Must be running something to be stalling — a 0-running engine that
+        // also has 0 tokens just means nothing has happened yet.
+        if current_running == 0 {
+            return false;
+        }
+
+        let stalled = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
+        if stalled {
+            self.healthy.store(false, Ordering::Relaxed);
+        }
+        stalled
+    }
+
+    /// Reset the stall counter on a successful scrape (any reading is fine).
+    pub fn reset_stall_counter(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
     }
 
     /// The count a ceiling should be compared against.
@@ -345,8 +411,34 @@ impl Backend {
         }
     }
 
+    /// Increment the error counter. Does not affect health — used for
+    /// retryable errors where the backend may still be serving.
     pub fn note_error(&self) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the consecutive timeout counter and, if it exceeds the
+    /// threshold, mark the backend unhealthy.
+    ///
+    /// A headers timeout after body dispatch is not a "connection refused" —
+    /// the upstream accepted the request but did not produce a response within
+    /// the configured budget. The caller has already sent the full body and
+    /// the timeout counts against the pool's effective capacity. If a backend
+    /// repeatedly times out it is being treated as unhealthy through the same
+    /// path as a dead probe, so that the failover loop eventually discovers
+    /// it and stops burning requests on it.
+    pub fn note_timeout(&self, threshold: u32) {
+        self.errors_total.fetch_add(1, Ordering::Relaxed);
+        let failures = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= threshold {
+            self.healthy.store(false, Ordering::Relaxed);
+            self.consecutive_timeouts.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Reset consecutive timeouts on a successful response.
+    pub fn reset_timeout_count(&self) {
+        self.consecutive_timeouts.store(0, Ordering::Relaxed);
     }
 
     /// Record a successful health probe.

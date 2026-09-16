@@ -79,6 +79,9 @@ export function Providers({ onUnauthorised, go }) {
   const [edit, setEdit] = useState({});
   const [renaming, setRenaming] = useState(null);
   const [newName, setNewName] = useState("");
+  // OAuth connection status per provider
+  const [oauthStatus, setOauthStatus] = useState({});
+  const [oauthLoading, setOauthLoading] = useState({});
   // The catalogue is eighty-odd entries: long enough that finding one by
   // scrolling is slower than typing three letters of its name.
   const [catFilter, setCatFilter] = useState("");
@@ -95,6 +98,31 @@ export function Providers({ onUnauthorised, go }) {
     },
     { onUnauthorised },
   );
+
+  // Fetch OAuth status for chatgpt_oauth providers
+  React.useEffect(() => {
+    if (!data) return;
+    const oauthProviders = data.providers.filter(
+      (p) =>
+        p.credential_kind === "chatgpt_oauth" || p.kind === "chatgpt_oauth",
+    );
+    const fetchAll = async () => {
+      const results = {};
+      for (const p of oauthProviders) {
+        try {
+          setOauthLoading((prev) => ({ ...prev, [p.id]: true }));
+          const status = await api.get(`/admin/providers/${p.id}/oauth/status`);
+          results[p.id] = status;
+        } catch {
+          results[p.id] = { connected: false, expires_in_seconds: 0 };
+        } finally {
+          setOauthLoading((prev) => ({ ...prev, [p.id]: false }));
+        }
+      }
+      setOauthStatus(results);
+    };
+    fetchAll();
+  }, [data]);
 
   if (loading && !data) return <Loading />;
   if (!data)
@@ -118,7 +146,7 @@ export function Providers({ onUnauthorised, go }) {
 
   const kinds =
     draft?.mode === "custom"
-      ? ["static", "gcp_service_account"]
+      ? ["static", "gcp_service_account", "chatgpt_oauth"]
       : entry
         ? entry.credential_kinds
         : ["static"];
@@ -214,6 +242,40 @@ export function Providers({ onUnauthorised, go }) {
     if (ok) reload();
   };
 
+  const connectOauth = async (g) => {
+    try {
+      setOauthLoading((prev) => ({ ...prev, [g.id]: "connect" }));
+      const res = await api.post(`/admin/providers/${g.id}/oauth/connect`);
+      // Open challenge URL in new window
+      if (res.challenge_url) {
+        window.open(res.challenge_url, "_blank");
+      }
+      setOauthLoading((prev) => ({ ...prev, [g.id]: false }));
+      // Refresh status
+      const status = await api.get(`/admin/providers/${g.id}/oauth/status`);
+      setOauthStatus((prev) => ({ ...prev, [g.id]: status }));
+    } catch (e) {
+      setError(e.message);
+      setOauthLoading((prev) => ({ ...prev, [g.id]: false }));
+    }
+  };
+
+  const disconnectOauth = async (g) => {
+    if (!window.confirm(`Disconnect OAuth for ${g.host}?`)) return;
+    try {
+      setOauthLoading((prev) => ({ ...prev, [g.id]: "disconnect" }));
+      await api.post(`/admin/providers/${g.id}/oauth/disconnect`);
+      setOauthStatus((prev) => ({
+        ...prev,
+        [g.id]: { connected: false, expires_in_seconds: 0 },
+      }));
+      setOauthLoading((prev) => ({ ...prev, [g.id]: false }));
+    } catch (e) {
+      setError(e.message);
+      setOauthLoading((prev) => ({ ...prev, [g.id]: false }));
+    }
+  };
+
   // One card per provider row. The models query still supplies the names and
   // the health lookup, both of which hang off a model rather than a provider.
   const groups = new Map();
@@ -225,6 +287,7 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
+      credential_kind: p.credential_kind,
       load:
         p.engine_load_at === null || p.engine_load_at === undefined
           ? null
@@ -487,6 +550,12 @@ export function Providers({ onUnauthorised, go }) {
               </Row>
 
               {entry?.notes && <Muted>{entry.notes}</Muted>}
+              {draft.credential_kind === "chatgpt_oauth" && (
+                <Muted>
+                  OAuth authentication — no API key needed. Click connect to
+                  start the login flow.
+                </Muted>
+              )}
 
               <Row>
                 <Muted>
@@ -627,6 +696,53 @@ export function Providers({ onUnauthorised, go }) {
                           : "credential set"}
                       </Muted>
                     </Row>
+                    {/* OAuth connection status for chatgpt_oauth providers */}
+                    {g.credential_kind === "chatgpt_oauth" && (
+                      <Row gap={6} style={{ flexWrap: "nowrap" }}>
+                        {oauthLoading[g.id] ? (
+                          <Muted>loading…</Muted>
+                        ) : oauthStatus[g.id] ? (
+                          <>
+                            <Dot
+                              tone={oauthStatus[g.id].connected ? "ok" : "bad"}
+                            />
+                            <Muted>
+                              {oauthStatus[g.id].connected
+                                ? `OAuth connected · expires in ${Math.floor(oauthStatus[g.id].expires_in_seconds / 60)}min`
+                                : "OAuth disconnected"}
+                            </Muted>
+                          </>
+                        ) : (
+                          <Muted>—</Muted>
+                        )}
+                        <Spacer />
+                        {oauthLoading[g.id] === "connect" ? (
+                          <Button variant="small" disabled>
+                            connecting…
+                          </Button>
+                        ) : oauthStatus[g.id]?.connected ? (
+                          <Button
+                            variant="smallDanger"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              disconnectOauth(g);
+                            }}
+                          >
+                            disconnect
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              connectOauth(g);
+                            }}
+                          >
+                            connect
+                          </Button>
+                        )}
+                      </Row>
+                    )}
                     <div style={{ flex: 1 }} />
                     {/* What the engine says it is doing. Absent for every
                         hosted provider, and for any engine started without

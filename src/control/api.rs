@@ -5,6 +5,7 @@
 //! — key hashes, never plaintext — and grants nothing else.
 
 use crate::control::build::build_snapshot;
+use crate::control::oauth;
 use crate::control::reconcile::ReconcileState;
 use crate::control::secrets::EncryptionKey;
 use crate::routing::MatchConditionJson;
@@ -1404,11 +1405,14 @@ async fn post_provider(
         .credential_kind
         .clone()
         .unwrap_or_else(|| "static".into());
-    if !matches!(credential_kind.as_str(), "static" | "gcp_service_account") {
+    if !matches!(
+        credential_kind.as_str(),
+        "static" | "gcp_service_account" | "chatgpt_oauth"
+    ) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             format!(
-                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account"
+                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account, chatgpt_oauth"
             ),
         ));
     }
@@ -1764,10 +1768,10 @@ async fn patch_provider(
             .map_err(|e| db_error("changing a provider's auth scheme", &e))?;
     }
     if let Some(kind) = body.credential_kind.as_deref().map(str::trim) {
-        if !matches!(kind, "static" | "gcp_service_account") {
+        if !matches!(kind, "static" | "gcp_service_account" | "chatgpt_oauth") {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                format!("credential_kind {kind:?} is not one of: static, gcp_service_account"),
+                format!("credential_kind {kind:?} is not one of: static, gcp_service_account, chatgpt_oauth"),
             ));
         }
         sqlx::query("UPDATE providers SET credential_kind = $1 WHERE id = $2")
@@ -1904,6 +1908,90 @@ struct ModelView {
     ///
     /// Prices live on these rather than on the model — see `BackendView`.
     backends: Vec<BackendView>,
+}
+
+/// Generate a PKCE challenge for an OAuth provider connect flow.
+///
+/// Returns a URL the operator can open in a browser to complete the
+/// authentication. The generated challenge is stored in-memory until the
+/// callback is received.
+async fn oauth_connect_generate_challenge(
+    State(_ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let url = oauth::generate_challenge(id).map_err(|e| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("generating OAuth challenge failed: {e}"),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "challenge_url": url })))
+}
+
+/// Handle the OAuth callback: exchange the authorization code for tokens.
+///
+/// Expects JSON body with `state` and `code` fields.
+async fn oauth_connect_callback(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<uuid::Uuid>,
+    body: axum::Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let state = body
+        .get("state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "missing `state`"))?;
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "missing `code`"))?;
+
+    oauth::exchange_token(&ctx.pool, &ctx.key, id, state, code)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("OAuth token exchange failed: {e}"),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({ "connected": true })))
+}
+
+/// Check OAuth connection status for a provider.
+async fn oauth_connection_status(
+    State(ctx): State<Ctx>,
+    _perm: RequireRead,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let status = oauth::connection_status(&ctx.pool, &ctx.key, id)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading OAuth status failed: {e}"),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "connected": status.connected,
+        "expires_in_seconds": status.expires_in_seconds,
+    })))
+}
+
+/// Disconnect a provider: clear stored OAuth tokens.
+async fn oauth_disconnect(
+    State(ctx): State<Ctx>,
+    _perm: RequireConfigWrite,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    oauth::disconnect(&ctx.pool, id).await.map_err(|e| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("OAuth disconnect failed: {e}"),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "disconnected": true })))
 }
 
 async fn list_models(
@@ -3187,11 +3275,14 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
         .credential_kind
         .clone()
         .unwrap_or_else(|| "static".into());
-    if !matches!(credential_kind.as_str(), "static" | "gcp_service_account") {
+    if !matches!(
+        credential_kind.as_str(),
+        "static" | "gcp_service_account" | "chatgpt_oauth"
+    ) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             format!(
-                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account"
+                "credential_kind {credential_kind:?} is not one of: static, gcp_service_account, chatgpt_oauth"
             ),
         ));
     }
@@ -8008,6 +8099,22 @@ pub async fn serve(
             get(provider_available_models),
         )
         .route("/admin/providers/register", post(post_provider_register))
+        .route(
+            "/admin/providers/{id}/oauth/connect",
+            post(oauth_connect_generate_challenge),
+        )
+        .route(
+            "/admin/providers/{id}/oauth/callback",
+            post(oauth_connect_callback),
+        )
+        .route(
+            "/admin/providers/{id}/oauth/status",
+            get(oauth_connection_status),
+        )
+        .route(
+            "/admin/providers/{id}/oauth/disconnect",
+            post(oauth_disconnect),
+        )
         .route("/admin/provider-models", get(list_models).post(post_model))
         .route(
             "/admin/provider-models/{id}",
@@ -11247,6 +11354,44 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(created.0["credential_kind"], "gcp_service_account");
 
+        // A plain `chatgpt_oauth` kind is accepted — no upstream_api_key
+        // needed because the OAuth tokens go in a separate column.
+        let (_, oauth_model) = post_model(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Json(NewModel {
+                name: unique_name("chatgpt-oauth-validate"),
+                description: String::new(),
+                cache_ttl_seconds: None,
+                context_length: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let (_, oauth) = post_backend(
+            State(ctx.clone()),
+            RequireConfigWrite,
+            Path(
+                oauth_model.0["id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
+                    .unwrap(),
+            ),
+            Json(NewBackend {
+                api_base: Some("http://chatgpt:8000/v1".into()),
+                upstream_model: Some("gpt-4o".into()),
+                credential_kind: Some("chatgpt_oauth".into()),
+                ..NewBackend::openai("http://other:8000/v1", None)
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(oauth.0["credential_kind"], "chatgpt_oauth");
+        // No upstream_api_key required for chatgpt_oauth — the column
+        // should be null since we passed None.
+        assert!(oauth.0["upstream_api_key"].is_null());
+
         // And the default stays `static`, so every existing caller is
         // unaffected by the field existing. On its own model, because a
         // provider model has exactly one provider and the row above already
@@ -11279,6 +11424,14 @@ mod tests {
         .unwrap();
         assert_eq!(plain.0["credential_kind"], "static");
     }
+
+    /// An `invalid_request_error` is returned when a client sends a malformed
+    /// request body — missing required fields, wrong types, etc.
+    ///
+    /// We test two simple shapes (missing model name and an empty model name)
+    /// to keep the test suite fast: every other validation is covered by the
+    /// specific fields' tests above. If the struct deserialises, the handler
+    /// proceeds and the DB constraint or business logic catches the rest.
 
     #[tokio::test]
     #[ignore = "requires postgres"]

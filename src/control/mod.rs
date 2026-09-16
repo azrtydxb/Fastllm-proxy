@@ -9,6 +9,7 @@ pub mod db;
 pub mod gcp;
 pub mod import;
 pub mod k8s;
+pub mod oauth;
 pub mod pricing;
 pub mod reconcile;
 pub mod registry_agent;

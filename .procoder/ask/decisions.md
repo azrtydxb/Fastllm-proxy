@@ -66,3 +66,60 @@ Options:
   broken and the fix is ready.
 
 **Decided:** commit, push, deploy.
+
+## Pull in the next ChatGPT OAuth story?
+
+Story 1 (admin API accepts `credential_kind: chatgpt_oauth`) is closed. Sprint
+`001-add-chatgpt-oauth-provider-credential-kind` is active with 11 remaining
+stories. The logical next story is:
+
+- **Task 4 — OAuth connect/status/disconnect APIs** (control plane: PKCE, token
+  exchange, encryption, storage)
+
+Or we could continue with the simpler stories first:
+
+- **Task 5 — Rust token refresh** (snapshot build decrypts tokens, refreshes
+  if within 5 min of expiry)
+- **Task 6 — Health check / error handling** (401/403/429 from OAuth backends
+  mark unhealthy → failover; already mostly existing code)
+- **Task 7 — Tests** (unit tests for token parsing and refresh timing)
+
+Options:
+
+- **Pull in Task 4 (OAuth APIs) first.** The big piece: new module
+  `src/control/oauth.rs`, three new endpoints, full PKCE + token exchange.
+  Everything else depends on having tokens to decrypt.
+- **Pull in Task 5 (token refresh) first.** Simpler: just a check and exchange
+  in the snapshot build. The OAuth connect flow still needs the endpoints, but
+  the data plane can start working on receiving tokens.
+- **Pull in Task 6 (health/error) first.** Almost no code — just verify existing
+  401/403 handling works for OAuth backends. Quick win, builds confidence.
+- **Defer for now.** The foundation is laid (DB, schema, API validation). Come
+  back when you want to actually connect a ChatGPT account.
+
+- [decision] decisions.md Commit ChatGPT OAuth sprint 002
+
+11 of 12 stories closed. 1 deferred (UI status — backend API ready). Tests pass (392/0). Gate clean (0 blocking).
+
+Options:
+
+- **Commit, push, and deploy to kw.** Sprint complete. The OAuth provider is fully usable on the control plane (connect, token refresh, disconnect, health).
+- **Hold for now.** Wait for something else to batch with.
+
+**Decided:**
+
+## Fix four filed GitHub issues before committing sprint changes
+
+Four open issues were raised before the sprint commit:
+
+- **#21** — Headers-timeout failover re-dispatches full body → retry amplification (fixed: timeout-rate breaker + threshold config)
+- **#18** — `/v1/models` strips `max_model_len` metadata (fixed: field added through model chain)
+- **#19** — Health sweep can't detect vLLM engine-core deadlocks (in progress: needs `/metrics` stall detection)
+- **#20** — Per-backend upstream timeout (in progress: needs per-backend config field)
+
+Options:
+
+- **Fix all four now.** They're all in the data plane and orthogonal to the ChatGPT OAuth work that is already committed. The remaining two (#19, #20) touch `registry.rs`, `state.rs`, `proxy.rs`, and the config schema.
+- **Defer #19 and #20.** #21 and #18 are done and can be committed separately; #19 requires engine-scrape integration and #20 requires DB migration plus admin API changes, both larger undertakings.
+
+**Decided:** fix all four before committing sprint changes.

@@ -795,6 +795,10 @@ impl RoutingRule {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrontendModelDef {
     pub name: String,
+    /// Maximum context window (tokens) for this model, advertised to clients
+    /// via `/v1/models`.  Propagated from the model config or scraped from
+    /// the upstream on the first `/v1/models` scrape.
+    pub max_model_len: Option<usize>,
     /// Evaluated in order; the first whose conditions match wins.
     pub rules: Vec<RoutingRule>,
     /// Used when no rule matches. Never consulted otherwise, even if a
@@ -1281,6 +1285,7 @@ mod tests {
     fn the_first_matching_rule_wins() {
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![
                 RoutingRule {
                     action: RuleAction::Route,
@@ -1310,6 +1315,7 @@ mod tests {
     fn a_later_rule_is_used_when_an_earlier_one_does_not_match() {
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![
                 RoutingRule {
                     action: RuleAction::Route,
@@ -1457,6 +1463,7 @@ mod tests {
         let reg = registry_with(&["a", "b"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: targets,
         };
@@ -1480,6 +1487,7 @@ mod tests {
         let reg = registry_with(&["a", "b"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![pool("ab", None, &[("a", 1), ("b", 3)])],
         };
@@ -1521,6 +1529,7 @@ mod tests {
         reg.pool("primary").unwrap()[0].mark_probe_failed(1);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             // weight 100 on primary so `choose_weighted` always picks it
             // first, isolating the failover behaviour from the split.
@@ -1539,6 +1548,7 @@ mod tests {
         let reg = registry_with(&["primary", "secondary"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
         };
@@ -1556,6 +1566,7 @@ mod tests {
         reg.pool("secondary").unwrap()[0].mark_probe_failed(1);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 1)],
         };
@@ -1757,6 +1768,7 @@ mod tests {
         let reg = registry_with(&["m"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Deny {
                     status: 402,
@@ -1804,6 +1816,7 @@ mod tests {
         let reg = registry_with(&["cheap", "big"]);
         let shared = FrontendModelDef {
             name: "house-policy".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Route,
                 tag: Some("house".into()),
@@ -1820,6 +1833,7 @@ mod tests {
         };
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Jump("house-policy".into()),
                 tag: None,
@@ -1855,6 +1869,7 @@ mod tests {
         let reg = registry_with(&["m"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Jump("deleted".into()),
                 tag: None,
@@ -1887,11 +1902,13 @@ mod tests {
         };
         let a = FrontendModelDef {
             name: "a".into(),
+            max_model_len: Default::default(),
             rules: vec![loop_rule("b")],
             default_targets: Vec::new(),
         };
         let b = FrontendModelDef {
             name: "b".into(),
+            max_model_len: Default::default(),
             rules: vec![loop_rule("a")],
             default_targets: Vec::new(),
         };
@@ -1922,6 +1939,7 @@ mod tests {
         let reg = registry_with(&["first", "second", "third"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![
                 target("first", 1),
@@ -1946,6 +1964,7 @@ mod tests {
         let reg = registry_with(&["a", "b", "cloud"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![
                 pool(
@@ -1978,6 +1997,7 @@ mod tests {
         let with = |p: Option<crate::router::Policy>| {
             FrontendModelDef {
                 name: "vm".into(),
+                max_model_len: Default::default(),
                 rules: vec![],
                 default_targets: vec![pool("p", p, &[("a", 1), ("b", 1)])],
             }
@@ -2009,6 +2029,7 @@ mod tests {
 
         let deny = |max: u64| FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Deny {
                     status: 402,
@@ -2056,6 +2077,7 @@ mod tests {
         let reg = registry_with(&["m"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Deny {
                     status: 402,
@@ -2153,7 +2175,14 @@ mod tests {
         let headers = HeaderMap::new();
         let pool = reg.pool("busy").unwrap();
 
-        pool[0].record_engine_inflight(2, crate::registry::now_ms());
+        pool[0].record_engine_inflight(
+            &crate::engine_metrics::EngineLoad {
+                running: 2,
+                waiting: 0,
+                ..Default::default()
+            },
+            crate::registry::now_ms(),
+        );
         assert!(
             !rule.matches(&facts_with(None, 0, None, &headers), &reg),
             "this replica sent nothing, but the engine is at the ceiling"
@@ -2162,7 +2191,14 @@ mod tests {
         // A reading older than `ENGINE_FRESH_FOR` is not believed: a backend
         // that stopped answering `/metrics` while busy must not be locked out
         // for ever.
-        pool[0].record_engine_inflight(2, crate::registry::now_ms() - 60_000);
+        pool[0].record_engine_inflight(
+            &crate::engine_metrics::EngineLoad {
+                running: 2,
+                waiting: 0,
+                ..Default::default()
+            },
+            crate::registry::now_ms() - 60_000,
+        );
         assert!(
             rule.matches(&facts_with(None, 0, None, &headers), &reg),
             "a stale reading falls back to the local count, which is zero"
@@ -2176,6 +2212,7 @@ mod tests {
         let reg = registry_with(&["local", "cloud"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![
                 rule_with(
                     RuleConditions {
@@ -2337,6 +2374,7 @@ mod tests {
         let reg = registry_with(&["primary", "secondary"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![target("primary", 100), target("secondary", 0)],
         };
@@ -2350,6 +2388,7 @@ mod tests {
         let reg = registry_with(&["a"]);
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![],
             default_targets: vec![target("a", 1), target("a", 1)],
         };
@@ -2416,6 +2455,7 @@ mod tests {
     fn no_matching_rule_falls_back_to_the_frontend_models_defaults() {
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Route,
                 tag: None,
@@ -2451,6 +2491,7 @@ mod tests {
     fn a_matched_rule_with_no_routable_target_does_not_fall_through_to_defaults() {
         let vm = FrontendModelDef {
             name: "vm".into(),
+            max_model_len: Default::default(),
             rules: vec![RoutingRule {
                 action: RuleAction::Route,
                 tag: None,

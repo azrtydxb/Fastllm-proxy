@@ -136,7 +136,17 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
             // queue is the reason it is slow.
             Ok(load) => {
                 known.remove(&uid);
-                backend.record_engine_inflight((load.running + load.waiting) as usize, now_ms());
+                let running = load.running;
+                let now_ms = now_ms();
+                backend.record_engine_inflight(&load, now_ms);
+                // Check for stall: the engine reports running work but token
+                // counters and KV cache have not moved since the last scrape.
+                if backend.check_stall(running, state.unhealthy_after) {
+                    debug!(
+                        backend = %backend.api_base,
+                        "engine stalled: token counters unchanged"
+                    );
+                }
             }
             Err(e) => {
                 // Answered, and it is not an engine: settle on the second such

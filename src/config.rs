@@ -109,6 +109,11 @@ pub struct ModelEntry {
     /// fields).
     #[serde(default)]
     pub policy: Option<String>,
+    /// Maximum context window (tokens) for this model, advertised to clients
+    /// via `/v1/models`.  Populated from the upstream on scrape when the
+    /// operator does not set one explicitly.
+    #[serde(default)]
+    pub max_model_len: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +178,14 @@ pub struct FastllmSettings {
     /// Consecutive health-check failures before a backend is taken out of rotation.
     #[serde(default = "default_unhealthy_after")]
     pub unhealthy_after: u32,
+    /// Consecutive upstream headers timeouts before a backend is taken out of
+    /// rotation. A timeout means the backend accepted the body but did not send
+    /// headers within `upstream_timeout` — dispatching the same body to the next
+    /// backend multiplies the cost.  Defaults to the same value as
+    /// `unhealthy_after` so a backend that consistently times out is ejected
+    /// through the same path as a dead health probe.
+    #[serde(default = "default_consecutive_timeout_threshold")]
+    pub consecutive_timeout_threshold: u32,
 }
 
 impl Default for FastllmSettings {
@@ -183,6 +196,7 @@ impl Default for FastllmSettings {
             balance_rel: default_balance_rel(),
             affinity_slots: default_affinity_slots(),
             unhealthy_after: default_unhealthy_after(),
+            consecutive_timeout_threshold: default_consecutive_timeout_threshold(),
         }
     }
 }
@@ -198,6 +212,9 @@ fn default_balance_rel() -> f64 {
 }
 fn default_affinity_slots() -> usize {
     65536
+}
+fn default_consecutive_timeout_threshold() -> u32 {
+    5
 }
 fn default_unhealthy_after() -> u32 {
     2

@@ -87,6 +87,7 @@ impl SnapshotSource for FileSource {
                     .unwrap_or_else(|| "authorization".to_string()),
                 auth_scheme: entry.litellm_params.auth_scheme_or_default(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
+                upstream_timeout_seconds: None,
                 // No database, so no attachment row to name, and nowhere in
                 // the file format to write a price. `File` mode prices
                 // nothing, which is all these three are for.

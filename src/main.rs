@@ -1043,6 +1043,7 @@ async fn run_all(cli: Cli) -> Result<()> {
             tls_config(cli.ca_bundle.as_deref())?,
         ));
         fastllm_proxy::control::gcp::init(Arc::clone(&client));
+        fastllm_proxy::control::oauth::init(Arc::clone(&client));
         let pool = fastllm_proxy::control::db::connect(&db_url).await?;
         let snap = fastllm_proxy::control::build::build_snapshot(&pool, &key).await?;
         let master_key = cli
@@ -1454,6 +1455,7 @@ fn build_app_state(
         tier2: std::sync::OnceLock::new(),
         upstream_headers_timeout: Duration::from_secs(cli.upstream_timeout),
         unhealthy_after: tuning.unhealthy_after.max(1),
+        consecutive_timeout_threshold: tuning.consecutive_timeout_threshold.max(1),
         started: Instant::now(),
         requests_ok: AtomicU64::new(0),
         requests_failed: AtomicU64::new(0),
@@ -1948,7 +1950,8 @@ fn register_token_minter(cli: &Cli) -> Result<()> {
         },
         tls_config(cli.ca_bundle.as_deref())?,
     ));
-    fastllm_proxy::control::gcp::init(client);
+    fastllm_proxy::control::gcp::init(client.clone());
+    fastllm_proxy::control::oauth::init(client);
     Ok(())
 }
 

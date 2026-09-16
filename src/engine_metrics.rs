@@ -27,6 +27,15 @@ pub struct EngineLoad {
     pub waiting: u32,
     /// KV cache in use, 0.0–1.0. `None` when the engine does not report it.
     pub kv_cache: Option<f32>,
+    /// Cumulative prompt tokens processed. Increments during a prefill; zero
+    /// during generation-only.
+    pub prompt_tokens_total: u64,
+    /// Cumulative generation tokens processed. Increments one per token
+    /// decoded.
+    pub generation_tokens_total: u64,
+    /// KV cache tokens in use (integer). `None` when the engine reports only
+    /// a percentage.
+    pub kv_cache_tokens: Option<u32>,
 }
 
 /// The families worth reading, newest name first.
@@ -44,6 +53,13 @@ const KV_CACHE: &[&str] = &[
     "vllm:gpu_cache_usage_perc",
     "sglang:token_usage",
 ];
+/// Cumulative prompt tokens — used by the stall detector.
+const PROMPT_TOKENS_TOTAL: &[&str] = &["vllm:prompt_tokens_total", "sglang:prompt_tokens"];
+/// Cumulative generation tokens — used by the stall detector.
+const GENERATION_TOKENS_TOTAL: &[&str] =
+    &["vllm:generation_tokens_total", "sglang:generation_tokens"];
+/// KV cache tokens in use — a more precise variant of the percentage.
+const KV_CACHE_TOKENS: &[&str] = &["vllm:cache_usage_perc", "sglang:cache_usage"];
 
 /// Sum every sample of the first family that appears.
 ///
@@ -171,6 +187,13 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
         running: running.max(0.0) as u32,
         waiting: read_family(body, WAITING, false).unwrap_or(0.0).max(0.0) as u32,
         kv_cache: read_family(body, KV_CACHE, true).map(|v| v.clamp(0.0, 1.0) as f32),
+        prompt_tokens_total: read_family(body, PROMPT_TOKENS_TOTAL, false)
+            .unwrap_or(0.0)
+            .max(0.0) as u64,
+        generation_tokens_total: read_family(body, GENERATION_TOKENS_TOTAL, false)
+            .unwrap_or(0.0)
+            .max(0.0) as u64,
+        kv_cache_tokens: read_family(body, KV_CACHE_TOKENS, false).map(|v| v.max(0.0) as u32),
     })
 }
 

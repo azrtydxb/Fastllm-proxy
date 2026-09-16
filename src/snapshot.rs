@@ -179,6 +179,11 @@ pub struct BackendDef {
     /// Header the key goes in. Gemini wants `x-goog-api-key`, Anthropic
     /// `x-api-key`; everything else wants `authorization`.
     pub auth_header: String,
+    /// Per-backend override for the upstream timeout (seconds). `None` means
+    /// fall back to the global `--upstream-timeout`. Useful when a self-hosted
+    /// long-context engine legitimately needs more than the global budget for
+    /// first-byte (e.g. a 100k-token prefill on a DGX Spark).
+    pub upstream_timeout_seconds: Option<u64>,
     /// Prefix before the key, `Bearer` for the usual case. `None` sends the
     /// raw key, which is what the two providers above require.
     pub auth_scheme: Option<String>,
@@ -219,6 +224,7 @@ impl Default for BackendDef {
             auth_header: "authorization".into(),
             auth_scheme: Some("Bearer".into()),
             default_max_tokens: None,
+            upstream_timeout_seconds: None,
             input_price_per_mtok: None,
             output_price_per_mtok: None,
             backend_id: None,
@@ -493,6 +499,10 @@ pub struct WireBackendDef {
     pub auth_scheme: Option<String>,
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
+    /// Per-backend override for the upstream timeout (seconds). `None` means
+    /// fall back to the global flag.
+    #[serde(default)]
+    pub upstream_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub input_price_per_mtok: Option<i64>,
     #[serde(default)]
@@ -654,6 +664,9 @@ fn default_tier() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireFrontendModel {
     pub name: String,
+    /// Maximum context window (tokens) for this model.
+    #[serde(default)]
+    pub max_model_len: Option<usize>,
     pub rules: Vec<WireRoutingRule>,
     pub default_targets: Vec<WireWeightedTarget>,
 }
@@ -844,6 +857,7 @@ impl Snapshot {
                             auth_header: b.auth_header.clone(),
                             auth_scheme: b.auth_scheme.clone(),
                             default_max_tokens: b.default_max_tokens,
+                            upstream_timeout_seconds: b.upstream_timeout_seconds,
                             input_price_per_mtok: b.input_price_per_mtok,
                             output_price_per_mtok: b.output_price_per_mtok,
                             backend_id: b.backend_id,
@@ -873,6 +887,7 @@ impl Snapshot {
                 .values()
                 .map(|vm| WireFrontendModel {
                     name: vm.name.clone(),
+                    max_model_len: vm.max_model_len,
                     rules: vm
                         .rules
                         .iter()
@@ -1033,6 +1048,7 @@ impl Snapshot {
                                 auth_header: b.auth_header,
                                 auth_scheme: b.auth_scheme,
                                 default_max_tokens: b.default_max_tokens,
+                                upstream_timeout_seconds: b.upstream_timeout_seconds,
                                 input_price_per_mtok: b.input_price_per_mtok,
                                 output_price_per_mtok: b.output_price_per_mtok,
                                 backend_id: b.backend_id,
@@ -1071,6 +1087,7 @@ impl Snapshot {
                         vm.name.clone(),
                         FrontendModelDef {
                             name: vm.name,
+                            max_model_len: vm.max_model_len,
                             rules: vm
                                 .rules
                                 .into_iter()

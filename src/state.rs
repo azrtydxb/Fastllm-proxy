@@ -49,6 +49,8 @@ pub struct AppState {
     /// completion is not a hung upstream.
     pub upstream_headers_timeout: Duration,
     pub unhealthy_after: u32,
+    /// Consecutive headers timeouts before a backend is taken out of rotation.
+    pub consecutive_timeout_threshold: u32,
 
     pub started: Instant,
     pub requests_ok: AtomicU64,
@@ -179,6 +181,7 @@ impl AppState {
             max_retries: 0,
             upstream_headers_timeout: Duration::from_secs(1),
             unhealthy_after: 1,
+            consecutive_timeout_threshold: 1,
             started: Instant::now(),
             requests_ok: AtomicU64::new(0),
             requests_failed: AtomicU64::new(0),

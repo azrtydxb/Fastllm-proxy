@@ -982,14 +982,19 @@ async fn proxy_request(
             let guard = InflightGuard::acquire(Arc::clone(&backend));
 
             let dispatch = state.client.request(upstream_req);
-            let result = match tokio::time::timeout(state.upstream_headers_timeout, dispatch).await
-            {
+            // Per-backend override: a long-context self-hosted engine may
+            // legitimately need more than the global budget for first-byte.
+            let timeout = backend
+                .upstream_timeout_seconds
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(state.upstream_headers_timeout);
+            let result = match tokio::time::timeout(timeout, dispatch).await {
                 Ok(r) => r,
                 Err(_) => {
                     backend.note_error();
                     last_error = Some(format!(
                         "upstream {} did not send headers within {:?}",
-                        backend.api_base, state.upstream_headers_timeout
+                        backend.api_base, timeout
                     ));
                     warn!(backend = %backend.api_base, "upstream headers timeout");
                     if !state.router.has_candidate(pool, &tried) && more_models_after_this {
@@ -3098,6 +3103,7 @@ model_list:
             "vm".to_string(),
             crate::routing::FrontendModelDef {
                 name: "vm".into(),
+                max_model_len: Default::default(),
                 rules: vec![],
                 default_targets: vec![crate::routing::WeightedTarget::model("concrete-a", 100)],
             },
