@@ -935,6 +935,97 @@
         ]
       }
     },
+    "/admin/providers/{id}/oauth/connect": {
+      "post": {
+        "summary": "Begin an OAuth flow for the provider: generates the PKCE challenge and returns the authorization URL to visit",
+        "operationId": "post_admin_providers_id_oauth_connect",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Challenge created; body carries challenge_url"
+          },
+          "500": {
+            "description": "Challenge generation failed"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/providers/{id}/oauth/callback": {
+      "post": {
+        "summary": "Complete an OAuth flow: exchanges the authorization code for tokens and stores them encrypted against the provider. Body: {state, code}",
+        "operationId": "post_admin_providers_id_oauth_callback",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Tokens stored; body carries connected=true"
+          },
+          "400": {
+            "description": "Missing state or code"
+          },
+          "500": {
+            "description": "Token exchange failed"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/providers/{id}/oauth/status": {
+      "get": {
+        "summary": "Report whether the provider holds live OAuth tokens and how long they remain valid",
+        "operationId": "get_admin_providers_id_oauth_status",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Body carries connected and expires_in_seconds"
+          },
+          "500": {
+            "description": "Reading status failed"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/admin/providers/{id}/oauth/disconnect": {
+      "post": {
+        "summary": "Clear the provider's stored OAuth tokens",
+        "operationId": "post_admin_providers_id_oauth_disconnect",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Tokens cleared; body carries disconnected=true"
+          },
+          "500": {
+            "description": "Disconnect failed"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/admin/providers/register": {
       "post": {
         "summary": "Register or refresh a provider's lease",

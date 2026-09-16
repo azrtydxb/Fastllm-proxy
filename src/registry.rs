@@ -150,6 +150,12 @@ pub struct Backend {
     /// unhealthy-after path so a backend that consistently times out is
     /// ejected before every subsequent request burns the full timeout budget.
     consecutive_timeouts: AtomicU32,
+    /// Consecutive stall samples: `running > 0` with every engine token
+    /// counter frozen since the previous scrape. Deliberately separate from
+    /// `consecutive_failures`, which a passing health probe resets — and a
+    /// deadlocked vLLM answers `GET /v1/models` just fine, so sharing the
+    /// counter would let the probe wipe the stall evidence every sweep.
+    consecutive_stalls: AtomicU32,
     inflight: AtomicUsize,
     /// What the engine itself says is in flight, and when it said so.
     ///
@@ -253,6 +259,7 @@ impl Backend {
             healthy: AtomicBool::new(true),
             consecutive_failures: AtomicU32::new(0),
             consecutive_timeouts: AtomicU32::new(0),
+            consecutive_stalls: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
             engine_inflight: AtomicUsize::new(0),
             engine_at: AtomicU64::new(0),
@@ -327,33 +334,48 @@ impl Backend {
     /// backend unhealthy through the same path as a dead health probe, so
     /// that the failover loop discovers it and stops burning requests on it.
     ///
-    /// Returns `true` if this transitioned the backend out of rotation.
-    pub fn check_stall(&self, current_running: u32, threshold: u32) -> bool {
-        let prev_prompt = self.engine_last_prompt.load(Ordering::Relaxed);
-        let prev_gen = self.engine_last_gen.load(Ordering::Relaxed);
-        let prev_kv = self.engine_last_kv_tokens.load(Ordering::Relaxed);
-
-        // Only check if we have a previous reading.
-        if prev_prompt == 0 && prev_gen == 0 && prev_kv == 0 {
+    /// Returns `true` if this sample transitioned the backend out of rotation.
+    ///
+    /// Must be called *before* `record_engine_inflight` overwrites the stored
+    /// reading with the current one — recorded first, every scrape would
+    /// trivially match itself and the comparison would compare nothing.
+    pub fn check_stall(&self, load: &crate::engine_metrics::EngineLoad, threshold: u32) -> bool {
+        // No previous scrape to compare against yet.
+        if self.engine_last_ts.load(Ordering::Relaxed) == 0 {
             return false;
         }
 
-        // Must be running something to be stalling — a 0-running engine that
-        // also has 0 tokens just means nothing has happened yet.
-        if current_running == 0 {
+        // Must be running something to be stalling — an idle engine with
+        // frozen counters is just an idle engine. Clear accumulated evidence
+        // so a later hang starts from a clean counter.
+        if load.running == 0 {
+            self.consecutive_stalls.store(0, Ordering::Relaxed);
             return false;
         }
 
-        let stalled = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
+        let frozen = self.engine_last_prompt.load(Ordering::Relaxed) == load.prompt_tokens_total
+            && self.engine_last_gen.load(Ordering::Relaxed) == load.generation_tokens_total
+            && self.engine_last_kv_tokens.load(Ordering::Relaxed)
+                == load.kv_cache_tokens.unwrap_or(0);
+
+        // Any movement — prefill climbing, decode climbing, cache growing —
+        // is proof of life, however slow the backend is.
+        if !frozen {
+            self.consecutive_stalls.store(0, Ordering::Relaxed);
+            return false;
+        }
+
+        let stalled = self.consecutive_stalls.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
         if stalled {
             self.healthy.store(false, Ordering::Relaxed);
         }
         stalled
     }
 
-    /// Reset the stall counter on a successful scrape (any reading is fine).
+    /// Reset the stall counter, e.g. when a backend leaves and re-enters
+    /// rotation and its previous evidence no longer describes it.
     pub fn reset_stall_counter(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.consecutive_stalls.store(0, Ordering::Relaxed);
     }
 
     /// The count a ceiling should be compared against.
@@ -775,6 +797,95 @@ model_list:
         );
         let reg = Registry::build(&config(&dup), &Interner::default(), None).unwrap();
         assert_eq!(reg.pool("Qwen/Qwen3-1.7B").unwrap().len(), 2);
+    }
+
+    fn load(
+        running: u32,
+        prompt: u64,
+        gen: u64,
+        kv: Option<u32>,
+    ) -> crate::engine_metrics::EngineLoad {
+        crate::engine_metrics::EngineLoad {
+            running,
+            waiting: 0,
+            kv_cache: None,
+            prompt_tokens_total: prompt,
+            generation_tokens_total: gen,
+            kv_cache_tokens: kv,
+        }
+    }
+
+    #[test]
+    fn stall_needs_two_frozen_samples_and_a_previous_scrape() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let l = load(2, 100, 50, Some(10));
+        // Nothing scraped yet: comparison has no baseline.
+        assert!(!b.check_stall(&l, 2));
+        b.record_engine_inflight(&l, 1);
+        // First frozen sample: below the threshold, still in rotation.
+        assert!(!b.check_stall(&l, 2));
+        assert!(b.is_healthy());
+        // Second: ejected.
+        assert!(b.check_stall(&l, 2));
+        assert!(!b.is_healthy());
+    }
+
+    #[test]
+    fn any_counter_movement_is_proof_of_life() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let a = load(2, 100, 50, Some(10));
+        b.record_engine_inflight(&a, 1);
+        assert!(!b.check_stall(&a, 2)); // one frozen sample banked
+                                        // Prefill advanced: the check itself must see the movement and
+                                        // wipe the banked evidence — production order is check, then record.
+        let moved = load(2, 140, 50, Some(10));
+        assert!(!b.check_stall(&moved, 2));
+        b.record_engine_inflight(&moved, 2);
+        // Frozen again, but the banked sample was wiped by the movement.
+        assert!(!b.check_stall(&moved, 2));
+        assert!(b.is_healthy());
+    }
+
+    #[test]
+    fn idle_engine_is_not_stalled() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let busy = load(2, 100, 50, Some(10));
+        b.record_engine_inflight(&busy, 1);
+        assert!(!b.check_stall(&busy, 2)); // one sample banked
+        assert!(!b.check_stall(&load(0, 100, 50, Some(10)), 2)); // drained: evidence cleared
+                                                                 // A later hang restarts from a clean counter.
+        assert!(!b.check_stall(&busy, 2));
+        assert!(b.is_healthy());
+    }
+
+    #[test]
+    fn passing_health_probe_does_not_wipe_stall_evidence() {
+        // The failure mode of #19: a deadlocked engine still answers
+        // GET /v1/models, so the probe must not reset the stall counter.
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let l = load(2, 100, 50, Some(10));
+        b.record_engine_inflight(&l, 1);
+        assert!(!b.check_stall(&l, 2));
+        b.mark_probe_ok();
+        assert!(b.check_stall(&l, 2));
+        assert!(!b.is_healthy());
+    }
+
+    #[test]
+    fn consecutive_timeouts_eject_and_any_answer_clears() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        b.note_timeout(2);
+        assert!(b.is_healthy());
+        b.reset_timeout_count(); // an answer arrived, streak broken
+        b.note_timeout(2);
+        assert!(b.is_healthy());
+        b.note_timeout(2);
+        assert!(!b.is_healthy());
     }
 
     #[test]

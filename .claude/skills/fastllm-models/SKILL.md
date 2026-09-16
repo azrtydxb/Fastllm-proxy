@@ -36,6 +36,10 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 | `PATCH` | `/admin/providers/{id}` | Rename a provider, move it, or rotate its credential. An absent upstream_api_key leaves the stored one alone; "" clears it | `name`*, `kind`*, `api_base`*, `protocol`*, `auth_header`*, `auth_scheme`*, `upstream_api_key`*, `credential_kind`* |
 | `DELETE` | `/admin/providers/{id}` | Delete a provider that serves no models | — |
 | `GET` | `/admin/providers/{id}/available-models` | What a provider is currently serving | — |
+| `POST` | `/admin/providers/{id}/oauth/callback` | Complete an OAuth flow: exchanges the authorization code for tokens and stores them encrypted against the provider. Body: {state, code} | — |
+| `POST` | `/admin/providers/{id}/oauth/connect` | Begin an OAuth flow for the provider: generates the PKCE challenge and returns the authorization URL to visit | — |
+| `POST` | `/admin/providers/{id}/oauth/disconnect` | Clear the provider's stored OAuth tokens | — |
+| `GET` | `/admin/providers/{id}/oauth/status` | Report whether the provider holds live OAuth tokens and how long they remain valid | — |
 
 *\* optional field*
 

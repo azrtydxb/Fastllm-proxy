@@ -989,9 +989,20 @@ async fn proxy_request(
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(state.upstream_headers_timeout);
             let result = match tokio::time::timeout(timeout, dispatch).await {
-                Ok(r) => r,
+                // Any non-timeout outcome breaks the streak: the breaker
+                // counts consecutive timeouts, not consecutive failures.
+                Ok(r) => {
+                    backend.reset_timeout_count();
+                    r
+                }
                 Err(_) => {
                     backend.note_error();
+                    // A headers timeout after the body was accepted means the
+                    // upstream is slow or wedged, not unreachable. N of them
+                    // in a row eject the backend through the same path as a
+                    // dead probe, so the next request does not rediscover the
+                    // slowness with a fresh full-timeout budget.
+                    backend.note_timeout(state.consecutive_timeout_threshold);
                     last_error = Some(format!(
                         "upstream {} did not send headers within {:?}",
                         backend.api_base, timeout
