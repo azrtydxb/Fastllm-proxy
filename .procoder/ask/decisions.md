@@ -26,6 +26,18 @@ Options:
 
 **Decided:** cache cargo and `target/` in the `test` job. The other two remain open.
 
+## Deploy the pool-policy fix to kw?
+
+The LB pool feature has a bug: pool policies (e.g. `cache-affinity`,
+`least-loaded`) were wired into the failover order but never reached
+`Router::pick`, so backends always used the deployment's `--policy` for
+dispatch regardless of what the pool configured.
+
+Fix: walk frontend model targets in `build_snapshot`, collect pool→member→policy
+mappings, write into `ModelDef.policy` so the registry's `PoolInner.policy` is
+set correctly. New test verifies a `least-loaded` pool member gets that policy
+in the snapshot. 397 tests pass, gate clean.
+
 ## Out-of-band access to the DGX Sparks now that wifi is off
 
 Both nodes are ethernet-only: `piwifi` autoconnect set to `no`, the radio

@@ -603,6 +603,38 @@ pub async fn build_snapshot_with(
             .fetch_optional(pool)
             .await?;
 
+    // Wire pool policies into the models so the registry can use them when
+    // routing — the pool's policy should govern how a member's own backends
+    // are chosen, not just which member wins the failover chain. Before this
+    // fix the pool policy only affected `expand_pool` (failover order) but
+    // `Router::pick` fell back to the deployment's `--policy` for every
+    // backend, making the pool's own policy a no-op at the dispatch level.
+    let mut pool_policies: std::collections::HashMap<String, crate::router::Policy> =
+        std::collections::HashMap::new();
+    for fm in frontend_models.values() {
+        for target in &fm.default_targets {
+            if let Some(policy) = target.policy {
+                for member in &target.members {
+                    pool_policies.entry(member.model.clone()).or_insert(policy);
+                }
+            }
+        }
+        for rule in &fm.rules {
+            for target in &rule.targets {
+                if let Some(policy) = target.policy {
+                    for member in &target.members {
+                        pool_policies.entry(member.model.clone()).or_insert(policy);
+                    }
+                }
+            }
+        }
+    }
+    for model in &mut models {
+        if let Some(policy) = pool_policies.get(&model.name) {
+            model.policy = Some(*policy);
+        }
+    }
+
     Ok(Snapshot {
         version: version as u64,
         keys,
@@ -1471,6 +1503,85 @@ mod tests {
             vm.default_targets,
             vec![crate::routing::WeightedTarget::model(fallback.clone(), 100)]
         );
+    }
+
+    /// Pool policies must flow into the provider model's policy in the
+    /// snapshot so that `Router::pick` uses the pool's dispatch policy
+    /// rather than silently falling back to the deployment default.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn pool_policies_wire_into_provider_model_snapshot() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("provider_models", "name", "pool-policy")
+            .track_prefix("frontend_models", "name", "pool-policy-fm")
+            .track_prefix("model_pools", "name", "pool-policy-pool");
+
+        let model_name = unique_name("pool-policy");
+        let pool_name = unique_name("pool-policy-pool");
+        let fm_name = unique_name("pool-policy-fm");
+
+        // Create the provider model
+        sqlx::query("INSERT INTO provider_models (name) VALUES ($1)")
+            .bind(&model_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let provider_model_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM provider_models WHERE name = $1")
+                .bind(&model_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // Create a pool with least-loaded policy
+        let pool_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO model_pools (name, policy) VALUES ($1, 'least-loaded') RETURNING id",
+        )
+        .bind(&pool_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO model_pool_members (pool_id, provider_model_id, position) \
+             VALUES ($1, $2, 0)",
+        )
+        .bind(pool_id)
+        .bind(provider_model_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Create a frontend model pointing to the pool
+        let fm_id: Uuid =
+            sqlx::query_scalar("INSERT INTO frontend_models (name) VALUES ($1) RETURNING id")
+                .bind(&fm_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO frontend_model_defaults (frontend_model_id, provider_model_id, \
+              target_model_name, weight, position, model_pool_id)
+             VALUES ($1, NULL, $2, 100, 0, $3)",
+        )
+        .bind(fm_id)
+        .bind(&pool_name)
+        .bind(pool_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let model = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == model_name)
+            .expect("the provider model must be in the snapshot");
+        // The pool's policy is now wired into the provider model so
+        // `Router::pick` uses least-loaded instead of the deployment default.
+        assert_eq!(model.policy, Some(crate::router::Policy::LeastLoaded));
     }
 
     /// A principal's role *names*, not just its flattened `allowed_models`,
