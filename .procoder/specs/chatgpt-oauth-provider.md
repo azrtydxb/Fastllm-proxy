@@ -46,6 +46,7 @@ directly, without the Codex CLI or app-server in the hot path.
 OAuth credential blob.
 
 **Admin API:**
+
 - `POST /admin/providers` accepts `credential_kind: "chatgpt_oauth"`
 - `POST /admin/providers/:id/connect-chatgpt` starts OAuth flow (returns
   challenge URL + state)
@@ -54,12 +55,14 @@ OAuth credential blob.
 - `GET /admin/providers/:id/chatgpt-status` returns connection status
 
 **Control plane → data plane (snapshot):**
+
 - `BackendDef` carries a new `chatgpt_oauth_tokens` field (decrypted),
   populated in the build phase only when `credential_kind == "chatgpt_oauth"`
 
 ## Data
 
 New DB columns:
+
 ```
 providers.credential_kind:   CHECK (IN ('static', 'gcp_service_account', 'chatgpt_oauth'))
 providers.chatgpt_oauth_tokens:  BYTEA  (AES-256-GCM encrypted JSON: {access_token, refresh_token, token_type, expires_in, created_at})
@@ -79,29 +82,29 @@ provider_catalogue.credential_kinds:  ('chatgpt_oauth,static') for openai entry
 
 ## Failure modes
 
-| Failure | Proxy behaviour | User-visible |
-| --- | --- | --- |
-| Provider unreachable | Health probe fails → mark unhealthy → failover | 502 on fallback provider |
-| Token expired, refresh fails | Mark unhealthy → failover | 502 on fallback provider |
-| 401/403 from upstream | Same as invalid key → mark unhealthy | 502 on fallback provider |
-| 429 from upstream | Route as rate-limited → failover | 429 on fallback provider |
-| OAuth callback lost (page closed) | Challenge still valid, user can re-navigate to /connect | "Please connect ChatGPT" |
-| DB corruption on token column | Provider appears with blank tokens → 401 → mark unhealthy | 502 on fallback provider |
+| Failure                           | Proxy behaviour                                           | User-visible             |
+| --------------------------------- | --------------------------------------------------------- | ------------------------ |
+| Provider unreachable              | Health probe fails → mark unhealthy → failover            | 502 on fallback provider |
+| Token expired, refresh fails      | Mark unhealthy → failover                                 | 502 on fallback provider |
+| 401/403 from upstream             | Same as invalid key → mark unhealthy                      | 502 on fallback provider |
+| 429 from upstream                 | Route as rate-limited → failover                          | 429 on fallback provider |
+| OAuth callback lost (page closed) | Challenge still valid, user can re-navigate to /connect   | "Please connect ChatGPT" |
+| DB corruption on token column     | Provider appears with blank tokens → 401 → mark unhealthy | 502 on fallback provider |
 
 ## Acceptance criteria
 
-- [ ] Provider catalogue has an OpenAI ChatGPT entry
-- [ ] Admin API accepts `credential_kind: chatgpt_oauth`
-- [ ] Connect ChatGPT button starts OAuth flow
-- [ ] PKCE challenge/verifier generated server-side
-- [ ] Callback exchange produces access and refresh tokens
-- [ ] Tokens stored encrypted in `providers.chatgpt_oauth_tokens`
-- [ ] Snapshot decrypts tokens before dispatch
-- [ ] Rust refreshes tokens if they are within 5 minutes of expiry
-- [ ] OAuth errors (401/403) mark backend as unhealthy
-- [ ] Subscription rate limits (429) trigger failover
-- [ ] Disconnect clears stored tokens
-- [ ] UI shows connection status
+- [x] Provider catalogue has an OpenAI ChatGPT entry
+- [x] Admin API accepts `credential_kind: chatgpt_oauth`
+- [x] Connect ChatGPT button starts OAuth flow
+- [x] PKCE challenge/verifier generated server-side
+- [x] Callback exchange produces access and refresh tokens
+- [x] Tokens stored encrypted in `providers.chatgpt_oauth_tokens`
+- [x] Snapshot decrypts tokens before dispatch
+- [x] Rust refreshes tokens if they are within 5 minutes of expiry
+- [x] OAuth errors (401/403) mark backend as unhealthy
+- [x] Subscription rate limits (429) trigger failover
+- [x] Disconnect clears stored tokens
+- [x] UI shows connection status
 
 ## Open questions
 
