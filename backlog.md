@@ -87,7 +87,7 @@ becoming an OpenAI backend pointed at Anthropic.
 agreeing with neither. `tests/doc_claims.rs` counts the table and fails if the
 prose disagrees.
 
-Not done: a shared response cache and SSO are parked with their reasoning under
+Parked: a shared response cache and SSO are archived with their reasoning under
 "Parked" below. `/batches`, `/files` and `/fine_tuning` stay out because
 retrieval is a `GET` with no model and no body, so routing them means durable
 state on the request path — a design, not a suffix. Guardrails and A2A are real
