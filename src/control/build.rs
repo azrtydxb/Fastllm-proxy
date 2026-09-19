@@ -603,6 +603,75 @@ pub async fn build_snapshot_with(
             .fetch_optional(pool)
             .await?;
 
+    // A pool whose members name individual attachments becomes a model in its
+    // own right: same name as the pool, carrying exactly the ticked backends
+    // and the pool's policy. The registry keys its pools by model name, so
+    // this is what lets a pool balance across a *subset* of one model's
+    // providers — the thing the member table could not express while a member
+    // was a whole model.
+    //
+    // Built by filtering the `BackendDef`s already assembled above rather than
+    // re-reading providers and re-decrypting credentials: one source for how a
+    // backend is configured, so a pool can never disagree with the model it
+    // draws from.
+    //
+    // These never reach a client. `/v1/models` lists frontend models, and
+    // authorisation is checked against the name the caller asked for, so a
+    // pool model is reachable only by a rule that points at it.
+    type PoolBackendRow = (String, Option<String>, Uuid);
+    let pool_backend_rows: Vec<PoolBackendRow> = sqlx::query_as(
+        "SELECT p.name, p.policy, mpm.model_backend_id
+           FROM model_pools p
+           JOIN model_pool_members mpm ON mpm.pool_id = p.id
+          WHERE mpm.model_backend_id IS NOT NULL
+          ORDER BY p.name, mpm.position",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut pool_models: Vec<ModelDef> = Vec::new();
+    for (pool_name, policy, _) in &pool_backend_rows {
+        if pool_models.iter().any(|m| m.name == *pool_name) {
+            continue;
+        }
+        let wanted: Vec<Uuid> = pool_backend_rows
+            .iter()
+            .filter(|(n, ..)| n == pool_name)
+            .map(|(.., backend_id)| *backend_id)
+            .collect();
+        let backends: Vec<BackendDef> = models
+            .iter()
+            .flat_map(|m| m.backends.iter())
+            .filter(|b| b.backend_id.is_some_and(|id| wanted.contains(&id)))
+            .cloned()
+            .collect();
+        if backends.is_empty() {
+            // Every ticked attachment has since been deleted, or none was
+            // routable. Publishing an empty pool would give a rule a target
+            // that resolves to nothing at all; leaving it out lets the chain
+            // fall through to whatever comes next, which is the same thing
+            // that happens to any other unroutable target.
+            tracing::warn!(pool = %pool_name, "pool names no routable backend; not published");
+            continue;
+        }
+        // Context length and cache TTL are properties of the weights, not of
+        // where they are served, so they come from the model the ticked
+        // attachments belong to.
+        let source = models.iter().find(|m| {
+            m.backends
+                .iter()
+                .any(|b| b.backend_id.is_some_and(|id| wanted.contains(&id)))
+        });
+        pool_models.push(ModelDef {
+            name: pool_name.clone(),
+            cache_ttl: source.and_then(|m| m.cache_ttl),
+            context_length: source.and_then(|m| m.context_length),
+            policy: policy.as_deref().and_then(crate::router::Policy::parse),
+            backends,
+        });
+    }
+    models.extend(pool_models);
+
     // Wire pool policies into the models so the registry can use them when
     // routing — the pool's policy should govern how a member's own backends
     // are chosen, not just which member wins the failover chain. Before this
@@ -1010,9 +1079,9 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // Every pool's members, flattened once rather than per target: a pool is
     // typically pointed at from several rules, and re-reading it for each
     // would be the same rows over again.
-    type PoolMemberRow = (Uuid, String, i32);
+    type PoolMemberRow = (Uuid, String, i32, Option<Uuid>);
     let pool_member_rows: Vec<PoolMemberRow> = sqlx::query_as(
-        "SELECT mpm.pool_id, pm.name, mpm.weight
+        "SELECT mpm.pool_id, pm.name, mpm.weight, mpm.model_backend_id
          FROM model_pool_members mpm
          JOIN provider_models pm ON pm.id = mpm.provider_model_id
          ORDER BY mpm.pool_id, mpm.position",
@@ -1024,6 +1093,17 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
             .fetch_all(pool)
             .await?;
 
+    // A pool whose members name individual attachments is published as a
+    // routable model of its own (see `backend_scoped_pool_models`), carrying
+    // exactly those backends and this pool's policy. The registry then
+    // balances inside it, so the target is a plain one: it needs no members
+    // and no policy here, and `expand_pool` never sees it.
+    let backend_scoped: std::collections::HashSet<Uuid> = pool_member_rows
+        .iter()
+        .filter(|(.., backend)| backend.is_some())
+        .map(|(pool_id, ..)| *pool_id)
+        .collect();
+
     let targets_for = |owner_id: Uuid, rows: &[TargetRow]| -> Vec<WeightedTarget> {
         rows.iter()
             .filter(|(id, ..)| *id == owner_id)
@@ -1033,11 +1113,12 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                 // provider model contributes neither, which is how
                 // `order_candidates` tells them apart.
                 members: pool_id
+                    .filter(|pid| !backend_scoped.contains(pid))
                     .map(|pid| {
                         pool_member_rows
                             .iter()
                             .filter(|(p, ..)| *p == pid)
-                            .map(|(_, name, w)| {
+                            .map(|(_, name, w, _)| {
                                 crate::routing::WeightedTarget::model(
                                     name.clone(),
                                     (*w).max(0) as u32,
@@ -1046,13 +1127,15 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
                             .collect()
                     })
                     .unwrap_or_default(),
-                policy: pool_id.and_then(|pid| {
-                    pool_policies
-                        .iter()
-                        .find(|(p, _)| *p == pid)
-                        .and_then(|(_, pol)| pol.as_deref())
-                        .and_then(crate::router::Policy::parse)
-                }),
+                policy: pool_id
+                    .filter(|pid| !backend_scoped.contains(pid))
+                    .and_then(|pid| {
+                        pool_policies
+                            .iter()
+                            .find(|(p, _)| *p == pid)
+                            .and_then(|(_, pol)| pol.as_deref())
+                            .and_then(crate::router::Policy::parse)
+                    }),
                 // `weight` is `INT` in Postgres (see the migration) and this
                 // schema never writes it negative; a value that somehow is
                 // (hand-written SQL, a future bug) is clamped to 0 rather
@@ -1502,6 +1585,123 @@ mod tests {
         assert_eq!(
             vm.default_targets,
             vec![crate::routing::WeightedTarget::model(fallback.clone(), 100)]
+        );
+    }
+
+    /// A pool whose members name individual attachments must publish itself
+    /// as a model carrying *exactly* those attachments — not all of the
+    /// model's providers.
+    ///
+    /// This is the whole point of the feature: before it, a member was a whole
+    /// provider model, so "balance across these two of the three machines
+    /// serving this model" had nowhere to live. A test that only asserted the
+    /// pool exists would pass on the old behaviour too, so the assertion is
+    /// containment: the ticked backend is present and the untickedOne is not.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_backend_scoped_pool_publishes_only_the_backends_it_names() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("provider_models", "name", "subset-model")
+            .track_prefix("providers", "name", "subset-provider")
+            .track_prefix("model_pools", "name", "subset-pool");
+
+        let model_name = unique_name("subset-model");
+        let pool_name = unique_name("subset-pool");
+
+        // One model, two providers — the shape the feature exists for.
+        let mut backend_ids = Vec::new();
+        let model_id: Uuid =
+            sqlx::query_scalar("INSERT INTO provider_models (name) VALUES ($1) RETURNING id")
+                .bind(&model_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        for host in ["http://subset-a:8000/v1", "http://subset-b:8000/v1"] {
+            let provider_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO providers (name, api_base) VALUES ($1, $2) RETURNING id",
+            )
+            .bind(unique_name("subset-provider"))
+            .bind(host)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let backend_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+                 VALUES ($1, $2, 'weights') RETURNING id",
+            )
+            .bind(model_id)
+            .bind(provider_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            backend_ids.push((backend_id, host));
+        }
+        let (ticked, ticked_host) = backend_ids[0];
+        let (_untouched, untouched_host) = backend_ids[1];
+
+        let pool_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO model_pools (name, policy) VALUES ($1, 'least-loaded') RETURNING id",
+        )
+        .bind(&pool_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, \
+             position) VALUES ($1, $2, $3, 0)",
+        )
+        .bind(pool_id)
+        .bind(model_id)
+        .bind(ticked)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot = build_snapshot(&pool, &key).await.unwrap();
+        let published = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == pool_name)
+            .expect("a backend-scoped pool is published as a model of its own");
+
+        let hosts: Vec<&str> = published
+            .backends
+            .iter()
+            .map(|b| b.api_base.as_str())
+            .collect();
+        assert!(
+            hosts
+                .iter()
+                .any(|h| ticked_host.starts_with(h) || *h == ticked_host),
+            "the ticked attachment is in the pool: {hosts:?}"
+        );
+        assert!(
+            !hosts
+                .iter()
+                .any(|h| untouched_host.starts_with(h) || *h == untouched_host),
+            "the attachment nobody ticked must not be: {hosts:?}"
+        );
+        assert_eq!(
+            published.policy,
+            Some(crate::router::Policy::LeastLoaded),
+            "the pool's own policy governs how it balances"
+        );
+
+        // And the model itself is untouched — it still carries both providers,
+        // because a pool selecting a subset must not narrow the model that
+        // everything else routes through.
+        let source = snapshot
+            .models
+            .iter()
+            .find(|m| m.name == model_name)
+            .expect("the provider model is still published");
+        assert_eq!(
+            source.backends.len(),
+            2,
+            "the model keeps every provider serving it"
         );
     }
 

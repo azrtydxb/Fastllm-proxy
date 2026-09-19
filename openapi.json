@@ -766,9 +766,7 @@
       "get": {
         "summary": "Known providers and how to reach them",
         "operationId": "get_admin_provider_catalogue",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -791,9 +789,7 @@
       "get": {
         "summary": "Read providers",
         "operationId": "get_admin_providers",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -814,9 +810,7 @@
       "post": {
         "summary": "Add a provider: an endpoint and the credential that reaches it",
         "operationId": "post_admin_providers",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "201": {
             "description": "Created"
@@ -845,9 +839,7 @@
       "patch": {
         "summary": "Rename a provider, move it, or rotate its credential. An absent upstream_api_key leaves the stored one alone; \"\" clears it",
         "operationId": "patch_admin_providers_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "204": {
             "description": "Updated"
@@ -877,9 +869,7 @@
       "delete": {
         "summary": "Delete a provider that serves no models",
         "operationId": "delete_admin_providers_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "204": {
             "description": "Deleted"
@@ -908,9 +898,7 @@
       "get": {
         "summary": "What a provider is currently serving",
         "operationId": "get_admin_providers_id_available_models",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -939,9 +927,7 @@
       "post": {
         "summary": "Begin an OAuth flow for the provider: generates the PKCE challenge and returns the authorization URL to visit",
         "operationId": "post_admin_providers_id_oauth_connect",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "Challenge created; body carries challenge_url"
@@ -961,9 +947,7 @@
       "post": {
         "summary": "Complete an OAuth flow: exchanges the authorization code for tokens and stores them encrypted against the provider. Body: {state, code}",
         "operationId": "post_admin_providers_id_oauth_callback",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "Tokens stored; body carries connected=true"
@@ -986,9 +970,7 @@
       "get": {
         "summary": "Report whether the provider holds live OAuth tokens and how long they remain valid",
         "operationId": "get_admin_providers_id_oauth_status",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "Body carries connected and expires_in_seconds"
@@ -1008,9 +990,7 @@
       "post": {
         "summary": "Clear the provider's stored OAuth tokens",
         "operationId": "post_admin_providers_id_oauth_disconnect",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "Tokens cleared; body carries disconnected=true"
@@ -1030,9 +1010,7 @@
       "post": {
         "summary": "Register or refresh a provider's lease",
         "operationId": "post_admin_providers_register",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "200": {
             "description": "OK"
@@ -1156,16 +1134,76 @@
         "summary": "Named groups of provider models, each with one policy for choosing between them",
         "operationId": "get_admin_model_pools",
         "tags": ["admin"],
-        "responses": { "200": { "description": "OK" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" } },
-        "security": [{ "session": [] }]
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "post": {
         "summary": "Create a pool. Its name must not collide with a provider model or a frontend model, because routing resolves targets by name",
         "operationId": "post_admin_model_pools",
         "tags": ["admin"],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"], "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", null], "description": "How to choose between members. Null is the weighted split" } } } } } },
-        "responses": { "201": { "description": "Created" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "The name is taken by a pool, a provider model or a frontend model" } },
-        "security": [{ "session": [] }]
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "policy": {
+                    "type": ["string", "null"],
+                    "enum": [
+                      "cache-affinity",
+                      "least-loaded",
+                      "lowest-latency",
+                      "round-robin",
+                      null
+                    ],
+                    "description": "How to choose between members. Null is the weighted split"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "409": {
+            "description": "The name is taken by a pool, a provider model or a frontend model"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/admin/model-pools/{id}": {
@@ -1173,29 +1211,158 @@
         "summary": "Rename a pool, change its description, or change how it chooses between its members. A rename carries onto the targets pointing at it",
         "operationId": "patch_admin_model_pools_id",
         "tags": ["admin"],
-        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "policy": { "type": ["string", "null"] } } } } } },
-        "responses": { "204": { "description": "Updated" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "404": { "description": "No such pool" } },
-        "security": [{ "session": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "policy": {
+                    "type": ["string", "null"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No such pool"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
       },
       "delete": {
         "summary": "Delete a pool. Refused while any rule target or default still routes to it, rather than cascading into rules that point at a name which no longer resolves",
         "operationId": "delete_admin_model_pools_id",
         "tags": ["admin"],
-        "responses": { "204": { "description": "Deleted" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "Targets still route to it" } },
-        "security": [{ "session": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "409": {
+            "description": "Targets still route to it"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
       }
     },
     "/admin/model-pools/{id}/members": {
       "post": {
-        "summary": "Add a provider model to a pool. The same model twice is refused: a member counted twice is one machine counted twice",
+        "summary": "Add a member to a pool: a whole provider model, or one of its attachments when model_backend_id is given. The same attachment twice is refused, and so is the same model twice at model grain",
         "operationId": "post_admin_model_pools_id_members",
         "tags": ["admin"],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["provider_model_id"], "properties": { "provider_model_id": { "type": "string", "format": "uuid" }, "weight": { "type": "integer", "description": "Only consulted by the weighted split; the other policies read load, latency or price" }, "position": { "type": "integer" } } } } } },
-        "responses": { "201": { "description": "Created" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "409": { "description": "Already a member" } },
-        "security": [{ "session": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["provider_model_id"],
+                "properties": {
+                  "provider_model_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "model_backend_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "One attachment of that model, when the pool balances across a chosen subset of its providers. Omit it and the member is the model itself, carrying every provider serving it. A backend belonging to a different model is a 400."
+                  },
+                  "weight": {
+                    "type": "integer",
+                    "description": "Only consulted by the weighted split; the other policies read load, latency or price"
+                  },
+                  "position": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "409": {
+            "description": "Already a member"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
       }
     },
     "/admin/model-pool-members/{id}": {
@@ -1203,9 +1370,36 @@
         "summary": "Remove one model from its pool",
         "operationId": "delete_admin_model_pool_members_id",
         "tags": ["admin"],
-        "responses": { "204": { "description": "Deleted" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" }, "404": { "description": "No such member" } },
-        "security": [{ "session": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          },
+          "404": {
+            "description": "No such member"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
       }
     },
     "/admin/nodes": {
@@ -1213,8 +1407,22 @@
         "summary": "The hosts registering their own endpoints, rolled up per node. An agent is not a row: it is a `node` several dynamic providers share, and its lease is what says it is alive",
         "operationId": "get_admin_nodes",
         "tags": ["admin"],
-        "responses": { "200": { "description": "OK" }, "401": { "description": "No session, or a bad proxy token" }, "403": { "description": "Authenticated, but the principal lacks the required permission" } },
-        "security": [{ "session": [] }]
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "No session, or a bad proxy token"
+          },
+          "403": {
+            "description": "Authenticated, but the principal lacks the required permission"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/admin/prices/sync": {
@@ -1288,9 +1496,7 @@
       "patch": {
         "summary": "Rename a principal, or correct its email",
         "operationId": "patch_admin_principals_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "204": {
             "description": "Updated"
@@ -1762,9 +1968,7 @@
       "patch": {
         "summary": "Rename a role, or change its description",
         "operationId": "patch_admin_roles_name",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "204": {
             "description": "Updated"
@@ -1953,7 +2157,13 @@
                 "properties": {
                   "policy": {
                     "type": ["string", "null"],
-                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin", null],
+                    "enum": [
+                      "cache-affinity",
+                      "least-loaded",
+                      "lowest-latency",
+                      "round-robin",
+                      null
+                    ],
                     "description": "How to choose among this rule's targets. Null clears it back to the frontend model's, and then to the weighted split"
                   },
                   "position": {
@@ -2234,9 +2444,7 @@
       "patch": {
         "summary": "Change how a frontend model chooses between its targets",
         "operationId": "patch_admin_frontend_models_id",
-        "tags": [
-          "admin"
-        ],
+        "tags": ["admin"],
         "responses": {
           "204": {
             "description": "Updated"
@@ -2363,7 +2571,12 @@
                   },
                   "policy": {
                     "type": "string",
-                    "enum": ["cache-affinity", "least-loaded", "lowest-latency", "round-robin"],
+                    "enum": [
+                      "cache-affinity",
+                      "least-loaded",
+                      "lowest-latency",
+                      "round-robin"
+                    ],
                     "description": "How to choose among this rule's targets. Absent means the frontend model's, then the weighted split"
                   },
                   "tag": {

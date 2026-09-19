@@ -125,9 +125,15 @@ export function ModelPools({ onUnauthorised }) {
               // Members after the pool, in the order they were ticked: that
               // order is the weighted split's declaration order and the
               // failover order within the pool.
-              for (const [position, id] of memberIds.entries()) {
+              // A member is either a whole model or one of its attachments;
+              // the picker decides which, and the body differs only by
+              // `model_backend_id`.
+              for (const [position, m] of memberIds.entries()) {
                 await api.post(`/admin/model-pools/${pool.id}/members`, {
-                  provider_model_id: id,
+                  provider_model_id: m.provider_model_id,
+                  ...(m.model_backend_id
+                    ? { model_backend_id: m.model_backend_id }
+                    : {}),
                   weight: 100,
                   position,
                 });
@@ -332,23 +338,44 @@ function NewPool({ models, taken, onCreate }) {
   // Unique model names that have at least one provider with backends.
   const modelNames = [...new Set(models.map((m) => m.name))];
 
-  // Narrowing the list is a convenience, never a restriction: filtering it
-  // down to one name capped every pool at a single member, because a model is
-  // one row carrying all of its providers. With no filter, every model is
-  // offered; with one, its row is shown first and the rest stay reachable.
-  const filteredModels = modelFilter
-    ? [
-        ...models.filter((m) => m.name === modelFilter),
-        ...models.filter((m) => m.name !== modelFilter),
-      ]
-    : models;
+  // What is tickable depends on the grain the pool is being built at.
+  //
+  // With a model chosen, the members are that model's *attachments* — one row
+  // per provider serving it — because balancing across a chosen subset of them
+  // is what a pool is for. Listing the model itself here was the bug: its
+  // providers were a label on a single row, so there was exactly one thing to
+  // tick and the pool had nothing to choose between.
+  //
+  // With no model chosen, the members are whole models, which is the other
+  // kind of pool: failover between different models, each bringing every
+  // provider serving it.
+  const chosen = modelFilter
+    ? models.filter((m) => m.name === modelFilter)
+    : [];
+  const options = modelFilter
+    ? chosen.flatMap((m) =>
+        (m.backends || []).map((b) => ({
+          key: b.id,
+          provider_model_id: m.id,
+          model_backend_id: b.id,
+          label: m.name,
+          where: b.provider_name || b.api_base,
+        })),
+      )
+    : models.map((m) => ({
+        key: m.id,
+        provider_model_id: m.id,
+        model_backend_id: null,
+        label: m.name,
+        where: where(m),
+      }));
 
-  const suggest = (ids, pol) => {
-    if (ids.length === 0) return "";
+  const suggest = (chosenOpts, pol) => {
+    if (chosenOpts.length === 0) return "";
     const short = (pol || "weighted").replace(/-/g, "");
-    const names = ids
-      .map((id) => models.find((m) => m.id === id)?.name)
-      .filter(Boolean);
+    // The model name, once: every attachment of one model shares it, and
+    // "leastloaded-bge-m3-bge-m3" names nothing useful.
+    const names = [...new Set(chosenOpts.map((o) => o.label).filter(Boolean))];
     const head = names.slice(0, 2).join("-");
     const rest = names.length > 2 ? `+${names.length - 2}` : "";
     return `${short}-${head}${rest}`;
@@ -358,10 +385,10 @@ function NewPool({ models, taken, onCreate }) {
     if (!edited) setName(suggest(ids, pol));
   };
 
-  const toggle = (id) => {
-    const next = picked.includes(id)
-      ? picked.filter((x) => x !== id)
-      : [...picked, id];
+  const toggle = (opt) => {
+    const next = picked.some((p) => p.key === opt.key)
+      ? picked.filter((p) => p.key !== opt.key)
+      : [...picked, opt];
     setPicked(next);
     retitle(next, policy);
   };
@@ -406,15 +433,19 @@ function NewPool({ models, taken, onCreate }) {
 
         <Field
           label="MEMBERS"
-          hint="tick the models this pool chooses between — the tick order is the failover order. Each member brings every provider serving it, and the policy below balances across them."
+          hint="pick a model above to balance across its providers; leave it on “all models” to build a pool that fails over between different models. The tick order is the failover order."
         >
-          {filteredModels.length === 0 && (
-            <Muted>no provider model is routable yet</Muted>
+          {options.length === 0 && (
+            <Muted>
+              {modelFilter
+                ? "that model has no provider attached — nothing to balance across"
+                : "no provider model is routable yet"}
+            </Muted>
           )}
           <Stack gap={4}>
-            {filteredModels.map((m) => (
+            {options.map((opt) => (
               <label
-                key={m.id}
+                key={opt.key}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -425,12 +456,14 @@ function NewPool({ models, taken, onCreate }) {
               >
                 <input
                   type="checkbox"
-                  checked={picked.includes(m.id)}
-                  onChange={() => toggle(m.id)}
+                  checked={picked.some((p) => p.key === opt.key)}
+                  onChange={() => toggle(opt)}
                 />
-                <Mono style={{ font: "400 12px var(--mono)" }}>{m.name}</Mono>
+                <Mono style={{ font: "400 12px var(--mono)" }}>
+                  {opt.label}
+                </Mono>
                 <Muted style={{ font: "400 10px var(--mono)" }}>
-                  {where(m)}
+                  {opt.where}
                 </Muted>
               </label>
             ))}
@@ -516,8 +549,8 @@ function NewPool({ models, taken, onCreate }) {
           </Button>
           <Muted>
             {picked.length === 0
-              ? "no providers yet — a pool with none routes nowhere"
-              : `${picked.length} provider${picked.length === 1 ? "" : "s"}`}
+              ? "nothing ticked yet — a pool with no members routes nowhere"
+              : `${picked.length} ${modelFilter ? "provider" : "model"}${picked.length === 1 ? "" : "s"}`}
           </Muted>
         </Row>
       </Stack>

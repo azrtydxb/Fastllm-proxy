@@ -4296,6 +4296,12 @@ struct PoolMemberView {
     model: String,
     weight: i32,
     position: i32,
+    /// The one attachment this member routes to, when it names one. `None`
+    /// means the member is the model and carries every provider serving it.
+    model_backend_id: Option<Uuid>,
+    /// That attachment's endpoint, so the member reads as somewhere rather
+    /// than as an id.
+    api_base: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4318,11 +4324,26 @@ async fn list_pools(
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| db_error("listing pools", &e))?;
-    type MemberRow = (Uuid, Uuid, Option<Uuid>, String, i32, i32);
+    // `api_base` comes along so the UI can show which attachment a member
+    // names without a second round trip — a member scoped to one backend is
+    // meaningless to read as a bare id.
+    type MemberRow = (
+        Uuid,
+        Uuid,
+        Option<Uuid>,
+        String,
+        i32,
+        i32,
+        Option<Uuid>,
+        Option<String>,
+    );
     let members: Vec<MemberRow> = sqlx::query_as(
-        "SELECT mpm.pool_id, mpm.id, pm.id, pm.name, mpm.weight, mpm.position
+        "SELECT mpm.pool_id, mpm.id, pm.id, pm.name, mpm.weight, mpm.position,
+                mpm.model_backend_id, p.api_base
          FROM model_pool_members mpm
          JOIN provider_models pm ON pm.id = mpm.provider_model_id
+         LEFT JOIN model_backends mb ON mb.id = mpm.model_backend_id
+         LEFT JOIN providers p ON p.id = mb.provider_id
          ORDER BY mpm.pool_id, mpm.position",
     )
     .fetch_all(&ctx.pool)
@@ -4340,13 +4361,19 @@ async fn list_pools(
                 members: members
                     .iter()
                     .filter(|(pool_id, ..)| *pool_id == id)
-                    .map(|(_, mid, pmid, model, weight, position)| PoolMemberView {
-                        id: *mid,
-                        provider_model_id: *pmid,
-                        model: model.clone(),
-                        weight: *weight,
-                        position: *position,
-                    })
+                    .map(
+                        |(_, mid, pmid, model, weight, position, backend_id, api_base)| {
+                            PoolMemberView {
+                                id: *mid,
+                                provider_model_id: *pmid,
+                                model: model.clone(),
+                                weight: *weight,
+                                position: *position,
+                                model_backend_id: *backend_id,
+                                api_base: api_base.clone(),
+                            }
+                        },
+                    )
                     .collect(),
             })
             .collect(),
@@ -4538,6 +4565,11 @@ async fn delete_pool(
 #[serde(deny_unknown_fields)]
 struct NewPoolMember {
     provider_model_id: Uuid,
+    /// One attachment of that model, when the pool balances across a chosen
+    /// subset of its providers. Absent means the member is the model and
+    /// brings every provider serving it.
+    #[serde(default)]
+    model_backend_id: Option<Uuid>,
     #[serde(default = "default_target_weight")]
     weight: i32,
     #[serde(default)]
@@ -4550,12 +4582,43 @@ async fn post_pool_member(
     Path(pool_id): Path<Uuid>,
     Json(body): Json<NewPoolMember>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // A backend that belongs to a different model would route this member
+    // somewhere the pool never named. The foreign key cannot catch it — both
+    // ids are valid rows — so it is checked here, before the insert.
+    if let Some(backend_id) = body.model_backend_id {
+        let owner: Option<Uuid> =
+            sqlx::query_scalar("SELECT provider_model_id FROM model_backends WHERE id = $1")
+                .bind(backend_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .map_err(|e| db_error("checking the backend's model", &e))?;
+        match owner {
+            None => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "no such backend".to_string(),
+                ));
+            }
+            Some(owner) if owner != body.provider_model_id => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "that backend serves a different model; a pool member names one \
+                     attachment of the model it is a member of"
+                        .to_string(),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO model_pool_members (pool_id, provider_model_id, weight, position)
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, weight, \
+         position)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(pool_id)
     .bind(body.provider_model_id)
+    .bind(body.model_backend_id)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -4564,7 +4627,7 @@ async fn post_pool_member(
         if is_unique_violation(&e) {
             api_error(
                 StatusCode::CONFLICT,
-                "that model is already in this pool; a member twice over is one machine \
+                "that member is already in this pool; a member twice over is one machine \
                  counted twice"
                     .to_string(),
             )

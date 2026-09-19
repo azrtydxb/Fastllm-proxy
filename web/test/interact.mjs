@@ -507,29 +507,39 @@ await goto("models");
       boxes.length > 1,
       `found ${boxes.length}`,
     );
-    // The model dropdown narrows the list; it must never restrict it. Filtering
-    // it down to a single name capped every pool at one member, because a model
-    // is one row carrying all of its providers -- so the one row with that name
-    // was the only thing tickable, and a one-member pool balances nothing.
+    // Choosing a model switches the grain: the members become that model's
+    // *attachments*, one row per provider serving it. Listing the model itself
+    // was the bug -- its providers were a label on a single row, so there was
+    // one thing to tick and the pool had nothing to choose between.
+    // `local-qwen` is on two providers in the fixtures.
     const modelSel = $("select").find((el) =>
       [...el.options].some((o) => o.value === "local-qwen"),
     );
+    check("a model can be chosen", !!modelSel);
     if (modelSel) {
       await fill(modelSel, "local-qwen");
+      const perBackend = $("input").filter((i) => i.type === "checkbox");
       check(
-        "narrowing to one model still offers the others",
-        $("input").filter((i) => i.type === "checkbox").length === boxes.length,
-        `found ${$("input").filter((i) => i.type === "checkbox").length} of ${boxes.length}`,
+        "choosing a model offers its providers, one row each",
+        perBackend.length === 2,
+        `found ${perBackend.length}, expected the 2 providers of local-qwen`,
       );
       await fill(modelSel, "");
+      check(
+        "clearing it goes back to whole models",
+        $("input").filter((i) => i.type === "checkbox").length === boxes.length,
+      );
     }
     const nameOf = () =>
       $("input").find(
         (i) => i.placeholder === "pick members to generate a name",
       )?.value;
     check("no name before anything is picked", !nameOf());
-    if (boxes.length) {
-      await click(boxes[0]);
+    // Re-queried: the filter above re-rendered the list, so the handles taken
+    // before it are detached and clicking them reaches nothing.
+    const freshBoxes = $("input").filter((i) => i.type === "checkbox");
+    if (freshBoxes.length) {
+      await click(freshBoxes[0]);
       check(
         "picking a member generates a name",
         !!nameOf(),
@@ -551,7 +561,7 @@ await goto("models");
         (i) => i.placeholder === "pick members to generate a name",
       );
       await fill(box, "my-own-name");
-      await click(boxes[1]);
+      await click($("input").filter((i) => i.type === "checkbox")[1]);
       check(
         "an edited name stops following the selection",
         nameOf() === "my-own-name",
@@ -575,11 +585,57 @@ await goto("models");
         (r) => r.method === "POST" && /\/members$/.test(r.path),
       );
       check(
-        "and one member POST per ticked model, in the order ticked",
+        "and one member POST per ticked member, in the order ticked",
         members.length === 2 &&
           members[0].body.position === 0 &&
           members[1].body.position === 1,
         `sent ${JSON.stringify(members.map((m) => m.body))}`,
+      );
+    }
+  }
+
+  // The grain that the whole feature exists for: with a model chosen, a ticked
+  // row is one *attachment*, and the member must carry `model_backend_id`.
+  // Without it the pool holds the whole model and balances across every
+  // provider serving it, which is the behaviour this replaced.
+  sent.length = 0;
+  await goto("pools");
+  {
+    await click(byText("Create pool"));
+    const modelSel = $("select").find((el) =>
+      [...el.options].some((o) => o.value === "local-qwen"),
+    );
+    if (modelSel) {
+      await fill(modelSel, "local-qwen");
+      const rows = $("input").filter((i) => i.type === "checkbox");
+      for (const row of rows) await click(row);
+      const nameBox = $("input").find(
+        (i) => i.placeholder === "pick members to generate a name",
+      );
+      check(
+        "the generated name names the model once, not once per provider",
+        !/local-qwen-local-qwen/.test(nameBox?.value || ""),
+        `name was ${JSON.stringify(nameBox?.value)}`,
+      );
+      await click(byText("Save"));
+      const members = sent.filter(
+        (r) => r.method === "POST" && /\/members$/.test(r.path),
+      );
+      check(
+        "one member per provider of that model",
+        members.length === 2,
+        `sent ${members.length}`,
+      );
+      check(
+        "each names the attachment it routes to",
+        members.every((m) => !!m.body.model_backend_id) &&
+          new Set(members.map((m) => m.body.model_backend_id)).size === 2,
+        `sent ${JSON.stringify(members.map((m) => m.body))}`,
+      );
+      check(
+        "and they all belong to the chosen model",
+        new Set(members.map((m) => m.body.provider_model_id)).size === 1,
+        `sent ${JSON.stringify(members.map((m) => m.body.provider_model_id))}`,
       );
     }
   }

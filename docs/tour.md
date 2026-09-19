@@ -42,16 +42,28 @@ Folded from `usage_events`, one row per request. A model with no price
 contributes nothing to spend and is counted as _unpriced_ rather than as zero,
 so a spend figure never quietly understates.
 
-## Model pools — several models, one policy
+## Model pools — several targets, one policy
 
 ![The Model pools screen: a named pool of provider models with the policy that chooses between them](images/ui-pools.png)
 
-A pool is a named group of provider models plus the policy that picks between
-them — least-loaded, fastest, prefix-affinity, or a weighted split. It exists so
-the same model on two hosts, or two different models that serve the same
-purpose, can be pointed at as one target. Frontend model rules choose a pool the
-same way they choose a single model, and the same model can sit in several pools
-under different policies.
+A pool is a named group plus the policy that picks between its members —
+least-loaded, fastest, prefix-affinity, or a weighted split. Frontend model
+rules choose a pool the same way they choose a single model.
+
+Members come at one of two grains, and the picker decides which by whether a
+model is chosen:
+
+- **Providers of one model.** Choose a model and its attachments are listed one
+  row per provider, so a pool can balance across two of the three machines
+  serving it and leave the third alone. Such a pool is published as a routable
+  model of its own carrying exactly those attachments, which is what lets the
+  subset mean anything — the model itself still carries every provider, so
+  everything else routing through it is unaffected.
+- **Whole models.** Leave the model on "all models" and the members are models,
+  each bringing every provider serving it. This is the pool that fails over
+  between _different_ models that serve the same purpose.
+
+The same model can sit in several pools under different policies.
 
 Cheapest is deliberately not a policy here: choosing on price is a routing
 decision made before a target is picked, not a way of balancing within one.
@@ -92,7 +104,7 @@ it at. It is not a skeleton key: naming a provider model directly still needs a
 grant on that model.
 
 This reversed a rule that required a grant on the resolved provider model. That
-rule pinned every grant to a provider model's *name*, so renaming one revoked
+rule pinned every grant to a provider model's _name_, so renaming one revoked
 access with nothing reporting it — see
 `.procoder/adr/0002-authorisation-moves-to-the-frontend-model.md`.
 
@@ -125,8 +137,8 @@ replica on an older snapshot answers
 it has never seen — so the snapshot version per replica is the thing to look at
 when one replica behaves differently from the others.
 
-The screen distinguishes a replica that is *catching up* from one that is
-*stuck*, and does it by the age of the newest snapshot rather than by the gap
+The screen distinguishes a replica that is _catching up_ from one that is
+_stuck_, and does it by the age of the newest snapshot rather than by the gap
 between version numbers — versions are stamped when the configuration last
 changed, so the gap measures the control plane's edit history, not any
 replica's health. Polling and reporting are on separate timers, so lagging

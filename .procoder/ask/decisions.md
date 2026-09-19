@@ -232,3 +232,49 @@ Options:
 still runs the suite on every commit and `publish` needs it, so nothing goes
 unverified; a hand-built image is the only thing that loses the check, and the
 comment there says so. The sysctl is left alone.
+
+## Pool members should be backends of one model, not the model
+
+The MEMBERS list shows one row per model (`qwen3-6-35b-a3b-nvfp4`, with its two
+providers printed as a label). It should show one row per backend —
+`…245:8000` and `…246:8000` as separately tickable — so a pool balances across
+a chosen subset of one model's providers.
+
+A member is a `provider_model_id` today, and the routing chain is model names
+end to end: `expand_pool` returns `Vec<String>`, and the registry keys its
+pools by model name. Nothing downstream can name a single backend, so this is
+not a UI change.
+
+What it takes, and it is all of these or none:
+
+- a migration adding `model_backend_id` to `model_pool_members`, and a
+  uniqueness rule that allows the same model twice with different backends;
+- the admin API accepting a backend on the member;
+- `build_snapshot` emitting the pool as its own `ModelDef` carrying exactly the
+  ticked backends and the pool's policy, so the registry balances within it;
+- `expand_pool` returning the pool's own name for such a pool;
+- the UI listing backends once a model is chosen.
+
+Checked and clear: `/v1/models` lists frontend models only, and authorisation
+is on the client-facing name, so a pool-scoped `ModelDef` leaks into neither.
+
+Two consequences worth deciding on rather than discovering:
+
+- usage rows would attribute to the pool name rather than the provider model,
+  because that is what served the request;
+- pools of _different_ models (failover between `qwen3.5-9b` and
+  `qwen3-8-27b`) and pools of _one model's backends_ become two behaviours in
+  one table. They can coexist — a member with a backend means the new one — but
+  it is two things to hold in your head.
+
+Options:
+
+- **Build it.** The five pieces above, with tests at each layer.
+- **Show the backends, keep the member a model.** After picking a model, list
+  its backends read-only so it is visible what the policy will balance across.
+  No schema change, and it matches what routing can express today — but you
+  cannot exclude one provider.
+- **Leave it.** Pools stay model-level; provider balancing is the model's own
+  policy, which `6ea7f29` made work.
+
+**Decided:** build it. Members become backends of one model.
