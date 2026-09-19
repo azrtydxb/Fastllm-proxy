@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
 import { attempt, useLoader } from "../load.js";
 import {
@@ -43,13 +43,47 @@ const POLICIES = [
   ["round-robin", "round robin — strict rotation"],
 ];
 
+// Remove button for pool members.
+function RemoveMember({ onDelete }) {
+  return (
+    <button
+      type="button"
+      onClick={onDelete}
+      style={{
+        background: "none",
+        border: "none",
+        color: "var(--warn-fg)",
+        fontSize: "14px",
+        cursor: "pointer",
+        padding: 0,
+        lineHeight: 1,
+      }}
+    >
+      ×
+    </button>
+  );
+}
+
+// Handler to remove a pool member by id.
+function makeRemoveHandler(run, memberId) {
+  return () =>
+    api.del(`/admin/model-pool-members/${memberId}`).then(() => run());
+}
+
 // Where a model actually runs, for the picker and the member chips. A name on
 // its own does not say: `bge-m3` is one model on two Sparks, and an operator
-// choosing a pool member needs to see which machines they are pulling in.
+// choosing a pool member needs to see which machine they are pulling in.
 function where(model) {
   if (!model || model.backends.length === 0)
     return "no provider — not routable";
   return model.backends.map((b) => b.provider_name).join(", ");
+}
+
+// Provider name from a model row: the first backend's provider, shown once
+// for compact labels (not "245, 246" which is what `where` does).
+function providerLabel(model) {
+  if (!model || model.backends.length === 0) return "—";
+  return model.backends[0].provider_name;
 }
 
 export function ModelPools({ onUnauthorised }) {
@@ -80,7 +114,7 @@ export function ModelPools({ onUnauthorised }) {
       <NewPool
         models={data.models}
         taken={new Set(data.pools.map((p) => p.name))}
-        onCreate={async (name, policy, memberIds) => {
+        onCreate={async (name, policy, modelFilter, memberIds) => {
           const ok = await attempt(
             async () => {
               const pool = await api.post("/admin/model-pools", {
@@ -118,7 +152,16 @@ export function ModelPools({ onUnauthorised }) {
 
       {data.pools.map((p) => {
         const inPool = new Set(p.members.map((m) => m.provider_model_id));
-        const available = data.models.filter((m) => !inPool.has(m.id));
+        // All members must be the same model name; derive it from the first.
+        const firstMember = data.models.find(
+          (m) => m.id === p.members[0]?.provider_model_id,
+        );
+        const memberModelName = firstMember?.name ?? "";
+        const available = data.models.filter(
+          (m) =>
+            !inPool.has(m.id) &&
+            (!memberModelName || m.name === memberModelName),
+        );
         return (
           <Card key={p.id} style={{ padding: 0 }}>
             <Row
@@ -197,7 +240,7 @@ export function ModelPools({ onUnauthorised }) {
                     </Mono>
                     {/* Which machines this member brings with it. A model can
                         be served by several providers, and the pool is
-                        choosing between models — that second level is the
+                        choosing between providers — that second level is the
                         model's own policy, set on Provider models. */}
                     <Muted style={{ font: "400 10px var(--mono)" }}>
                       {where(
@@ -209,14 +252,7 @@ export function ModelPools({ onUnauthorised }) {
                     <Muted style={{ font: "400 10px var(--mono)" }}>
                       w{m.weight}
                     </Muted>
-                    <Button
-                      variant="small"
-                      onClick={() =>
-                        run(() => api.del(`/admin/model-pool-members/${m.id}`))
-                      }
-                    >
-                      ×
-                    </Button>
+                    <RemoveMember onDelete={makeRemoveHandler(run, m.id)} />
                   </div>
                 ))}
               </Row>
@@ -229,10 +265,14 @@ export function ModelPools({ onUnauthorised }) {
                       setAdding({ ...adding, [p.id]: e.target.value })
                     }
                   >
-                    <option value="">provider model…</option>
+                    <option value="">
+                      {memberModelName
+                        ? "add provider… (same model)"
+                        : "provider model…"}
+                    </option>
                     {available.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.name} · {where(m)}
+                        {m.name} · {providerLabel(m)}
                       </option>
                     ))}
                   </select>
@@ -262,17 +302,14 @@ export function ModelPools({ onUnauthorised }) {
                   </Button>
                 </div>
               </Row>
-              {/* The question this screen kept raising: one model served by
-                  two machines looks like two things, and adding it looks like
-                  adding one. Both are true, at different levels. */}
-              <div style={{ marginTop: 8 }}>
-                <Muted>
-                  A member is a <b>model</b>, and brings every provider serving
-                  it. This pool chooses between members; which provider serves a
-                  given member is that model&rsquo;s own load balancing, set on
-                  Provider&nbsp;models.
-                </Muted>
-              </div>
+              {memberModelName && (
+                <div style={{ marginTop: 8 }}>
+                  <Muted>
+                    This pool is for <b>{memberModelName}</b> — members must be
+                    providers of the same model.
+                  </Muted>
+                </div>
+              )}
             </div>
           </Card>
         );
@@ -294,10 +331,21 @@ function NewPool({ models, taken, onCreate }) {
   const [picked, setPicked] = useState([]);
   const [policy, setPolicy] = useState("");
   const [name, setName] = useState("");
+  // Filter providers to a single model: first pick a model, then only its
+  // providers are shown as members.
+  const [modelFilter, setModelFilter] = useState("");
   // Once the name is typed in, it stops following the selection: a generated
   // value that overwrote what somebody wrote would be a data-loss bug wearing
   // a convenience hat.
   const [edited, setEdited] = useState(false);
+
+  // Unique model names that have at least one provider with backends.
+  const modelNames = [...new Set(models.map((m) => m.name))];
+
+  // Providers of the current filter (or all, if no filter).
+  const filteredModels = modelFilter
+    ? models.filter((m) => m.name === modelFilter)
+    : [];
 
   const suggest = (ids, pol) => {
     if (ids.length === 0) return "";
@@ -332,8 +380,8 @@ function NewPool({ models, taken, onCreate }) {
             Create pool
           </Button>
           <Muted>
-            Several provider models chosen between by one policy. Point a rule
-            at it instead of listing the models.
+            Several providers for one model chosen between by one policy. Point
+            a rule at it instead of listing the models.
           </Muted>
         </Row>
       </Card>
@@ -344,11 +392,35 @@ function NewPool({ models, taken, onCreate }) {
     <Card title="New pool" tone="accent">
       <Stack gap={12}>
         <Field
-          label="MEMBERS"
-          hint="tick every model this pool may serve — the order you tick them is the order it falls back through"
+          label="MODEL"
+          hint="pools choose between providers of one model — pick the model first"
         >
+          <select
+            value={modelFilter}
+            onChange={(e) => {
+              setModelFilter(e.target.value);
+              setPicked([]);
+              retitle([], policy);
+            }}
+          >
+            <option value="">select a model…</option>
+            {modelNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field
+          label="PROVIDERS"
+          hint="tick every provider of this model to pool between them — the tick order is the failover order"
+        >
+          {filteredModels.length === 0 && (
+            <Muted>select a model to see its providers</Muted>
+          )}
           <Stack gap={4}>
-            {models.map((m) => (
+            {filteredModels.map((m) => (
               <label
                 key={m.id}
                 style={{
@@ -421,7 +493,12 @@ function NewPool({ models, taken, onCreate }) {
             variant="primary"
             disabled={picked.length === 0 || !name.trim() || clash}
             onClick={async () => {
-              const ok = await onCreate(name.trim(), policy, picked);
+              const ok = await onCreate(
+                name.trim(),
+                policy,
+                modelFilter,
+                picked,
+              );
               if (ok) {
                 setOpen(false);
                 setPicked([]);
@@ -433,11 +510,22 @@ function NewPool({ models, taken, onCreate }) {
           >
             Save
           </Button>
-          <Button onClick={() => setOpen(false)}>cancel</Button>
+          <Button
+            onClick={() => {
+              setOpen(false);
+              setPicked([]);
+              setPolicy("");
+              setName("");
+              setModelFilter("");
+              setEdited(false);
+            }}
+          >
+            cancel
+          </Button>
           <Muted>
             {picked.length === 0
-              ? "no members yet — a pool with none routes nowhere"
-              : `${picked.length} member${picked.length === 1 ? "" : "s"}`}
+              ? "no providers yet — a pool with none routes nowhere"
+              : `${picked.length} provider${picked.length === 1 ? "" : "s"}`}
           </Muted>
         </Row>
       </Stack>
