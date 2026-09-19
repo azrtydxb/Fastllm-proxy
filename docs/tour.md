@@ -42,31 +42,29 @@ Folded from `usage_events`, one row per request. A model with no price
 contributes nothing to spend and is counted as _unpriced_ rather than as zero,
 so a spend figure never quietly understates.
 
-## Model pools — several targets, one policy
+## Model pools — one model, the providers you choose
 
 ![The Model pools screen: a named pool of provider models with the policy that chooses between them](images/ui-pools.png)
 
-A pool is a named group plus the policy that picks between its members —
-least-loaded, fastest, prefix-affinity, or a weighted split. Frontend model
-rules choose a pool the same way they choose a single model.
+A pool is one model, a chosen subset of the providers serving it, and the
+policy that picks between them per request — least-loaded, fastest,
+prefix-affinity, or a weighted split. Choose the model first and its providers
+are listed one row each, so a pool can balance across two of the three machines
+serving a model and leave the third alone.
 
-Members come at one of two grains, and the picker decides which by whether a
-model is chosen:
+Such a pool is published as a routable model of its own, carrying exactly the
+ticked attachments and the pool's policy. That is what makes the subset mean
+anything at dispatch, and it leaves the model itself untouched: it still
+carries every provider, so everything else routing through it is unaffected.
 
-- **Providers of one model.** Choose a model and its attachments are listed one
-  row per provider, so a pool can balance across two of the three machines
-  serving it and leave the third alone. Such a pool is published as a routable
-  model of its own carrying exactly those attachments, which is what lets the
-  subset mean anything — the model itself still carries every provider, so
-  everything else routing through it is unaffected.
-- **Whole models.** Leave the model on "all models" and the members are models,
-  each bringing every provider serving it. This is the pool that fails over
-  between _different_ models that serve the same purpose.
-
-The same model can sit in several pools under different policies.
+Frontend model rules choose a pool the same way they choose a single model, and
+the same model can sit in several pools under different policies.
 
 Cheapest is deliberately not a policy here: choosing on price is a routing
 decision made before a target is picked, not a way of balancing within one.
+
+Usage rows for a pool record the pool's name as the model, because the pool is
+what served the request; the exact backend is on the row either way.
 
 ## Frontend models — one name, many targets
 

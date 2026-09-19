@@ -16,6 +16,7 @@ import {
   ShortId,
   Spacer,
   Stack,
+  hostOf,
 } from "../ui.jsx";
 
 // A pool is a named group of provider models and one policy for choosing
@@ -77,13 +78,6 @@ function where(model) {
   if (!model || model.backends.length === 0)
     return "no provider — not routable";
   return model.backends.map((b) => b.provider_name).join(", ");
-}
-
-// Provider name from a model row: the first backend's provider, shown once
-// for compact labels (not "245, 246" which is what `where` does).
-function providerLabel(model) {
-  if (!model || model.backends.length === 0) return "—";
-  return model.backends[0].provider_name;
 }
 
 export function ModelPools({ onUnauthorised }) {
@@ -157,12 +151,28 @@ export function ModelPools({ onUnauthorised }) {
       )}
 
       {data.pools.map((p) => {
-        const inPool = new Set(p.members.map((m) => m.provider_model_id));
-        // Anything not already a member. Filtering to the first member's own
-        // name emptied this list permanently: since migration 0045 a model is
-        // one row carrying every provider that serves it, so the only row with
-        // that name is the member itself and no pool could ever gain a second.
-        const available = data.models.filter((m) => !inPool.has(m.id));
+        // A pool balances across providers of one model, so what it can gain
+        // is the attachments of that model it does not already hold.
+        //
+        // An empty pool is the exception and offers every provider of every
+        // model: with no member there is no model to narrow by, and a pool
+        // that had lost its last member must not become impossible to refill —
+        // which is precisely the trap the previous same-name filter fell into.
+        const heldBackends = new Set(
+          p.members.map((m) => m.model_backend_id).filter(Boolean),
+        );
+        const poolModel = data.models.find(
+          (x) => x.id === p.members[0]?.provider_model_id,
+        );
+        const available = (poolModel ? [poolModel] : data.models).flatMap((m) =>
+          (m.backends || [])
+            .filter((b) => !heldBackends.has(b.id))
+            .map((b) => ({
+              id: b.id,
+              provider_model_id: m.id,
+              label: `${m.name} · ${b.provider_name || b.api_base}`,
+            })),
+        );
         return (
           <Card key={p.id} style={{ padding: 0 }}>
             <Row
@@ -239,14 +249,18 @@ export function ModelPools({ onUnauthorised }) {
                     <Mono style={{ font: "400 12px var(--mono)" }}>
                       {m.model}
                     </Mono>
-                    {/* Which machines this member brings with it. A model can
-                        be served by several providers, and the pool is
-                        choosing between providers — that second level is the
-                        model's own policy, set on Provider models. */}
+                    {/* The one machine this member routes to. A member that
+                        names no attachment predates that being possible and
+                        still carries every provider serving its model, so it
+                        says so rather than showing a blank. */}
                     <Muted style={{ font: "400 10px var(--mono)" }}>
-                      {where(
-                        data.models.find((x) => x.id === m.provider_model_id),
-                      )}
+                      {m.api_base
+                        ? hostOf(m.api_base)
+                        : where(
+                            data.models.find(
+                              (x) => x.id === m.provider_model_id,
+                            ),
+                          )}
                     </Muted>
                     {/* Weight only bites on the weighted split; the other
                         policies read load, latency or price instead. */}
@@ -266,10 +280,10 @@ export function ModelPools({ onUnauthorised }) {
                       setAdding({ ...adding, [p.id]: e.target.value })
                     }
                   >
-                    <option value="">provider model…</option>
-                    {available.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} · {providerLabel(m)}
+                    <option value="">provider…</option>
+                    {available.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
                       </option>
                     ))}
                   </select>
@@ -282,7 +296,10 @@ export function ModelPools({ onUnauthorised }) {
                       const ok = await attempt(
                         () =>
                           api.post(`/admin/model-pools/${p.id}/members`, {
-                            provider_model_id: adding[p.id],
+                            provider_model_id: available.find(
+                              (a) => a.id === adding[p.id],
+                            )?.provider_model_id,
+                            model_backend_id: adding[p.id],
                             weight: 100,
                             position: p.members.length,
                           }),
@@ -338,37 +355,22 @@ function NewPool({ models, taken, onCreate }) {
   // Unique model names that have at least one provider with backends.
   const modelNames = [...new Set(models.map((m) => m.name))];
 
-  // What is tickable depends on the grain the pool is being built at.
-  //
-  // With a model chosen, the members are that model's *attachments* — one row
-  // per provider serving it — because balancing across a chosen subset of them
-  // is what a pool is for. Listing the model itself here was the bug: its
-  // providers were a label on a single row, so there was exactly one thing to
-  // tick and the pool had nothing to choose between.
-  //
-  // With no model chosen, the members are whole models, which is the other
-  // kind of pool: failover between different models, each bringing every
-  // provider serving it.
-  const chosen = modelFilter
-    ? models.filter((m) => m.name === modelFilter)
-    : [];
-  const options = modelFilter
-    ? chosen.flatMap((m) =>
-        (m.backends || []).map((b) => ({
-          key: b.id,
-          provider_model_id: m.id,
-          model_backend_id: b.id,
-          label: m.name,
-          where: b.provider_name || b.api_base,
-        })),
-      )
-    : models.map((m) => ({
-        key: m.id,
+  // A pool is always one model and a chosen subset of the providers serving
+  // it: that is what it balances across. So the model comes first and there is
+  // nothing to tick until one is picked — offering whole models here produced
+  // a list whose rows carried their providers as a label, which is exactly the
+  // shape that made a pool unable to choose between anything.
+  const options = models
+    .filter((m) => m.name === modelFilter)
+    .flatMap((m) =>
+      (m.backends || []).map((b) => ({
+        key: b.id,
         provider_model_id: m.id,
-        model_backend_id: null,
+        model_backend_id: b.id,
         label: m.name,
-        where: where(m),
-      }));
+        where: b.provider_name || b.api_base,
+      })),
+    );
 
   const suggest = (chosenOpts, pol) => {
     if (chosenOpts.length === 0) return "";
@@ -416,13 +418,13 @@ function NewPool({ models, taken, onCreate }) {
       <Stack gap={12}>
         <Field
           label="MODEL"
-          hint="optional — narrows the list below to one model first"
+          hint="the pool balances across this model's providers"
         >
           <select
             value={modelFilter}
             onChange={(e) => setModelFilter(e.target.value)}
           >
-            <option value="">all models</option>
+            <option value="">select a model…</option>
             {modelNames.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -433,13 +435,13 @@ function NewPool({ models, taken, onCreate }) {
 
         <Field
           label="MEMBERS"
-          hint="pick a model above to balance across its providers; leave it on “all models” to build a pool that fails over between different models. The tick order is the failover order."
+          hint="tick the providers this pool balances across — the tick order is the failover order"
         >
           {options.length === 0 && (
             <Muted>
               {modelFilter
                 ? "that model has no provider attached — nothing to balance across"
-                : "no provider model is routable yet"}
+                : "select a model above to see its providers"}
             </Muted>
           )}
           <Stack gap={4}>
@@ -549,8 +551,8 @@ function NewPool({ models, taken, onCreate }) {
           </Button>
           <Muted>
             {picked.length === 0
-              ? "nothing ticked yet — a pool with no members routes nowhere"
-              : `${picked.length} ${modelFilter ? "provider" : "model"}${picked.length === 1 ? "" : "s"}`}
+              ? "no provider ticked — a pool with no members routes nowhere"
+              : `${picked.length} provider${picked.length === 1 ? "" : "s"}`}
           </Muted>
         </Row>
       </Stack>

@@ -501,143 +501,110 @@ await goto("models");
   await goto("pools");
   {
     await click(byText("Create pool"));
-    const boxes = $("input").filter((i) => i.type === "checkbox");
+    // A pool is one model and a subset of the providers serving it, so there
+    // is nothing to tick until a model is chosen. Offering whole models here
+    // was the bug: each row carried its providers as a label, so a pool could
+    // hold one row and had nothing to choose between.
     check(
-      "members are a multi-select",
-      boxes.length > 1,
-      `found ${boxes.length}`,
+      "no members offered before a model is chosen",
+      $("input").filter((i) => i.type === "checkbox").length === 0,
     );
-    // Choosing a model switches the grain: the members become that model's
-    // *attachments*, one row per provider serving it. Listing the model itself
-    // was the bug -- its providers were a label on a single row, so there was
-    // one thing to tick and the pool had nothing to choose between.
-    // `local-qwen` is on two providers in the fixtures.
     const modelSel = $("select").find((el) =>
       [...el.options].some((o) => o.value === "local-qwen"),
     );
-    check("a model can be chosen", !!modelSel);
-    if (modelSel) {
-      await fill(modelSel, "local-qwen");
-      const perBackend = $("input").filter((i) => i.type === "checkbox");
-      check(
-        "choosing a model offers its providers, one row each",
-        perBackend.length === 2,
-        `found ${perBackend.length}, expected the 2 providers of local-qwen`,
-      );
-      await fill(modelSel, "");
-      check(
-        "clearing it goes back to whole models",
-        $("input").filter((i) => i.type === "checkbox").length === boxes.length,
-      );
-    }
+    check("a model is chosen first", !!modelSel);
+    check(
+      "and there is no all-models escape hatch",
+      modelSel &&
+        ![...modelSel.options].some((o) => /all models/i.test(o.text)),
+    );
+    await fill(modelSel, "local-qwen");
+    const boxes = $("input").filter((i) => i.type === "checkbox");
+    check(
+      "choosing a model offers its providers, one row each",
+      boxes.length === 2,
+      `found ${boxes.length}, expected the 2 providers of local-qwen`,
+    );
+
     const nameOf = () =>
       $("input").find(
         (i) => i.placeholder === "pick members to generate a name",
       )?.value;
     check("no name before anything is picked", !nameOf());
-    // Re-queried: the filter above re-rendered the list, so the handles taken
-    // before it are detached and clicking them reaches nothing.
-    const freshBoxes = $("input").filter((i) => i.type === "checkbox");
-    if (freshBoxes.length) {
-      await click(freshBoxes[0]);
-      check(
-        "picking a member generates a name",
-        !!nameOf(),
-        `name was ${JSON.stringify(nameOf())}`,
-      );
-      const beforePolicy = nameOf();
-      const pol = $("select").find((el) =>
-        [...el.options].some((o) => o.value === "least-loaded"),
-      );
-      await fill(pol, "least-loaded");
-      check(
-        "and the policy is part of it",
-        nameOf() !== beforePolicy && /leastloaded/.test(nameOf() || ""),
-        `name was ${JSON.stringify(nameOf())}`,
-      );
-      // Typing must stop the generator: overwriting what somebody wrote would
-      // be data loss dressed as a convenience.
-      const box = $("input").find(
-        (i) => i.placeholder === "pick members to generate a name",
-      );
-      await fill(box, "my-own-name");
-      await click($("input").filter((i) => i.type === "checkbox")[1]);
-      check(
-        "an edited name stops following the selection",
-        nameOf() === "my-own-name",
-        `name was ${JSON.stringify(nameOf())}`,
-      );
-      await click(byText("Save"));
-      // The member POSTs share this prefix, so match the creation exactly --
-      // `lastCall` would otherwise hand back the last member instead.
-      const call = [...sent]
-        .reverse()
-        .find(
-          (r) => r.method === "POST" && r.path.endsWith("/admin/model-pools"),
-        );
-      check(
-        "save sends the name and policy",
-        call?.body?.name === "my-own-name" &&
-          call?.body?.policy === "least-loaded",
-        `sent ${JSON.stringify(call?.body)}`,
-      );
-      const members = sent.filter(
-        (r) => r.method === "POST" && /\/members$/.test(r.path),
-      );
-      check(
-        "and one member POST per ticked member, in the order ticked",
-        members.length === 2 &&
-          members[0].body.position === 0 &&
-          members[1].body.position === 1,
-        `sent ${JSON.stringify(members.map((m) => m.body))}`,
-      );
-    }
-  }
-
-  // The grain that the whole feature exists for: with a model chosen, a ticked
-  // row is one *attachment*, and the member must carry `model_backend_id`.
-  // Without it the pool holds the whole model and balances across every
-  // provider serving it, which is the behaviour this replaced.
-  sent.length = 0;
-  await goto("pools");
-  {
-    await click(byText("Create pool"));
-    const modelSel = $("select").find((el) =>
-      [...el.options].some((o) => o.value === "local-qwen"),
+    await click(boxes[0]);
+    check(
+      "picking a provider generates a name",
+      !!nameOf(),
+      `name was ${JSON.stringify(nameOf())}`,
     );
-    if (modelSel) {
-      await fill(modelSel, "local-qwen");
-      const rows = $("input").filter((i) => i.type === "checkbox");
-      for (const row of rows) await click(row);
-      const nameBox = $("input").find(
+    check(
+      "which names the model once, not once per provider",
+      !/local-qwen-local-qwen/.test(nameOf() || ""),
+      `name was ${JSON.stringify(nameOf())}`,
+    );
+    const beforePolicy = nameOf();
+    const pol = $("select").find((el) =>
+      [...el.options].some((o) => o.value === "least-loaded"),
+    );
+    await fill(pol, "least-loaded");
+    check(
+      "and the policy is part of it",
+      nameOf() !== beforePolicy && /leastloaded/.test(nameOf() || ""),
+      `name was ${JSON.stringify(nameOf())}`,
+    );
+    // Typing must stop the generator: overwriting what somebody wrote would
+    // be data loss dressed as a convenience.
+    await fill(
+      $("input").find(
         (i) => i.placeholder === "pick members to generate a name",
+      ),
+      "my-own-name",
+    );
+    await click($("input").filter((i) => i.type === "checkbox")[1]);
+    check(
+      "an edited name stops following the selection",
+      nameOf() === "my-own-name",
+      `name was ${JSON.stringify(nameOf())}`,
+    );
+
+    await click(byText("Save"));
+    // The member POSTs share this prefix, so match the creation exactly --
+    // `lastCall` would otherwise hand back the last member instead.
+    const call = [...sent]
+      .reverse()
+      .find(
+        (r) => r.method === "POST" && r.path.endsWith("/admin/model-pools"),
       );
-      check(
-        "the generated name names the model once, not once per provider",
-        !/local-qwen-local-qwen/.test(nameBox?.value || ""),
-        `name was ${JSON.stringify(nameBox?.value)}`,
-      );
-      await click(byText("Save"));
-      const members = sent.filter(
-        (r) => r.method === "POST" && /\/members$/.test(r.path),
-      );
-      check(
-        "one member per provider of that model",
-        members.length === 2,
-        `sent ${members.length}`,
-      );
-      check(
-        "each names the attachment it routes to",
-        members.every((m) => !!m.body.model_backend_id) &&
-          new Set(members.map((m) => m.body.model_backend_id)).size === 2,
-        `sent ${JSON.stringify(members.map((m) => m.body))}`,
-      );
-      check(
-        "and they all belong to the chosen model",
-        new Set(members.map((m) => m.body.provider_model_id)).size === 1,
-        `sent ${JSON.stringify(members.map((m) => m.body.provider_model_id))}`,
-      );
-    }
+    check(
+      "save sends the name and policy",
+      call?.body?.name === "my-own-name" &&
+        call?.body?.policy === "least-loaded",
+      `sent ${JSON.stringify(call?.body)}`,
+    );
+    const members = sent.filter(
+      (r) => r.method === "POST" && /\/members$/.test(r.path),
+    );
+    check(
+      "one member POST per ticked provider, in the order ticked",
+      members.length === 2 &&
+        members[0].body.position === 0 &&
+        members[1].body.position === 1,
+      `sent ${JSON.stringify(members.map((m) => m.body))}`,
+    );
+    // The whole point: a member names the attachment it routes to. Without
+    // this the pool holds the model and balances across every provider
+    // serving it, which is the behaviour this replaced.
+    check(
+      "each member names the attachment it routes to",
+      members.every((m) => !!m.body.model_backend_id) &&
+        new Set(members.map((m) => m.body.model_backend_id)).size === 2,
+      `sent ${JSON.stringify(members.map((m) => m.body))}`,
+    );
+    check(
+      "and they all belong to the chosen model",
+      new Set(members.map((m) => m.body.provider_model_id)).size === 1,
+      `sent ${JSON.stringify(members.map((m) => m.body.provider_model_id))}`,
+    );
   }
 
   // API keys hide revoked ones by default: a revoked key cannot authenticate
