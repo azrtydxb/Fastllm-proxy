@@ -228,4 +228,7 @@ Options:
   builds on those nodes stop being fragile too.
 - **Leave it.** Re-running the job clears it when it happens.
 
-**Decided:** pending.
+**Decided:** drop `RUN npm test` from the Dockerfile (`ed15a5d`). CI's `ui` job
+still runs the suite on every commit and `publish` needs it, so nothing goes
+unverified; a hand-built image is the only thing that loses the check, and the
+comment there says so. The sysctl is left alone.
