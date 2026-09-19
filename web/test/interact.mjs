@@ -507,6 +507,22 @@ await goto("models");
       boxes.length > 1,
       `found ${boxes.length}`,
     );
+    // The model dropdown narrows the list; it must never restrict it. Filtering
+    // it down to a single name capped every pool at one member, because a model
+    // is one row carrying all of its providers -- so the one row with that name
+    // was the only thing tickable, and a one-member pool balances nothing.
+    const modelSel = $("select").find((el) =>
+      [...el.options].some((o) => o.value === "local-qwen"),
+    );
+    if (modelSel) {
+      await fill(modelSel, "local-qwen");
+      check(
+        "narrowing to one model still offers the others",
+        $("input").filter((i) => i.type === "checkbox").length === boxes.length,
+        `found ${$("input").filter((i) => i.type === "checkbox").length} of ${boxes.length}`,
+      );
+      await fill(modelSel, "");
+    }
     const nameOf = () =>
       $("input").find(
         (i) => i.placeholder === "pick members to generate a name",

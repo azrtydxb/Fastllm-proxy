@@ -135,3 +135,38 @@ Options:
 - **Defer #19 and #20.** #21 and #18 are done and can be committed separately; #19 requires engine-scrape integration and #20 requires DB migration plus admin API changes, both larger undertakings.
 
 **Decided:** fix all four before committing sprint changes.
+
+## The pool member picker now caps every pool at one member
+
+`3a3b0c2` scoped pool members to "providers of the pool's model". But a pool
+member is a `provider_model_id`, and since migration 0045 one model is one row
+carrying many backends. So:
+
+- **Create form:** pick a model, and exactly one checkbox appears (verified —
+  the interaction harness reports `found 1` and posts a single
+  `provider_model_id`).
+- **Existing pool:** `available` filters to models whose name matches the
+  current member, and that single row is already `inPool` — so the add-member
+  list is empty forever.
+
+A one-member pool has nothing to choose between, so pools are currently inert.
+The field's own hint ("tick every provider of this model to pool between them")
+describes behaviour the schema cannot express: there is no way to name a single
+provider as a member.
+
+`6ea7f29` (pool policies reaching `Router::pick`) is sound and passes against
+real Postgres — that one is worth deploying either way.
+
+Options:
+
+- **Revert the picker to multi-model, deploy the rest.** Restores pools that
+  choose between models, which is what the schema supports and what the docs
+  describe. Provider-level balancing within a model stays the model's own
+  policy, which `6ea7f29` has just made work.
+- **Make members provider-level for real.** A migration so a member can name a
+  backend, plus API and UI. Matches the new hint text, but it is a schema
+  change and a bigger piece of work.
+- **Deploy as-is.** The pool-policy fix lands; pools stay single-member and
+  inert until the picker is revisited.
+
+**Decided:** pending.

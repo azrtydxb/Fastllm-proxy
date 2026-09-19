@@ -634,6 +634,71 @@ model_list:
     }
 
     #[test]
+    fn least_loaded_distributes_when_backends_have_different_inflight() {
+        use crate::registry::InflightGuard;
+
+        let pool = two_node_pool();
+        let r = router(Policy::LeastLoaded);
+
+        // Both at zero — picks one (whichever).
+        let first = r.pick(&pool, 0, &[]).unwrap();
+        let second = if pool[0].uid == first.uid {
+            pool[1].clone()
+        } else {
+            pool[0].clone()
+        };
+
+        // Pile 5 requests on the chosen backend.
+        let _guards: Vec<_> = (0..5)
+            .map(|_| InflightGuard::acquire(Arc::clone(&first)))
+            .collect();
+
+        // Now the other backend (inflight 0) should win every time.
+        for _ in 0..20 {
+            let picked = r.pick(&pool, 0, &[]).unwrap();
+            assert_eq!(
+                picked.uid, second.uid,
+                "least_loaded should pick the idle node: got {} (inflight 5), expected {} (inflight 0)",
+                picked.uid, second.uid
+            );
+        }
+    }
+
+    #[test]
+    fn least_loaded_sends_every_pick_to_the_idle_backend() {
+        use crate::registry::InflightGuard;
+
+        let pool = two_node_pool();
+        let r = router(Policy::LeastLoaded);
+
+        let a = pool[0].clone();
+        let b = pool[1].clone();
+
+        // Put 3 inflight on A.
+        let ga: Vec<_> = (0..3)
+            .map(|_| InflightGuard::acquire(Arc::clone(&a)))
+            .collect();
+
+        // 100 picks should all go to B (inflight 0) since it is strictly lighter.
+        let mut b_count = 0u32;
+        let mut a_count = 0u32;
+        for _ in 0..100 {
+            let picked = r.pick(&pool, 0, &[]).unwrap();
+            if picked.uid == b.uid {
+                b_count += 1;
+            } else {
+                a_count += 1;
+            }
+        }
+        drop(ga);
+        assert_eq!(
+            (b_count, a_count),
+            (100, 0),
+            "least_loaded sends every pick to the idle backend while A holds 3 in flight"
+        );
+    }
+
+    #[test]
     fn affinity_cache_detects_collisions() {
         let cache = AffinityCache::new(64);
         cache.put(0x1234_5678_9abc_def0, 7);

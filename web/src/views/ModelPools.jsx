@@ -152,16 +152,11 @@ export function ModelPools({ onUnauthorised }) {
 
       {data.pools.map((p) => {
         const inPool = new Set(p.members.map((m) => m.provider_model_id));
-        // All members must be the same model name; derive it from the first.
-        const firstMember = data.models.find(
-          (m) => m.id === p.members[0]?.provider_model_id,
-        );
-        const memberModelName = firstMember?.name ?? "";
-        const available = data.models.filter(
-          (m) =>
-            !inPool.has(m.id) &&
-            (!memberModelName || m.name === memberModelName),
-        );
+        // Anything not already a member. Filtering to the first member's own
+        // name emptied this list permanently: since migration 0045 a model is
+        // one row carrying every provider that serves it, so the only row with
+        // that name is the member itself and no pool could ever gain a second.
+        const available = data.models.filter((m) => !inPool.has(m.id));
         return (
           <Card key={p.id} style={{ padding: 0 }}>
             <Row
@@ -265,11 +260,7 @@ export function ModelPools({ onUnauthorised }) {
                       setAdding({ ...adding, [p.id]: e.target.value })
                     }
                   >
-                    <option value="">
-                      {memberModelName
-                        ? "add provider… (same model)"
-                        : "provider model…"}
-                    </option>
+                    <option value="">provider model…</option>
                     {available.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name} · {providerLabel(m)}
@@ -302,14 +293,13 @@ export function ModelPools({ onUnauthorised }) {
                   </Button>
                 </div>
               </Row>
-              {memberModelName && (
-                <div style={{ marginTop: 8 }}>
-                  <Muted>
-                    This pool is for <b>{memberModelName}</b> — members must be
-                    providers of the same model.
-                  </Muted>
-                </div>
-              )}
+              <div style={{ marginTop: 8 }}>
+                <Muted>
+                  A member is a <b>model</b>, and brings every provider serving
+                  it. This pool chooses between members; the providers within
+                  one member are balanced by this pool&rsquo;s own policy.
+                </Muted>
+              </div>
             </div>
           </Card>
         );
@@ -342,10 +332,16 @@ function NewPool({ models, taken, onCreate }) {
   // Unique model names that have at least one provider with backends.
   const modelNames = [...new Set(models.map((m) => m.name))];
 
-  // Providers of the current filter (or all, if no filter).
+  // Narrowing the list is a convenience, never a restriction: filtering it
+  // down to one name capped every pool at a single member, because a model is
+  // one row carrying all of its providers. With no filter, every model is
+  // offered; with one, its row is shown first and the rest stay reachable.
   const filteredModels = modelFilter
-    ? models.filter((m) => m.name === modelFilter)
-    : [];
+    ? [
+        ...models.filter((m) => m.name === modelFilter),
+        ...models.filter((m) => m.name !== modelFilter),
+      ]
+    : models;
 
   const suggest = (ids, pol) => {
     if (ids.length === 0) return "";
@@ -393,17 +389,13 @@ function NewPool({ models, taken, onCreate }) {
       <Stack gap={12}>
         <Field
           label="MODEL"
-          hint="pools choose between providers of one model — pick the model first"
+          hint="optional — narrows the list below to one model first"
         >
           <select
             value={modelFilter}
-            onChange={(e) => {
-              setModelFilter(e.target.value);
-              setPicked([]);
-              retitle([], policy);
-            }}
+            onChange={(e) => setModelFilter(e.target.value)}
           >
-            <option value="">select a model…</option>
+            <option value="">all models</option>
             {modelNames.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -413,11 +405,11 @@ function NewPool({ models, taken, onCreate }) {
         </Field>
 
         <Field
-          label="PROVIDERS"
-          hint="tick every provider of this model to pool between them — the tick order is the failover order"
+          label="MEMBERS"
+          hint="tick the models this pool chooses between — the tick order is the failover order. Each member brings every provider serving it, and the policy below balances across them."
         >
           {filteredModels.length === 0 && (
-            <Muted>select a model to see its providers</Muted>
+            <Muted>no provider model is routable yet</Muted>
           )}
           <Stack gap={4}>
             {filteredModels.map((m) => (
