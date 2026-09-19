@@ -31,7 +31,7 @@ source for _why_ anything is the way it is; this file is the summary.
   roles gain one. Renaming used to be impossible on purpose — three separate
   things recorded a model's name and every one of them would have broken.
   Targets now resolve by id and fall back to the recorded name, so a rename is
-  followed automatically while a *deleted* model still leaves a target naming
+  followed automatically while a _deleted_ model still leaves a target naming
   what it wants (migration 0036's reason for existing); `relink_targets` puts
   the id back when that model returns. Grants move in the same transaction as
   the rename, because a `model/<name>` left behind revokes everyone holding it
@@ -76,7 +76,7 @@ source for _why_ anything is the way it is; this file is the summary.
   comment claimed but could not provide.
 - **Fixed: a response from an upstream that hangs up was thrown away.**
   `Upstream::request` drives the connection itself, and treated the connection
-  finishing as "no response came" — but polling the connection is what *reads*
+  finishing as "no response came" — but polling the connection is what _reads_
   the response, so one delivered on the way out was discarded and reported as
   `upstream closed the connection before sending a response`. Any upstream
   answering `Connection: close` hit it, which is legal and happens under load.
@@ -145,7 +145,7 @@ source for _why_ anything is the way it is; this file is the summary.
   someone adding Groq — and the UI reads that from the catalogue instead of
   naming a vendor in a component.
 - **Providers can be added, edited and credentialled from the UI.** `POST
-  /admin/providers` and `PATCH /admin/providers/{id}`, and an **Add provider**
+/admin/providers` and `PATCH /admin/providers/{id}`, and an **Add provider**
   form on the Providers screen with two ways in: a cloud vendor picked from the
   catalogue, which fills in its base URL and the header it wants its key in, or
   a typed address for anything else. Before this a provider could only appear
@@ -193,7 +193,7 @@ source for _why_ anything is the way it is; this file is the summary.
   cache want `cache-affinity`, three hosted providers of differing speed want
   `lowest-latency`, and a flag can only be one of them. Each provider model may
   now carry its own (migration 0028, `policy` on `POST`/`PATCH
-  /admin/provider-models`, a control on the **Provider models** screen). Unset means the deployment
+/admin/provider-models`, a control on the **Provider models** screen). Unset means the deployment
   default, so an existing database behaves exactly as it did.
 - **The price sync can replace a price that is already set.** It never
   overwrote by design — a negotiated rate must not be replaced by a list
@@ -217,7 +217,7 @@ source for _why_ anything is the way it is; this file is the summary.
 - **Access is granted on frontend models.** A request naming one is authorised
   against it; naming a provider model directly still needs a grant on that
   model. The old rule required a grant on the resolved provider model, which
-  pinned every grant to a provider model's *name* — so renaming one revoked
+  pinned every grant to a provider model's _name_ — so renaming one revoked
   access silently, as migration 0029 demonstrated. A grant on a frontend model
   covers the chain it routes to, so adding a target extends the reach of
   everyone holding it; editing one requires `config:write`, which already
@@ -324,7 +324,7 @@ QEMU and `rustc` segfaulted before compiling anything.
   are pinned per agent rather than inferred, forwarded methods are a closed
   list, and `agent:invoke` is implied by neither `model:invoke` nor
   `mcp:invoke`. An **Agents** screen and `/admin/a2a-agents` CRUD. Translation
-  between 0.3 and 1.0 is deliberately not done — see docs/agents.md.
+  between 0.3 and 1.0 is deliberately not built — see docs/agents.md.
 - **Interactive API reference** on the docs site, rendering the same
   `openapi.json` the control plane serves at `/openapi.json`.
 

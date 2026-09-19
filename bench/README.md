@@ -1,12 +1,12 @@
 # bench
 
 Standalone measurement tools used to produce the performance numbers in the
-root `TODO.md`. Not part of the shipped product and not built by a plain
+root `backlog.md`. Not part of the shipped product and not built by a plain
 `cargo build`/`cargo test` at the workspace root (see `default-members` in the
 root `Cargo.toml`) — build or run them explicitly with `-p bench`.
 
 These are throwaway instruments, not tests: no unit tests of their own, and no
-assertions about pass/fail. Read the numbers, compare them to `TODO.md`,
+assertions about pass/fail. Read the numbers, compare them to `backlog.md`,
 re-measure before acting on anything there.
 
 ```
@@ -23,7 +23,7 @@ produces `target/release/{upstream,load,realbench,micro,proto,tcprelay}`.
   in a response (0 means a single non-streaming JSON reply); `PER_FRAME` packs
   that many SSE events into each HTTP body frame, holding total bytes constant
   while varying frame count — this is how the frames-per-response sweep in
-  `TODO.md` ("500 single-event frames → 77 MiB/s; 5 hundred-event frames →
+  `backlog.md` ("500 single-event frames → 77 MiB/s; 5 hundred-event frames →
   2918 MiB/s") was produced. `PORT` (default 8100) and `CLOSE_EVERY` (send
   `Connection: close` every Nth response, to exercise pool churn) round it
   out.
@@ -39,7 +39,7 @@ produces `target/release/{upstream,load,realbench,micro,proto,tcprelay}`.
   (`argv[1]` = URL, `KEY`/`MODEL` env vars), reporting time-to-first-token and
   inter-token gaps rather than throughput: what a proxy costs a single stream,
   not how hard the proxy can be pushed. This produced the "measured against
-  the real spark2 replica" numbers in `TODO.md`.
+  the real spark2 replica" numbers in `backlog.md`.
 
 - **`micro`** — in-process microbenchmarks of the proxy's fixed per-request
   work (URL formatting, header copy, `BodyPeek` JSON parse, prefix hash,
@@ -67,13 +67,13 @@ produces `target/release/{upstream,load,realbench,micro,proto,tcprelay}`.
   (`tokio::io::copy_bidirectional`, no HTTP parsing, no framing, no
   decisions). No proxy that speaks HTTP on this path can beat it, so it
   bounds what any byte-level-relay optimization could possibly be worth —
-  see "Byte-level relay after the response is committed" in `TODO.md`.
+  see "Byte-level relay after the response is committed" in `backlog.md`.
 
 ## Reproducing the headline numbers
 
 All tools default to `127.0.0.1` and are meant to run against each other on
 one machine. A typical session, reproducing the frames-per-response sweep and
-the proxy-vs-relay ceiling comparison from `TODO.md`:
+the proxy-vs-relay ceiling comparison from `backlog.md`:
 
 ```bash
 # Terminal 1: mock upstream, 500 SSE frames per response, one event per frame.

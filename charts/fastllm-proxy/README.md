@@ -50,4 +50,4 @@ gain.
 
 Note that the response cache is per process, so a repeated request only hits
 if it lands on the replica that served it before. That is deliberate — see
-`TODO.md` for why a shared cache was ruled out rather than deferred.
+`backlog.md` for why a shared cache was ruled out rather than deferred.

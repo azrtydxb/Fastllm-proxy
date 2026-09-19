@@ -242,7 +242,7 @@ cargo build --release
 | [Helm chart](charts/fastllm-proxy/)              | The same two Deployments, as values                                                                            |
 | [Kubernetes operator](operator/)                 | A `FastllmProxy` resource: ordered upgrades, secret rotation, and a first admin login, reconciled continuously |
 | [One real cluster's manifests](deploy/README.md) | Concrete values, applied continuously — a worked example, not a template                                       |
-| [TODO](TODO.md)                                  | What is deliberately not built, and why                                                                        |
+| [Backlog](backlog.md)                            | What is deliberately not built, and why                                                                        |
 
 ## Development
 

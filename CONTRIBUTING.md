@@ -63,7 +63,7 @@ Check each of these and update the ones your change touches:
   snapshot moves means the diagram is now wrong.
 - `docs/api.md`, `docs/operations.md` — routes and anything an operator does.
 - `deploy/README.md` and the manifests' comments.
-- `TODO.md` — mark work done; delete claims that stopped being true.
+- `backlog.md` — mark work done; delete claims that stopped being true.
 - The doc comment on any function whose contract you changed.
 
 A comment describing behaviour the code no longer has is worse than no comment:

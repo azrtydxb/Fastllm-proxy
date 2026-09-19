@@ -11,7 +11,7 @@ Check each of these and update the ones the change touches:
   component, a role, an endpoint that crosses a plane boundary, or alters how
   the snapshot moves, the diagram is now wrong and must be redrawn.
 - `deploy/README.md` and `deploy/*.yaml` comments — anything an operator does.
-- `TODO.md` — mark work done; delete claims that are no longer true.
+- `backlog.md` — mark work done; delete claims that are no longer true.
 - The doc comment on any function whose behaviour or contract you changed.
 
 A comment that describes behaviour the code no longer has is worse than no
