@@ -17,13 +17,21 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ ./
-# The screen and interaction checks run here rather than only in CI: this stage
-# is the one place the UI is guaranteed to be built before it is embedded, and
-# a screen that throws on mount — or a button that posts a body the handler
-# discards — would otherwise ship as something nobody noticed until an
-# operator opened it. Two RUNs, not one: which step failed is the diagnosis.
-# hadolint ignore=DL3059
-RUN npm test
+# The screen and interaction checks deliberately do *not* run here. They used
+# to, on the argument that this stage is the one place the UI is guaranteed to
+# be built before it is embedded — but CI's `ui` job runs the same `npm test`
+# on the same commit before `publish` is allowed to start, so this was a second
+# execution of a suite that had already passed.
+#
+# What the duplicate did earn us was a failure mode: the harness starts vite,
+# vite watches the tree, and `fs.inotify.max_user_instances` is 128 by default
+# on the runner nodes. Under load the build died with `EMFILE: too many open
+# files, watch '/web'` — an image build failing for a reason that had nothing
+# to do with the image.
+#
+# A build of this Dockerfile outside CI therefore does not run the UI tests.
+# That is the trade: run `npm test` in `web/` yourself if you are building this
+# by hand and want them.
 RUN npm run build
 
 # Trixie, not bookworm, and specifically because of ONNX Runtime. The prebuilt

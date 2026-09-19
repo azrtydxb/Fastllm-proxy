@@ -13,11 +13,11 @@ Every `/admin/*` route (including `PUT /admin/principals/{id}/password` below) r
 
 Every admin route needs one of four permissions, seeded by `migrations/0001_init.sql`:
 
-| Permission     | Routes                                                                                                                                         |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Permission     | Routes                                                                                                                                          |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `usage:read`   | Every `GET /admin/*` route (keys, principals, models, frontend models, roles, limits, budgets, health)                                          |
-| `key:create`   | `POST /admin/keys`                                                                                                                             |
-| `key:revoke`   | `DELETE /admin/keys/{id}`                                                                                                                      |
+| `key:create`   | `POST /admin/keys`                                                                                                                              |
+| `key:revoke`   | `DELETE /admin/keys/{id}`                                                                                                                       |
 | `config:write` | Every other write: principals (create/delete/roles/**password**), models, backends, frontend models, routing rules and targets, limits, budgets |
 
 There is no finer-grained permission for "manage principals" or "manage frontend models" than `config:write` — the schema does not seed one, and inventing a permission per table would multiply roles for no operator-visible benefit. The built-in `operator` role holds everything except `model:invoke` (i.e. all four of the above); `admin` holds everything including `model:invoke`. A role with `usage:read` alone can list and view but never create, revoke or reconfigure anything — the shape a read-only UI viewer or an audit tool needs.
@@ -44,7 +44,7 @@ Sixteen screens, all driven by the admin API above: **Overview** (fleet, backend
 
 The one thing that _is_ computed in the browser is a rate: the control plane stores no metric history, so every line on the Metrics screen is a delta between two polls of the counters the fleet reports, starting empty when the page loads. The header says so on the page.
 
-Three checks guard it, all under `web/` (`npm test`, plus a CI job and the Dockerfile's web stage):
+Three checks guard it, all under `web/`, run by `npm test` and by CI's `ui` job on every commit. The Dockerfile's web stage deliberately does not run them a second time — see the comment there.
 
 - **`test/render.mjs`** mounts every screen against stubbed responses and fails on a render error or missing content. `npm run build` proves the modules parse; it says nothing about whether a screen renders, and a component used but not imported is a clean build and a blank page.
 - **`test/interact.mjs`** clicks every control on every screen (231 of them) and then asserts the exact method, path and body that the important mutations send. This exists because the worst bug this UI has had was a screen that rendered perfectly while posting `{position, match_condition: {...}}` to a handler that flattens the conditions — serde discarded them, answered 201, and every rule created through the UI matched every request. Nothing looked wrong; only the request body was, and no test had ever looked at one.

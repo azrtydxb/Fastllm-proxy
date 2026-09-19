@@ -170,3 +170,62 @@ Options:
   inert until the picker is revisited.
 
 **Decided:** pending.
+
+## Nexus is full, which blocks CI and the deploy
+
+`nexus-data-iscsi` is 200Gi and 100% used — 185.6G of it one `default` blob
+store. Nexus logs `No space left on device` and its H2 database has closed, so
+every repository returns 500: cargo (CI `test`), npm (CI `ui`), and the Docker
+registry. That is the single cause of every CI failure since `4e8bdab`, not
+anything in the code.
+
+It also means the cluster cannot pull `fastllm-proxy` images at all — the
+manifest for the _currently deployed_ `sha-4e8bdab` 500s. Running pods are fine
+on their local cache; a restart onto a cold node would not be.
+
+The image for `f2e8b43` builds cleanly on kw's buildkit — it got as far as
+exporting the manifest, and only the push failed.
+
+Options:
+
+- **Expand the PVC.** `truenas-iscsi` has `allowVolumeExpansion=true`, so this
+  is an edit plus a Nexus restart. Fastest way back to a working CI and a
+  normal deploy, and it does not delete anything.
+- **Reclaim space inside Nexus.** Cleanup policies plus "Compact blob store".
+  Fixes the cause rather than the symptom, but it deletes artefacts and needs
+  decisions about what may go.
+- **Bypass the registry for this deploy.** Export the built image from buildkit
+  and import it into containerd on the worker nodes, with
+  `imagePullPolicy: IfNotPresent`. Gets `f2e8b43` running today, but the image
+  exists only on the nodes imported to, so a reschedule elsewhere fails — and
+  CI stays broken either way.
+
+**Decided:** expand the PVC. Done — 200Gi → 300Gi, Nexus restarted to complete
+the filesystem resize, now 66% used with 94G free. cargo, npm and the registry
+all answer again, CI went green, and `sha-f2e8b43` is deployed.
+
+## `npm test` inside the image build keeps exhausting inotify
+
+The `publish` job failed with `EMFILE: too many open files, watch '/web'` —
+vite's file watchers hitting `fs.inotify.max_user_instances`, which is at the
+kernel default of **128** on the runner node (`max_user_watches` is fine at
+249535). A re-run passed, so it is load-dependent rather than deterministic,
+and it will recur.
+
+The suite being run there is the same one CI's `ui` job already ran and passed
+in the same workflow — the Dockerfile's `RUN npm test` is a second execution of
+it, and the only thing that distinguishes it is that it can fail this way.
+
+Options:
+
+- **Drop `RUN npm test` from the Dockerfile.** Removes the duplicate run and
+  the failure mode with it. `ui` still gates every commit, so nothing goes
+  unverified; the image build stops re-proving what the pipeline just proved.
+- **Raise `fs.inotify.max_user_instances` on the runner nodes.** Keeps the
+  in-image test as a belt-and-braces check for anyone building the Dockerfile
+  outside CI. A node-level sysctl, so it needs to survive node rebuilds.
+- **Both.** Drop the duplicate run _and_ raise the limit, so other watcher-heavy
+  builds on those nodes stop being fragile too.
+- **Leave it.** Re-running the job clears it when it happens.
+
+**Decided:** pending.
