@@ -625,7 +625,10 @@ Whatever is chosen, the live cluster's Deployments are on the legacy `app:`
 scheme and cannot be relabelled in place — moving them needs a delete and
 recreate of both Deployments, which is a brief gateway outage.
 
-**Decided:** pending.
+**Decided:** backfilled `qwen3.5-9b` from its engine, then made it
+self-maintaining — the health probe reads the window out of the `/models`
+response it already fetches, and the registry prefers that over the stored
+value. The backfill still matters as the fallback for anything not yet probed.
 
 ## A stale scratch worktree blocks every commit
 
@@ -732,3 +735,39 @@ Options:
   the missing config. Complements either path and nobody upstream has done it.
 - **Stop here.** The cards are proven working and sharding correctly; treat
   performance as a later project.
+
+## Models that advertise no context window because nobody filled the field in
+
+`ed3aed2` makes `/v1/models` report `max_model_len` / `context_length`, taken
+from `provider_models.context_length`. Four names still advertise nothing,
+because that column is null for them:
+
+| name               | engine says | column says |
+| ------------------ | ----------- | ----------- |
+| `qwen3.5-9b`       | 262144      | null        |
+| `gpt-5`            | —           | null        |
+| `gemini-2.5-flash` | —           | null        |
+| `free`             | —           | null        |
+
+`qwen3.5-9b` is the sharp case: the engine on `.245:8001` publishes 262144 in
+its own `/v1/models`, and a client asking the proxy is told nothing. The data
+exists, it simply never reached the column.
+
+Options:
+
+- **Backfill the column for the local models.** One `UPDATE` per model from
+  what each engine reports. Immediate, and the numbers are authoritative
+  because they come from the process actually serving. Goes stale if a model
+  is restarted with a different `--max-model-len`.
+- **Have the proxy read it from the backend instead.** The engine scrape
+  already runs per backend; `/v1/models` is one more cheap call. Self-healing
+  and never stale, but it is a new thing on the scrape path and only works for
+  engines that publish it — the cloud models still say nothing.
+- **Have the registration agent record it.** The agent already registers what
+  each host serves, so it could carry the context length with it. Right place
+  for it long-term; does nothing for cloud providers or hand-registered
+  endpoints.
+- **Leave it.** Omitted is honest. The two models that matter for coding
+  traffic already advertise 262144.
+
+**Decided:** pending.

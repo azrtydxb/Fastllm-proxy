@@ -70,6 +70,17 @@ An explicit `max_model_len` on the frontend model wins outright: that is an
 operator saying what the name promises, and it is allowed to be smaller than
 the backend permits.
 
+The figure comes from the engines themselves and stays current without
+anyone maintaining it. `--max-model-len` is chosen when an engine starts, so a
+restart can change it without touching a row — the health probe already
+fetches each backend's own `/models` and now reads the window out of the
+response it was discarding, at no extra request. A value recorded on the
+provider model is the fallback, for providers that publish nothing.
+
+That matters beyond reporting: routing demotes a model whose window is smaller
+than the prompt, so a stale figure either sends an oversized prompt to an
+engine that will reject it, or stops routing to one that grew.
+
 Where nothing reachable has said, the fields are **omitted** rather than
 guessed. A client that trusts an invented number sizes a prompt to it and
 collects the upstream rejection this exists to prevent.

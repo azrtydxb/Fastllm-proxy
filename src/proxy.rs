@@ -2426,20 +2426,24 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
 fn advertised_context(snapshot: &Snapshot, registry: &Registry, name: &str) -> Option<u64> {
     let Some(vm) = snapshot.frontend_models.get(name) else {
         // `File` mode: the name is the model, so its own length is the answer.
-        return registry
-            .pool(name)
-            .and_then(|_| snapshot.models.iter().find(|m| m.name == name))
-            .and_then(|m| m.context_length);
+        return registry.context_length(name);
     };
     if let Some(explicit) = vm.max_model_len {
         return Some(explicit as u64);
     }
+    // Through the registry, not the snapshot: the registry prefers what the
+    // engines currently report, so a model restarted with a different
+    // `--max-model-len` advertises the new number without anyone editing a
+    // row. The snapshot value remains the fallback for anything that has not
+    // said — a hosted provider, or a backend not yet probed.
     let length_of = |target: &str| -> Option<u64> {
-        snapshot
-            .models
-            .iter()
-            .find(|m| m.name == target)
-            .and_then(|m| m.context_length)
+        registry.context_length(target).or_else(|| {
+            snapshot
+                .models
+                .iter()
+                .find(|m| m.name == target)
+                .and_then(|m| m.context_length)
+        })
     };
     // Every target of every rule, and the defaults: routing may send a request
     // to any of them, so all of them bound what a client may send.

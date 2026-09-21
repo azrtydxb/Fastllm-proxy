@@ -182,6 +182,16 @@ pub struct Backend {
     /// the process restarted and its prefix cache is cold, which is the signal
     /// that the affinity table is now pointing at nothing.
     prefix_queries: AtomicUsize,
+    /// The context window this engine last said it accepts. 0 is "it has not
+    /// said".
+    ///
+    /// Live, because the database cannot know: `--max-model-len` is chosen
+    /// when the engine starts, so a restart changes it without anything
+    /// touching a row. A stale figure is not merely a misreport — routing
+    /// demotes a model whose window is smaller than the prompt, so it either
+    /// sends an oversized prompt to an engine that will reject it, or stops
+    /// routing to one that grew.
+    engine_context_length: AtomicUsize,
     engine_at: AtomicU64,
     /// Last engine metrics snapshot: when the reading was taken (milliseconds
     /// since epoch) and the counters that the stall detector compares against.
@@ -276,6 +286,7 @@ impl Backend {
             engine_inflight: AtomicUsize::new(0),
             prefix_hit_permille: AtomicUsize::new(usize::MAX),
             prefix_queries: AtomicUsize::new(0),
+            engine_context_length: AtomicUsize::new(0),
             engine_at: AtomicU64::new(0),
             engine_last_ts: AtomicU64::new(0),
             engine_last_prompt: AtomicU64::new(0),
@@ -346,6 +357,22 @@ impl Backend {
             None => self
                 .prefix_hit_permille
                 .store(usize::MAX, Ordering::Relaxed),
+        }
+    }
+
+    /// Record the context window an engine reported, from the health probe's
+    /// own response — no extra request: that body was being drained and
+    /// discarded.
+    pub fn record_context_length(&self, len: u64) {
+        self.engine_context_length
+            .store(len as usize, Ordering::Relaxed);
+    }
+
+    /// What this engine says it accepts, or `None` if it never has.
+    pub fn engine_context_length(&self) -> Option<u64> {
+        match self.engine_context_length.load(Ordering::Relaxed) {
+            0 => None,
+            len => Some(len as u64),
         }
     }
 
@@ -709,7 +736,22 @@ impl Registry {
     /// registry, not the snapshot, and the alternative was threading a second
     /// lookup through every call site that already has a `&Registry`.
     pub fn context_length(&self, model: &str) -> Option<u64> {
-        self.context_length.get(model).copied()
+        // What the engines currently say wins over what was recorded. The
+        // stored figure is a snapshot of a value chosen at engine start, so a
+        // restart with a different `--max-model-len` leaves it describing a
+        // process that no longer exists — and routing demotes a model whose
+        // window is smaller than the prompt, so believing it either sends an
+        // oversized prompt to an engine that will reject it or stops routing
+        // to one that grew.
+        //
+        // The smallest across the model's backends, because any of them may
+        // serve the request and the figure has to hold for whichever does.
+        // Backends that have not said are skipped rather than counted as
+        // zero, which would make one silent engine shrink the whole pool.
+        let live = self
+            .pool(model)
+            .and_then(|pool| pool.iter().filter_map(|b| b.engine_context_length()).min());
+        live.or_else(|| self.context_length.get(model).copied())
     }
 
     /// Declare context windows on a registry built from YAML, which has no
