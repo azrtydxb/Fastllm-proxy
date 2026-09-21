@@ -81,40 +81,47 @@ where
         .await?)
 }
 
-/// Clear a `rollingUpdate` block that a previous owner left behind.
+/// Put the control plane's Deployment on `Recreate`, in one write.
 ///
-/// The control plane must roll with `Recreate` — two of them briefly sharing
-/// one database would both apply migrations at startup. But the API rejects an
-/// object carrying `strategy.rollingUpdate` while `strategy.type` is
-/// `Recreate`, and server-side apply cannot remove a field this manager has
-/// never owned. So a Deployment created as `RollingUpdate` by anything else
-/// makes every apply fail with 422 — which is precisely what the live cluster
-/// did, every fifteen seconds for nine days.
+/// It must roll with `Recreate` — two control planes briefly sharing one
+/// database would both apply migrations at startup — but the API rejects an
+/// object carrying `strategy.rollingUpdate` while the type is `Recreate`, and
+/// server-side apply cannot remove a field this manager has never owned. A
+/// Deployment created as `RollingUpdate` by anything else therefore made every
+/// apply fail with 422.
 ///
-/// A merge patch with an explicit null removes it, and is a no-op once it is
-/// gone, so this runs on every reconcile without accumulating writes.
-async fn clear_stale_rolling_update(
+/// Both fields move together, and that is the whole point. Clearing the block
+/// alone does not work: with `type` still `RollingUpdate` the API immediately
+/// re-defaults it, so the next apply finds a fresh `25%/25%` block and fails
+/// exactly as before. The live cluster did precisely that six times before the
+/// mistake was visible.
+///
+/// A no-op once the strategy is already right, so this runs every reconcile
+/// without accumulating writes.
+async fn ensure_recreate_strategy(
     deploys: &Api<Deployment>,
     name: &str,
     live: Option<&Deployment>,
 ) -> Result<(), Error> {
-    let has_block = live
+    let strategy = live
         .and_then(|d| d.spec.as_ref())
-        .and_then(|s| s.strategy.as_ref())
-        .is_some_and(|st| st.rolling_update.is_some());
-    if !has_block {
+        .and_then(|s| s.strategy.as_ref());
+    let already_right = strategy
+        .is_some_and(|st| st.type_.as_deref() == Some("Recreate") && st.rolling_update.is_none());
+    if live.is_none() || already_right {
         return Ok(());
     }
     info!(
         deployment = %name,
-        "clearing a rollingUpdate block left by a previous owner; Recreate forbids it"
+        "moving the control plane to Recreate; RollingUpdate would let two of them \
+         apply migrations at once"
     );
     deploys
         .patch(
             name,
             &PatchParams::default(),
             &Patch::Merge(serde_json::json!({
-                "spec": { "strategy": { "rollingUpdate": null } }
+                "spec": { "strategy": { "type": "Recreate", "rollingUpdate": null } }
             })),
         )
         .await?;
@@ -313,7 +320,7 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
 
     // Before the apply, not after: the apply is what the stale block rejects.
     let control_before = deploys.get_opt(&control_name).await?;
-    clear_stale_rolling_update(&deploys, &control_name, control_before.as_ref()).await?;
+    ensure_recreate_strategy(&deploys, &control_name, control_before.as_ref()).await?;
     apply(
         &deploys,
         &control_name,
