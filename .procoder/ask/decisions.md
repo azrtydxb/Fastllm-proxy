@@ -655,3 +655,39 @@ Options:
   which `.gitignore` is not.
 
 **Decided:** pending.
+
+## Cleaning up the Kubernetes objects that used the tank ZFS pool
+
+tank is held un-imported while its four raidz members are unplugged, pending
+right-angled cables. Six k8s objects reference it: StorageClasses
+`openebs-zfspv` (marked default) and `openebs-zfspv-block`, PVC
+`buildkit/buildkit-cache` (150Gi), its PV `pvc-d3a6c144-...`, the ZFSVolume CR
+of the same name, and the Deployment `buildkit/buildkit` that mounts it -- plus
+the openebs zfs-localpv driver itself.
+
+The PV is `reclaimPolicy: Delete`. Deleting the PVC therefore does not merely
+detach storage: openebs will destroy the dataset `tank/pvc-d3a6c144-...` once
+the pool is importable again, taking the 9.38G buildkit cache with it. That is
+rebuildable, but the deletion happens later and silently.
+
+Two incidental findings: `local-path` and `openebs-zfspv` are BOTH marked as
+the default StorageClass, which is a misconfiguration; and
+`default/test-fs-snap` is a 145-day-old VolumeSnapshot on class
+`novanas-snapshots` whose driver `csi.novanas.io` was never deployed and whose
+source is gone -- an orphan independent of tank.
+
+Options:
+
+- **Stop the churn, keep the storage.** Scale buildkit to 0 so the mount
+  retries and CSI errors stop, and leave PVC, PV, ZFSVolume and the
+  StorageClasses untouched so everything returns by itself when the pool is
+  imported. Also delete the orphaned test snapshot, which is dead regardless.
+- **Remove the k8s objects but preserve the data.** Patch the PV to
+  `reclaimPolicy: Retain` first, then remove the Deployment, PVC and PV. The
+  dataset survives on tank and can be re-adopted later, but re-adoption is
+  manual work.
+- **Full removal including the dataset.** Delete the Deployment, PVC, PV and
+  ZFSVolume with the reclaim policy left at Delete, drop both zfspv
+  StorageClasses and uninstall openebs zfs-localpv. The buildkit cache dataset
+  is destroyed when the pool returns, and buildkit must be reprovisioned from
+  scratch.

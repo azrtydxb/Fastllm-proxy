@@ -192,6 +192,27 @@ jobs:
         with:
           path: .hf-cache
           key: hf-potion-code-16m
+      # Fetch it here rather than letting the test pay for it.
+      #
+      # `actions/cache` only restores; on a miss the download happened inside
+      # the semantic-routing test's health window, and the test died waiting
+      # with nothing to say but that it had waited. Doing it in its own step
+      # makes a cold cache a slow *step* with its own log instead of a
+      # five-minute test failure that looks like a flake. A warm cache makes
+      # this a no-op.
+      - name: Fetch the classifier model
+        env:
+          HF_HOME: ${{ github.workspace }}/.hf-cache
+        run: |
+          command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 python3-pip; }
+          python3 -m pip install --quiet --break-system-packages huggingface_hub 2>/dev/null \
+            || python3 -m pip install --quiet huggingface_hub
+          python3 - <<'PY'
+          from huggingface_hub import snapshot_download
+          # Same repo id the test passes as --classifier-model.
+          p = snapshot_download("minishlab/potion-code-16M")
+          print(f"classifier model ready at {p}")
+          PY
       - name: Clippy (classifier)
         run: cargo clippy --all-targets --features "control classifier-tier2" -- -D warnings
       - name: Test (classifier)

@@ -69,7 +69,19 @@ fn cleanup_for(suffix: &str) -> TestCleanup {
         .track_suffix("permissions", "resource", suffix)
 }
 
-fn wait_healthy(port: u16, timeout: Duration) {
+/// Wait for the spawned proxy, and explain itself when it does not come up.
+///
+/// Two things this refuses to do, both learned from a five-minute CI failure
+/// that said only that it had waited five minutes:
+///
+/// - **Wait out the clock on a process that has already exited.** A bad flag
+///   or an unreachable database kills the child in milliseconds; waiting the
+///   full timeout afterwards turns an instant, obvious failure into the
+///   slowest possible one.
+/// - **Throw away what the child said.** Its stderr is the diagnosis — the
+///   model download, the database refusal, the panic — and discarding it left
+///   a genuine flake and a real misconfiguration looking identical.
+fn wait_healthy(child: &mut Child, port: u16, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         if !matches!(
@@ -78,13 +90,41 @@ fn wait_healthy(port: u16, timeout: Duration) {
         ) {
             return;
         }
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!(
+                "fastllm-proxy on port {port} exited before serving ({status}).\n\
+                 --- its stderr ---\n{}",
+                drain_stderr(child)
+            );
+        }
         if Instant::now() >= deadline {
             panic!(
-                "fastllm-proxy on port {port} did not answer /health within {}s",
-                timeout.as_secs()
+                "fastllm-proxy on port {port} did not answer /health within {}s. \
+                 It was still running, so it was starting and had not finished — \
+                 most often the one-time classifier download on a cold HF_HOME.\n\
+                 --- its stderr so far ---\n{}",
+                timeout.as_secs(),
+                drain_stderr(child)
             );
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whatever the child has written, without blocking on a pipe it may never
+/// close. A partial read beats none: the last line is usually the reason.
+fn drain_stderr(child: &mut Child) -> String {
+    use std::io::Read as _;
+    let Some(mut err) = child.stderr.take() else {
+        return "(stderr was not captured)".to_string();
+    };
+    // The child is dead or about to be killed, so this cannot block for long.
+    let mut buf = String::new();
+    let _ = err.read_to_string(&mut buf);
+    if buf.trim().is_empty() {
+        "(it wrote nothing)".to_string()
+    } else {
+        buf
     }
 }
 
@@ -105,12 +145,17 @@ fn start(port: u16, admin_port: u16, database_url: &str, with_classifier: bool) 
     .env("FASTLLM_ENCRYPTION_KEY", encryption_key())
     // One pool per spawned process against a shared 100-connection
     // server; the default of 8 exhausts it once enough tests run at once.
-    .env("FASTLLM_DATABASE_MAX_CONNECTIONS", "2");
+    .env("FASTLLM_DATABASE_MAX_CONNECTIONS", "2")
+    // Captured so a failure can say *why*. Without this the only thing a
+    // timeout reported was that it had timed out, on a test that takes five
+    // minutes to say so — which is how a genuine flake and a real
+    // misconfiguration became indistinguishable.
+    .stderr(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::null());
     if with_classifier {
         cmd.args(["--classifier-model", CLASSIFIER_MODEL]);
     }
-    let child = cmd.spawn().expect("failed to spawn fastllm-proxy");
-    let proc = Proc(child);
+    let mut child = cmd.spawn().expect("failed to spawn fastllm-proxy");
     // A classifier-enabled start may be paying the one-time model download
     // before the listener comes up; 60s only covers a warm cache.
     let timeout = if with_classifier {
@@ -118,8 +163,8 @@ fn start(port: u16, admin_port: u16, database_url: &str, with_classifier: bool) 
     } else {
         Duration::from_secs(60)
     };
-    wait_healthy(port, timeout);
-    proc
+    wait_healthy(&mut child, port, timeout);
+    Proc(child)
 }
 
 fn admin_post(
