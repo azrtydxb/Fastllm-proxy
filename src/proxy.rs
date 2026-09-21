@@ -2405,6 +2405,59 @@ fn budget_exceeded_response(budget: &Budget) -> Response<ResBody> {
         .expect("static response is well-formed")
 }
 
+/// The context window to advertise for a client-facing name.
+///
+/// `None` when nothing reachable has said, and that is deliberate: the field
+/// is then omitted rather than guessed at. A number nobody can stand behind is
+/// worse than an absent one — a client that trusts it sizes a prompt to it and
+/// collects the upstream rejection this is meant to prevent.
+///
+/// The **smallest** window across everything the name can reach, not the
+/// largest. A frontend model may route to several models, and which one serves
+/// a given request is not the client's to know — so the only figure a client
+/// can safely size a session against is the one that fits wherever it lands.
+/// Reporting the largest would work until the request that spilled onto a
+/// smaller backend, and then fail on prompt length for reasons the client
+/// could not have predicted.
+///
+/// An explicit `max_model_len` on the frontend model wins outright. That is an
+/// operator saying what this name promises, and it is allowed to be smaller
+/// than the backend permits — a deliberate cap is not a mistake to correct.
+fn advertised_context(snapshot: &Snapshot, registry: &Registry, name: &str) -> Option<u64> {
+    let Some(vm) = snapshot.frontend_models.get(name) else {
+        // `File` mode: the name is the model, so its own length is the answer.
+        return registry
+            .pool(name)
+            .and_then(|_| snapshot.models.iter().find(|m| m.name == name))
+            .and_then(|m| m.context_length);
+    };
+    if let Some(explicit) = vm.max_model_len {
+        return Some(explicit as u64);
+    }
+    let length_of = |target: &str| -> Option<u64> {
+        snapshot
+            .models
+            .iter()
+            .find(|m| m.name == target)
+            .and_then(|m| m.context_length)
+    };
+    // Every target of every rule, and the defaults: routing may send a request
+    // to any of them, so all of them bound what a client may send.
+    vm.rules
+        .iter()
+        .flat_map(|r| r.targets.iter())
+        .chain(vm.default_targets.iter())
+        .flat_map(|t| {
+            // A pool contributes its members; a plain target contributes
+            // itself.
+            let own = std::iter::once(t.model.as_str());
+            let members = t.members.iter().map(|m| m.model.as_str());
+            own.chain(members)
+        })
+        .filter_map(length_of)
+        .min()
+}
+
 /// OpenAI-shaped model list, filtered to what this caller may actually
 /// invoke.
 ///
@@ -2463,12 +2516,22 @@ fn models_response(
     let data: Vec<serde_json::Value> = names
         .into_iter()
         .map(|name| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "id": name,
                 "object": "model",
                 "owned_by": "fastllm-proxy",
                 "created": 0,
-            })
+            });
+            // Both spellings, because clients read different ones:
+            // `max_model_len` is what vLLM's own `/v1/models` returns, and
+            // `context_length` is OpenRouter's. Emitting one would leave half
+            // the ecosystem still guessing.
+            if let Some(len) = advertised_context(snapshot, &registry, name) {
+                let obj = entry.as_object_mut().expect("just built as an object");
+                obj.insert("max_model_len".into(), len.into());
+                obj.insert("context_length".into(), len.into());
+            }
+            entry
         })
         .collect();
     json_response(
@@ -2708,6 +2771,139 @@ fn full(bytes: Bytes) -> ResBody {
 
 #[cfg(test)]
 mod tests {
+
+    /// `/v1/models` said nothing about context windows, so a client had to be
+    /// told by hand. Hecto fell back to a 16k default against models serving
+    /// 262144 — sizing sessions at six per cent of what the hardware allows.
+    ///
+    /// Issue #18 added an operator-settable field and was closed as fixed; the
+    /// endpoint was never touched and the field is empty on every model in the
+    /// deployment that reported it. Hence the number coming from the models
+    /// themselves.
+    #[test]
+    fn the_advertised_context_is_the_smallest_a_request_could_land_on() {
+        use crate::registry::Interner;
+        use crate::routing::{FrontendModelDef, WeightedTarget};
+        use crate::snapshot::ModelDef;
+
+        let models = vec![
+            ModelDef {
+                name: "big".into(),
+                cache_ttl: None,
+                context_length: Some(262_144),
+                policy: None,
+                backends: Vec::new(),
+            },
+            ModelDef {
+                name: "small".into(),
+                cache_ttl: None,
+                context_length: Some(8_192),
+                policy: None,
+                backends: Vec::new(),
+            },
+            ModelDef {
+                name: "unknown".into(),
+                cache_ttl: None,
+                context_length: None,
+                policy: None,
+                backends: Vec::new(),
+            },
+        ];
+        let mut snap = Snapshot {
+            models,
+            ..Default::default()
+        };
+        let registry = Registry::build(
+            &crate::config::FileConfig::default(),
+            &Interner::default(),
+            None,
+        )
+        .unwrap();
+
+        let fm = |targets: Vec<WeightedTarget>| FrontendModelDef {
+            name: "alias".into(),
+            max_model_len: None,
+            rules: Vec::new(),
+            default_targets: targets,
+        };
+
+        // One target: its own window.
+        snap.frontend_models
+            .insert("alias".into(), fm(vec![WeightedTarget::model("big", 1)]));
+        assert_eq!(advertised_context(&snap, &registry, "alias"), Some(262_144));
+
+        // Two: the smaller, because routing may send the request either way
+        // and only that figure fits wherever it lands.
+        snap.frontend_models.insert(
+            "alias".into(),
+            fm(vec![
+                WeightedTarget::model("big", 1),
+                WeightedTarget::model("small", 1),
+            ]),
+        );
+        assert_eq!(
+            advertised_context(&snap, &registry, "alias"),
+            Some(8_192),
+            "a client sizing to the largest would fail on the spillover"
+        );
+
+        // A target nobody has measured is not a zero: it is excluded, and the
+        // known ones still answer. Treating unknown as 0 would report a
+        // context window of nothing for a perfectly usable alias.
+        snap.frontend_models.insert(
+            "alias".into(),
+            fm(vec![
+                WeightedTarget::model("big", 1),
+                WeightedTarget::model("unknown", 1),
+            ]),
+        );
+        assert_eq!(advertised_context(&snap, &registry, "alias"), Some(262_144));
+
+        // Nothing known at all: the field is omitted rather than guessed.
+        snap.frontend_models.insert(
+            "alias".into(),
+            fm(vec![WeightedTarget::model("unknown", 1)]),
+        );
+        assert_eq!(advertised_context(&snap, &registry, "alias"), None);
+    }
+
+    /// An operator's own cap wins, and is allowed to be smaller than the
+    /// backend permits — that is a deliberate promise about the name, not a
+    /// stale value to correct.
+    #[test]
+    fn an_explicit_max_model_len_overrides_the_backends() {
+        use crate::registry::Interner;
+        use crate::routing::{FrontendModelDef, WeightedTarget};
+        use crate::snapshot::ModelDef;
+
+        let models = vec![ModelDef {
+            name: "big".into(),
+            cache_ttl: None,
+            context_length: Some(262_144),
+            policy: None,
+            backends: Vec::new(),
+        }];
+        let mut snap = Snapshot {
+            models,
+            ..Default::default()
+        };
+        snap.frontend_models.insert(
+            "alias".into(),
+            FrontendModelDef {
+                name: "alias".into(),
+                max_model_len: Some(32_768),
+                rules: Vec::new(),
+                default_targets: vec![WeightedTarget::model("big", 1)],
+            },
+        );
+        let registry = Registry::build(
+            &crate::config::FileConfig::default(),
+            &Interner::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(advertised_context(&snap, &registry, "alias"), Some(32_768));
+    }
     use super::*;
     use std::collections::{HashMap, HashSet};
 

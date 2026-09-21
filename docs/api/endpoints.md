@@ -54,6 +54,26 @@ identical requests at `temperature > 0` are supposed to be able to differ. A
 deployment that sets nothing pays nothing, not even the hash — that is only
 computed once a model is known to have caching on.
 
+### How large a context a name accepts
+
+`GET /v1/models` reports `max_model_len` and `context_length` on each entry —
+both spellings, because vLLM's own endpoint uses the first and OpenRouter the
+second, and emitting one leaves half the ecosystem guessing.
+
+The number is the **smallest** window across everything the name can reach, not
+the largest. A frontend model may route to several models and which one serves
+a request is not the client's to know, so the only figure it can safely size a
+session against is the one that fits wherever it lands. Reporting the largest
+works until the request that spills onto a smaller backend.
+
+An explicit `max_model_len` on the frontend model wins outright: that is an
+operator saying what the name promises, and it is allowed to be smaller than
+the backend permits.
+
+Where nothing reachable has said, the fields are **omitted** rather than
+guessed. A client that trusts an invented number sizes a prompt to it and
+collects the upstream rejection this exists to prevent.
+
 ### Why a request went where it went
 
 Every response carries two more headers:
