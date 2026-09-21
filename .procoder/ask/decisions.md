@@ -691,3 +691,44 @@ Options:
   StorageClasses and uninstall openebs zfs-localpv. The buildkit cache dataset
   is destroyed when the pool returns, and buildkit must be reprovisioned from
   scratch.
+
+## Closing the R9700 vLLM performance gap
+
+Our first vLLM run on the two R9700s served Qwen3.6-35B-A3B-FP8 at 7.2 tok/s
+single-stream, 45.8 tok/s aggregate over 8 streams, with both cards at 100% and
+31.9GB VRAM each, so sharding is genuinely working.
+
+github.com/andysalerno/r9700-serving benchmarks the same hardware and reaches
+57.7 tok/s single-stream (Qwen3.8-27B-FP8, 2026-09-11) and 105.1 tok/s
+(Qwen3.6-27B-FP8, 2026-07-22). Both are _dense_ 27B models; ours is an MoE with
+3B active parameters and should decode faster, so the gap is stack, not model.
+
+Their stack differs in: ROCm 10.0 vs our 7.14.1; vLLM 0.29.0 compiled for
+gfx1201 vs our stock 0.23.1.dev1 image; AITER compiled for gfx1201 (ours fell
+back to Triton); Flash Attention 2.8.4 built for gfx1201; attention backend
+ROCM_AITER_UNIFIED_ATTN vs our ROCM_ATTN; MTP speculative decoding with 3 tokens
+vs none; fp8 KV cache vs 16-bit; and the env overrides GPU_MAX_HW_QUEUES=1,
+NCCL_P2P_DISABLE=1, NCCL_MIN_NCHANNELS=112.
+
+Separately, vLLM warns there is no tuned FP8 block-GEMM config for the R9700.
+Upstream ships 219 such configs and the only AMD entries are MI300X/MI325X/
+MI325_OAM, so no RDNA config exists to download; generating one needs vLLM's
+kernel tuning script run on this hardware.
+
+Their numbers are self-reported, and their own July result exceeds their
+September one, so treat the targets as indicative.
+
+Options:
+
+- **Cheap wins on the existing image first.** Restart the current container with
+  `--kv-cache-dtype fp8`, the three env overrides, and MTP speculative decoding
+  if the model supports it. No rebuild; minutes, not hours. Establishes how much
+  is configuration rather than compilation before committing to a build.
+- **Reproduce their full build.** Use their Dockerfile.fullbuild pins: ROCm 10,
+  vLLM 0.29.0, PyTorch 2.13, AITER and Flash Attention compiled for gfx1201.
+  This is where the AITER win lives, but it is a long compile and a second large
+  image alongside the 74.6GB one already pulled.
+- **Tune the FP8 kernels for the R9700.** Run vLLM's tuning script to generate
+  the missing config. Complements either path and nobody upstream has done it.
+- **Stop here.** The cards are proven working and sharding correctly; treat
+  performance as a later project.

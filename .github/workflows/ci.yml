@@ -204,7 +204,12 @@ jobs:
         env:
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: |
-          command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 python3-pip; }
+          # Guard on pip, not python3. The rust image ships python3 without
+          # it, so a `command -v python3` check passed and the install never
+          # ran — `No module named pip`, which is what this step failed with
+          # the first time.
+          python3 -m pip --version >/dev/null 2>&1 \
+            || { apt-get update -qq && apt-get install -y -qq python3-pip; }
           python3 -m pip install --quiet --break-system-packages huggingface_hub 2>/dev/null \
             || python3 -m pip install --quiet huggingface_hub
           python3 - <<'PY'
