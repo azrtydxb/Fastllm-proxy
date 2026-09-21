@@ -3,18 +3,18 @@
 What the gateway serves on `:4000`, what it deliberately does not, and
 the headers and retry behaviour that come with each.
 
-| Endpoint                       | Purpose                                                                                                                                                                                                                                                                                                 |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /v1/chat/completions`    | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations`                                                                                   |
+| Endpoint                       | Purpose                                                                                                                                                                                                                                                                                                  |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/chat/completions`    | Proxied byte-for-byte. Also `/completions`, `/responses`, `/embeddings`, `/rerank`, `/score`, `/audio/transcriptions`, `/audio/translations`, `/audio/speech`, `/images/generations`, `/images/edits`, `/moderations`                                                                                    |
 | `GET /v1/models`               | Aggregated across every pool, **filtered to what the calling key may invoke**. A frontend model is listed when the caller can invoke any model it routes to. Clients build model pickers from this, and offering names that 403 on selection is a defect the authorisation being correct does not excuse |
-| `GET /health`                  | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface                                                                        |
-| `GET /metrics`                 | Prometheus text, including `fastllm_snapshot_version`. No auth required                                                                                                                                                                                                                                 |
-| `/admin/*`                     | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it                                                                                                                                              |
-| `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires                                                                                                                                                                    |
-| `/`, `/ui/*` (management UI)   | `--role all`/`control` only. The embedded SPA — see "Management UI" below                                                                                                                                                                                                                               |
-| `GET /snapshot`                | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token`                                                                                                                                                                                                         |
-| `POST /usage`                  | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot`                                                                                                                                    |
-| `POST /limits/reconcile`       | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token`                                                                                                                                                                |
+| `GET /health`                  | Per-backend health, in-flight, request and error counts, plus `snapshot_version` and the key count for the configuration this process is serving. No auth required. Exposes backend addresses — keep it off the public interface                                                                         |
+| `GET /metrics`                 | Prometheus text, including `fastllm_snapshot_version`. No auth required                                                                                                                                                                                                                                  |
+| `/admin/*`                     | `--role all`/`control` only. Gated by a session cookie (`POST /login`), not `--proxy-token` — see the table below and "Admin authentication" underneath it                                                                                                                                               |
+| `POST /login` / `POST /logout` | `--role all`/`control` only. Argon2id password check; sets/clears the `fastllm_session` cookie every other `/admin/*` route requires                                                                                                                                                                     |
+| `/`, `/ui/*` (management UI)   | `--role all`/`control` only. The embedded SPA — see "Management UI" below                                                                                                                                                                                                                                |
+| `GET /snapshot`                | `--role all`/`control` only. What `--role proxy` polls in `Http` mode; gated by `--proxy-token`                                                                                                                                                                                                          |
+| `POST /usage`                  | `--role all`/`control` only. Batched usage reporting from `--role proxy` (see "TLS and the reverse channel" below); gated by the same `--proxy-token` as `/snapshot`                                                                                                                                     |
+| `POST /limits/reconcile`       | `--role all`/`control` only. Rate-limit count reporting from `--role proxy` (see "Rate limits" below); gated by the same `--proxy-token`                                                                                                                                                                 |
 
 ## Endpoints, and what is not one
 
@@ -53,6 +53,27 @@ Opt-in per model rather than global, because caching changes semantics: two
 identical requests at `temperature > 0` are supposed to be able to differ. A
 deployment that sets nothing pays nothing, not even the hash — that is only
 computed once a model is known to have caching on.
+
+### Why a request went where it went
+
+Every response carries two more headers:
+
+| header                   | says                                                                                     |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `x-fastllm-route`        | which decision served it: `concrete`, `rule:2`, `default`, or `jump:house-policy>rule:0` |
+| `x-fastllm-served-model` | the provider model that actually answered                                                |
+
+The pair exists because the delta between the two was recorded and the cause
+never was. `max_inflight_per_backend` is not a pure function of the request —
+two identical prompts a second apart can legitimately route differently — so a
+quality regression in an eval tool had two indistinguishable explanations: the
+prompt changed, or the local pool was busy. These tell them apart.
+
+A header rather than only a span, because the head sampler traces one request
+in `--otel-sample-one-in`, and the request somebody investigates is rarely the
+one that happened to be sampled. The same string is on the span as `route`,
+and `POST /admin/routing/dry-run` returns it as `reason`, so a dry run and a
+real request describe a decision identically.
 
 **Non-streaming 2xx responses only.** Caching a stream would mean buffering the
 whole response before any of it reached the client, turning the one path this

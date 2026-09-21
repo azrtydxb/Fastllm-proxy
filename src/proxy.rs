@@ -312,7 +312,7 @@ fn resolve_target_models(
     facts: &crate::routing::RequestFacts<'_>,
     prefix: u64,
     registry: &Registry,
-) -> Result<(Vec<String>, Option<String>), Response<ResBody>> {
+) -> Result<(Vec<String>, Option<String>, crate::routing::RouteReason), Response<ResBody>> {
     let Some(vm) = snapshot.frontend_models.get(requested_model) else {
         // `File` mode has no frontend models at all — routing is a control
         // plane feature, and a config file defines models directly. So a
@@ -325,7 +325,13 @@ fn resolve_target_models(
         // 0034 gives every provider model one. So this is the File-mode
         // carve-out and not a hole in the rule below.
         if snapshot.frontend_models.is_empty() {
-            return Ok((vec![requested_model.to_string()], None));
+            // `File` mode: the model is the client-facing name and routes to
+            // itself, so there was nothing to decide.
+            return Ok((
+                vec![requested_model.to_string()],
+                None,
+                crate::routing::RouteReason::Concrete,
+            ));
         }
         // A frontend model is the only name a client may use.
         //
@@ -357,25 +363,34 @@ fn resolve_target_models(
     // `decide` rather than `resolve_candidates` because a rule may now refuse
     // outright, and because a jump has to be able to reach the other frontend
     // models.
-    let (candidates, tag) = match vm.decide(facts, prefix, registry, &snapshot.frontend_models) {
-        crate::routing::Decision::Route { candidates, tag } => (candidates, tag),
-        // A refusal is the rule working, not the gateway failing, so it
-        // carries the operator's own status and message rather than
-        // anything synthesised here.
-        crate::routing::Decision::Deny { status, message } => {
-            return Err(error_response(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
-                "refused_by_policy",
-                &message,
-            ));
-        }
-    };
+    let (candidates, tag, reason) =
+        match vm.decide(facts, prefix, registry, &snapshot.frontend_models) {
+            crate::routing::Decision::Route {
+                candidates,
+                tag,
+                reason,
+            } => (candidates, tag, reason),
+            // A refusal is the rule working, not the gateway failing, so it
+            // carries the operator's own status and message rather than
+            // anything synthesised here.
+            crate::routing::Decision::Deny { status, message } => {
+                return Err(error_response(
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+                    "refused_by_policy",
+                    &message,
+                ));
+            }
+        };
     if candidates.is_empty() {
         // The deployment-wide fallback, if there is one. A frontend model whose
         // targets have all gone is exactly the case a fallback exists for, and
         // reaching for it here is cheaper than telling the caller no.
         if let Some(fallback) = snapshot.fallback_model.as_ref() {
-            return Ok((vec![fallback.clone()], tag));
+            // The reason still names what decided, not the fallback: the rule
+            // did match, its targets were simply all gone. Reporting
+            // `default` here would attribute a deployment-wide catch to a
+            // routing decision nobody made.
+            return Ok((vec![fallback.clone()], tag, reason));
         }
         // 503, not 404.
         //
@@ -399,7 +414,7 @@ fn resolve_target_models(
             ),
         ));
     }
-    Ok((candidates, tag))
+    Ok((candidates, tag, reason))
 }
 
 /// One span per request, carrying the fields worth asking a trace about.
@@ -421,6 +436,11 @@ fn resolve_target_models(
         fields(
             model = tracing::field::Empty,
             served_model = tracing::field::Empty,
+            // Why `served_model` differs from `model`. The span carried the
+            // delta and never the cause, so a regression in an eval tool had
+            // two indistinguishable explanations: the prompt changed, or the
+            // local pool was busy and this went elsewhere.
+            route = tracing::field::Empty,
             backend = tracing::field::Empty,
             stream = tracing::field::Empty,
             class = tracing::field::Empty,
@@ -596,7 +616,7 @@ async fn proxy_request(
         class: class_name,
         class_refines,
     };
-    let (candidates, routing_tag) =
+    let (candidates, routing_tag, route_reason) =
         match resolve_target_models(&requested_model, snapshot, &facts, prefix, &registry) {
             Ok(c) => c,
             Err(rejection) => {
@@ -854,7 +874,11 @@ async fn proxy_request(
             let elapsed = received_at.elapsed().as_micros() as u64;
             state.telemetry.duration.record_us(elapsed);
             debug!(model = %target_model, "served from cache");
-            return cached_response(entry, &rate_limit_status);
+            return cached_response(
+                entry,
+                &rate_limit_status,
+                (&route_reason, target_model.as_str()),
+            );
         }
     }
 
@@ -1083,6 +1107,7 @@ async fn proxy_request(
                             .fetch_add(1, Ordering::Relaxed);
                     }
                     span_field!("served_model", candidate_model.as_str());
+                    span_field!("route", route_reason.to_string().as_str());
                     span_field!("backend", backend.api_base.as_str());
                     span_field!("status", status.as_u16());
                     span_field!("attempts", attempt + 1);
@@ -1137,6 +1162,7 @@ async fn proxy_request(
                                 .on_backend(Arc::clone(&backend)),
                             ),
                         );
+                        stamp_route_headers(&mut resp, &route_reason, candidate_model);
                         if let Some(status) = &rate_limit_status {
                             stamp_rate_limit_headers(&mut resp, status);
                         }
@@ -1196,6 +1222,7 @@ async fn proxy_request(
                                 received_at,
                             )
                             .on_backend(Arc::clone(&backend)),
+                            (&route_reason, candidate_model),
                         )
                         .await;
                     }
@@ -1213,6 +1240,7 @@ async fn proxy_request(
                             .on_backend(Arc::clone(&backend)),
                         ),
                     );
+                    stamp_route_headers(&mut resp, &route_reason, candidate_model);
                     if let Some(status) = &rate_limit_status {
                         stamp_rate_limit_headers(&mut resp, status);
                     }
@@ -2185,6 +2213,7 @@ async fn cache_and_finish(
     cache: Arc<crate::cache::ResponseCache>,
     rate_limit_status: Option<crate::limiter::RateLimitStatus>,
     mut timing: crate::telemetry::RequestTiming,
+    route: (&crate::routing::RouteReason, &str),
 ) -> Response<ResBody> {
     let (mut parts, body) = resp.into_parts();
     for name in HOP_BY_HOP {
@@ -2226,6 +2255,7 @@ async fn cache_and_finish(
     let mut resp = Response::from_parts(parts, full(collected));
     resp.headers_mut()
         .insert("x-fastllm-cache", HeaderValue::from_static("miss"));
+    stamp_route_headers(&mut resp, route.0, route.1);
     if let Some(status) = &rate_limit_status {
         stamp_rate_limit_headers(&mut resp, status);
     }
@@ -2240,6 +2270,11 @@ async fn cache_and_finish(
 fn cached_response(
     entry: crate::cache::Entry,
     rate_limit_status: &Option<crate::limiter::RateLimitStatus>,
+    // A cache hit was still routed — the decision picked the model whose
+    // answer is being replayed. Omitting it here would make the header
+    // present on some responses and absent on others for no reason a caller
+    // could reason about.
+    route: (&crate::routing::RouteReason, &str),
 ) -> Response<ResBody> {
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -2250,6 +2285,7 @@ fn cached_response(
     let mut resp = builder
         .body(full(entry.body))
         .expect("a cached body is always a valid response");
+    stamp_route_headers(&mut resp, route.0, route.1);
     if let Some(status) = rate_limit_status {
         stamp_rate_limit_headers(&mut resp, status);
     }
@@ -2290,6 +2326,32 @@ async fn backoff(attempt: usize, status: StatusCode, prefix: u64) {
 /// client that already paces itself against OpenAI needs no new code to pace
 /// itself against this. Without them a caller only learns a limit exists by
 /// being refused by it.
+/// Stamp the routing decision onto the response.
+///
+/// Unconditional, and that is the point. The head sampler traces one request
+/// in `--otel-sample-one-in`, so an unsampled request has no span to hang a
+/// reason on — and the requests somebody investigates are rarely the ones that
+/// happened to be sampled. A header is on every response, costs nothing when
+/// nobody reads it, and survives into whatever the client already logs.
+///
+/// `x-fastllm-route` says which rule, default or jump decided;
+/// `x-fastllm-served-model` says what actually answered, which is the other
+/// half of the question — the two differ after a failover and the delta alone
+/// never said why.
+fn stamp_route_headers(
+    resp: &mut Response<ResBody>,
+    reason: &crate::routing::RouteReason,
+    served_model: &str,
+) {
+    let headers = resp.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&reason.to_string()) {
+        headers.insert("x-fastllm-route", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(served_model) {
+        headers.insert("x-fastllm-served-model", v);
+    }
+}
+
 fn stamp_rate_limit_headers(
     resp: &mut Response<ResBody>,
     status: &crate::limiter::RateLimitStatus,

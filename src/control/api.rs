@@ -4909,6 +4909,10 @@ struct DryRunResult {
     matched_rule: Option<usize>,
     /// `false` when the name is a provider model, which resolves to itself.
     frontend_model: bool,
+    /// The same string the live path puts in `x-fastllm-route`, so a dry run
+    /// and a real request describe a decision the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
     /// Set when a rule would refuse the request outright. `candidates` is
     /// then empty, and the reason it is empty is this rather than "nothing is
     /// serving" — a distinction a rule author needs, since one is their rule
@@ -4966,6 +4970,7 @@ async fn routing_dry_run(
             frontend_model: false,
             denied: None,
             tag: None,
+            reason: Some(crate::routing::RouteReason::Concrete.to_string()),
         }));
     };
 
@@ -4996,13 +5001,20 @@ async fn routing_dry_run(
     // its body, and weighted targets are chosen from it. Zero is deterministic
     // and documented rather than random, so a dry run is reproducible.
     let matched_rule = vm.rules.iter().position(|r| r.matches(&facts, &registry));
-    let (candidates, denied, tag) = match vm.decide(&facts, 0, &registry, &snapshot.frontend_models)
-    {
-        crate::routing::Decision::Route { candidates, tag } => (candidates, None, tag),
-        crate::routing::Decision::Deny { status, message } => {
-            (Vec::new(), Some(DryRunDenial { status, message }), None)
-        }
-    };
+    let (candidates, denied, tag, reason) =
+        match vm.decide(&facts, 0, &registry, &snapshot.frontend_models) {
+            crate::routing::Decision::Route {
+                candidates,
+                tag,
+                reason,
+            } => (candidates, None, tag, Some(reason.to_string())),
+            crate::routing::Decision::Deny { status, message } => (
+                Vec::new(),
+                Some(DryRunDenial { status, message }),
+                None,
+                None,
+            ),
+        };
 
     Ok(Json(DryRunResult {
         candidates,
@@ -5010,6 +5022,7 @@ async fn routing_dry_run(
         frontend_model: true,
         denied,
         tag,
+        reason,
     }))
 }
 

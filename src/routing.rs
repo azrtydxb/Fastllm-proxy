@@ -686,6 +686,60 @@ pub enum RuleAction {
     Jump(String),
 }
 
+/// Why a request went where it went.
+///
+/// Routing is the reason people reach for this proxy — semantic classes,
+/// weighted splits, spillover on a load ceiling — and once a request was
+/// served, nothing on record said which of them decided. That matters most
+/// exactly where it was least available: `LoadMatch` is not a pure function of
+/// the request, so two identical prompts a second apart can legitimately route
+/// differently, and a quality regression in an eval tool had two
+/// indistinguishable explanations. This is the one that tells them apart.
+///
+/// `Copy`, and the only allocation is the frontend model's name after a jump —
+/// this is built on the request path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteReason {
+    /// Not a frontend model. It routes to itself and there was nothing to
+    /// decide.
+    Concrete,
+    /// The rule at this index matched first. Zero-based, as the rule list is.
+    Rule { index: usize },
+    /// No rule matched; the default targets decided.
+    Default,
+    /// A rule delegated to another frontend model, and that one decided.
+    /// Carries where it landed, because "which rule" means nothing without
+    /// saying whose.
+    Jumped { to: String, then: Box<RouteReason> },
+}
+
+impl std::fmt::Display for RouteReason {
+    /// Compact enough for a response header, readable without a legend.
+    ///
+    /// `concrete`, `rule:2`, `default`, `jump:cheap>rule:0`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Concrete => write!(f, "concrete"),
+            Self::Rule { index } => write!(f, "rule:{index}"),
+            Self::Default => write!(f, "default"),
+            Self::Jumped { to, then } => write!(f, "jump:{to}>{then}"),
+        }
+    }
+}
+
+/// Wrap an innermost reason in the jumps that led to it.
+///
+/// A bare `rule:0` after a jump names a rule on a frontend model the caller
+/// never asked for, which reads as a lie. `jump:cheap>rule:0` says whose.
+fn nest(hops: &[String], inner: RouteReason) -> RouteReason {
+    hops.iter()
+        .rev()
+        .fold(inner, |acc, to| RouteReason::Jumped {
+            to: to.clone(),
+            then: Box::new(acc),
+        })
+}
+
 /// What routing decided, which is no longer always "these models".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -694,6 +748,8 @@ pub enum Decision {
         candidates: Vec<String>,
         /// The tag of the rule that decided, for the usage row.
         tag: Option<String>,
+        /// Which rule, default or jump produced `candidates`.
+        reason: RouteReason,
     },
     /// Refuse before dispatching anything.
     Deny { status: u16, message: String },
@@ -705,6 +761,7 @@ impl Decision {
         Self::Route {
             candidates: Vec::new(),
             tag: None,
+            reason: RouteReason::Default,
         }
     }
 }
@@ -913,6 +970,9 @@ impl FrontendModelDef {
         models: &HashMap<String, FrontendModelDef>,
     ) -> Decision {
         let mut current = self;
+        // Where the jumps have been, so the reason can say whose rule decided
+        // rather than an index into a list the caller cannot identify.
+        let mut hops: Vec<String> = Vec::new();
         // Once, before any rule is tested, and recomputed after a jump because
         // the reachable set is then a different frontend model's. See
         // `CostMatch` for why it is a property of the model rather than of the
@@ -920,7 +980,7 @@ impl FrontendModelDef {
         let mut cost = current.estimated_cost(facts, registry);
         for _ in 0..MAX_JUMPS {
             let mut jumped = None;
-            for rule in &current.rules {
+            for (index, rule) in current.rules.iter().enumerate() {
                 if !rule.matches_with_cost(facts, registry, cost) {
                     continue;
                 }
@@ -936,7 +996,7 @@ impl FrontendModelDef {
                         // instead would turn deleting a frontend model into an
                         // outage for every other one that referenced it.
                         if let Some(next) = models.get(name) {
-                            jumped = Some(next);
+                            jumped = Some((name.clone(), next));
                             break;
                         }
                         continue;
@@ -950,12 +1010,14 @@ impl FrontendModelDef {
                                 facts.needed_tokens(),
                             ),
                             tag: rule.tag.clone(),
+                            reason: nest(&hops, RouteReason::Rule { index }),
                         };
                     }
                 }
             }
             match jumped {
-                Some(next) => {
+                Some((name, next)) => {
+                    hops.push(name);
                     current = next;
                     cost = current.estimated_cost(facts, registry);
                 }
@@ -968,6 +1030,7 @@ impl FrontendModelDef {
                             facts.needed_tokens(),
                         ),
                         tag: None,
+                        reason: nest(&hops, RouteReason::Default),
                     }
                 }
             }
@@ -1160,6 +1223,32 @@ fn expand_pool(pool: &WeightedTarget, prefix_hash: u64, registry: &Registry) -> 
 
 #[cfg(test)]
 mod tests {
+    /// The reason has to name *which* rule, and after a jump it has to say
+    /// whose. A bare `rule:0` on a frontend model the caller never asked for
+    /// reads as a lie about their own configuration.
+    #[test]
+    fn the_reason_names_the_rule_the_default_and_the_jump() {
+        assert_eq!(RouteReason::Concrete.to_string(), "concrete");
+        assert_eq!(RouteReason::Default.to_string(), "default");
+        assert_eq!(RouteReason::Rule { index: 2 }.to_string(), "rule:2");
+        assert_eq!(
+            RouteReason::Jumped {
+                to: "cheap".into(),
+                then: Box::new(RouteReason::Rule { index: 0 }),
+            }
+            .to_string(),
+            "jump:cheap>rule:0"
+        );
+    }
+
+    /// Every hop, in the order taken. One jump losing the outer frontend
+    /// model would make two different routes print the same reason.
+    #[test]
+    fn nested_jumps_keep_the_whole_path() {
+        let r = nest(&["a".to_string(), "b".to_string()], RouteReason::Default);
+        assert_eq!(r.to_string(), "jump:a>jump:b>default");
+    }
+
     use super::*;
     use crate::config::FileConfig;
     use crate::registry::Interner;
@@ -1851,7 +1940,14 @@ mod tests {
             vm.decide(&facts_with(None, 5000, None, &headers), 0, &reg, &models),
             Decision::Route {
                 candidates: vec!["big".into()],
-                tag: Some("house".into())
+                tag: Some("house".into()),
+                // Named, not just "rule 0": that rule belongs to the shared
+                // chain, and reporting the index alone would point at a rule
+                // on the frontend model the caller actually asked for.
+                reason: RouteReason::Jumped {
+                    to: "house-policy".into(),
+                    then: Box::new(RouteReason::Rule { index: 0 }),
+                },
             }
         );
         // And the shared chain's defaults catch what it does not match.
@@ -1924,7 +2020,8 @@ mod tests {
             ),
             Decision::Route {
                 candidates: Vec::new(),
-                tag: None
+                tag: None,
+                reason: RouteReason::Default,
             }
         );
     }
