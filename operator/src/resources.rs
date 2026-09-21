@@ -66,6 +66,30 @@ pub fn labels(owner: &FastllmProxy, component: &str) -> BTreeMap<String, String>
     ])
 }
 
+/// The labels an object should select pods by.
+///
+/// `spec.selector` is immutable on a Deployment, so the operator cannot impose
+/// its own scheme on one that already exists — it has to adopt whatever that
+/// Deployment already selects, and label the pods it creates to match. Three
+/// schemes are in the wild: `deploy/kubernetes/base/` uses name+component, the
+/// operator adds `instance`, and clusters installed before either use
+/// `app: <name>`. Assuming any one of them produced a Service and a
+/// PodDisruptionBudget that matched zero pods, and nine days of a reconcile
+/// loop failing on `field is immutable`.
+///
+/// `None` means nothing exists yet and [`selector`] decides.
+pub type LiveSelector = Option<BTreeMap<String, String>>;
+
+/// What to select by: the live Deployment's own labels when it has them,
+/// this operator's scheme when the Deployment is ours to create.
+fn selector_or(
+    owner: &FastllmProxy,
+    component: &str,
+    live: &LiveSelector,
+) -> BTreeMap<String, String> {
+    live.clone().unwrap_or_else(|| selector(owner, component))
+}
+
 /// Selector labels are a strict subset of [`labels`] and must never gain a
 /// field that changes between releases: `spec.selector` is immutable on a
 /// Deployment, so a version label in here would make every upgrade a delete
@@ -197,8 +221,13 @@ fn template_meta(
     component: &str,
     over: &PodOverrides,
     config_hash: &str,
+    sel: &BTreeMap<String, String>,
 ) -> ObjectMeta {
     let mut l = labels(owner, component);
+    // Whatever is being selected by must be on the pod, or the Deployment
+    // would create pods its own selector rejects. `sel` last so an adopted
+    // scheme wins over this operator's.
+    l.extend(sel.clone());
     l.extend(over.labels.clone());
     let mut a = over.annotations.clone();
     a.insert(CONFIG_HASH_ANNOTATION.to_string(), config_hash.to_string());
@@ -258,7 +287,12 @@ pub fn tuning_yaml(owner: &FastllmProxy) -> String {
     })
 }
 
-pub fn control_deployment(owner: &FastllmProxy, config_hash: &str) -> Deployment {
+pub fn control_deployment(
+    owner: &FastllmProxy,
+    config_hash: &str,
+    live: &LiveSelector,
+) -> Deployment {
+    let sel = selector_or(owner, CONTROL, live);
     let s = &owner.spec;
     let tls = s.control.tls_secret_name.as_ref();
     let over = &s.control.pod;
@@ -355,11 +389,11 @@ pub fn control_deployment(owner: &FastllmProxy, config_hash: &str) -> Deployment
                 ..Default::default()
             }),
             selector: LabelSelector {
-                match_labels: Some(selector(owner, CONTROL)),
+                match_labels: Some(sel.clone()),
                 ..Default::default()
             },
             template: PodTemplateSpec {
-                metadata: Some(template_meta(owner, CONTROL, over, config_hash)),
+                metadata: Some(template_meta(owner, CONTROL, over, config_hash, &sel)),
                 spec: Some(pod),
             },
             ..Default::default()
@@ -374,7 +408,13 @@ pub fn control_deployment(owner: &FastllmProxy, config_hash: &str) -> Deployment
 /// controller holds the data plane at the image the *control plane* is
 /// actually running until the control plane has rolled, so the two never
 /// disagree across a schema change. See `main::reconcile`.
-pub fn proxy_deployment(owner: &FastllmProxy, image: &str, config_hash: &str) -> Deployment {
+pub fn proxy_deployment(
+    owner: &FastllmProxy,
+    image: &str,
+    config_hash: &str,
+    live: &LiveSelector,
+) -> Deployment {
+    let sel = selector_or(owner, PROXY, live);
     let s = &owner.spec;
     let tls = s.control.tls_secret_name.as_ref();
     let scheme = if tls.is_some() { "https" } else { "http" };
@@ -527,7 +567,7 @@ pub fn proxy_deployment(owner: &FastllmProxy, image: &str, config_hash: &str) ->
                 // replicas.
                 when_unsatisfiable: "ScheduleAnyway".into(),
                 label_selector: Some(LabelSelector {
-                    match_labels: Some(selector(owner, PROXY)),
+                    match_labels: Some(sel.clone()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -554,11 +594,11 @@ pub fn proxy_deployment(owner: &FastllmProxy, image: &str, config_hash: &str) ->
                 }),
             }),
             selector: LabelSelector {
-                match_labels: Some(selector(owner, PROXY)),
+                match_labels: Some(sel.clone()),
                 ..Default::default()
             },
             template: PodTemplateSpec {
-                metadata: Some(template_meta(owner, PROXY, over, config_hash)),
+                metadata: Some(template_meta(owner, PROXY, over, config_hash, &sel)),
                 spec: Some(pod),
             },
             ..Default::default()
@@ -624,7 +664,8 @@ pub fn bootstrap_job(owner: &FastllmProxy) -> Option<Job> {
     })
 }
 
-pub fn service(owner: &FastllmProxy, component: &str) -> Service {
+pub fn service(owner: &FastllmProxy, component: &str, live: &LiveSelector) -> Service {
+    let sel = selector_or(owner, component, live);
     let (port, target, type_, annotations) = match component {
         CONTROL => (
             4001,
@@ -672,7 +713,7 @@ pub fn service(owner: &FastllmProxy, component: &str) -> Service {
         metadata: meta_with_annotations(owner, component, annotations),
         spec: Some(ServiceSpec {
             type_: Some(type_.to_string()),
-            selector: Some(selector(owner, component)),
+            selector: Some(sel),
             ports: Some(ports),
             ..Default::default()
         }),
@@ -686,7 +727,10 @@ pub fn service(owner: &FastllmProxy, component: &str) -> Service {
 /// blocks every voluntary eviction, so a node drain hangs for ever rather
 /// than protecting anything. With autoscaling on, the floor is `minReplicas`
 /// for the same reason.
-pub fn pod_disruption_budget(owner: &FastllmProxy) -> Option<PodDisruptionBudget> {
+pub fn pod_disruption_budget(
+    owner: &FastllmProxy,
+    live: &LiveSelector,
+) -> Option<PodDisruptionBudget> {
     let a = &owner.spec.proxy.autoscaling;
     let floor = if a.enabled {
         a.min_replicas
@@ -701,7 +745,7 @@ pub fn pod_disruption_budget(owner: &FastllmProxy) -> Option<PodDisruptionBudget
         spec: Some(PodDisruptionBudgetSpec {
             min_available: Some(IntOrString::Int(1)),
             selector: Some(LabelSelector {
-                match_labels: Some(selector(owner, PROXY)),
+                match_labels: Some(selector_or(owner, PROXY, live)),
                 ..Default::default()
             }),
             ..Default::default()

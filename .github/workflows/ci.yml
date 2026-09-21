@@ -153,6 +153,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      # `default-members = ["."]`, so everything above tests the proxy and
+      # nothing else. The operator ships as its own image and had never been
+      # linted or tested here: a PodDisruptionBudget selecting zero pods
+      # reached a live cluster and sat there for two weeks, and the committed
+      # CRD drifted from its own generator without a single red build.
+      - name: Clippy (operator)
+        run: cargo clippy -p fastllm-operator --all-targets -- -D warnings
+      - name: Test (operator)
+        run: cargo test -p fastllm-operator --locked
       # The database tests are `#[ignore]`d by default so `cargo test` stays
       # database-free everywhere else (a laptop with no Postgres running,
       # `cargo build --no-default-features`). Here, with a real Postgres

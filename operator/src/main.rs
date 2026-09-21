@@ -256,16 +256,31 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
         &resources::control_role_binding(&obj),
     )
     .await?;
+    // Read what the live Deployments already select by, before writing
+    // anything. `spec.selector` is immutable, so an existing Deployment's
+    // labels are the only ones the Service, the PDB and the topology spread
+    // may use — imposing this operator's scheme on an install made from
+    // `deploy/kubernetes/base/`, or from a release older than either, produced
+    // objects matching zero pods and a reconcile that could never succeed.
+    let control_selector: resources::LiveSelector = deploys
+        .get_opt(&control_name)
+        .await?
+        .and_then(|d| d.spec.and_then(|s| s.selector.match_labels));
+    let proxy_selector: resources::LiveSelector = deploys
+        .get_opt(&proxy_name)
+        .await?
+        .and_then(|d| d.spec.and_then(|s| s.selector.match_labels));
+
     apply(
         &deploys,
         &control_name,
-        &resources::control_deployment(&obj, hash),
+        &resources::control_deployment(&obj, hash, &control_selector),
     )
     .await?;
     apply(
         &svcs,
         &control_name,
-        &resources::service(&obj, resources::CONTROL),
+        &resources::service(&obj, resources::CONTROL, &control_selector),
     )
     .await?;
 
@@ -295,19 +310,19 @@ async fn reconcile(obj: Arc<FastllmProxy>, ctx: Arc<Ctx>) -> Result<Action, Erro
         apply(
             &deploys,
             &proxy_name,
-            &resources::proxy_deployment(&obj, image, hash),
+            &resources::proxy_deployment(&obj, image, hash, &proxy_selector),
         )
         .await?;
         apply(
             &svcs,
             &proxy_name,
-            &resources::service(&obj, resources::PROXY),
+            &resources::service(&obj, resources::PROXY, &proxy_selector),
         )
         .await?;
     }
 
     // ------------------------------------------------------------ 3
-    match resources::pod_disruption_budget(&obj) {
+    match resources::pod_disruption_budget(&obj, &proxy_selector) {
         // Scaling back to one replica has to remove the budget, not merely
         // stop creating it — a stale minAvailable:1 over a single pod blocks
         // every voluntary eviction and hangs a node drain.
@@ -742,6 +757,95 @@ mod tests {
     use k8s_openapi::api::apps::v1::DeploymentStatus;
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
+    /// `spec.selector` is immutable, so an existing Deployment's labels are
+    /// the only ones anything may select by. Imposing this operator's own
+    /// scheme on an install made from `deploy/kubernetes/base/` — or from a
+    /// release older than either — produced a Service and a
+    /// PodDisruptionBudget matching zero pods, and a reconcile that failed on
+    /// `field is immutable` every fifteen seconds for nine days without once
+    /// succeeding.
+    ///
+    /// The pods have to carry the adopted labels too, or the Deployment would
+    /// create pods its own selector rejects.
+    #[test]
+    fn an_adopted_selector_is_used_and_lands_on_the_pods() {
+        use std::collections::BTreeMap;
+        let cr = spec();
+        let legacy = BTreeMap::from([("app".to_string(), "fastllm-proxy".to_string())]);
+        let live = Some(legacy.clone());
+
+        let d = resources::proxy_deployment(&cr, "img", "hash", &live);
+        assert_eq!(
+            d.spec.as_ref().unwrap().selector.match_labels.as_ref(),
+            Some(&legacy),
+            "the Deployment keeps the selector it already had"
+        );
+        let pod_labels = d
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .clone()
+            .unwrap();
+        assert_eq!(
+            pod_labels.get("app").map(String::as_str),
+            Some("fastllm-proxy"),
+            "and labels its pods to match, or it would reject its own pods"
+        );
+
+        let svc = resources::service(&cr, resources::PROXY, &live);
+        assert_eq!(
+            svc.spec.as_ref().unwrap().selector.as_ref(),
+            Some(&legacy),
+            "the Service selects the pods that exist, not the ones we would have made"
+        );
+
+        let mut two = cr.clone();
+        two.spec.proxy.replicas = 2;
+        two.spec.proxy.autoscaling.enabled = false;
+        let pdb =
+            resources::pod_disruption_budget(&two, &live).expect("two replicas earn a budget");
+        assert_eq!(
+            pdb.spec
+                .as_ref()
+                .unwrap()
+                .selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref(),
+            Some(&legacy),
+            "and so does the budget — one selecting zero pods blocks every drain"
+        );
+    }
+
+    /// With nothing live, the operator's own scheme decides: a fresh install
+    /// has no Deployment to adopt from.
+    #[test]
+    fn with_no_live_deployment_the_operator_uses_its_own_scheme() {
+        let d = resources::proxy_deployment(&spec(), "img", "hash", &None);
+        let sel = d
+            .spec
+            .as_ref()
+            .unwrap()
+            .selector
+            .match_labels
+            .clone()
+            .unwrap();
+        assert_eq!(
+            sel.get("app.kubernetes.io/name").map(String::as_str),
+            Some("fastllm-proxy"),
+        );
+        assert!(
+            sel.contains_key("app.kubernetes.io/instance"),
+            "instance is what keeps two CRs in one namespace apart"
+        );
+    }
+
     fn spec() -> FastllmProxy {
         let mut cr = FastllmProxy::new(
             "demo",
@@ -774,7 +878,7 @@ mod tests {
     }
 
     fn rolled(image: &str, replicas: i32) -> Deployment {
-        let mut d = resources::control_deployment(&spec(), "hash");
+        let mut d = resources::control_deployment(&spec(), "hash", &None);
         d.spec
             .as_mut()
             .unwrap()
@@ -814,8 +918,13 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            image_of(&resources::control_deployment(&cr, "h")),
-            image_of(&resources::proxy_deployment(&cr, &cr.spec.image, "h"))
+            image_of(&resources::control_deployment(&cr, "h", &None)),
+            image_of(&resources::proxy_deployment(
+                &cr,
+                &cr.spec.image,
+                "h",
+                &None
+            ))
         );
     }
 
@@ -878,13 +987,13 @@ mod tests {
                 .clone()
         };
         assert_ne!(
-            annotation(&resources::control_deployment(&cr, "aaaa")),
-            annotation(&resources::control_deployment(&cr, "bbbb"))
+            annotation(&resources::control_deployment(&cr, "aaaa", &None)),
+            annotation(&resources::control_deployment(&cr, "bbbb", &None))
         );
         // And the gateway rolls too — a rotated proxy token is read by both.
         assert_ne!(
-            annotation(&resources::proxy_deployment(&cr, "img", "aaaa")),
-            annotation(&resources::proxy_deployment(&cr, "img", "bbbb"))
+            annotation(&resources::proxy_deployment(&cr, "img", "aaaa", &None)),
+            annotation(&resources::proxy_deployment(&cr, "img", "bbbb", &None))
         );
     }
 
@@ -897,7 +1006,7 @@ mod tests {
             resources::CONFIG_HASH_ANNOTATION.to_string(),
             "supplied-by-hand".into(),
         );
-        let d = resources::proxy_deployment(&cr, "img", "real-hash");
+        let d = resources::proxy_deployment(&cr, "img", "real-hash", &None);
         let a = d
             .spec
             .unwrap()
@@ -918,8 +1027,8 @@ mod tests {
     fn exposing_the_gateway_leaves_the_admin_service_internal() {
         let mut cr = spec();
         cr.spec.proxy.service_type = ServiceType::LoadBalancer;
-        let admin = resources::service(&cr, resources::CONTROL);
-        let gateway = resources::service(&cr, resources::PROXY);
+        let admin = resources::service(&cr, resources::CONTROL, &None);
+        let gateway = resources::service(&cr, resources::PROXY, &None);
         assert_eq!(admin.spec.unwrap().type_.unwrap(), "ClusterIP");
         assert_eq!(gateway.spec.unwrap().type_.unwrap(), "LoadBalancer");
 
@@ -927,7 +1036,7 @@ mod tests {
         cr.spec.control.service_type = ServiceType::LoadBalancer;
         cr.spec.control.tls_secret_name = Some("fastllm-control-tls".into());
         assert_eq!(
-            resources::service(&cr, resources::CONTROL)
+            resources::service(&cr, resources::CONTROL, &None)
                 .spec
                 .unwrap()
                 .type_
@@ -946,13 +1055,13 @@ mod tests {
             .proxy
             .service_annotations
             .insert("io.cilium/lb-ipam-ips".into(), "192.168.10.125".into());
-        let svc = resources::service(&cr, resources::PROXY);
+        let svc = resources::service(&cr, resources::PROXY, &None);
         assert_eq!(
             svc.metadata.annotations.unwrap()["io.cilium/lb-ipam-ips"],
             "192.168.10.125"
         );
         // And not onto the admin Service, which shares the builder.
-        assert!(resources::service(&cr, resources::CONTROL)
+        assert!(resources::service(&cr, resources::CONTROL, &None)
             .metadata
             .annotations
             .is_none());
@@ -966,7 +1075,7 @@ mod tests {
         let mut cr = spec();
         // The default: one port, unchanged.
         let ports = |cr: &FastllmProxy| {
-            resources::service(cr, resources::PROXY)
+            resources::service(cr, resources::PROXY, &None)
                 .spec
                 .unwrap()
                 .ports
@@ -992,7 +1101,7 @@ mod tests {
             vec![("http".to_string(), 80), ("api".to_string(), 4000)]
         );
         // Every one of them targets the single container port.
-        for p in resources::service(&cr, resources::PROXY)
+        for p in resources::service(&cr, resources::PROXY, &None)
             .spec
             .unwrap()
             .ports
@@ -1004,7 +1113,7 @@ mod tests {
         // The admin Service is one port by construction and must not inherit
         // the gateway's list.
         assert_eq!(
-            resources::service(&cr, resources::CONTROL)
+            resources::service(&cr, resources::CONTROL, &None)
                 .spec
                 .unwrap()
                 .ports
@@ -1020,9 +1129,9 @@ mod tests {
     fn a_single_replica_gets_no_disruption_budget() {
         let mut cr = spec();
         cr.spec.proxy.replicas = 1;
-        assert!(resources::pod_disruption_budget(&cr).is_none());
+        assert!(resources::pod_disruption_budget(&cr, &None).is_none());
         cr.spec.proxy.replicas = 2;
-        assert!(resources::pod_disruption_budget(&cr).is_some());
+        assert!(resources::pod_disruption_budget(&cr, &None).is_some());
 
         // Under an autoscaler the floor is minReplicas, not the replicas
         // field the HPA is ignoring.
@@ -1033,7 +1142,7 @@ mod tests {
             max_replicas: 9,
             target_cpu_utilization_percentage: 70,
         };
-        assert!(resources::pod_disruption_budget(&cr).is_none());
+        assert!(resources::pod_disruption_budget(&cr, &None).is_none());
     }
 
     /// Writing `replicas` back on every pass would fight the autoscaler for
@@ -1043,7 +1152,7 @@ mod tests {
     fn an_autoscaled_gateway_has_its_replica_count_left_alone() {
         let mut cr = spec();
         cr.spec.proxy.autoscaling.enabled = true;
-        let d = resources::proxy_deployment(&cr, "img", "h");
+        let d = resources::proxy_deployment(&cr, "img", "h", &None);
         assert!(d.spec.unwrap().replicas.is_none());
 
         let hpa = resources::horizontal_pod_autoscaler(&cr).expect("hpa");
@@ -1117,7 +1226,9 @@ mod tests {
     fn selector_labels_carry_nothing_that_changes_between_releases() {
         let mut cr = spec();
         cr.spec.proxy.pod.labels.insert("team".into(), "ml".into());
-        let d = resources::proxy_deployment(&cr, "img", "h").spec.unwrap();
+        let d = resources::proxy_deployment(&cr, "img", "h", &None)
+            .spec
+            .unwrap();
         let sel = d.selector.match_labels.unwrap();
         assert!(!sel.contains_key("app.kubernetes.io/version"));
         assert!(!sel.contains_key("app.kubernetes.io/managed-by"));
@@ -1133,7 +1244,7 @@ mod tests {
     fn tls_moves_the_probes_to_https_as_well_as_the_listener() {
         let mut cr = spec();
         cr.spec.control.tls_secret_name = Some("fastllm-control-tls".into());
-        let d = resources::control_deployment(&cr, "h");
+        let d = resources::control_deployment(&cr, "h", &None);
         let c = &d.spec.unwrap().template.spec.unwrap().containers[0];
         assert!(c
             .args
@@ -1154,7 +1265,7 @@ mod tests {
         }
         // And the gateway must trust the issuing CA, or the handshake fails
         // and it serves a stale snapshot for ever.
-        let p = resources::proxy_deployment(&cr, "img", "h");
+        let p = resources::proxy_deployment(&cr, "img", "h", &None);
         let pc = &p.spec.unwrap().template.spec.unwrap().containers[0];
         assert!(pc
             .args
@@ -1179,7 +1290,7 @@ mod tests {
     #[test]
     fn the_gateway_reaches_the_control_plane_by_its_certificate_name() {
         let cr = spec();
-        let d = resources::proxy_deployment(&cr, "img", "h");
+        let d = resources::proxy_deployment(&cr, "img", "h", &None);
         let url = d.spec.unwrap().template.spec.unwrap().containers[0]
             .env
             .as_ref()
@@ -1197,7 +1308,7 @@ mod tests {
     fn policy_reaches_the_flag_the_binary_accepts() {
         let mut cr = spec();
         cr.spec.proxy.policy = Policy::LowestLatency;
-        let d = resources::proxy_deployment(&cr, "img", "h");
+        let d = resources::proxy_deployment(&cr, "img", "h", &None);
         let args = d.spec.unwrap().template.spec.unwrap().containers[0]
             .args
             .clone()
@@ -1210,7 +1321,7 @@ mod tests {
     fn extra_args_are_appended_after_everything_the_controller_computed() {
         let mut cr = spec();
         cr.spec.proxy.pod.extra_args = vec!["--max-body-bytes=1048576".into()];
-        let d = resources::proxy_deployment(&cr, "img", "h");
+        let d = resources::proxy_deployment(&cr, "img", "h", &None);
         let args = d.spec.unwrap().template.spec.unwrap().containers[0]
             .args
             .clone()
@@ -1249,10 +1360,12 @@ mod tests {
         });
         for meta in [
             resources::config_map(&cr).metadata,
-            resources::control_deployment(&cr, "h").metadata,
-            resources::proxy_deployment(&cr, "img", "h").metadata,
-            resources::service(&cr, resources::PROXY).metadata,
-            resources::pod_disruption_budget(&cr).unwrap().metadata,
+            resources::control_deployment(&cr, "h", &None).metadata,
+            resources::proxy_deployment(&cr, "img", "h", &None).metadata,
+            resources::service(&cr, resources::PROXY, &None).metadata,
+            resources::pod_disruption_budget(&cr, &None)
+                .unwrap()
+                .metadata,
             resources::horizontal_pod_autoscaler(&cr).unwrap().metadata,
             resources::ingress(&cr).unwrap().metadata,
             resources::bootstrap_job(&cr).unwrap().metadata,

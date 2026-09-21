@@ -278,3 +278,350 @@ Options:
   policy, which `6ea7f29` made work.
 
 **Decided:** build it. Members become backends of one model.
+
+## The orphaned `tank/objects` ZFS dataset on NovaNAS
+
+Removing keycloak, openbao, rustfs, nova-api and the observability stack from
+NovaNAS left the ZFS dataset `tank/objects` (192K, mounted at `/tank/objects`)
+with nothing that references it. It was the object-storage plugin's tier-2
+dataset, declared in that plugin's `needs/dataset.yaml` and `rustfs.env`, all of
+which are now deleted.
+
+It was left in place deliberately: destroying a ZFS dataset is a different kind
+of action from purging packages and config, and it was not part of what the
+removal was asked to cover. The same applies to the config backups this session
+wrote across `/etc` (`*.bak-<timestamp>`, `*.bak2-<timestamp>`) and
+`/etc/hosts.bak-*`, which are now the only record of the pre-removal state.
+
+Options:
+
+- **Destroy the dataset, keep the backups.** `zfs destroy tank/objects`
+  reclaims the mountpoint and the 192K. The `/etc` backups stay as a record of
+  what the configs looked like before today.
+- **Destroy both.** Also delete this session's `*.bak-*` files under `/etc` and
+  `/usr/local/bin`. Nothing left to reconstruct the old config from.
+- **Leave both.** The dataset costs 192K and an unused mountpoint; the backups
+  cost a few hundred KB. Neither is doing harm.
+
+## NovaNAS k3s carries more than the builder it is expected to
+
+The expectation for NovaNAS is "a k3s cluster with a builder, that's it". The
+builder is really a small stack — buildkit plus the things it depends on: ARC
+runners (github.com/azrtydxb) that drive it, cert-manager issuing its mTLS
+certs from the `cluster-ca` issuer, kube-vip supplying the `192.168.10.211`
+LoadBalancer address, and openebs zfs-localpv backing its 150Gi cache. Those
+all earn their place.
+
+What does not:
+
+- **KubeVirt + CDI** — 10 pods, 41 of the cluster's 51 CRDs, ~740Mi RAM,
+  running zero VirtualMachines and zero DataVolumes.
+- **csi-nfs** — 2 pods; the `nfs-csi` storage class has no PVCs, and the host
+  export `/srv/k8s-nfs` has no consumers.
+- **snapshot-controller** — 2 pods for a single 144-day-old VolumeSnapshot,
+  `test-fs-snap`, whose source volume is gone.
+- **Empty namespaces** — `novanas-apps-system` and `novanas-vms` (left behind
+  by the nova platform removed earlier today) and `sera-workspaces`.
+
+Separately, and not a tidiness question: `sera-workspaces` holds a service
+account `sera` with a token issued 6 days ago, bound to a cluster-scoped role
+`sera-nodes`. Something outside this cluster currently holds credentials to it.
+
+Options:
+
+- **Strip to the builder.** Remove KubeVirt, CDI, csi-nfs, the stale snapshot
+  and snapshot-controller, and the empty namespaces. Leaves buildkit, ARC,
+  cert-manager, kube-vip, openebs and the k3s baseline.
+- **Remove the VM platform only.** KubeVirt and CDI go; csi-nfs and
+  snapshot-controller stay in case NFS volumes or snapshots are wanted again.
+- **Leave it, now that it is known.** Nothing is broken and the node is at 2%
+  CPU / 9% memory.
+
+The `sera` credential is a separate question from any of the above.
+
+**Decided:** leave it as is. The extra components are known and idle, and the
+node sits at 2% CPU / 9% memory. The `sera` credential is intentional.
+
+## NovaNAS host is not ready for the R9700 GPUs
+
+Two R9700 cards (RDNA4 / Navi 48, PCI IDs in the `1002:75xx` range) are going
+into NovaNAS. ROCm and vLLM are intended to run in containers, which is the
+right split — but the kernel driver and its firmware can only live on the host,
+and neither is usable today:
+
+- `amdgpu` in the running kernel 6.12.74 carries **no `75xx` PCI IDs** at all
+  (its alias table stops around `743F`), so it cannot bind the cards. Debian 13
+  ships the 6.12 LTS kernel; RDNA4 enablement is substantially newer.
+- `/lib/firmware/amdgpu/` is **empty** — `firmware-amd-graphics` has never been
+  installed, though it is available at 20250410-2 from non-free-firmware, which
+  is already enabled.
+- `trixie-backports` is not configured, so the newest kernel apt offers is
+  6.12.90 — still 6.12.
+
+Metrics themselves need nothing on the host: once the driver binds, the kernel
+exposes utilisation, VRAM, temperature, power and clocks through sysfs, and
+`amd-smi` / AMD's Device Metrics Exporter both run fine in containers with
+`/dev/kfd` and `/dev/dri` mapped in. But today's cleanup removed Prometheus,
+node-exporter, Grafana and Loki, so there is currently no destination for them.
+
+Options for preparing the host before the cards arrive:
+
+- **Backports kernel + firmware.** Add `trixie-backports`, install its kernel
+  and `firmware-amd-graphics`, reboot, confirm the alias table now carries
+  `75xx`. Stays on Debian-packaged kernels.
+- **AMD `amdgpu-dkms` + firmware.** Keep the 6.12 kernel and build AMD's
+  out-of-tree driver from the ROCm repo. Matches ROCm versions exactly, but
+  Debian is not an officially supported ROCm distro and DKMS rebuilds on every
+  kernel update.
+- **Firmware only now, kernel decision at the machine.** Install
+  `firmware-amd-graphics` today and leave the kernel until the cards are
+  physically in and their exact PCI IDs are readable.
+- **Do nothing yet.** Handle it all tomorrow with the hardware present.
+
+Where GPU metrics should land is a separate question: back onto the host, or
+in-cluster via the AMD GPU Operator, which also provides the device plugin that
+k3s needs in order to schedule the GPUs at all.
+
+**Decided:** not a decision for me — the user is handling the driver/firmware
+side themselves. Left here only as a record of what the host looked like the
+day before the cards went in.
+
+## ROCm userspace on the NovaNAS host (Debian 13)
+
+Host prep for the two R9700s is done for the parts that are unambiguous:
+trixie-backports added, kernel 7.1.8 + headers installed, firmware-amd-graphics
+20260810 installed (677 blobs, Navi 48 `gc_12_0_0` present), and zfs-dkms
+upgraded 2.3.2 -> 2.4.4 and built for both the running 6.12.74 and the new
+7.1.8, so the `tank` pool still imports after the reboot. `atlantic` (the 10G
+lifeline) and `igc` both verified present in 7.1.8.
+
+Correction worth recording: the earlier claim that 6.12's amdgpu "does not know
+the card exists", based on no `1002:75xx` entries in its modalias list, was
+wrong. The RX 7900 XTX (`1002:744c`) has no entry either and is plainly
+supported, so that list is a legacy remnant, not the binding table. Both kernels
+carry 9 `gc_12_0_0` (Navi 48) firmware references. The real blocker was the
+missing firmware package, now fixed. 7.1.8 is still the better kernel for a new
+card, but it was not the emergency described.
+
+What cannot be done cleanly: AMD publishes ROCm only for `jammy` and `noble` —
+there is no Debian tree (404). Debian's own ROCm is 6.1.2, which predates
+gfx1201. Checking the noble 7.2.4 packages against trixie:
+
+- `hip-runtime-amd`'s external deps (`libnuma1`, `libstdc++6`, `libgcc-s1`,
+  `libc6`) are all satisfiable here;
+- `libpython3.12` does not exist on trixie (3.13), breaking the Python-binding
+  packages — the `amd-smi` CLI, rocprofiler;
+- `libelf1` is `libelf1t64` on trixie.
+
+Options:
+
+- **Full ROCm 7.2.4 from AMD's noble repo, apt-pinned** so it can never upgrade
+  a system library. Closest to "the works"; the Python-binding pieces are
+  expected to fail, and the whole combination is unsupported by AMD.
+- **Minimal host ROCm.** Debian-native `amd-smi` / `rocminfo` (6.1.2) purely to
+  see and manage the cards; containers carry the real ROCm. Native packages, no
+  mixing, but the tooling is too old to report gfx1201 properly.
+- **Driver and firmware only.** Stop where we are. Containers bring their own
+  complete ROCm, which is the standard pattern and the original plan.
+
+## Fitting the GPUs will probably rename the 10G NIC and strand NovaNAS
+
+NovaNAS is single-homed on `enp6s0` with a static address set by name in
+`/etc/network/interfaces`, and there is no remote rescue path. That name is
+derived from its PCI bus: the Aquantia 10G sits at `06:00.0`.
+
+Today there is no `00:01.0` root port in `lspci` — the CPU's x16 complex is
+dormant because nothing is plugged into it. Fitting two R9700s activates it, and
+it claims bus numbers ahead of the PCH root ports that currently hold the NVMe
+drives, the SATA controller and the NICs. Everything downstream shifts up, so
+`06:00.0` most likely becomes `08:00.0` and the interface comes up as `enp8s0`.
+
+`/etc/network/interfaces` matches on `enp6s0` literally. If the name changes the
+stanza never applies: no address, no default route, nothing listening, and
+recovery needs a monitor and keyboard.
+
+Two other places also name the interface, and would break the same way:
+`/etc/samba/smb.conf` (`interfaces = lo enp6s0`) and the kube-vip DaemonSet
+(`vip_interface=enp6s0`), which owns the `192.168.10.211` buildkit VIP.
+
+Options:
+
+- **Pin the name to the MAC, keep `enp6s0`.** A systemd `.link` file matching
+  `a8:b8:e0:14:20:d2` and forcing `Name=enp6s0`. Nothing else changes — smb.conf
+  and kube-vip keep working untouched. systemd warns about assigning a name in
+  its own predictable namespace, but it is widely done and stable.
+- **Rename to something bus-independent, e.g. `lan10g`.** Cleaner in principle
+  and unambiguous, but the name is referenced in three places, so
+  `/etc/network/interfaces`, `smb.conf` and the kube-vip DaemonSet all have to
+  change together.
+- **Leave it and fix at the console.** The rename only bites at the next boot,
+  which is the boot where the cards go in — and you will be physically at the
+  machine anyway.
+
+## Remaining host gaps for NovaNAS as a Kubernetes LLM box
+
+Backports is exhausted: nothing installed has a newer backports candidate. The
+three that mattered — kernel 7.1.8, zfs 2.4.4, firmware-amd-graphics 20260810 —
+are in. The only remaining backports delta is smartmontools 7.4 -> 7.5.
+
+The more notable finding is not a backports question. **intel-microcode is not
+installed at all.** The CPU is an i5-14400T (Raptor Lake, family 6 model 191
+stepping 2) running microcode 0x3d supplied by the BIOS; Debian omits the
+package by default because it lives in non-free-firmware. For a host about to
+run sustained inference, leaving the CPU on whatever revision the board shipped
+is an avoidable risk. trixie has 3.20251111.1.
+
+Smaller gaps, all plain trixie, all currently absent: `ethtool` (this is a 10G
+host and its absence already obstructed NIC diagnosis earlier today),
+`lm-sensors` (thermals, with two 300W-class cards arriving), `numactl` (vLLM
+pinning).
+
+Checked and deliberately not recommended: `libdrm2` / `libdrm-amdgpu1` — ROCm
+bundles its own (`librocm_sysdeps_drm.so.2`), so the system copies are
+redundant. ROCm's other runtime deps are already satisfied.
+
+Separately, CDI is not enabled in k3s's containerd and no `/etc/cdi` spec dirs
+exist. That is how AMD GPUs reach pods, but it belongs with the device-plugin
+work after the cards are fitted.
+
+Options:
+
+- **Microcode plus the operational tools.** intel-microcode, ethtool,
+  lm-sensors, numactl, and smartmontools from backports. Microcode needs a
+  reboot to take effect, which the card installation provides anyway.
+- **Microcode only.** The one with real consequences; skip the tooling.
+- **Tools only, no microcode.** Avoids any change to CPU behaviour.
+- **Nothing.** The box is functional as it stands.
+
+## Bringing NovaNAS onto Cilium to match the kw cluster
+
+NovaNAS currently runs flannel in `host-gw` mode (`cni0`, 10.42.0.0/24) with
+kube-proxy in-process. kw runs **Cilium 1.19.4** installed by Helm (release
+`cilium` in kube-system, revision 10), with cluster-pool IPAM over 10.42.0.0/16
+at /24 per node, `routingMode: tunnel` / vxlan, `kubeProxyReplacement: true`,
+BGP control plane on, and Hubble with relay, UI and metrics.
+
+Three of kw's values cannot be carried over literally:
+
+- `k8sServiceHost: 192.168.10.102` is kw's API server; on NovaNAS it must be
+  192.168.10.203 or Cilium points at the wrong cluster.
+- `hubble.metrics.serviceMonitor.enabled: true` needs the ServiceMonitor CRD,
+  which NovaNAS does not have — Prometheus was removed earlier today — so the
+  Helm install fails outright.
+- `hubble.ui.ingress` targets ingress class `nginx` at `hubble.kw.watteel.lab`.
+  NovaNAS has no ingress controller at all (traefik is disabled), so the Ingress
+  object would be created and never served.
+
+The substantive risk is `kubeProxyReplacement: true`. NovaNAS runs kube-vip in
+ARP mode with service election, holding 192.168.10.211 for buildkit. Cilium
+replacing kube-proxy is known to interfere with kube-vip's service VIP
+handling, and that VIP is how CI reaches the builder.
+
+The migration itself is disruptive whatever is decided: k3s must restart with
+`--flannel-backend=none --disable-network-policy`, `cni0` and the flannel state
+have to be torn down, and all 29 pods restart — ARC runners drop mid-job and
+buildkit goes offline. SSH is unaffected, so the host stays reachable; a failed
+Cilium rollout leaves the cluster without a CNI but recoverable.
+
+Options:
+
+- **Match kw closely, minus what cannot work.** Cilium 1.19.4, cluster-pool
+  IPAM, vxlan tunnel, BGP on, Hubble with relay and UI, but
+  `k8sServiceHost: 192.168.10.203`, serviceMonitor off, UI ingress off (reach it
+  by port-forward). Keep `kubeProxyReplacement: true` as kw has it, and accept
+  that kube-vip may need replacing with Cilium's own LB.
+- **Same but keep kube-proxy.** Identical except `kubeProxyReplacement: false`,
+  leaving kube-vip and the buildkit VIP untouched. Diverges from kw on one
+  setting, and is the lower-risk path for a box whose CI depends on that VIP.
+- **Match kw fully, including LB.** Drop kube-vip and let Cilium handle
+  LoadBalancer addresses via its own IP pool, which is the more coherent
+  end-state but changes how .211 is served.
+- **Do not migrate.** Leave flannel in place.
+
+**Decided:** migrated. NovaNAS now runs cilium 1.19.4 matching kw on chart,
+IPAM, routing mode, kube-proxy replacement, hubble and BGP control plane.
+kube-vip was NOT retired — investigation showed kw runs Cilium _with_ kube-vip
+for LoadBalancer and has no CiliumLoadBalancerIPPool or L2 announcement policy,
+so "full parity including LB" meant keeping kube-vip and bumping it to kw's
+v1.2.3. k8sServiceHost, hubble serviceMonitor and hubble UI ingress necessarily
+differ, for the reasons recorded above.
+
+## Whether to change the shell used on the Mac
+
+Several failures this session came from Mac-side inline commands written with
+bash idioms but executed by zsh — most damagingly `K="kubectl --context=kw"; $K
+get nodes`, which zsh reads as one command name because it does not word-split
+unquoted expansions. Combined with `2>/dev/null` it failed silently, and the
+empty output was misread as "kw has no kube-vip, no LB pools, no L2 policies".
+
+Switching shells does not obviously help. zsh here is 5.9, current and capable.
+macOS `/bin/bash` is 3.2.57, frozen at 2007 over GPLv3 licensing, lacking
+`mapfile`, associative arrays and `${var,,}` — making it the tool shell would be
+a regression. No Homebrew bash is installed, and Claude Code exposes no
+shell-selection setting in this config. Every substantial piece of work this
+session already ran as a script file through `ssh host 'sudo bash -s'` against
+Linux bash 5.2 and behaved correctly.
+
+Options:
+
+- **Change nothing; fix the practice.** Non-trivial shell goes in a file with an
+  explicit interpreter, inline commands avoid shell-specific constructs, and
+  stderr is never suppressed on a check whose emptiness will be read as fact.
+  Recorded as a memory so it persists.
+- **Install Homebrew bash 5.x.** Leaves zsh as the login shell but makes a
+  modern bash available at /opt/homebrew/bin/bash for scripts, lifting the 3.2
+  limitations on locally-run scripts.
+- **Change the login shell to bash.** Would make the tool and the interactive
+  shell match, but on stock macOS that means bash 3.2, and it changes the
+  interactive environment.
+
+## The operator cannot adopt the deployments it is meant to manage
+
+Three label schemes are in play, and no two agree:
+
+| Where                       | Selector                                    |
+| --------------------------- | ------------------------------------------- |
+| `deploy/kubernetes/base/`   | `app.kubernetes.io/name` + `component`      |
+| `operator/src/resources.rs` | those **plus `app.kubernetes.io/instance`** |
+| the live cluster            | legacy `app: <name>`                        |
+
+`spec.selector` is immutable on a Deployment, so the operator can adopt
+neither. It has been failing to reconcile every 15 seconds for nine days:
+
+```
+spec.selector: Invalid value: {"app.kubernetes.io/..."}: field is immutable
+spec.strategy.rollingUpdate: Forbidden: ... when strategy type is 'Recreate'
+```
+
+That failure is the only reason the cluster is healthy. The live Service and
+PDB were made by an older operator build that used `app:`, they match the live
+pods, and they work — Service has endpoints, PDB reads 2/2. Had the selector
+been mutable, a successful reconcile would have rewritten **both** to labels
+matching zero pods, taking the gateway Service down with the PDB. Issue #16
+reports only the PDB, and reports the Service as working; it is working by
+accident, and it is the more dangerous half.
+
+The `instance` label is what makes the operator's selector un-adoptable, and it
+is there for a reason: without it two `FastllmProxy` objects in one namespace
+select each other's pods.
+
+Options:
+
+- **Drop `instance` from the operator's selector.** It then matches
+  `deploy/kubernetes/base/` exactly and can adopt a standard install. Cost: two
+  instances in one namespace would collide, which the label exists to prevent.
+- **Add `instance` to the static manifests.** Keeps multi-instance isolation
+  and makes a fresh install adoptable. Cost: the manifests must carry the CR's
+  name, so they stop being name-agnostic.
+- **Have the operator read the existing Deployment's selector** and use it for
+  the Service, PDB and topology spread rather than assuming. Correct in every
+  case including adoption, and the only one that fixes a cluster already on the
+  legacy scheme without recreating anything. More code.
+- **Stop the operator managing pod-selecting objects it did not create.**
+  Narrowest fix for #16 alone; leaves the reconcile loop failing.
+
+Whatever is chosen, the live cluster's Deployments are on the legacy `app:`
+scheme and cannot be relabelled in place — moving them needs a delete and
+recreate of both Deployments, which is a brief gateway outage.
+
+**Decided:** pending.
