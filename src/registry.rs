@@ -170,6 +170,18 @@ pub struct Backend {
     /// which is how a backend with no `/metrics` — every hosted one — stays
     /// on the local count instead of pretending to be idle.
     engine_inflight: AtomicUsize,
+    /// Prefix-cache hit rate as of the last scrape, in per-mille so it fits an
+    /// integer atomic; `u32::MAX` means "not reported".
+    ///
+    /// `cache-affinity` routes on the assumption that a backend still holds
+    /// the prefix it was chosen for, and nothing verified that. A backend that
+    /// restarted keeps winning the same sessions while re-prefilling every
+    /// turn — the exact cost the policy exists to avoid, and invisible.
+    prefix_hit_permille: AtomicUsize,
+    /// Lookups the engine had served at the last scrape. A *decrease* means
+    /// the process restarted and its prefix cache is cold, which is the signal
+    /// that the affinity table is now pointing at nothing.
+    prefix_queries: AtomicUsize,
     engine_at: AtomicU64,
     /// Last engine metrics snapshot: when the reading was taken (milliseconds
     /// since epoch) and the counters that the stall detector compares against.
@@ -262,6 +274,8 @@ impl Backend {
             consecutive_stalls: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
             engine_inflight: AtomicUsize::new(0),
+            prefix_hit_permille: AtomicUsize::new(usize::MAX),
+            prefix_queries: AtomicUsize::new(0),
             engine_at: AtomicU64::new(0),
             engine_last_ts: AtomicU64::new(0),
             engine_last_prompt: AtomicU64::new(0),
@@ -302,6 +316,52 @@ impl Backend {
         self.inflight.load(Ordering::Relaxed)
     }
 
+    /// Keep the prefix-cache reading, and notice when the cache went away.
+    ///
+    /// A cumulative counter that goes *down* means the engine process
+    /// restarted, so whatever prefixes it held are gone. The affinity table
+    /// still points at it, and would keep pointing at it while every turn
+    /// re-prefilled from nothing — 85 minutes of that happened on this fleet
+    /// with no operator-visible signal. Zeroing the stored rate is what lets
+    /// `prefix_cache_hit_rate` report "cold" rather than a stale 96%.
+    fn record_prefix_cache(&self, load: &crate::engine_metrics::EngineLoad) {
+        let Some(queries) = load.prefix_cache_queries_total else {
+            return;
+        };
+        let previous = self
+            .prefix_queries
+            .swap(queries as usize, Ordering::Relaxed);
+        if (queries as usize) < previous {
+            // Restarted: nothing it reports yet describes the cache the
+            // affinity table was built against.
+            self.prefix_hit_permille
+                .store(usize::MAX, Ordering::Relaxed);
+            return;
+        }
+        match load.prefix_cache_hit_rate() {
+            Some(rate) => self.prefix_hit_permille.store(
+                (rate * 1000.0).round().clamp(0.0, 1000.0) as usize,
+                Ordering::Relaxed,
+            ),
+            None => self
+                .prefix_hit_permille
+                .store(usize::MAX, Ordering::Relaxed),
+        }
+    }
+
+    /// The engine's prefix-cache hit rate as of the last scrape, 0.0–1.0.
+    ///
+    /// `None` when the engine does not report it, when it has served no
+    /// lookups, or when it restarted since the last scrape — all three are
+    /// "unknown", and a zero would read as "affinity is failing" when it may
+    /// simply be a backend nobody has used yet.
+    pub fn prefix_cache_hit_rate(&self) -> Option<f32> {
+        match self.prefix_hit_permille.load(Ordering::Relaxed) {
+            usize::MAX => None,
+            permille => Some(permille as f32 / 1000.0),
+        }
+    }
+
     /// How stale an engine reading may be and still be believed.
     ///
     /// Generous next to the scrape interval, and deliberately so: the cost of
@@ -324,6 +384,7 @@ impl Backend {
             .store(load.generation_tokens_total, Ordering::Relaxed);
         self.engine_last_kv_tokens
             .store(load.kv_cache_tokens.unwrap_or(0), Ordering::Relaxed);
+        self.record_prefix_cache(load);
     }
 
     /// Check whether the engine has stalled since the last metrics scrape.
@@ -806,6 +867,8 @@ model_list:
         kv: Option<u32>,
     ) -> crate::engine_metrics::EngineLoad {
         crate::engine_metrics::EngineLoad {
+            prefix_cache_queries_total: None,
+            prefix_cache_hits_total: None,
             running,
             waiting: 0,
             kv_cache: None,
@@ -829,6 +892,65 @@ model_list:
         // Second: ejected.
         assert!(b.check_stall(&l, 2));
         assert!(!b.is_healthy());
+    }
+
+    /// The signal `cache-affinity` never had.
+    ///
+    /// A hit rate is only meaningful once the engine has served lookups, and a
+    /// counter that goes backwards means the process restarted and the cache
+    /// the affinity table was built against is gone. Reporting a stale 96% at
+    /// that moment is worse than reporting nothing: it is the number an
+    /// operator would use to conclude affinity is working.
+    #[test]
+    fn a_restarted_engine_stops_claiming_its_old_hit_rate() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+
+        // Nothing reported: unknown, not zero.
+        let mut load = load(0, 0, 0, None);
+        b.record_engine_inflight(&load, 1);
+        assert_eq!(b.prefix_cache_hit_rate(), None, "no counters means unknown");
+
+        // Warm: 96 hits in 100 lookups.
+        load.prefix_cache_queries_total = Some(100);
+        load.prefix_cache_hits_total = Some(96);
+        b.record_engine_inflight(&load, 2);
+        let warm = b
+            .prefix_cache_hit_rate()
+            .expect("a rate once it has lookups");
+        assert!((warm - 0.96).abs() < 0.002, "got {warm}");
+
+        // Restarted: the counter fell, so the cache is cold and the old rate
+        // describes a process that no longer exists.
+        load.prefix_cache_queries_total = Some(3);
+        load.prefix_cache_hits_total = Some(0);
+        b.record_engine_inflight(&load, 3);
+        assert_eq!(
+            b.prefix_cache_hit_rate(),
+            None,
+            "a counter going backwards means restarted, and the old rate is a lie"
+        );
+
+        // And it recovers once the new process has served enough to speak for
+        // itself.
+        load.prefix_cache_queries_total = Some(50);
+        load.prefix_cache_hits_total = Some(25);
+        b.record_engine_inflight(&load, 4);
+        let recovered = b.prefix_cache_hit_rate().expect("reporting again");
+        assert!((recovered - 0.5).abs() < 0.002, "got {recovered}");
+    }
+
+    /// Zero lookups is unknown, not 0%. An idle backend showing 0% sends an
+    /// operator hunting a cache problem that is not there.
+    #[test]
+    fn no_lookups_is_unknown_rather_than_zero_percent() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let mut load = load(0, 0, 0, None);
+        load.prefix_cache_queries_total = Some(0);
+        load.prefix_cache_hits_total = Some(0);
+        b.record_engine_inflight(&load, 1);
+        assert_eq!(b.prefix_cache_hit_rate(), None);
     }
 
     #[test]

@@ -120,6 +120,15 @@ the window rolls over.
 
 ![The Fleet screen: the topology of control plane, worker replicas and engine hosts, each with its own health and counters](images/ui-fleet.png)
 
+Each backend row carries its prefix-cache hit rate, which is what makes
+`cache-affinity` auditable. The policy routes by a hash of the prompt's first
+bytes and assumes the chosen backend still holds that prefix; nothing used to
+verify it, so a backend that restarted kept winning the same sessions while
+re-prefilling every turn — the exact cost the policy exists to avoid. A dash
+means unknown: no counters, no lookups yet, or restarted since the last
+scrape. It is deliberately not 0%, which would read as affinity failing on a
+backend nobody has used.
+
 The screen opens with a **topology**: the management plane, the worker
 replicas, and the engine hosts, with each box carrying its own health and
 counters. It is there for the three things a table cannot show — that the

@@ -183,6 +183,12 @@ const SCREENS = [
       "dgx-spark",
       "lapsed",
       "1 degraded",
+      // Prefix-cache effectiveness, which is what makes cache-affinity
+      // auditable: a warm backend and a cold one, told apart on the screen
+      // rather than both reading "healthy".
+      "PREFIX CACHE",
+      "96%",
+      "0%",
       // The topology, which is the part a table cannot say: the three planes,
       // a worker's own counters in place, the host an agent registered, and
       // the host nobody did.

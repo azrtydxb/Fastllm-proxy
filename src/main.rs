@@ -1582,6 +1582,7 @@ fn spawn_health_reports(
                         inflight: b.inflight(),
                         requests_total: b.requests_total(),
                         errors_total: b.errors_total(),
+                        prefix_cache_hit_rate: b.prefix_cache_hit_rate(),
                     })
                     .collect(),
             });

@@ -100,6 +100,8 @@ const FIXTURES = {
           inflight: 3,
           requests_total: 41000,
           errors_total: 2,
+          // Warm: affinity is reusing what it routed for.
+          prefix_cache_hit_rate: 0.961,
         },
         {
           api_base: "https://api.anthropic.com/v1",
@@ -116,6 +118,9 @@ const FIXTURES = {
           inflight: 0,
           requests_total: 500,
           errors_total: 0,
+          // Cold: healthy, serving, and reusing nothing — the state that was
+          // invisible before and reads as plain "healthy" everywhere else.
+          prefix_cache_hit_rate: 0.0,
         },
       ],
       process: {

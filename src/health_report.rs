@@ -93,6 +93,19 @@ pub struct BackendHealth {
     pub inflight: usize,
     pub requests_total: u64,
     pub errors_total: u64,
+    /// The engine's prefix-cache hit rate, 0.0–1.0, when it reports one.
+    ///
+    /// `None` is three things at once and deliberately not zero: the engine
+    /// does not expose the counters, it has served no lookups yet, or it
+    /// restarted since the last scrape. Zero would read as "affinity is
+    /// failing" on a backend nobody has used.
+    ///
+    /// This is what makes `cache-affinity` auditable. The policy assumes the
+    /// backend it picked still holds the prefix; on this fleet one that had
+    /// restarted served at 0% while its sibling ran at 96%, and both showed
+    /// as plain "healthy".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_hit_rate: Option<f32>,
 }
 
 /// Sends a report every `interval`.
@@ -238,6 +251,7 @@ mod tests {
                 inflight: 2,
                 requests_total: 10,
                 errors_total: 0,
+                prefix_cache_hit_rate: None,
             }],
         }
     }

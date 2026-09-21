@@ -48,6 +48,11 @@ const BACKEND_COLS = [
   { label: "IN FLIGHT", width: ".7fr", align: "right" },
   { label: "REQUESTS", width: ".7fr", align: "right" },
   { label: "ERRORS", width: ".7fr", align: "right" },
+  // Whether cache-affinity is actually reusing anything. The policy assumes
+  // the backend it picked still holds the prefix, and nothing showed when that
+  // stopped being true: after a restart one backend here served at 0% while
+  // its sibling ran at 96%, and both read as plain "healthy".
+  { label: "PREFIX CACHE", width: ".9fr", align: "right" },
 ];
 
 const NODE_COLS = [
@@ -430,6 +435,27 @@ export function Fleet({ onUnauthorised, config }) {
                     }}
                   >
                     {fmtInt(b.errors)}
+                  </Mono>,
+                  // Amber below a third: affinity is routing as though the
+                  // prefix is there and the engine is re-prefilling anyway,
+                  // which is the cost the policy exists to avoid. A dash means
+                  // unknown — no counters, no lookups yet, or just restarted —
+                  // and is deliberately not 0%.
+                  <Mono
+                    key="p"
+                    style={{
+                      font: "400 12px var(--mono)",
+                      color:
+                        b.prefixHitRate === null
+                          ? "var(--fg-5)"
+                          : b.prefixHitRate < 0.33
+                            ? "var(--warn-fg)"
+                            : "var(--fg-4)",
+                    }}
+                  >
+                    {b.prefixHitRate === null
+                      ? "—"
+                      : `${Math.round(b.prefixHitRate * 100)}%`}
                   </Mono>,
                 ]}
               />

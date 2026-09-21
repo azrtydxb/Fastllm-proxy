@@ -36,6 +36,33 @@ pub struct EngineLoad {
     /// KV cache tokens in use (integer). `None` when the engine reports only
     /// a percentage.
     pub kv_cache_tokens: Option<u32>,
+    /// Prefix-cache lookups the engine has done, cumulative. `None` when it
+    /// does not report them.
+    ///
+    /// This is what tells an operator whether `cache-affinity` is doing
+    /// anything. The policy routes by a hash of the prompt's first bytes and
+    /// *assumes* the chosen backend still holds that prefix; nothing verified
+    /// it. After a vLLM restart one backend served 57 queries at 0 hits while
+    /// its sibling ran at 96%, and the fleet view called both "healthy".
+    pub prefix_cache_queries_total: Option<u64>,
+    /// Prefix-cache hits, cumulative. `None` as above.
+    pub prefix_cache_hits_total: Option<u64>,
+}
+
+impl EngineLoad {
+    /// Hit rate over the whole life of the engine process, 0.0–1.0.
+    ///
+    /// `None` when the engine does not report the counters, and also when it
+    /// has served no lookups — a rate over zero queries is not zero, it is
+    /// unknown, and showing 0% for an idle backend would send an operator
+    /// hunting a cache problem that is not there.
+    pub fn prefix_cache_hit_rate(&self) -> Option<f32> {
+        let (q, h) = (
+            self.prefix_cache_queries_total?,
+            self.prefix_cache_hits_total?,
+        );
+        (q > 0).then(|| h as f32 / q as f32)
+    }
 }
 
 /// The families worth reading, newest name first.
@@ -60,6 +87,19 @@ const GENERATION_TOKENS_TOTAL: &[&str] =
     &["vllm:generation_tokens_total", "sglang:generation_tokens"];
 /// KV cache tokens in use — a more precise variant of the percentage.
 const KV_CACHE_TOKENS: &[&str] = &["vllm:cache_usage_perc", "sglang:cache_usage"];
+
+/// Prefix-cache counters. vLLM names them outright; SGLang reports the rate as
+/// a gauge and the totals under its own prefix.
+const PREFIX_QUERIES: &[&str] = &[
+    "vllm:prefix_cache_queries_total",
+    "vllm:gpu_prefix_cache_queries_total",
+    "sglang:prefix_cache_queries_total",
+];
+const PREFIX_HITS: &[&str] = &[
+    "vllm:prefix_cache_hits_total",
+    "vllm:gpu_prefix_cache_hits_total",
+    "sglang:prefix_cache_hits_total",
+];
 
 /// Sum every sample of the first family that appears.
 ///
@@ -187,6 +227,9 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
         running: running.max(0.0) as u32,
         waiting: read_family(body, WAITING, false).unwrap_or(0.0).max(0.0) as u32,
         kv_cache: read_family(body, KV_CACHE, true).map(|v| v.clamp(0.0, 1.0) as f32),
+        prefix_cache_queries_total: read_family(body, PREFIX_QUERIES, false)
+            .map(|v| v.max(0.0) as u64),
+        prefix_cache_hits_total: read_family(body, PREFIX_HITS, false).map(|v| v.max(0.0) as u64),
         prompt_tokens_total: read_family(body, PROMPT_TOKENS_TOTAL, false)
             .unwrap_or(0.0)
             .max(0.0) as u64,

@@ -50,6 +50,10 @@ export function mergeBackends(reports) {
           inflight: 0,
           requests: 0,
           errors: 0,
+          // Every replica's reading of the same engine, kept separately: they
+          // scrape the same `/metrics`, so they should agree, and a spread
+          // means one of them is looking at a different process.
+          prefixRates: [],
           healthyOn: [],
           unhealthyOn: [],
         };
@@ -58,6 +62,9 @@ export function mergeBackends(reports) {
       row.inflight += b.inflight;
       row.requests += b.requests_total;
       row.errors += b.errors_total;
+      if (typeof b.prefix_cache_hit_rate === "number") {
+        row.prefixRates.push(b.prefix_cache_hit_rate);
+      }
       (b.healthy ? row.healthyOn : row.unhealthyOn).push(report.replica);
     }
   }
@@ -65,6 +72,13 @@ export function mergeBackends(reports) {
     .map((row) => ({
       ...row,
       reporting: row.healthyOn.length + row.unhealthyOn.length,
+      // `null`, not 0, when nobody reported one. The engine may not expose
+      // the counters, may have served no lookups, or may have just restarted
+      // — all three are "unknown", and a 0% would read as affinity failing on
+      // a backend nobody has used.
+      prefixHitRate: row.prefixRates.length
+        ? row.prefixRates.reduce((a, b) => a + b, 0) / row.prefixRates.length
+        : null,
       // Unanimity, not a majority: see this module's header.
       healthy: row.unhealthyOn.length === 0,
       // The partition signal — some replicas can reach it and some cannot.

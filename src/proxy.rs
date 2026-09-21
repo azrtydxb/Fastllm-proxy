@@ -2634,6 +2634,24 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
         ));
     }
 
+    // Only backends that report it get a series. A gauge of 0 for an engine
+    // that exposes no prefix-cache counters would be indistinguishable on a
+    // dashboard from one reusing nothing, and those need different actions.
+    out.push_str(
+        "# HELP fastllm_backend_prefix_cache_hit_rate Engine prefix-cache hit rate, 0-1. \
+Absent when the engine does not report it, has served no lookups, or restarted since the \
+last scrape.\n",
+    );
+    out.push_str("# TYPE fastllm_backend_prefix_cache_hit_rate gauge\n");
+    for b in registry.backends() {
+        if let Some(rate) = b.prefix_cache_hit_rate() {
+            out.push_str(&format!(
+                "fastllm_backend_prefix_cache_hit_rate{{api_base=\"{}\",model=\"{}\"}} {rate}\n",
+                b.api_base, b.upstream_model,
+            ));
+        }
+    }
+
     out.push_str("# HELP fastllm_backend_healthy Whether a backend is in rotation.\n");
     out.push_str("# TYPE fastllm_backend_healthy gauge\n");
     for b in registry.backends() {

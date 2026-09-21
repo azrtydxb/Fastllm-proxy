@@ -11984,6 +11984,7 @@ mod tests {
                 inflight: 3,
                 requests_total: 100,
                 errors_total: 9,
+                prefix_cache_hit_rate: None,
             }],
         };
 
