@@ -69,6 +69,19 @@ spec:
             {{- with .Values.otel.endpoint }}
             - {name: FASTLLM_OTEL_ENDPOINT, value: {{ . | quote }}}
             - {name: FASTLLM_OTEL_SAMPLE_ONE_IN, value: {{ $.Values.otel.sampleOneIn | quote }}}
+            {{- with $.Values.otel.protocol }}
+            - {name: FASTLLM_OTEL_PROTOCOL, value: {{ . | quote }}}
+            {{- end }}
+            {{- if $.Values.otel.headersSecret.name }}
+            # From a Secret, so the token is not readable from the PodSpec by
+            # anyone who can `get pod`.
+            - name: FASTLLM_OTEL_HEADERS
+              valueFrom:
+                secretKeyRef: {name: {{ $.Values.otel.headersSecret.name | quote }}, key: {{ $.Values.otel.headersSecret.key | quote }}}
+            {{- else if $.Values.otel.headers }}
+            - name: FASTLLM_OTEL_HEADERS
+              value: {{ range $i, $k := (keys $.Values.otel.headers | sortAlpha) }}{{ if $i }},{{ end }}{{ $k }}={{ get $.Values.otel.headers $k }}{{ end }}
+            {{- end }}
             {{- end }}
             - {name: FASTLLM_LOG, value: info}
           volumeMounts:

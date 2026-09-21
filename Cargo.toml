@@ -76,7 +76,14 @@ rand = { version = "0.9", optional = true }
 ring = { version = "0.17", optional = true }
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
+# Both transports compiled in, chosen at runtime from the endpoint.
+# `http-proto` is what every hosted backend speaks — Braintrust, Honeycomb,
+# Grafana Cloud, Langfuse — and a feature that is not compiled in is not a
+# runtime choice, it is an absence.
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client"], optional = true }
+# Only to build the gRPC metadata map for --otel-header; already in the tree
+# as opentelemetry-otlp's own transport.
+tonic = { version = "0.14", default-features = false, optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 # Embeds the management UI's built `web/dist/` into the binary (P4). Points
 # at a directory that may not exist yet in a plain `cargo build` — see
@@ -106,6 +113,7 @@ otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
+    "dep:tonic",
     "dep:tracing-opentelemetry",
 ]
 

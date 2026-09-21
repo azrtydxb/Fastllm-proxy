@@ -147,11 +147,30 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = LogFormat::Text, env = "FASTLLM_LOG_FORMAT")]
     log_format: LogFormat,
 
-    /// OTLP/gRPC collector for traces, e.g. `http://collector:4317`. Unset
-    /// disables tracing entirely, which is the default.
+    /// OTLP collector for traces. Unset disables tracing entirely, which is
+    /// the default.
+    ///
+    /// The transport comes from the address: `http://collector:4317` is gRPC,
+    /// `https://api.braintrust.dev/otel/v1/traces` is HTTP. `--otel-protocol`
+    /// overrides when a proxy hides both signals.
     #[cfg(feature = "otel")]
     #[arg(long, env = "FASTLLM_OTEL_ENDPOINT")]
     otel_endpoint: Option<String>,
+
+    /// Force the OTLP transport: `grpc` or `http`. Inferred from the endpoint
+    /// when unset.
+    #[cfg(feature = "otel")]
+    #[arg(long, env = "FASTLLM_OTEL_PROTOCOL")]
+    otel_protocol: Option<String>,
+
+    /// Headers on every span export, `key=value,key2=value2`.
+    ///
+    /// This is how a hosted backend is reached: an `Authorization`, plus
+    /// whatever routing header it wants beside it. The value is a credential
+    /// and is never logged — only the number of headers is.
+    #[cfg(feature = "otel")]
+    #[arg(long, env = "FASTLLM_OTEL_HEADERS")]
+    otel_headers: Option<String>,
 
     /// Trace one request in this many. 1 traces everything, which is only
     /// sensible at low volume or while debugging.
@@ -462,10 +481,25 @@ fn init_logging(cli: &Cli) {
     #[cfg(feature = "otel")]
     {
         let otel = cli.otel_endpoint.as_ref().and_then(|endpoint| {
+            let protocol = cli.otel_protocol.as_deref().and_then(|p| {
+                let parsed = fastllm_proxy::telemetry::tracing_otel::Protocol::parse(p);
+                if parsed.is_none() {
+                    // Inferring instead would silently export over a transport
+                    // the operator did not ask for.
+                    eprintln!("--otel-protocol must be grpc or http, not {p:?}; inferring");
+                }
+                parsed
+            });
             let cfg = fastllm_proxy::telemetry::tracing_otel::Config {
                 endpoint: endpoint.clone(),
                 sample_one_in: cli.otel_sample_one_in,
                 service_name: cli.otel_service_name.clone(),
+                headers: cli
+                    .otel_headers
+                    .as_deref()
+                    .map(fastllm_proxy::telemetry::tracing_otel::parse_headers)
+                    .unwrap_or_default(),
+                protocol,
             };
             match fastllm_proxy::telemetry::tracing_otel::layer(&cfg) {
                 Ok(layer) => Some(layer),

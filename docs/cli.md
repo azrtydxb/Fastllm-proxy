@@ -121,17 +121,17 @@ machine.
 
 ### Roles and planes
 
-| flag                              | default                          |                                                                                                                            |
-| --------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `--role`                          | `proxy`                          | `all`, `control`, or `proxy`. See [Roles](operations/configuration.md#roles)                                               |
-| `--database-url`                  | —                                | Required by `all` and `control`; unused by `proxy`                                                                         |
-| `--control-url`                   | —                                | Control plane to poll in `proxy` mode. Absent means `File` mode                                                            |
-| `--proxy-token`                   | —                                | Presented to a control plane by `proxy`; required of callers by `all`/`control`                                            |
-| `--snapshot-cache`                | `/var/lib/fastllm/snapshot.json` | Last-known-good snapshot, so a control-plane outage degrades to "stops learning about changes" rather than "stops serving" |
-| `--admin-port`                    | `4001`                           | Admin API bind port (`all`/`control`)                                                                                      |
-| `--snapshot-rebuild-interval`     | `5`                              | Seconds between control-plane rebuilds independent of admin writes                                                         |
+| flag                              | default                          |                                                                                                                                                   |
+| --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--role`                          | `proxy`                          | `all`, `control`, or `proxy`. See [Roles](operations/configuration.md#roles)                                                                      |
+| `--database-url`                  | —                                | Required by `all` and `control`; unused by `proxy`                                                                                                |
+| `--control-url`                   | —                                | Control plane to poll in `proxy` mode. Absent means `File` mode                                                                                   |
+| `--proxy-token`                   | —                                | Presented to a control plane by `proxy`; required of callers by `all`/`control`                                                                   |
+| `--snapshot-cache`                | `/var/lib/fastllm/snapshot.json` | Last-known-good snapshot, so a control-plane outage degrades to "stops learning about changes" rather than "stops serving"                        |
+| `--admin-port`                    | `4001`                           | Admin API bind port (`all`/`control`)                                                                                                             |
+| `--snapshot-rebuild-interval`     | `5`                              | Seconds between control-plane rebuilds independent of admin writes                                                                                |
 | `--provider-sweep-interval`       | `60`                             | Seconds between provider probes: one `GET /v1/models` each, answering both whether it is reachable and whether it still serves what is registered |
-| `--rate-limit-reconcile-interval` | `5`                              | `Http`-mode `proxy` only. `0` disables                                                                                     |
+| `--rate-limit-reconcile-interval` | `5`                              | `Http`-mode `proxy` only. `0` disables                                                                                                            |
 
 ### Listener
 
@@ -173,14 +173,16 @@ ever reach them.
 
 ### Observability
 
-| flag                   | default |                                                                                                                                                |
-| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--log`                | `info`  |                                                                                                                                                |
-| `--log-format`         | `text`  | `json` for a log collector                                                                                                                     |
-| `--webhook-url`        | —       | POSTs JSON when a backend goes down or recovers, or a snapshot rebuild fails. `all`/`control` only — these are things the control plane learns |
-| `--webhook-secret`     | —       | Signs each body with HMAC-SHA256 in `x-fastllm-signature`                                                                                      |
-| `--otel-endpoint`      | —       | Requires `--features otel`                                                                                                                     |
-| `--otel-sample-one-in` | `100`   | Tracing every request on a hot path is its own performance problem                                                                             |
+| flag                   | default  |                                                                                                                                                |
+| ---------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--log`                | `info`   |                                                                                                                                                |
+| `--log-format`         | `text`   | `json` for a log collector                                                                                                                     |
+| `--webhook-url`        | —        | POSTs JSON when a backend goes down or recovers, or a snapshot rebuild fails. `all`/`control` only — these are things the control plane learns |
+| `--webhook-secret`     | —        | Signs each body with HMAC-SHA256 in `x-fastllm-signature`                                                                                      |
+| `--otel-endpoint`      | —        | Requires `--features otel`. Transport is read from the address: `:4317` is gRPC, a `/v1/traces` path or `:4318` is HTTP                        |
+| `--otel-protocol`      | inferred | `grpc` or `http`, when a proxy in front hides both signals                                                                                     |
+| `--otel-header`        | —        | `key=value,key2=value2` on every export. How a hosted backend is reached. Never logged — only the count is                                     |
+| `--otel-sample-one-in` | `100`    | Tracing every request on a hot path is its own performance problem                                                                             |
 
 ### Classifier
 
@@ -200,11 +202,11 @@ ever reach them.
 Three values are environment-only, because a flag ends up in a process listing
 and these should not:
 
-|                              |                                                                                                                                                                                                          |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|                              |                                                                                                                                                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FASTLLM_ENCRYPTION_KEY`     | Encrypts `providers.upstream_api_key` at rest. **Not regenerable** — lose it and those credentials are unrecoverable; change it without running `reencrypt-backends` and the process will not start |
-| `FASTLLM_PROXY_TOKEN`        | Also a flag, but the variable is the form to use                                                                                                                                                         |
-| `FASTLLM_BOOTSTRAP_PASSWORD` | `set-password`'s `--password`                                                                                                                                                                            |
+| `FASTLLM_PROXY_TOKEN`        | Also a flag, but the variable is the form to use                                                                                                                                                    |
+| `FASTLLM_BOOTSTRAP_PASSWORD` | `set-password`'s `--password`                                                                                                                                                                       |
 
 ## Where next
 

@@ -82,8 +82,22 @@ webhook:
   secret: ""
 
 otel:
+  # Transport is read from the address: `:4317` is gRPC, a `/v1/traces` path
+  # or `:4318` is HTTP. Set `protocol` only when a proxy hides both.
   endpoint: ""
   sampleOneIn: 100
+  protocol: ""
+  # Headers on every export, as a map. This is how a hosted backend is
+  # reached — Braintrust, Honeycomb, Grafana Cloud all want an Authorization
+  # and most want a routing header beside it.
+  #
+  # A token belongs in `headersSecret` instead: values here land in the
+  # PodSpec, which anyone with `get pod` can read. `headersSecret` names a
+  # Secret with a single key holding the same `k=v,k2=v2` string.
+  headers: {}
+  headersSecret:
+    name: ""
+    key: headers
 
 podAnnotations: {}
 nodeSelector: {}

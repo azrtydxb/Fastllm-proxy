@@ -237,6 +237,26 @@ Built with `--features otel`, then `--otel-endpoint http://collector:4317`.
 Sampling is one-in-N via `--otel-sample-one-in`, because tracing every request
 on a hot path is its own performance problem.
 
+Both transports are compiled in and the endpoint chooses between them: `:4317`
+is gRPC, a `/v1/traces` path or `:4318` is HTTP. `--otel-protocol grpc|http`
+overrides when something in front hides both signals.
+
+A hosted backend needs headers, and that is what `--otel-header` is for —
+repeatable, or `FASTLLM_OTEL_HEADERS=k=v,k2=v2`. Braintrust wants two:
+
+```
+--otel-endpoint https://api.braintrust.dev/otel/v1/traces
+--otel-header "Authorization=Bearer $BRAINTRUST_API_KEY,x-bt-parent=project_id:$PROJECT"
+```
+
+Header values are credentials, so they are never written to a log — the
+startup line reports how many headers there are, not what they say. In the
+chart, prefer `otel.headersSecret` over `otel.headers`: the map form lands in
+the PodSpec, which anyone who can `get pod` can read.
+
+A Collector is still the right answer for fanning out to several backends. It
+should not be the price of reaching one.
+
 ### Webhooks
 
 `--webhook-url` POSTs JSON when a backend goes down or recovers, or when a
