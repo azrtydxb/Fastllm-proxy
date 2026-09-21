@@ -537,8 +537,12 @@ impl Backend {
     /// repeatedly times out it is being treated as unhealthy through the same
     /// path as a dead probe, so that the failover loop eventually discovers
     /// it and stops burning requests on it.
+    ///
+    /// The error count is *not* incremented here. A timeout is one error, and
+    /// the caller has already recorded it with `note_error`; counting it again
+    /// made `errors_total` — and every error-rate alert built on it — read
+    /// double the real rate for a timing-out backend.
     pub fn note_timeout(&self, threshold: u32) {
-        self.errors_total.fetch_add(1, Ordering::Relaxed);
         let failures = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
         if failures >= threshold {
             self.healthy.store(false, Ordering::Relaxed);
@@ -1050,6 +1054,17 @@ model_list:
         assert!(b.is_healthy());
         b.note_timeout(2);
         assert!(!b.is_healthy());
+    }
+
+    #[test]
+    fn a_timeout_counts_as_one_error_not_two() {
+        // The proxy records a timeout with note_error + note_timeout. When
+        // both bumped errors_total, every error-rate panel doubled.
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        b.note_error();
+        b.note_timeout(2);
+        assert_eq!(b.errors_total(), 1);
     }
 
     #[test]
