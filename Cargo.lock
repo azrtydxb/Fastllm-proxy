@@ -1175,6 +1175,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tonic",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

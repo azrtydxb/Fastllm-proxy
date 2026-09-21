@@ -169,7 +169,8 @@ Options:
 - **Deploy as-is.** The pool-policy fix lands; pools stay single-member and
   inert until the picker is revisited.
 
-**Decided:** pending.
+**Decided:** deleted. Its working tree was clean and its HEAD was `dc887bc`,
+already on main, so it held nothing that was not already committed.
 
 ## Nexus is full, which blocks CI and the deploy
 
@@ -623,5 +624,34 @@ Options:
 Whatever is chosen, the live cluster's Deployments are on the legacy `app:`
 scheme and cannot be relabelled in place — moving them needs a delete and
 recreate of both Deployments, which is a brief gateway outage.
+
+**Decided:** pending.
+
+## A stale scratch worktree blocks every commit
+
+`web/` is upgraded — vite 8.3.0, nanoid 3.3.19, `npm audit` clean, build and
+both harnesses passing. The commit gate still refuses on vite 5.4.21 and
+nanoid 3.3.17, and the only file left in the tree claiming those versions is:
+
+```
+.kilo/worktrees/verbose-manx/web/package-lock.json
+```
+
+a 15 MB scratch worktree another tool left behind. It is untracked, already in
+`.git/info/exclude`, and I added `.kilo/` to `.gitignore` — none of which helps,
+because the gate walks the filesystem rather than git. So nothing can be
+committed until that copy stops claiming a vulnerable version.
+
+Options:
+
+- **Delete `.kilo/worktrees/verbose-manx/`.** Unblocks immediately. It is
+  scratch and untracked, but it is a worktree and deleting it is irreversible
+  — if it holds work nobody pushed, that work is gone.
+- **Upgrade the dependencies inside it.** Non-destructive and unblocks, but it
+  means running `npm install` in someone else's worktree and rewriting their
+  lockfile.
+- **Exclude it from the gate.** Correct in principle — a scratch copy is not
+  this repository — and needs whatever ignore mechanism procoder itself reads,
+  which `.gitignore` is not.
 
 **Decided:** pending.

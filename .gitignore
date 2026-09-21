@@ -33,3 +33,8 @@ mermaid-init.js
 .procoder/state/
 __pycache__/
 .cargo-home/
+
+# Scratch worktrees another tool leaves behind. Untracked, but the commit gate
+# walks the filesystem rather than git, and a stale copy of `web/` in here was
+# reported as vulnerable dependencies this repo had already upgraded.
+.kilo/

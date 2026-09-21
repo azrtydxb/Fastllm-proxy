@@ -109,7 +109,13 @@ const { createServer } = await import("vite");
 const vite = await createServer({
   configFile: false,
   root: new URL("..", import.meta.url).pathname,
-  server: { middlewareMode: true, hmr: false },
+  // `watch: null` disables the file watcher. `hmr: false` is not enough — the
+  // module graph still gets a chokidar watcher, and these harnesses run
+  // one-shot, so nothing wants to be told the tree changed. It costs inotify
+  // instances, which default to 128 per user on the CI nodes, and exhausting
+  // them failed the build with `EMFILE: too many open files, watch '/web'` —
+  // an error about the runner, reported as a test failure.
+  server: { middlewareMode: true, hmr: false, watch: null },
   appType: "custom",
   plugins: [(await import("@vitejs/plugin-react")).default()],
   logLevel: "warn",
