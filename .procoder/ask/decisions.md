@@ -1233,3 +1233,84 @@ Options:
   when a model it serves has no healthy backend. The bigger change, and the
   one that actually makes replicas into HA.
 - **Reconcile the replica count**, so the CR and the dashboard stop disagreeing.
+
+## How a replica sheds traffic for one model without going unready
+
+Pascal's requirement, and it is the right one: a replica that cannot serve
+model X should stop taking X's traffic while continuing to serve everything
+else, and the replicas that can serve X should absorb it.
+
+The obstacle is that Kubernetes cannot express this. A Service routes to a pod
+or it does not; there is no per-model endpoint. Readiness is the only lever it
+offers and it is all-or-nothing, which is why the naive fix -- unready when any
+model lacks a backend -- is worse than the status quo: one dead model would
+empty the entire fleet.
+
+So it has to be built in the proxy. What already exists to build on: every
+replica POSTs a `HealthReport` to the control plane on a timer, carrying
+`replica`, `snapshot_version` and `backends: Vec<BackendHealth>`. The control
+plane therefore already knows what all ten replicas think of every backend.
+There is no headless Service, so replicas cannot currently address each other.
+
+Worth stating plainly, because it shaped today's outage: the incident was not
+really "one replica disagreed". `coder`'s pool had exactly **one** member, so
+when a replica ejected it there was nothing to fail over to. With two members
+the existing per-model failover would have covered it inside the replica, with
+no fleet-level mechanism at all.
+
+Options:
+
+- **Fleet-aware health.** The control plane already collects every replica's
+  view; publish the aggregate back, and let a replica treat its own negative
+  verdict as suspect when the rest of the fleet disagrees. Converges the
+  divergence instead of routing around it -- no extra hop, no discovery, no new
+  failure mode, and it uses a channel that already exists. It fixes the actual
+  incident, where one replica was wrong and nine were right. It does not help
+  when a replica is genuinely the only one that cannot reach a backend.
+- **Cross-replica forwarding.** A replica with no healthy backend for X hands
+  the request to a sibling that has one. Literally what Pascal described, and
+  the only option that covers a real single-replica partition. Costs sibling
+  discovery (a headless Service), an extra hop on the failure path, and loop
+  prevention -- a forwarded request must never be forwarded again.
+- **Both**, aggregate health as the common case and forwarding as the backstop.
+- **Neither; require two backends per model instead.** No code: the existing
+  per-model failover already handles one dead backend, and today's outage was
+  total only because the pool had a single member. Cheapest by far, and it
+  leaves a single-backend model exactly as exposed as it is now.
+
+## Whether to roll `a2be034` out now
+
+`sha-c3f3620` is deployed and healthy: both Deployments rolled with zero
+restarts, `/livez` and `POD_IP` written by the operator, gateway and dashboard
+serving. What it does _not_ contain is the fix for the thing that prompted all
+of this.
+
+The `ORDER BY` change was misattributed. It is a real latent bug -- an
+unordered query feeding an order-sensitive comparison -- but deploying it left
+the churn exactly where it was: three version changes per 90 seconds. The
+control plane logging zero rebuilds while the version moved is what gave it
+away: `rebuild_once` compares before publishing and logs, `refresh` does
+neither, and `POST /admin/providers/register` calls `refresh`. That route is a
+liveness heartbeat, not a write -- three agents renew every ~30s, nothing they
+touch is published, and `version` is a clock reading taken at build time, so an
+identical snapshot got a fresh stamp regardless.
+
+`a2be034` fixes that and is committed, tested and pushed, but not built.
+
+Until it ships, the deployment keeps: the fleet perpetually mid-convergence,
+the "N is behind the fleet's snapshot" alerts, and a response cache that cannot
+retain an entry because `apply_snapshot` clears it every ~30s against a 300s
+TTL. None of that is new or worsening -- it has been true for weeks -- so the
+only question is whether to spend another build-and-roll now.
+
+Options:
+
+- **Roll it now.** One more CI build (~30 min) and the same pause/resume
+  sequence, then re-measure: version changes per 90s should go 3 -> 0 and
+  registry rebuilds per proxy per 5min should go 10 -> 0. This is the run that
+  proves the diagnosis, and without it the claim stays unverified.
+- **Wait and batch it** with whatever comes next, accepting the churn for now.
+  Today has already had four rollouts.
+- **Move FastLLM onto Solder first**, so this and everything after it deploys
+  on merge instead of by hand. Solder already runs on kw and manages
+  kuvryn-scout; the work is mostly inventorying what `prune: true` would claim.

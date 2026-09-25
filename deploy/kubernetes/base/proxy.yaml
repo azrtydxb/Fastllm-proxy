@@ -100,7 +100,14 @@ spec:
             periodSeconds: 3
             failureThreshold: 20
           resources:
-            requests: { cpu: 100m, memory: 128Mi }
+            # Sized from what a working proxy actually uses, not from a guess. The
+            # HPA divides observed CPU by this number, so a request of 100m meant a
+            # pod touching a tenth of a core read as 100% utilised: it scaled up 53
+            # times in 17 days while inference load barely moved. Memory was the
+            # same mistake in the other direction -- 128Mi requested against ~180Mi
+            # actually used, so every pod started over its request and was first in
+            # line for eviction under node pressure.
+            requests: { cpu: "1", memory: 250Mi }
             # 85Mi serving without classification; 268Mi once a refined class
             # loads the ONNX session lazily.
             limits: { cpu: "2", memory: 1Gi }
