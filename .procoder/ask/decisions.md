@@ -1043,3 +1043,49 @@ Options:
 The control plane and `fastllm-pg-dev` stay LAN-only. Security rests on the
 existing API-key auth plus per-principal budgets, with Cloudflare rate-limiting
 as a second layer. Streaming is the mitigation for the 100s edge timeout.
+
+## A live `coder` outage, a dropped LB member, and why the cache never stores
+
+Three findings from the cache question, in order of urgency.
+
+**1. `coder` is failing ~95% of requests against a working engine.** The proxy
+has `192.168.10.245:8000` marked `fastllm_backend_healthy 0` and is answering 502. The engine is fine: it returns `/v1/models` in 13ms and completed a real
+generation in 96ms while marked unhealthy, its container has been up 8 days,
+and the control plane's own probe has it un-degraded with `last_seen_at` a few
+seconds old. Failure rate by hour: 0% through 04:00, 63.9% at 05:00, 96.0% at
+06:00 (1,402 errors against 58 successes). Backend health lives in the proxy's
+memory, so the two pods disagree with the control plane and with reality.
+`sweep()` calls `mark_probe_ok()`, which does restore health, and no
+"back in rotation" or "out of rotation" line appears in 20 minutes of logs --
+consistent with an ejection that predates the window and a probe that is not
+clearing it.
+
+**2. Load balancing has nothing to balance.** `192.168.10.246` was down: its
+engine answered nothing on 8000/8001/8890/8891, and its `model_backends` row
+for the 35B was gone, leaving `qwen3-6-35b-a3b-nvfp4` with exactly one backend.
+It came back during the investigation -- containers 1-2 minutes old, `:8000`
+answering 200, `providers.last_seen_at` now populating -- but it still has no
+`model_backends` row, so it is a known provider attached to no model.
+
+**3. The cache cannot store anything given the current traffic.** Not a
+key-matching problem: `store` is 0 across all replicas while `miss` is ~1,800,
+so nothing is ever written. Only non-streaming 2xx responses are cacheable, and
+right now every non-streaming request to that model is a 502 (errors are
+deliberately never cached) while every success streams (streams are
+deliberately never cached). Separately, the proxies log "snapshot changed,
+registry rebuilt" every 10-30s while the control plane rebuilt once in six
+minutes, and `apply_snapshot` clears the cache -- so even once stores resume,
+entries would be wiped far more often than the 300s TTL implies. That mismatch
+looks like a bug in the proxy's change detection and is worth its own look.
+
+Options:
+
+- **Restart the two proxy pods.** Backend health is in-memory, so this clears
+  the false ejection and should restore `coder` immediately. Cheapest fix for
+  the outage, but it treats the symptom and loses the evidence.
+- **Re-attach `.246` as a backend** so there are two members to balance across,
+  now that the box is serving again.
+- **Investigate why the probe is not restoring health** before restarting,
+  while the bad state is still there to inspect.
+- **Investigate the snapshot-churn mismatch** (proxy rebuilding 10-30x more
+  often than the control plane rebuilds).

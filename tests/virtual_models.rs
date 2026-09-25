@@ -588,3 +588,104 @@ async fn a_virtual_models_rule_reaches_the_right_backend_and_authorisation_check
     // `grant_one_model`'s roles, which no admin route creates — when it
     // drops at the end of this function, panic or not.
 }
+
+/// A pool target is not a dangling target, and the API has to say which it is.
+///
+/// `TargetView.provider_model_id` is `None` for both a deleted provider model
+/// and a perfectly good pool, because a pool lives in `model_pool_id`. The GUI
+/// read that one field and labelled every pool target "unavailable" -- on a
+/// pool that had served thousands of requests. So the fix is the API stating
+/// the fact rather than the UI inferring it, and this pins both halves.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_pool_target_is_distinguishable_from_a_dangling_one() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port) = (14881, 14882);
+    let pool_db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_string();
+    // Same idiom as the test above: one suffix, one Drop guard, so a failing
+    // assertion still cleans up after itself on this shared database.
+    let _cleanup = TestCleanup::new()
+        .track_suffix("provider_models", "name", suffix.clone())
+        .track_suffix("model_pools", "name", suffix.clone())
+        .track_suffix("frontend_models", "name", suffix.clone())
+        .track_suffix("principals", "name", suffix.clone())
+        .track_suffix("roles", "name", suffix.clone());
+
+    let admin_name = format!("vm-pool-admin-{suffix}");
+    support::bootstrap_login_user(&pool_db, &admin_name).await;
+    let _proc = start(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+
+    // A provider model, and a pool with it as the only member.
+    let model_name = format!("vm-pool-model-{suffix}");
+    let model = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/provider-models",
+        serde_json::json!({ "name": model_name, "description": "" }),
+    );
+    let pool_name = format!("vm-pool-{suffix}");
+    let pool = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/model-pools",
+        serde_json::json!({ "name": pool_name, "policy": "cache-affinity" }),
+    );
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!(
+            "/admin/model-pools/{}/members",
+            pool["id"].as_str().unwrap()
+        ),
+        serde_json::json!({ "provider_model_id": model["id"], "weight": 100, "position": 0 }),
+    );
+
+    // A frontend model whose only default is that pool.
+    let frontend = format!("vm-pool-front-{suffix}");
+    let fm = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/frontend-models",
+        serde_json::json!({ "name": frontend }),
+    );
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!(
+            "/admin/frontend-models/{}/defaults",
+            fm["id"].as_str().unwrap()
+        ),
+        serde_json::json!({ "model_pool_id": pool["id"], "weight": 100, "position": 0 }),
+    );
+
+    let listed = admin_get(admin_port, &cookie, "/admin/frontend-models");
+    let view = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|v| v["name"] == frontend.as_str())
+        .expect("the frontend model we just made");
+    let target = &view["default_targets"][0];
+
+    assert_eq!(target["model"], pool_name.as_str());
+    assert!(
+        target["provider_model_id"].is_null(),
+        "a pool target names no provider model: {target}"
+    );
+    assert_eq!(
+        target["model_pool_id"], pool["id"],
+        "the API must say this target is a pool, or the UI cannot tell it from \
+         a deleted model and calls it unavailable: {target}"
+    );
+}

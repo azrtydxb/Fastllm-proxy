@@ -3519,9 +3519,18 @@ async fn delete_backend(
 #[derive(Serialize)]
 struct TargetView {
     id: Uuid,
-    /// `None` once the provider model it names has been deleted. The target
-    /// itself remains, bound by name, and reattaches if that name comes back.
+    /// Set when this target names a provider model, and `None` once that model
+    /// has been deleted — the target itself remains, bound by name, and
+    /// reattaches if the name comes back.
+    ///
+    /// `None` on its own does *not* mean the target is broken: a pool target
+    /// never has one, because a target is a provider model or a pool and never
+    /// both. Read it together with `model_pool_id`; both `None` is what
+    /// "nothing by this name exists any more" looks like. The UI used to infer
+    /// from this field alone and so labelled every pool target "unavailable".
     provider_model_id: Option<Uuid>,
+    /// Set when this target names a pool. See `provider_model_id`.
+    model_pool_id: Option<Uuid>,
     model: String,
     weight: i32,
     position: i32,
@@ -3570,7 +3579,7 @@ struct FrontendModelView {
 /// (migration 0036) — that is what lets routing reattach when the model comes
 /// back. An inner join here would drop exactly the targets an operator most
 /// needs to see.
-type TargetRow = (Uuid, Uuid, Option<Uuid>, String, i32, i32);
+type TargetRow = (Uuid, Uuid, Option<Uuid>, Option<Uuid>, String, i32, i32);
 
 async fn list_virtual_models(
     State(ctx): State<Ctx>,
@@ -3602,8 +3611,8 @@ async fn list_virtual_models(
     .await
     .map_err(|e| db_error("listing routing rules", &e))?;
     let rule_targets: Vec<TargetRow> = sqlx::query_as(
-        "SELECT rt.id, rt.rule_id, rt.provider_model_id, rt.target_model_name, \
-                rt.weight, rt.position
+        "SELECT rt.id, rt.rule_id, rt.provider_model_id, rt.model_pool_id, \
+                rt.target_model_name, rt.weight, rt.position
          FROM rule_targets rt
          ORDER BY rt.rule_id, rt.position",
     )
@@ -3611,8 +3620,8 @@ async fn list_virtual_models(
     .await
     .map_err(|e| db_error("listing rule targets", &e))?;
     let default_targets: Vec<TargetRow> = sqlx::query_as(
-        "SELECT vd.id, vd.frontend_model_id, vd.provider_model_id, vd.target_model_name, \
-                vd.weight, vd.position
+        "SELECT vd.id, vd.frontend_model_id, vd.provider_model_id, vd.model_pool_id, \
+                vd.target_model_name, vd.weight, vd.position
          FROM frontend_model_defaults vd
          ORDER BY vd.frontend_model_id, vd.position",
     )
@@ -3624,9 +3633,10 @@ async fn list_virtual_models(
         rows.iter()
             .filter(|(_, o, ..)| *o == owner)
             .map(
-                |(id, _, provider_model_id, model, weight, position)| TargetView {
+                |(id, _, provider_model_id, model_pool_id, model, weight, position)| TargetView {
                     id: *id,
                     provider_model_id: *provider_model_id,
+                    model_pool_id: *model_pool_id,
                     model: model.clone(),
                     weight: *weight,
                     position: *position,

@@ -20,6 +20,14 @@ import {
   Stack,
 } from "../ui.jsx";
 
+// A target is dangling only when it names neither a live provider model nor a
+// pool. Checking provider_model_id alone marked every *pool* target
+// "unavailable": a pool lives in model_pool_id and legitimately has no provider
+// model, so a working pool serving thousands of requests was displayed as
+// broken.
+const isDangling = (t) =>
+  t.provider_model_id === null && t.model_pool_id === null;
+
 // Rules, read as an operator reads them: in order, first match wins, and each
 // rule's conditions AND'd together.
 //
@@ -423,7 +431,7 @@ export function VirtualModels({ onUnauthorised }) {
                           <Dot tone="ok" size={6} />
                           <Mono style={{ font: "400 12px var(--mono)" }}>
                             {t.model}
-                            {t.provider_model_id === null ? (
+                            {isDangling(t) ? (
                               <span style={{ color: "var(--warn)" }}>
                                 {" · unavailable"}
                               </span>
@@ -526,7 +534,7 @@ export function VirtualModels({ onUnauthorised }) {
                     <Dot tone="ok" size={6} />
                     <Mono style={{ font: "400 12px var(--mono)" }}>
                       {t.model}
-                      {t.provider_model_id === null ? (
+                      {isDangling(t) ? (
                         <span style={{ color: "var(--warn)" }}>
                           {" · unavailable"}
                         </span>
