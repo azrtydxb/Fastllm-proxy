@@ -1,0 +1,127 @@
+# The node agent, running inside a Kubernetes cluster.
+#
+# Same agent as the systemd unit beside this file, with `--kubernetes`: it asks
+# the API which addresses the cluster exposes instead of probing a list of
+# ports. A cluster knows exactly what is reachable from outside it, and
+# guessing at ports when something can tell you is how an engine on a port
+# nobody thought of stays invisible.
+#
+# *Exposed* is the whole criterion, which is why there is no label to apply and
+# no annotation to remember. A NodePort, a LoadBalancer and a hostPort are
+# reachable from outside the cluster by definition; a ClusterIP is not, and so
+# is never a candidate. Whether a candidate is a *model* is then settled the
+# same way it is for every other source — by asking it for `/v1/models`. A
+# cluster that exposes Postgres and an ingress and no engines registers
+# nothing.
+#
+# This is deliberately a Deployment and not a DaemonSet. The agent reads the
+# API and registers addresses that are cluster-wide; one copy answers for the
+# whole cluster, and one per node would have every node re-register the same
+# LoadBalancer.
+#
+# It dials out and is never dialled, so the cluster it runs in needs no inbound
+# path from FastLLM — which is the point, since the proxies live in another
+# cluster entirely.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fastllm-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fastllm-node-agent
+  namespace: fastllm-agent
+---
+# Read-only, and only the two kinds it reads. It never writes to this cluster:
+# everything it learns goes out to FastLLM over the token below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fastllm-node-agent
+rules:
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fastllm-node-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fastllm-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: fastllm-node-agent
+    namespace: fastllm-agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastllm-node-agent
+  namespace: fastllm-agent
+spec:
+  # One. See the header: the agent speaks for the cluster, not for a node.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastllm-node-agent
+  template:
+    metadata:
+      labels:
+        app: fastllm-node-agent
+    spec:
+      serviceAccountName: fastllm-node-agent
+      containers:
+        - name: agent
+          # Any Python works: the agent is standard library only, on purpose,
+          # so there is nothing to install and no image to build and keep
+          # current.
+          image: python:3.13-slim
+          command:
+            ["python3", "/opt/fastllm/fastllm-node-agent.py", "--kubernetes"]
+          env:
+            - name: FASTLLM_CONTROL_URL
+              value: https://192.168.10.129:4001
+            - name: FASTLLM_NODE
+              value: novanas
+            # The address a *proxy* will dial for a NodePort or hostPort. Not
+            # this pod's address and not a ClusterIP: what is registered is a
+            # destination for someone else's traffic, and this agent's own
+            # outbound reachability says nothing about it.
+            - name: FASTLLM_ADVERTISE
+              value: 192.168.10.203
+            - name: FASTLLM_CA_CERT
+              value: /etc/fastllm/ca.crt
+            - name: FASTLLM_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fastllm-agent-token
+                  key: token
+          volumeMounts:
+            - { name: script, mountPath: /opt/fastllm }
+            - { name: ca, mountPath: /etc/fastllm, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: script
+          configMap:
+            name: fastllm-node-agent
+            defaultMode: 0555
+        # The control plane's certificate comes from an internal CA no public
+        # root store has heard of. There is deliberately no way to skip
+        # verification: the token above travels over this connection, and an
+        # agent that stops checking hands it to whoever answers.
+        - name: ca
+          secret:
+            secretName: fastllm-control-ca

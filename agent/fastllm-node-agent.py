@@ -51,6 +51,149 @@ def serves_models(base, timeout):
         return False
 
 
+SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+
+def kube_get(path, timeout):
+    """GET a Kubernetes API path using the pod's own ServiceAccount.
+
+    Standard library, like everything else here: the token and the CA are
+    files the kubelet already mounted, and the API speaks JSON over HTTPS. A
+    client library would buy nothing and cost the one property this agent is
+    built on -- that it runs wherever Python does, with nothing installed.
+    """
+    with open(f"{SA_DIR}/token", encoding="utf-8") as f:
+        token = f.read().strip()
+    host = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+    port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    req = urllib.request.Request(
+        f"https://{host}:{port}{path}",
+        headers={"authorization": f"Bearer {token}"},
+    )
+    ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        return json.load(r)
+
+
+def port_from_command(container):
+    """The port a host-network container says it listens on, from its command.
+
+    A pod on `hostNetwork` publishes on the node whether or not it declares a
+    `containerPort`, and a pod that declares none tells the API nothing about
+    where it listens -- which is how a working engine stays invisible to a
+    scan that only reads port fields. This deployment's own engines are
+    exactly that: `hostNetwork: true`, no ports declared, serving on 8000.
+
+    So read the flag the operator already wrote. `--port N` and `--port=N` are
+    what vLLM, SGLang and llama.cpp's server all take, and this is reading a
+    declaration rather than guessing at a range -- the distinction that makes
+    it not a port scan.
+
+    The better fix is upstream of here: a `containerPort` on a host-network
+    pod costs nothing and makes the API describe it properly. This covers the
+    pods that do not.
+    """
+    argv = (container.get("command") or []) + (container.get("args") or [])
+    out = []
+    for i, tok in enumerate(argv):
+        if tok == "--port" and i + 1 < len(argv):
+            candidate = argv[i + 1]
+        elif tok.startswith("--port="):
+            candidate = tok.split("=", 1)[1]
+        else:
+            continue
+        try:
+            out.append(int(candidate))
+        except ValueError:
+            pass
+    return out
+
+
+def kube_candidates(args):
+    """Addresses this cluster actually exposes, from the API rather than a guess.
+
+    A port probe is what you do on a host with no service registry. Kubernetes
+    has one, and it knows exactly which ports are reachable from outside --
+    so ask it, and probe only those.
+
+    *Exposed* is the whole criterion, and it is why this needs no label or
+    annotation to opt in. A NodePort, a LoadBalancer and a hostPort are
+    reachable from outside the cluster by definition; a ClusterIP is not. So a
+    ClusterIP-only Service is never a candidate -- not refused, simply not
+    exposed, which is the same answer the operator already gave by choosing
+    that type.
+
+    That matters because what gets registered is a destination for *someone
+    else's* traffic. This agent dials out, but a proxy elsewhere later dials
+    the address it registered. Registering an unreachable one succeeds here
+    and fails at request time, to a user -- the same trap `--advertise` exists
+    to avoid on a bare host.
+
+    Returns candidate `api_base` URLs. Whether any of them serves models is
+    still decided by the `/v1/models` probe every other source goes through,
+    so discovery and reachability stay the same test.
+    """
+    found = []
+
+    try:
+        services = kube_get("/api/v1/services", args.probe_timeout).get("items", [])
+    except Exception as e:
+        log(f"could not list services: {e}")
+        services = []
+    for svc in services:
+        spec = svc.get("spec") or {}
+        kind = spec.get("type")
+        meta = svc.get("metadata") or {}
+        # An explicit address wins over anything inferred, for the Service
+        # whose reachable address this agent would get wrong.
+        override = (meta.get("annotations") or {}).get("fastllm.io/advertise")
+        for port in spec.get("ports") or []:
+            if override:
+                found.append(
+                    f"http://{override}/v1" if "://" not in override else override
+                )
+                continue
+            if kind == "LoadBalancer":
+                for ing in ((svc.get("status") or {}).get("loadBalancer") or {}).get(
+                    "ingress", []
+                ):
+                    addr = ing.get("ip") or ing.get("hostname")
+                    if addr and port.get("port"):
+                        found.append(f"http://{addr}:{port['port']}/v1")
+            elif kind == "NodePort" and port.get("nodePort") and args.advertise:
+                found.append(f"http://{args.advertise}:{port['nodePort']}/v1")
+
+    # A hostPort or host networking bypasses Services entirely and is a normal
+    # way to expose a single-node engine, so both would be invisible to a
+    # Service-only scan.
+    try:
+        pods = kube_get("/api/v1/pods", args.probe_timeout).get("items", [])
+    except Exception as e:
+        log(f"could not list pods: {e}")
+        pods = []
+    for pod in pods:
+        spec = pod.get("spec") or {}
+        host_net = bool(spec.get("hostNetwork"))
+        for c in spec.get("containers") or []:
+            ports = [p["hostPort"] for p in (c.get("ports") or []) if p.get("hostPort")]
+            # Under host networking every containerPort *is* a node port, so a
+            # pod that declares one has already said where it listens.
+            if host_net:
+                ports += [
+                    p["containerPort"]
+                    for p in (c.get("ports") or [])
+                    if p.get("containerPort")
+                ]
+                if not ports:
+                    ports += port_from_command(c)
+            for hp in ports:
+                if args.advertise:
+                    found.append(f"http://{args.advertise}:{hp}/v1")
+
+    # Two Services can front the same endpoint; register it once.
+    return list(dict.fromkeys(found))
+
+
 def discover(args):
     """Endpoints on this host that serve models.
 
@@ -65,6 +208,11 @@ def discover(args):
             found.append(base)
         else:
             log(f"configured endpoint {base} did not answer {MODELS_PATH}")
+
+    if args.kubernetes:
+        for base in kube_candidates(args):
+            if base not in found and serves_models(base, args.probe_timeout):
+                found.append(base)
 
     for port in args.scan_ports:
         # The advertised host, never a loopback or a container address: this
@@ -144,50 +292,108 @@ def register(args, api_base):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--control", default=os.environ.get("FASTLLM_CONTROL_URL"),
-                    help="control plane admin base URL")
-    ap.add_argument("--token", default=os.environ.get("FASTLLM_AGENT_TOKEN"),
-                    help="API key for this node's principal")
-    ap.add_argument("--node", default=os.environ.get("FASTLLM_NODE", socket.gethostname()),
-                    help="name for this host, scoping what it may register")
-    ap.add_argument("--advertise", default=os.environ.get("FASTLLM_ADVERTISE"),
-                    help="address the proxies should dial. Configured, never "
-                         "inferred: a discovered container address is one the "
-                         "proxies cannot reach")
-    ap.add_argument("--api-base", action="append", default=[],
-                    help="an endpoint to register outright; repeatable")
-    ap.add_argument("--scan-ports", type=int, nargs="*", default=[8000, 8001, 8080, 8890],
-                    help="ports on --advertise to probe")
-    ap.add_argument("--provider-name", default=os.environ.get("FASTLLM_PROVIDER_NAME"),
-                    help="what to call this host's providers in FastLLM; the "
-                         "endpoint's port is appended, so one host's endpoints "
-                         "are distinguishable. Defaults to --node. Sent on "
-                         "every heartbeat, so changing it renames them")
-    ap.add_argument("--engine", default=os.environ.get("FASTLLM_ENGINE"),
-                    help="hint only; nothing depends on it")
-    ap.add_argument("--ttl", type=int, default=90,
-                    help="lease length in seconds")
-    ap.add_argument("--interval", type=int, default=30,
-                    help="how often to re-register. Well inside --ttl, so one "
-                         "missed beat is not an expiry")
-    ap.add_argument("--ca-cert", default=os.environ.get("FASTLLM_CA_CERT"),
-                    help="PEM bundle to verify the control plane against, for "
-                         "a certificate from an internal CA. The CA's "
-                         "certificate, or a lone self-signed one, which is its "
-                         "own issuer. There is deliberately no way to skip "
-                         "verification: the token below goes over this "
-                         "connection")
+    ap.add_argument(
+        "--control",
+        default=os.environ.get("FASTLLM_CONTROL_URL"),
+        help="control plane admin base URL",
+    )
+    ap.add_argument(
+        "--token",
+        default=os.environ.get("FASTLLM_AGENT_TOKEN"),
+        help="API key for this node's principal",
+    )
+    ap.add_argument(
+        "--node",
+        default=os.environ.get("FASTLLM_NODE", socket.gethostname()),
+        help="name for this host, scoping what it may register",
+    )
+    ap.add_argument(
+        "--advertise",
+        default=os.environ.get("FASTLLM_ADVERTISE"),
+        help="address the proxies should dial. Configured, never "
+        "inferred: a discovered container address is one the "
+        "proxies cannot reach",
+    )
+    ap.add_argument(
+        "--api-base",
+        action="append",
+        default=[],
+        help="an endpoint to register outright; repeatable",
+    )
+    ap.add_argument(
+        "--kubernetes",
+        action="store_true",
+        default=os.environ.get("FASTLLM_KUBERNETES", "").lower()
+        in ("1", "true", "yes"),
+        help="Discover exposed endpoints from the Kubernetes API "
+        "(NodePort, LoadBalancer, hostPort) instead of guessing "
+        "at ports. Requires a ServiceAccount that can list "
+        "services and pods.",
+    )
+    ap.add_argument(
+        "--scan-ports",
+        type=int,
+        nargs="*",
+        default=None,
+        help="ports on --advertise to probe. Defaults to a short "
+        "list, or to nothing under --kubernetes, where the "
+        "API already knows what is exposed",
+    )
+    ap.add_argument(
+        "--provider-name",
+        default=os.environ.get("FASTLLM_PROVIDER_NAME"),
+        help="what to call this host's providers in FastLLM; the "
+        "endpoint's port is appended, so one host's endpoints "
+        "are distinguishable. Defaults to --node. Sent on "
+        "every heartbeat, so changing it renames them",
+    )
+    ap.add_argument(
+        "--engine",
+        default=os.environ.get("FASTLLM_ENGINE"),
+        help="hint only; nothing depends on it",
+    )
+    ap.add_argument("--ttl", type=int, default=90, help="lease length in seconds")
+    ap.add_argument(
+        "--interval",
+        type=int,
+        default=30,
+        help="how often to re-register. Well inside --ttl, so one "
+        "missed beat is not an expiry",
+    )
+    ap.add_argument(
+        "--ca-cert",
+        default=os.environ.get("FASTLLM_CA_CERT"),
+        help="PEM bundle to verify the control plane against, for "
+        "a certificate from an internal CA. The CA's "
+        "certificate, or a lone self-signed one, which is its "
+        "own issuer. There is deliberately no way to skip "
+        "verification: the token below goes over this "
+        "connection",
+    )
     ap.add_argument("--probe-timeout", type=float, default=5.0)
-    ap.add_argument("--once", action="store_true",
-                    help="register and exit, for a cron or a smoke test")
+    ap.add_argument(
+        "--once",
+        action="store_true",
+        help="register and exit, for a cron or a smoke test",
+    )
     args = ap.parse_args()
+
+    # Probing ports is what you do when nothing can tell you. Under
+    # --kubernetes something can, so the guess is off unless asked for
+    # explicitly -- a cluster that exposes an engine on 9000 is discovered,
+    # and one that exposes nothing registers nothing rather than being
+    # rummaged through.
+    if args.scan_ports is None:
+        args.scan_ports = [] if args.kubernetes else [8000, 8001, 8080, 8890]
 
     missing = [n for n in ("control", "token", "advertise") if not getattr(args, n)]
     if missing:
         ap.error("missing required: " + ", ".join("--" + m for m in missing))
     if args.interval >= args.ttl:
-        ap.error(f"--interval {args.interval} must be well inside --ttl {args.ttl}, "
-                 "or a single slow beat expires the lease")
+        ap.error(
+            f"--interval {args.interval} must be well inside --ttl {args.ttl}, "
+            "or a single slow beat expires the lease"
+        )
 
     log(f"node={args.node} advertising {args.advertise} to {args.control}")
     while True:
@@ -201,9 +407,11 @@ def main():
         for base in endpoints:
             try:
                 r = register(args, base)
-                log(f"registered {base} -> provider {r.get('id')} "
+                log(
+                    f"registered {base} -> provider {r.get('id')} "
                     f"{r.get('name')!r} kind={r.get('kind')} "
-                    f"leased={r.get('leased')}")
+                    f"leased={r.get('leased')}"
+                )
             except urllib.error.HTTPError as e:
                 log(f"registering {base} failed: {e.code} {e.read()[:200]!r}")
             except Exception as e:

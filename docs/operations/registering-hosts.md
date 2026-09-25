@@ -37,17 +37,74 @@ Standard library only, so there is nothing to install. That is deliberate: this
 runs on machines whose Python is whatever the vendor shipped, and a health
 agent that needs a virtualenv to start is one more thing to be broken at 3am.
 
-| Flag | Why it matters |
-| --- | --- |
-| `--advertise` | The address **proxies** will dial. Configured, never inferred — an agent that discovers a container on `172.17.0.2` and registers that hands the proxies an address they cannot reach. |
-| `--scan-ports` | Ports to probe on that address. Catches a bare process started by hand or by a launcher, with no container runtime present. |
-| `--api-base` | Register an endpoint outright, repeatable. Use when the address is not a port on `--advertise`. |
-| `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease. |
-| `--provider-name` | What this host's providers are called in FastLLM. The endpoint's port is appended, so one host's endpoints stay distinguishable — always, not only when a second one appears, since a name that changed shape as a model was started would rename the first one behind you. Defaults to `--node`, and is sent on every heartbeat, so changing it renames them. |
-| `--engine` | A hint, carried as metadata. Nothing depends on it. |
-| `--token` | A principal API key. It authenticates the agent; there is no permission to grant beyond that. |
-| `--ca-cert` | PEM bundle to verify the control plane against, when its certificate comes from an internal CA. There is deliberately no way to skip verification — the token above goes over this connection, and an agent that stops checking hands it to whoever answers. Pass the CA's certificate, or a lone self-signed certificate, which is its own issuer. |
-| `--once` | Register and exit, for a cron or a smoke test. |
+| Flag                   | Why it matters                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--advertise`          | The address **proxies** will dial. Configured, never inferred — an agent that discovers a container on `172.17.0.2` and registers that hands the proxies an address they cannot reach.                                                                                                                                                                         |
+| `--scan-ports`         | Ports to probe on that address. Catches a bare process started by hand or by a launcher, with no container runtime present.                                                                                                                                                                                                                                    |
+| `--api-base`           | Register an endpoint outright, repeatable. Use when the address is not a port on `--advertise`.                                                                                                                                                                                                                                                                |
+| `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease.                                                                                                                                                                                                                    |
+| `--provider-name`      | What this host's providers are called in FastLLM. The endpoint's port is appended, so one host's endpoints stay distinguishable — always, not only when a second one appears, since a name that changed shape as a model was started would rename the first one behind you. Defaults to `--node`, and is sent on every heartbeat, so changing it renames them. |
+| `--engine`             | A hint, carried as metadata. Nothing depends on it.                                                                                                                                                                                                                                                                                                            |
+| `--token`              | A principal API key. It authenticates the agent; there is no permission to grant beyond that.                                                                                                                                                                                                                                                                  |
+| `--ca-cert`            | PEM bundle to verify the control plane against, when its certificate comes from an internal CA. There is deliberately no way to skip verification — the token above goes over this connection, and an agent that stops checking hands it to whoever answers. Pass the CA's certificate, or a lone self-signed certificate, which is its own issuer.            |
+| `--once`               | Register and exit, for a cron or a smoke test.                                                                                                                                                                                                                                                                                                                 |
+
+## Running it in Kubernetes
+
+`agent/kubernetes.yaml` runs the same agent with `--kubernetes`, where it asks
+the API which addresses the cluster exposes instead of probing a list of ports.
+A port probe is what you do on a host with no service registry; a cluster has
+one, and guessing at ports when something can tell you is how an engine on a
+port nobody thought of stays invisible.
+
+**Exposed is the whole criterion**, which is why there is no label to apply and
+no annotation to remember. A NodePort, a LoadBalancer and a hostPort are
+reachable from outside the cluster by definition; a ClusterIP is not, and so is
+never a candidate — not refused, simply not exposed, which is the answer the
+operator already gave by choosing that type. Whether a candidate is a _model_ is
+then settled the same way it is for every other source: by asking it for
+`/v1/models`. A cluster that exposes Postgres and an ingress and no engines
+registers nothing.
+
+Under `--kubernetes`, `--scan-ports` defaults to nothing. Pass it explicitly to
+have both.
+
+### Host networking, and the port nobody declared
+
+A pod on `hostNetwork` publishes on the node whether or not it declares a
+`containerPort`, and one that declares none tells the API nothing about where
+it listens. That is not hypothetical: this project's own engines are exactly
+that — `hostNetwork: true`, no ports declared, serving on 8000 — and a scan
+that only reads port fields finds nothing while the engine answers happily.
+
+So for a host-network pod the agent takes, in order: a declared `hostPort`, then
+a declared `containerPort` (under host networking that _is_ a node port), and
+failing both, the `--port` flag from the container's command. That last one is
+reading a declaration the operator already wrote, which is what makes it not a
+port scan — but it is still a fallback. **Declaring `containerPort` on a
+host-network pod is the better fix**, costs nothing, and makes the API describe
+the pod properly for everything that reads it, not just this agent.
+
+### What it needs
+
+A ServiceAccount that can `list` services and pods, and nothing else — it never
+writes to the cluster it runs in. A Deployment rather than a DaemonSet: the
+agent reads cluster-wide state, so one copy answers for the cluster, where one
+per node would have every node re-register the same LoadBalancer.
+
+`--advertise` still matters, and still means the address a **proxy** will dial —
+used for NodePorts and host ports. It is not this pod's address and not a
+ClusterIP: what is registered is a destination for someone else's traffic, and
+the agent's own outbound reachability says nothing about it.
+
+```bash
+kubectl apply -f agent/kubernetes.yaml
+kubectl -n fastllm-agent create configmap fastllm-node-agent \
+  --from-file=fastllm-node-agent.py=agent/fastllm-node-agent.py
+kubectl -n fastllm-agent create secret generic fastllm-control-ca --from-file=ca.crt
+kubectl -n fastllm-agent create secret generic fastllm-agent-token \
+  --from-literal=token=fllm_...
+```
 
 ## Running it under systemd
 
@@ -104,7 +161,7 @@ Providers screen, or with `PATCH /admin/providers/{id}`.
 ## There is no RBAC on providers
 
 A provider is an endpoint and a credential for reaching it. The credential is
-the *provider's* own — an OpenRouter key, a vLLM server's auth — defined by the
+the _provider's_ own — an OpenRouter key, a vLLM server's auth — defined by the
 provider rather than by us, and it is the whole of what a provider needs to
 work.
 
@@ -151,7 +208,7 @@ provider answers both questions that matter:
 - **is it still serving what is registered against it** — the drift question,
   which is the one that started all this
 
-A provider serving *more* than is registered is healthy, not drifted. OpenRouter
+A provider serving _more_ than is registered is healthy, not drifted. OpenRouter
 answers with hundreds of models and three of them are registered; treating the
 extras as drift would mark every cloud provider broken.
 

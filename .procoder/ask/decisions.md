@@ -1368,3 +1368,47 @@ Options:
   is ever used for a FastLLM inside the same cluster.
 - **Poll on the existing heartbeat interval** (simple, consistent with the
   lease model) versus **watch the API** (instant, more connection handling).
+
+## Whether a 2xx carrying an error body should be rewritten to its real status (#28)
+
+NVIDIA answers `200` with `{"error":{...,"code":502}}`. That body is not ours --
+no `type` field, and `error_response` always emits one with `code` matching the
+status it actually returns -- so the upstream is violating the OpenAI contract
+and the proxy is relaying it byte for byte, which is a deliberate and tested
+property. OpenRouter sends a correct `429` and passthrough preserves that, so
+both paths behave identically; the upstreams differ.
+
+The reporter's case is that clients key retries on status, so a transient rate
+limit becomes a hard failure. True, and there is a sharper version of it:
+
+    let retryable = status.is_server_error() || status == TOO_MANY_REQUESTS;
+
+Our own failover is keyed on status too. A `200` carrying a resource-exhaustion
+body means the proxy does not fail over to another backend of the same model --
+it had healthy alternatives and returned the error instead. The gateway declined
+to do the thing it exists for, because it believed the upstream had succeeded.
+
+The cost of detecting it is real. Non-streaming responses are streamed through
+without buffering unless caching is on, so inspecting the body adds a JSON parse
+on every 2xx and gives up the byte-for-byte guarantee `native_protocols.rs`
+pins. Streaming responses cannot be inspected at all without buffering the whole
+generation.
+
+Options:
+
+- **Rewrite the status on non-streaming 2xx whose body carries `error.code`.**
+  Fixes both the client's retries and our own failover. Costs a parse per
+  non-streaming response and the byte-for-byte guarantee. Streaming is left
+  alone, where the problem is less acute because a stream that has begun has
+  already committed a status.
+- **Fail over on it but leave the response alone.** Treat a 2xx-with-error-body
+  as retryable internally, so another backend gets a chance, while still
+  returning whatever finally comes back untouched. Keeps passthrough honest and
+  fixes the worse half -- but a client that gets the last backend's error still
+  sees a 200.
+- **Gate it per provider.** A `trust_status` flag on the backend, off for
+  upstreams known to lie. No cost on the paths that do not need it, at the price
+  of an operator having to know.
+- **Leave it and document it.** The upstream is at fault; the proxy relaying a
+  contract violation faithfully is defensible, and the reporter can pin the
+  provider. Cheapest, and it leaves our own failover blind.
