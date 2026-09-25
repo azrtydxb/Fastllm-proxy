@@ -11986,6 +11986,7 @@ mod tests {
     async fn a_health_report_is_gated_by_the_proxy_token_and_read_back_from_the_fleet() {
         let (ctx, _cache) = test_ctx().await;
         let report = crate::health_report::HealthReport {
+            advertise: None,
             replica: "proxy-test-0".into(),
             snapshot_version: 42,
             uptime_seconds: 7,

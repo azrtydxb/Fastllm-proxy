@@ -53,6 +53,15 @@ spec:
           ports:
             - { name: http, containerPort: 4000 }
           env:
+            # Its own address, so a sibling can be handed a request for a model
+            # this replica cannot reach. From the downward API because nothing
+            # else in the pod knows it — the listen address is 0.0.0.0, which
+            # is not somewhere anyone can send a request. Without this the
+            # proxy still forwards *to* others; it just never receives.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             # Plain http:// inside the cluster. /snapshot carries usable
             # upstream credentials, so put TLS in front of it wherever a
             # backend has a real one — overlays/tls/ does exactly that, and

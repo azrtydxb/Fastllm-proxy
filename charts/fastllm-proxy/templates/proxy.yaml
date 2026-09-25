@@ -61,6 +61,13 @@ spec:
           ports:
             - {name: http, containerPort: {{ .Values.proxy.service.port }}}
           env:
+            # Its own address, so a sibling can be handed a request for a model
+            # this replica cannot reach. From the downward API because nothing
+            # else in the pod knows it — the listen address is 0.0.0.0.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: FASTLLM_CONTROL_URL
               value: {{ printf "%s://%s-control.%s.svc:%v/snapshot" (ternary "https" "http" .Values.control.tls.enabled) (include "fastllm.fullname" .) .Release.Namespace .Values.control.service.port | quote }}
             - name: FASTLLM_PROXY_TOKEN

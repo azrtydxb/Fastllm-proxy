@@ -83,6 +83,16 @@ pub struct AppState {
     /// would mean a network call, and the request path performs no I/O.
     pub cache: std::sync::Arc<crate::cache::ResponseCache>,
 
+    /// Model name -> addresses of sibling replicas that can serve it, for
+    /// models this replica currently cannot.
+    ///
+    /// Written on the health-report tick by `apply_fleet_verdict`, read on the
+    /// request path only after every local backend has already failed. Holding
+    /// it here rather than resolving it per request is what keeps the lookup
+    /// off the hot path: by the time it is read it is a `HashMap::get` on an
+    /// `Arc` that was built seconds ago.
+    pub peers: arc_swap::ArcSwap<std::collections::HashMap<String, Vec<String>>>,
+
     /// Prompt classifier, rebuilt from the snapshot on every `apply_snapshot`
     /// so the centroids a request is scored against are always the ones the
     /// control plane most recently published.
@@ -129,6 +139,43 @@ impl AppState {
     /// rather than an override, and why it cannot revive a dead backend.
     pub fn apply_fleet_verdict(&self, verdict: &crate::health_report::FleetVerdict) {
         let registry = self.registry.load();
+
+        // Who else could serve each model, for the case the fleet cannot talk
+        // this replica out of: it really is the only one that cannot reach the
+        // backend. Keyed by the model name the request path already has, and
+        // rebuilt here — on the report timer — because resolving it per
+        // request would be work on the hot path for a case that almost never
+        // happens.
+        //
+        // Only models this replica currently has no healthy backend for get an
+        // entry. A model it can serve itself needs no fallback, and leaving it
+        // out keeps the map to the handful of entries that matter.
+        let mut peers: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for name in registry.model_names() {
+            if registry.pool_has_healthy(name) {
+                continue;
+            }
+            let Some(pool) = registry.pool(name) else {
+                continue;
+            };
+            let mut addrs: Vec<String> = pool
+                .iter()
+                .flat_map(|b| {
+                    verdict
+                        .backends
+                        .iter()
+                        .filter(|v| v.api_base == b.api_base && v.model == b.upstream_model)
+                        .flat_map(|v| v.reachable_from.iter().cloned())
+                })
+                .collect();
+            addrs.sort();
+            addrs.dedup();
+            if !addrs.is_empty() {
+                peers.insert(name.to_string(), addrs);
+            }
+        }
+        self.peers.store(std::sync::Arc::new(peers));
+
         for backend in registry.backends() {
             if backend.is_healthy() {
                 continue;
@@ -213,6 +260,7 @@ impl AppState {
             limiter: Arc::new(crate::limiter::Limiter::new()),
             telemetry: std::sync::Arc::new(crate::telemetry::Telemetry::new()),
             cache: std::sync::Arc::new(crate::cache::ResponseCache::new(4096, 64 * 1024 * 1024)),
+            peers: Default::default(),
         }
     }
 

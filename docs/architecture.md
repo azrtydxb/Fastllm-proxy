@@ -178,21 +178,23 @@ Two things an operator should know rather than discover:
 
 ## Failure modes
 
-| event                               | behaviour                                                                                                                 |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| control plane down, proxy warm      | serves from memory; policy stops changing                                                                                 |
-| control plane down, proxy cold      | loads last-known-good from disk                                                                                           |
-| cold start, no cache                | starts, `/health` unhealthy, never crash-loops                                                                            |
-| snapshot invalid                    | keeps the previous one, logs once                                                                                         |
-| key revoked                         | effective within the poll interval, ~1s                                                                                   |
-| a model in a chain returns 429/5xx  | the next model in the same rule serves it; nothing reached the client yet                                                 |
-| every model in the chain refuses    | the last upstream's own status and body are forwarded, not a synthetic 502                                                |
-| Postgres down                       | control plane serves its last built snapshot; proxies unaffected                                                          |
-| SIGTERM (a rollout)                 | stops accepting, lets in-flight generations finish, exits — up to `--shutdown-grace` (25s, under Kubernetes' 30s default) |
-| usage report fails                  | dropped; never blocks a request                                                                                           |
-| health report fails                 | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s                                              |
-| upstream speaks an unexpected shape | translated backends only: the body fails rather than returning a plausible empty completion                               |
-| snapshot names an unknown protocol  | that backend is dropped with a logged reason, never silently treated as OpenAI                                            |
+| event                                             | behaviour                                                                                                                                                                  |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| control plane down, proxy warm                    | serves from memory; policy stops changing                                                                                                                                  |
+| control plane down, proxy cold                    | loads last-known-good from disk                                                                                                                                            |
+| cold start, no cache                              | starts, `/health` unhealthy, never crash-loops                                                                                                                             |
+| snapshot invalid                                  | keeps the previous one, logs once                                                                                                                                          |
+| key revoked                                       | effective within the poll interval, ~1s                                                                                                                                    |
+| a model in a chain returns 429/5xx                | the next model in the same rule serves it; nothing reached the client yet                                                                                                  |
+| every model in the chain refuses                  | the last upstream's own status and body are forwarded, not a synthetic 502                                                                                                 |
+| one replica cannot reach a backend the rest can   | the fleet's tally, returned in the reply to that replica's health report, contradicts it; the replica withdraws its own ejection and lets its next probe decide again      |
+| one replica genuinely is the only one that cannot | it hands the request to a sibling that can, one hop only; readiness cannot express "blind for one model" so the replica stays in rotation and this is what keeps it honest |
+| Postgres down                                     | control plane serves its last built snapshot; proxies unaffected                                                                                                           |
+| SIGTERM (a rollout)                               | stops accepting, lets in-flight generations finish, exits — up to `--shutdown-grace` (25s, under Kubernetes' 30s default)                                                  |
+| usage report fails                                | dropped; never blocks a request                                                                                                                                            |
+| health report fails                               | dropped, logged at debug; `GET /admin/fleet` ages that replica out after 30s                                                                                               |
+| upstream speaks an unexpected shape               | translated backends only: the body fails rather than returning a plausible empty completion                                                                                |
+| snapshot names an unknown protocol                | that backend is dropped with a logged reason, never silently treated as OpenAI                                                                                             |
 
 Never crash-looping on a cold start is deliberate: under Kubernetes that would
 turn a control-plane outage into a data-plane outage, which is the failure this

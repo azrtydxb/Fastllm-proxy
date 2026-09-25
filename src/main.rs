@@ -1481,6 +1481,9 @@ fn build_app_state(
     };
 
     let state = Arc::new(AppState {
+        // Learned from the control plane on the health-report tick; empty
+        // until the first reply, which simply means no fallback yet.
+        peers: Default::default(),
         registry: ArcSwap::from_pointee(registry),
         router: Router::new(
             cli.policy,
@@ -1559,6 +1562,21 @@ fn spawn_health_reports(
     interval: Duration,
 ) {
     let replica = hostname();
+    // Where siblings can reach this replica, for cross-replica forwarding.
+    // Injected by the operator and the manifests as POD_IP; absent anywhere
+    // else, which simply means this replica never volunteers as a fallback.
+    // Deliberately not guessed from the listen address: `0.0.0.0` is not an
+    // address anyone can dial, and inventing one sends traffic into the dark.
+    let advertise = std::env::var("FASTLLM_ADVERTISE_ADDR")
+        .ok()
+        .or_else(|| std::env::var("POD_IP").ok().map(|ip| format!("{ip}:4000")))
+        .filter(|a| !a.is_empty());
+    if advertise.is_none() {
+        tracing::debug!(
+            "no FASTLLM_ADVERTISE_ADDR or POD_IP; this replica will not be offered to \
+             siblings as a fallback"
+        );
+    }
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1567,6 +1585,7 @@ fn spawn_health_reports(
             let registry = state.registry.load();
             reporter.send(fastllm_proxy::health_report::HealthReport {
                 replica: replica.clone(),
+                advertise: advertise.clone(),
                 snapshot_version: state.snapshot.load().version,
                 uptime_seconds: state.started.elapsed().as_secs(),
                 process: fastllm_proxy::health_report::ProcessCounters {

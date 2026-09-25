@@ -521,6 +521,22 @@ pub fn proxy_deployment(
             format!("{scheme}://{control_host}:4001/snapshot"),
         ),
         secret_env("FASTLLM_PROXY_TOKEN", &s.proxy_token),
+        // Its own address, so it can offer itself to siblings as a fallback
+        // for a model they cannot reach. From the downward API because
+        // nothing else in the pod knows it: the listen address is 0.0.0.0,
+        // which is not somewhere anyone can send a request. A proxy without
+        // this still forwards *to* others; it just never receives.
+        EnvVar {
+            name: "POD_IP".to_string(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(k8s_openapi::api::core::v1::ObjectFieldSelector {
+                    field_path: "status.podIP".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
     ];
     env.extend(common_env(owner));
     env.extend(over.extra_env.clone());

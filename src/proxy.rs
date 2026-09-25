@@ -1300,6 +1300,25 @@ async fn proxy_request(
         }
     }
 
+    // Every local backend for this model has failed. Before answering 502,
+    // see whether a sibling replica can still serve it.
+    //
+    // This is the case the fleet verdict cannot fix: that mechanism talks a
+    // replica out of a verdict the others contradict, which covers "I am
+    // wrong". It cannot help when the replica is right and genuinely is the
+    // only one that cannot reach the backend — a partitioned node, a dead
+    // link. Readiness cannot express that either: it is all-or-nothing across
+    // every model, so a replica that is fine for nine models and blind for one
+    // stays in rotation and answers 502 for that one. Handing the request to a
+    // replica that can serve it is the only thing left that keeps the promise
+    // replicas are supposed to make.
+    if !already_forwarded(&parts.headers) {
+        if let Some(resp) = forward_to_peer(&state, &target_model, &parts.headers, &collected).await
+        {
+            return resp;
+        }
+    }
+
     state.requests_failed.fetch_add(1, Ordering::Relaxed);
     let detail =
         last_error.unwrap_or_else(|| format!("no healthy backend for model {target_model:?}"));
@@ -1319,6 +1338,82 @@ async fn proxy_request(
         crate::usage::Refusal::NoBackend,
     );
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &detail)
+}
+
+/// The header that stops a forwarded request being forwarded again.
+///
+/// One hop, never two. Without this a model no replica can serve would have
+/// each one hand the request to the next until something ran out, turning a
+/// clean 502 into a storm proportional to the replica count.
+const FORWARDED_HEADER: &str = "x-fastllm-forwarded-for-model";
+
+fn already_forwarded(headers: &HeaderMap) -> bool {
+    headers.contains_key(FORWARDED_HEADER)
+}
+
+/// Hand a request to a sibling replica that can still serve this model.
+///
+/// `None` when there is no sibling to try or the attempt failed, and the
+/// caller answers as it would have anyway — a fallback that turns a 502 into a
+/// different 502 has cost only the attempt.
+///
+/// The peer list arrived on the health-report tick, so choosing one is a map
+/// lookup rather than discovery: no DNS, no I/O, nothing the request path is
+/// not already allowed to do.
+async fn forward_to_peer(
+    state: &Arc<AppState>,
+    target_model: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Option<Response<ResBody>> {
+    let peers = state.peers.load();
+    let addrs = peers.get(target_model)?;
+    // Spread the load rather than stampeding whichever address sorts first:
+    // every replica blind to this model would otherwise pick the same sibling.
+    let pick = addrs.get(
+        (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0))
+            % addrs.len(),
+    )?;
+
+    let uri = format!("http://{pick}/v1/chat/completions");
+    let mut builder = Request::builder().method(Method::POST).uri(&uri);
+    let out = builder.headers_mut()?;
+    for (name, value) in headers.iter() {
+        if HOP_BY_HOP.contains(&name.as_str()) || name.as_str() == "host" {
+            continue;
+        }
+        out.insert(name.clone(), value.clone());
+    }
+    // Marks the hop, and is also what the receiving replica checks before
+    // considering a forward of its own.
+    out.insert(FORWARDED_HEADER, HeaderValue::from_static("1"));
+
+    let req = builder.body(Full::new(body.clone())).ok()?;
+    match state.client.request(req).await {
+        Ok(resp) => {
+            tracing::info!(
+                model = %target_model,
+                peer = %pick,
+                "no local backend for this model; served by a sibling replica"
+            );
+            // Relayed as it stands. There is no local backend to hold an
+            // in-flight guard for, and the replica that actually served it
+            // records the usage — counting it here too would double every
+            // forwarded request in the ledger.
+            let (mut parts, body) = resp.into_parts();
+            for name in HOP_BY_HOP {
+                parts.headers.remove(*name);
+            }
+            Some(Response::from_parts(parts, body.boxed()))
+        }
+        Err(e) => {
+            tracing::warn!(model = %target_model, peer = %pick, error = %e, "forward failed");
+            None
+        }
+    }
 }
 
 /// Rebuild the body with a different `model` value and/or an injected

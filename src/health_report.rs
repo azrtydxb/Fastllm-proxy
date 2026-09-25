@@ -41,6 +41,12 @@ pub struct HealthReport {
     /// Which proxy. Its hostname, which in Kubernetes is the pod name — the
     /// thing an operator would `kubectl logs` next.
     pub replica: String,
+    /// Where a sibling can reach this replica, `host:port`, when it has been
+    /// told. `None` disables forwarding *to* this replica: a proxy that does
+    /// not know its own address cannot be anyone's fallback, and guessing one
+    /// would send traffic into the dark.
+    #[serde(default)]
+    pub advertise: Option<String>,
     /// The snapshot this proxy is serving, so a fleet-wide `max - min` shows a
     /// replica stuck on an old configuration without scraping each one.
     pub snapshot_version: u64,
@@ -264,24 +270,34 @@ pub mod store {
         /// a proxy still on an older snapshot has nothing useful to say about
         /// a backend it has not heard of yet.
         pub fn verdict(&self, now: Instant) -> super::FleetVerdict {
-            let mut tally: HashMap<(String, String), (usize, usize)> = HashMap::new();
+            type Tally = (usize, usize, Vec<String>);
+            let mut tally: HashMap<(String, String), Tally> = HashMap::new();
             for report in self.current(now) {
                 for b in report.backends {
-                    let e = tally.entry((b.api_base, b.model)).or_insert((0, 0));
+                    let e = tally
+                        .entry((b.api_base, b.model))
+                        .or_insert((0, 0, Vec::new()));
                     e.1 += 1;
                     if b.healthy {
                         e.0 += 1;
+                        if let Some(addr) = &report.advertise {
+                            e.2.push(addr.clone());
+                        }
                     }
                 }
             }
             let mut backends: Vec<super::BackendVerdict> = tally
                 .into_iter()
                 .map(
-                    |((api_base, model), (healthy, total))| super::BackendVerdict {
-                        api_base,
-                        model,
-                        healthy,
-                        total,
+                    |((api_base, model), (healthy, total, mut reachable_from))| {
+                        reachable_from.sort();
+                        super::BackendVerdict {
+                            api_base,
+                            model,
+                            healthy,
+                            total,
+                            reachable_from,
+                        }
                     },
                 )
                 .collect();
@@ -306,6 +322,11 @@ pub struct BackendVerdict {
     pub healthy: usize,
     /// Replicas that reported recently at all. `healthy` out of this.
     pub total: usize,
+    /// Addresses of the replicas that can reach it, for a replica that cannot
+    /// and wants to hand the request to one that can. Only replicas that
+    /// advertised an address appear here.
+    #[serde(default)]
+    pub reachable_from: Vec<String>,
 }
 
 /// The fleet's answer to "is it me, or is it the backend?".
@@ -342,6 +363,7 @@ mod tests {
     fn report(replica: &str, healthy: bool, version: u64) -> HealthReport {
         HealthReport {
             replica: replica.into(),
+            advertise: None,
             snapshot_version: version,
             uptime_seconds: 1,
             process: Default::default(),
@@ -401,6 +423,36 @@ mod tests {
         pair.record(report("a", false, 1), now);
         pair.record(report("b", false, 1), now);
         assert!(!pair.verdict(now).contradicts("http://a", "m"));
+    }
+
+    /// A replica offers itself as a fallback only for backends it can actually
+    /// reach, and only if it knows its own address.
+    #[test]
+    fn only_replicas_that_can_reach_a_backend_are_offered_as_fallbacks() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let fleet = store::Fleet::new(Duration::from_secs(60));
+
+        let mut good = report("good", true, 1);
+        good.advertise = Some("10.0.0.1:4000".into());
+        fleet.record(good, now);
+
+        // Can reach it, but never told anyone where it lives.
+        fleet.record(report("anonymous", true, 1), now);
+
+        // Knows its address, but cannot reach the backend.
+        let mut blind = report("blind", false, 1);
+        blind.advertise = Some("10.0.0.3:4000".into());
+        fleet.record(blind, now);
+
+        let v = fleet.verdict(now);
+        let b = &v.backends[0];
+        assert_eq!(b.healthy, 2, "two replicas can reach it");
+        assert_eq!(
+            b.reachable_from,
+            vec!["10.0.0.1:4000"],
+            "only the one that can reach it *and* knows its address is offered"
+        );
     }
 
     /// A replica that stopped reporting stops voting, or a scaled-down pod

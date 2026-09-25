@@ -59,6 +59,15 @@ spec:
           ports:
             - { name: http, containerPort: 4000 }
           env:
+            # Its own address, so a sibling can be handed a request for a model
+            # this replica cannot reach. From the downward API because nothing
+            # else in the pod knows it — the listen address is 0.0.0.0, which
+            # is not somewhere anyone can send a request. Without this the
+            # proxy still forwards *to* others; it just never receives.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             # Http mode: models, backends and keys come from fastllm-control,
             # not from the ConfigMap below. `config` is still mounted for the
             # optional `fastllm:` tuning block only (see configmap.yaml).
