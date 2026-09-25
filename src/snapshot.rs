@@ -691,6 +691,23 @@ fn target_from_wire(t: WireWeightedTarget) -> WeightedTarget {
     }
 }
 
+/// Compare two model lists ignoring order.
+///
+/// Sorts borrowed references by name rather than cloning: this runs on the
+/// control plane's rebuild tick, not the request path, but the list carries
+/// every backend and credential and copying it to compare it would be waste.
+/// Names are unique per snapshot, so sorting by name is a total order.
+fn models_eq(a: &[ModelDef], b: &[ModelDef]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a: Vec<&ModelDef> = a.iter().collect();
+    let mut b: Vec<&ModelDef> = b.iter().collect();
+    a.sort_unstable_by(|x, y| x.name.cmp(&y.name));
+    b.sort_unstable_by(|x, y| x.name.cmp(&y.name));
+    a == b
+}
+
 impl Snapshot {
     /// Whether two snapshots carry the same policy, ignoring `version`.
     ///
@@ -709,11 +726,27 @@ impl Snapshot {
         // as a content change here — that is what makes the periodic
         // rebuilder (`control::api::rebuild_once`) actually publish the
         // updated counter rather than treating it as noise.
+        //
+        // `models` is compared as a *set*, not a list. Its order carries no
+        // meaning — routing looks models up by name — but `Vec` equality is
+        // order-sensitive, and the rows behind it arrived from Postgres. An
+        // unordered query returns the same rows in whatever order the heap
+        // happens to be in, and that shifts whenever rows are rewritten: live
+        // traffic stamps `api_keys.last_used_at`, which is deliberately not in
+        // the snapshot yet still perturbs the table.
+        //
+        // The queries are ordered now, which is the real fix. This is the
+        // second line of defence, because the failure was silent and
+        // expensive: a permutation read as a change republished the snapshot,
+        // every proxy rebuilt its registry, and `apply_snapshot` cleared the
+        // response cache — so a 300s cache TTL was wiped every ~30s and the
+        // fleet was permanently mid-convergence. Nothing said so; the version
+        // simply kept moving.
         self.keys == other.keys
             && self.principals == other.principals
-            && self.models == other.models
             && self.frontend_models == other.frontend_models
             && self.open == other.open
+            && models_eq(&self.models, &other.models)
     }
 
     pub fn authenticate(&self, token: &str, now: SystemTime) -> Result<&Principal, AuthError> {
@@ -1346,6 +1379,44 @@ mod tests {
             .allow_all = true;
         let p = snap.authenticate("sk-admin", SystemTime::now()).unwrap();
         assert!(p.may_invoke("anything-at-all"));
+    }
+
+    /// The bug this cost us: a permutation of the same models read as a
+    /// configuration change.
+    ///
+    /// Postgres returned the same rows in a different order whenever the heap
+    /// shifted — and live traffic shifts it, because stamping
+    /// `api_keys.last_used_at` rewrites rows. Every permutation republished
+    /// the snapshot, so every proxy rebuilt its registry and cleared its
+    /// response cache roughly every 30 seconds, and the fleet never finished
+    /// converging. Nothing logged a reason; the version just kept moving.
+    #[test]
+    fn reordering_the_models_is_not_a_change() {
+        let model = |name: &str| ModelDef {
+            name: name.into(),
+            cache_ttl: None,
+            context_length: None,
+            policy: None,
+            backends: vec![],
+        };
+        let mut a = snapshot_with("sk-good", &["qwen3"], None);
+        a.models = vec![model("alpha"), model("beta")];
+        let mut b = snapshot_with("sk-good", &["qwen3"], None);
+        b.models = vec![model("beta"), model("alpha")];
+
+        assert_ne!(
+            a.models, b.models,
+            "the Vecs really are unequal — that is the trap this guards"
+        );
+        assert!(
+            a.content_eq(&b),
+            "the same models in a different order are the same configuration"
+        );
+
+        // And a real difference still registers.
+        let mut c = snapshot_with("sk-good", &["qwen3"], None);
+        c.models = vec![model("alpha"), model("gamma")];
+        assert!(!a.content_eq(&c), "a different model set is a real change");
     }
 
     /// `version` is a timestamp, not a content hash — the periodic control

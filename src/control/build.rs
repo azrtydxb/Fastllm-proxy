@@ -213,7 +213,8 @@ pub async fn build_snapshot_with(
          mb.upstream_timeout_seconds \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
-         JOIN provider_models m ON m.id = mb.provider_model_id",
+         JOIN provider_models m ON m.id = mb.provider_model_id \
+         ORDER BY mb.provider_model_id, p.api_base, mb.id",
     )
     .fetch_all(pool)
     .await?;
@@ -379,7 +380,7 @@ pub async fn build_snapshot_with(
     }
 
     let principal_rows: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, name FROM principals WHERE NOT disabled")
+        sqlx::query_as("SELECT id, name FROM principals WHERE NOT disabled ORDER BY id")
             .fetch_all(pool)
             .await?;
 
@@ -997,9 +998,10 @@ async fn roll_over_and_load_budgets(pool: &PgPool) -> anyhow::Result<HashMap<Uui
 /// stay far easier to follow than one join across five tables with `weight`
 /// and `position` columns that would otherwise need disambiguating aliases.
 async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, FrontendModelDef>> {
-    let vm_rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM frontend_models")
-        .fetch_all(pool)
-        .await?;
+    let vm_rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM frontend_models ORDER BY name")
+            .fetch_all(pool)
+            .await?;
 
     type RuleRow = (
         Uuid,
@@ -1089,7 +1091,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     .fetch_all(pool)
     .await?;
     let pool_policies: Vec<(Uuid, Option<String>)> =
-        sqlx::query_as("SELECT id, policy FROM model_pools")
+        sqlx::query_as("SELECT id, policy FROM model_pools ORDER BY id")
             .fetch_all(pool)
             .await?;
 

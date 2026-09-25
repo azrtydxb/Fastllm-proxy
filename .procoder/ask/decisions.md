@@ -1162,3 +1162,74 @@ Options:
   tunnel to `fastllm-control:4001`. Reachable from anywhere, so it wants
   Cloudflare Access in front of the login rather than the password alone.
 - **Both** — `.lab` for daily use, `.dev` behind Access for when away.
+
+## Why the fleet is perpetually out of sync, and why replicas do not give HA
+
+Two complaints, two distinct causes, both measured today.
+
+### The fleet churn: an unordered query
+
+The snapshot version changes every ~30s with nothing in the configuration
+changing. `If-None-Match` works correctly (304 on a current etag), and the
+control plane's rebuilder does compare before publishing, so neither is at
+fault. Diffing two consecutive snapshots 45s apart shows the payload is
+_identical_ -- the same 10 frontend models, the same 22 principals, the same
+`allowed_models` per principal -- in a **different order**.
+
+`Snapshot::content_eq` compares `self.principals == other.principals`, and the
+wire type is `Vec<WirePrincipal>`, so that equality is order-sensitive.
+`build_snapshot` reads them with `SELECT id, name FROM principals WHERE NOT
+disabled` -- **no `ORDER BY`**, unlike almost every other query in that file.
+Postgres returns unordered rows in physical order, which shifts whenever rows
+are rewritten; `api_keys.last_used_at` is stamped on live traffic and is
+deliberately _not_ in the snapshot, but stamping it still perturbs the heap. So
+traffic itself permutes the row order, `content_eq` reads the permutation as a
+change, and the whole fleet re-syncs for nothing.
+
+Three consequences follow from that one missing clause:
+
+- Every replica rebuilds its registry every ~30s (measured: 12 rebuilds in 5
+  minutes per pod, against 0 real rebuilds logged by the control plane).
+- `AppState::apply_snapshot` clears the response cache on every rebuild, so a
+  300s `cache_ttl` is wiped roughly ten times before an entry could ever be
+  hit. This is a second, independent reason the cache never shows a hit.
+- The fleet page compares versions across replicas. With the version moving
+  every 30s and each replica polling on its own schedule, some replica is
+  always a beat behind, which is exactly the "N is behind the fleet's
+  snapshot" alert.
+
+### The HA gap: readiness is all-or-nothing, health is per-replica
+
+`/health` is 200 when `registry.healthy_count() > 0` -- _any_ healthy backend
+anywhere. So a replica that has wrongly ejected the only backend for `coder`
+still has `bge-m3` healthy, stays Ready, keeps receiving `coder` traffic, and
+502s all of it. Kubernetes cannot see a per-model failure through an
+all-or-nothing readiness signal.
+
+Backend health is per-replica and in memory, and deliberately not shared (the
+request path performs no I/O). So N replicas hold N independent views, a wrong
+one silently eats 1/N of that model's traffic, and nothing converges them --
+the ejection paths (`check_stall`, `note_timeout`) are silent and, as seen
+today, were not being cleared by the sweep. Proven directly: at the same
+instant, on the same engine, a fresh pod reported `healthy=1` and a 2d15h pod
+reported `healthy=0`.
+
+That is why more replicas felt worse rather than better: each one is another
+chance to hold a stale bad view, and readiness will not take any of them out.
+
+Also found: the Deployment is running **10 replicas while the CR asks for 2**.
+The dashboard's scaling control PATCHes the Deployment directly, so the CR and
+the live object disagree and the operator is not reconciling the count back.
+
+Options:
+
+- **Add the missing `ORDER BY`** to the principals query (and any sibling
+  without one). One line, and it stops the fleet churn, the 30s registry
+  rebuilds and the cache wipes at once.
+- **Make `content_eq` order-insensitive** instead -- compare as sets. More
+  robust against the next unordered query, but slower and it hides the real
+  defect.
+- **Fix readiness to be per-model**, or have a replica report itself unready
+  when a model it serves has no healthy backend. The bigger change, and the
+  one that actually makes replicas into HA.
+- **Reconcile the replica count**, so the CR and the dashboard stop disagreeing.
