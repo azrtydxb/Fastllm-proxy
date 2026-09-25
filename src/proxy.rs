@@ -141,6 +141,21 @@ pub async fn handle(
     // authenticates these too, and one running `open` (no auth anywhere)
     // leaves them open, because there is nothing there to keep from whom.
     match (&method, path.as_str()) {
+        // Liveness, and only liveness: is this process running. Always 200
+        // while it answers at all, says nothing, needs no key.
+        //
+        // Separate from `/health` because the two questions differ. `/health`
+        // is 503 with no healthy backend, which is right for readiness — stop
+        // sending traffic — and catastrophic for liveness, where it would have
+        // the kubelet restart every pod during a backend outage, exactly when
+        // restarting helps least. The operator used `/metrics` for liveness
+        // for want of anything better; this is the endpoint it wanted.
+        (&Method::GET, "/livez") => {
+            return Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({ "status": "alive" }).to_string(),
+            ))
+        }
         (&Method::GET, "/health") | (&Method::GET, "/healthz") => {
             let snapshot = state.snapshot.load();
             return Ok(health_response(

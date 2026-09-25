@@ -1089,3 +1089,37 @@ Options:
   while the bad state is still there to inspect.
 - **Investigate the snapshot-churn mismatch** (proxy rebuilding 10-30x more
   often than the control plane rebuilds).
+
+## `/metrics` is the operator's liveness probe, so gating it crash-loops the proxy
+
+Deploying the `/metrics` auth gate (`1d3936f`) to kw put the new pod into a
+restart loop: `Startup probe failed: HTTP probe failed with statuscode: 401`,
+five restarts before I rolled the CR back to `sha-169bfd9`. Both old pods stayed
+ready throughout, so there was no outage, but `main` currently carries a change
+that will do this to anyone who deploys it.
+
+The cause is a deliberate design I did not account for.
+`operator/src/resources.rs:542-544` probes `/health` for readiness but
+`/metrics` for liveness and startup, because `/health` answers 503 when no
+backend is healthy. That is correct for readiness -- stop sending traffic -- and
+would be a disaster for liveness, where it would restart every proxy pod during
+a backend outage. So the operator needed an endpoint that is 200 whenever the
+process is alive, and `/metrics` was the only one.
+
+Gating `/metrics` took that away. The three ways out:
+
+Options:
+
+- **Add a `/livez` endpoint** -- always 200 while the process lives, no auth, no
+  body -- and point the operator's liveness and startup probes at it. Correct
+  separation, and it is what the operator actually wanted. Costs a three-step
+  rollout: the proxy must serve `/livez` before the operator probes it, and
+  `/metrics` can only be gated once no probe depends on it.
+- **Serve an empty exposition to an unauthenticated scrape** -- 200, one comment
+  line saying a key is required, no series. Probes pass unchanged, nothing is
+  disclosed, no operator change and no sequencing. The compromise is answering
+  200 to a request that was not authorised, and a misconfigured scraper sees an
+  empty target rather than a clear 401.
+- **Revert the `/metrics` half** and gate only `/health`, leaving the 62KB
+  exposition public. Smallest change; gives up most of the disclosure fix, since
+  `/metrics` was the bigger leak of the two.

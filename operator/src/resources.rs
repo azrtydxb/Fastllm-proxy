@@ -540,8 +540,13 @@ pub fn proxy_deployment(
         // correctly pulls the pod out of the Service. Liveness must NOT use
         // it: a backend outage would then restart-loop a healthy proxy.
         readiness_probe: Some(probe("/health", "http", false, 10, 3)),
-        liveness_probe: Some(probe("/metrics", "http", false, 20, 3)),
-        startup_probe: Some(probe("/metrics", "http", false, 3, 20)),
+        // Liveness and startup ask `/livez`, not `/metrics`. `/metrics` was
+        // only ever standing in for a liveness endpoint — it was the one route
+        // that stayed 200 while the process lived — and that stopped being
+        // true when it began requiring a key, which restart-looped every pod
+        // on a 401. `/livez` is the real thing: always 200, never authorised.
+        liveness_probe: Some(probe("/livez", "http", false, 20, 3)),
+        startup_probe: Some(probe("/livez", "http", false, 3, 20)),
         resources: s.proxy.resources.clone(),
         security_context: Some(hardened()),
         volume_mounts: Some(mounts),

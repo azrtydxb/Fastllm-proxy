@@ -89,8 +89,18 @@ So the verdict is public and the detail is earned:
 
 |                       | no key                                 | valid key           |
 | --------------------- | -------------------------------------- | ------------------- |
+| `/livez`              | `200`, always                          | same                |
 | `/health`, `/healthz` | the status code, and `{"status": ...}` | the full body       |
 | `/metrics`            | `401`                                  | the full exposition |
+
+`/livez` exists because liveness and readiness are different questions.
+`/health` answers 503 when no backend is healthy — right for readiness, and
+catastrophic for liveness, where it would have the kubelet restart every pod
+during a backend outage. So the probes split: readiness asks `/health`,
+liveness and startup ask `/livez`. They used to ask `/metrics`, which was only
+ever standing in for a liveness endpoint because it was the one route that
+stayed 200 while the process lived — gating it restart-looped every pod on a
+401, which is how `/livez` came to exist.
 
 The status code is deliberately the same either way. If it moved with the
 caller's credential, a key rotation would read as an outage and Kubernetes

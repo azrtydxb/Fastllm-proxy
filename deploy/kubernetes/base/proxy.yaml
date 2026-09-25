@@ -83,11 +83,11 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /metrics, port: http }
+            httpGet: { path: /livez, port: http }
             periodSeconds: 20
             failureThreshold: 3
           startupProbe:
-            httpGet: { path: /metrics, port: http }
+            httpGet: { path: /livez, port: http }
             periodSeconds: 3
             failureThreshold: 20
           resources:

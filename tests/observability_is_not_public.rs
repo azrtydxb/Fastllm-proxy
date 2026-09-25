@@ -196,3 +196,33 @@ fn a_bogus_key_earns_nothing() {
     );
     assert_eq!(get(14615, "/metrics", Some("sk-nonsense")).0, 401);
 }
+
+/// `/livez` is the endpoint the operator's liveness probe asks, so it must
+/// answer 200 with no credential and stay 200 when every backend is down.
+///
+/// Liveness must not track backend health: `/health` goes 503 once its probes
+/// have failed, which is correct for readiness and would have the kubelet
+/// restart every pod during a backend outage. That distinction is not asserted
+/// here because it depends on probe timing; what is asserted is the half that
+/// does not -- `/livez` needs no key and says nothing. Gating `/metrics`, which
+/// the operator had been using for liveness, restart-looped every pod on a 401.
+#[test]
+fn livez_is_open_and_stays_up_when_every_backend_is_down() {
+    let _p = start(14616);
+
+    let (code, body) = get(14616, "/livez", None);
+    assert_eq!(
+        code, 200,
+        "liveness must not depend on backend health: {body}"
+    );
+    assert!(body.contains("alive"), "body was {body}");
+
+    // And it discloses nothing, like the other open route.
+    assert!(!body.contains(BACKEND_API_BASE), "body was {body}");
+    for forbidden in ["api_base", "backends", "models"] {
+        assert!(
+            !body.contains(forbidden),
+            "/livez leaked {forbidden}: {body}"
+        );
+    }
+}
