@@ -122,6 +122,30 @@ impl AppState {
     /// authorisation but never reached routing, so requests for it 404'd
     /// until a restart — is what this single-entry-point design exists to
     /// make structurally impossible to reintroduce.
+    /// Act on the fleet's answer to our last health report.
+    ///
+    /// Only ever clears a local ejection the rest of the fleet contradicts;
+    /// see `registry::Backend::reconsider` for why that is a re-examination
+    /// rather than an override, and why it cannot revive a dead backend.
+    pub fn apply_fleet_verdict(&self, verdict: &crate::health_report::FleetVerdict) {
+        let registry = self.registry.load();
+        for backend in registry.backends() {
+            if backend.is_healthy() {
+                continue;
+            }
+            if verdict.contradicts(&backend.api_base, &backend.upstream_model)
+                && backend.reconsider()
+            {
+                tracing::warn!(
+                    backend = %backend.api_base,
+                    model = %backend.upstream_model,
+                    "the rest of the fleet can reach this backend; withdrawing our own \
+                     ejection so the next probe decides again"
+                );
+            }
+        }
+    }
+
     pub fn apply_snapshot(&self, snap: Snapshot) -> anyhow::Result<usize> {
         #[cfg(feature = "classifier")]
         self.rebuild_classifier(&snap);

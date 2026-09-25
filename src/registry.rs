@@ -550,6 +550,38 @@ impl Backend {
         }
     }
 
+    /// Reconsider a local ejection the rest of the fleet disagrees with.
+    ///
+    /// Returns true if this cleared one, so the caller can log a transition
+    /// that is otherwise invisible.
+    ///
+    /// Backend health is per replica and in memory, so ten proxies hold ten
+    /// independent opinions and nothing reconciles them. That is usually
+    /// right — a proxy that cannot reach a backend should stop using it — but
+    /// it has no way to tell "the backend is down" from "I am wrong", and a
+    /// wrong one is invisible: the replica keeps taking that model's traffic,
+    /// answers 502, and stays Ready because its other backends are fine. One
+    /// replica held a backend ejected for hours while nine served it and the
+    /// engine answered a probe in 13ms.
+    ///
+    /// So this does not force the backend healthy — it *withdraws the
+    /// verdict*, clearing the ejection and its counters so the next local
+    /// probe decides again from scratch. If this replica genuinely cannot
+    /// reach the backend, its own sweep re-ejects it within one probe
+    /// interval and nothing has been lost. That self-limiting shape is why
+    /// this cannot resurrect a dead backend: the fleet only ever buys a
+    /// re-examination, never a conclusion.
+    pub fn reconsider(&self) -> bool {
+        if self.healthy.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.consecutive_timeouts.store(0, Ordering::Relaxed);
+        self.consecutive_stalls.store(0, Ordering::Relaxed);
+        self.healthy.store(true, Ordering::Relaxed);
+        true
+    }
+
     /// Reset consecutive timeouts on a successful response.
     pub fn reset_timeout_count(&self) {
         self.consecutive_timeouts.store(0, Ordering::Relaxed);

@@ -5045,14 +5045,22 @@ async fn post_health_report(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
     Json(report): Json<crate::health_report::HealthReport>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     if !proxy_token_authorised(&headers, &ctx.proxy_token) {
-        return StatusCode::UNAUTHORIZED;
+        return StatusCode::UNAUTHORIZED.into_response();
     }
-    let previous = ctx.fleet.record(report.clone(), std::time::Instant::now());
+    let now = std::time::Instant::now();
+    let previous = ctx.fleet.record(report.clone(), now);
     notify_health_transitions(&ctx, &report, previous.as_ref());
     persist_rejection_deltas(&ctx.pool, &report, previous.as_ref()).await;
-    StatusCode::NO_CONTENT
+    // Answer with what the whole fleet sees, so the replica that just told us
+    // its view learns how that compares. This reply is why there is no second
+    // endpoint and no second poll for it: the report is already a round trip
+    // on a timer, and the answer is only useful to the replica making it.
+    //
+    // Computed after recording, so the caller's own view is included in the
+    // tally it receives. `contradicts` subtracts one for that.
+    (StatusCode::OK, Json(ctx.fleet.verdict(now))).into_response()
 }
 
 /// Emit a notification for each backend that changed health since this

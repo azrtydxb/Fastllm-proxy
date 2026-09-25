@@ -1145,6 +1145,14 @@ async fn run_all(cli: Cli) -> Result<()> {
                     interval: Duration::from_secs(cli.health_report_interval),
                 },
                 Arc::clone(&state.client),
+                // The fleet's reply is only actionable here, so it is applied
+                // here rather than returned to a caller that would ignore it.
+                Some({
+                    let state = Arc::clone(&state);
+                    Arc::new(move |v: &fastllm_proxy::health_report::FleetVerdict| {
+                        state.apply_fleet_verdict(v)
+                    })
+                }),
             ),
             Duration::from_secs(cli.health_report_interval),
         );
@@ -1378,6 +1386,15 @@ async fn run_data_plane(cli: Cli) -> Result<()> {
                         interval: Duration::from_secs(cli.health_report_interval),
                     },
                     Arc::clone(&state.client),
+                    // The fleet's reply is only actionable here, so it is
+                    // applied here rather than returned to a caller that
+                    // would ignore it.
+                    Some({
+                        let state = Arc::clone(&state);
+                        Arc::new(move |v: &fastllm_proxy::health_report::FleetVerdict| {
+                            state.apply_fleet_verdict(v)
+                        })
+                    }),
                 ),
                 Duration::from_secs(cli.health_report_interval),
             );

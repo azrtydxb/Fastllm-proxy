@@ -136,27 +136,47 @@ pub struct Config {
     pub interval: Duration,
 }
 
-pub fn spawn(cfg: Config, upstream: Arc<Upstream>) -> Reporter {
+/// Handed the fleet's answer to each report. See `FleetVerdict`.
+pub type VerdictSink = Arc<dyn Fn(&FleetVerdict) + Send + Sync>;
+
+pub fn spawn(cfg: Config, upstream: Arc<Upstream>, on_verdict: Option<VerdictSink>) -> Reporter {
     // Depth 1: a backlog of health reports is worthless, because only the
     // newest says anything true. Queuing more would deliver a UI a sequence of
     // stale answers rather than one current one.
     let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(run(cfg, upstream, rx));
+    tokio::spawn(run(cfg, upstream, rx, on_verdict));
     Reporter { tx }
 }
 
-async fn run(cfg: Config, upstream: Arc<Upstream>, mut rx: mpsc::Receiver<HealthReport>) {
+async fn run(
+    cfg: Config,
+    upstream: Arc<Upstream>,
+    mut rx: mpsc::Receiver<HealthReport>,
+    on_verdict: Option<VerdictSink>,
+) {
     while let Some(report) = rx.recv().await {
-        if let Err(e) = post(&cfg, &upstream, &report).await {
-            // A control plane that is down must not make a proxy noisy: this is
-            // the same "keep serving, stop learning" posture the snapshot
-            // poller takes, and inference is unaffected either way.
-            tracing::debug!(error = %e, "could not deliver a health report");
+        match post(&cfg, &upstream, &report).await {
+            Ok(Some(verdict)) => {
+                if let Some(sink) = &on_verdict {
+                    sink(&verdict);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A control plane that is down must not make a proxy noisy: this is
+                // the same "keep serving, stop learning" posture the snapshot
+                // poller takes, and inference is unaffected either way.
+                tracing::debug!(error = %e, "could not deliver a health report");
+            }
         }
     }
 }
 
-async fn post(cfg: &Config, upstream: &Upstream, report: &HealthReport) -> anyhow::Result<()> {
+async fn post(
+    cfg: &Config,
+    upstream: &Upstream,
+    report: &HealthReport,
+) -> anyhow::Result<Option<FleetVerdict>> {
     use http_body_util::BodyExt as _;
 
     let body = serde_json::to_vec(report)?;
@@ -175,12 +195,16 @@ async fn post(cfg: &Config, upstream: &Upstream, report: &HealthReport) -> anyho
         .map_err(|_| anyhow::anyhow!("health report timed out"))??;
     let status = resp.status();
     // Drained rather than dropped, so the connection returns to the pool
-    // instead of being torn down once a second.
-    let _ = resp.into_body().collect().await;
+    // instead of being torn down once a second — and read rather than
+    // discarded, because the answer carries the fleet's view of every backend.
+    let body = resp.into_body().collect().await.map(|b| b.to_bytes());
     if !status.is_success() {
         anyhow::bail!("control plane answered {status}");
     }
-    Ok(())
+    // An older control plane answers 204 with no body. That is not an error,
+    // it is a deployment mid-upgrade, and the proxy simply learns nothing this
+    // round rather than logging on every tick.
+    Ok(body.ok().and_then(|b| serde_json::from_slice(&b).ok()))
 }
 
 /// What the control plane keeps: the latest report from each replica, and when
@@ -231,6 +255,83 @@ pub mod store {
             out.sort_by(|a, b| a.replica.cmp(&b.replica));
             out
         }
+
+        /// Tally every live replica's view of every backend.
+        ///
+        /// Built from `current`, so it inherits the same expiry: a replica
+        /// that stopped reporting stops voting. A backend only some replicas
+        /// know about is counted only among the replicas that reported it —
+        /// a proxy still on an older snapshot has nothing useful to say about
+        /// a backend it has not heard of yet.
+        pub fn verdict(&self, now: Instant) -> super::FleetVerdict {
+            let mut tally: HashMap<(String, String), (usize, usize)> = HashMap::new();
+            for report in self.current(now) {
+                for b in report.backends {
+                    let e = tally.entry((b.api_base, b.model)).or_insert((0, 0));
+                    e.1 += 1;
+                    if b.healthy {
+                        e.0 += 1;
+                    }
+                }
+            }
+            let mut backends: Vec<super::BackendVerdict> = tally
+                .into_iter()
+                .map(
+                    |((api_base, model), (healthy, total))| super::BackendVerdict {
+                        api_base,
+                        model,
+                        healthy,
+                        total,
+                    },
+                )
+                .collect();
+            // Deterministic, so the response body does not churn between
+            // identical tallies — the same trap the snapshot fell into.
+            backends.sort_by(|a, b| (&a.api_base, &a.model).cmp(&(&b.api_base, &b.model)));
+            super::FleetVerdict { backends }
+        }
+    }
+}
+
+/// What the fleet collectively sees of one backend.
+///
+/// Returned to a replica in the response to its own health report, so it
+/// learns how its view compares with everyone else's without a second
+/// endpoint or a second poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendVerdict {
+    pub api_base: String,
+    pub model: String,
+    /// Replicas that reported recently and can reach it.
+    pub healthy: usize,
+    /// Replicas that reported recently at all. `healthy` out of this.
+    pub total: usize,
+}
+
+/// The fleet's answer to "is it me, or is it the backend?".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetVerdict {
+    pub backends: Vec<BackendVerdict>,
+}
+
+impl FleetVerdict {
+    /// Whether the fleet contradicts a replica that cannot reach this backend.
+    ///
+    /// Requires a strict majority of *other* replicas to disagree, and at
+    /// least one of them — a two-replica fleet where the other one is also
+    /// down must not conclude anything, and a single-replica fleet has no
+    /// second opinion to offer by definition.
+    ///
+    /// The caller has already decided the backend is unhealthy locally; this
+    /// only says whether that verdict is worth a second look.
+    pub fn contradicts(&self, api_base: &str, model: &str) -> bool {
+        self.backends
+            .iter()
+            .find(|b| b.api_base == api_base && b.model == model)
+            .is_some_and(|b| {
+                let others = b.total.saturating_sub(1);
+                others > 0 && b.healthy * 2 > others
+            })
     }
 }
 
@@ -254,6 +355,69 @@ mod tests {
                 prefix_cache_hit_rate: None,
             }],
         }
+    }
+
+    /// The distinction the whole mechanism turns on: one replica dissenting is
+    /// probably that replica's problem, everyone agreeing is the backend's.
+    #[test]
+    fn a_lone_dissenter_is_contradicted_but_a_dead_backend_is_not() {
+        use std::time::Instant;
+        let now = Instant::now();
+
+        // Nine can reach it, one cannot.
+        let fleet = store::Fleet::new(Duration::from_secs(60));
+        for i in 0..9 {
+            fleet.record(report(&format!("ok-{i}"), true, 1), now);
+        }
+        fleet.record(report("odd-one-out", false, 1), now);
+        assert!(
+            fleet.verdict(now).contradicts("http://a", "m"),
+            "nine replicas reaching it should outvote the one that cannot"
+        );
+
+        // Now nobody can reach it. Nothing should be contradicted.
+        let dead = store::Fleet::new(Duration::from_secs(60));
+        for i in 0..10 {
+            dead.record(report(&format!("down-{i}"), false, 1), now);
+        }
+        assert!(
+            !dead.verdict(now).contradicts("http://a", "m"),
+            "a backend nobody can reach is down, not a disagreement"
+        );
+    }
+
+    /// A single-replica deployment has no second opinion, and a two-replica one
+    /// where the other is also down has no majority. Neither may conclude.
+    #[test]
+    fn a_fleet_too_small_to_have_an_opinion_does_not_offer_one() {
+        use std::time::Instant;
+        let now = Instant::now();
+
+        let alone = store::Fleet::new(Duration::from_secs(60));
+        alone.record(report("only", false, 1), now);
+        assert!(!alone.verdict(now).contradicts("http://a", "m"));
+
+        let pair = store::Fleet::new(Duration::from_secs(60));
+        pair.record(report("a", false, 1), now);
+        pair.record(report("b", false, 1), now);
+        assert!(!pair.verdict(now).contradicts("http://a", "m"));
+    }
+
+    /// A replica that stopped reporting stops voting, or a scaled-down pod
+    /// would keep outvoting the ones still running.
+    #[test]
+    fn an_expired_replica_does_not_vote() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let fleet = store::Fleet::new(Duration::from_secs(30));
+        // Two healthy votes, but from replicas last heard from long ago.
+        fleet.record(report("gone-1", true, 1), now - Duration::from_secs(120));
+        fleet.record(report("gone-2", true, 1), now - Duration::from_secs(120));
+        fleet.record(report("here", false, 1), now);
+        let v = fleet.verdict(now);
+        assert_eq!(v.backends.len(), 1);
+        assert_eq!(v.backends[0].total, 1, "only the live replica counts");
+        assert!(!v.contradicts("http://a", "m"));
     }
 
     /// Reports are kept per replica and not merged. The interesting failures
