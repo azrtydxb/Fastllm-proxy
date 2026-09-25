@@ -771,3 +771,275 @@ Options:
   traffic already advertise 262144.
 
 **Decided:** pending.
+
+## Making the vLLM service on NovaNAS survive restarts
+
+The MXFP4 model is serving on port 8000 from a container started by hand
+(`docker run`), with tool calling, the qwen3 reasoning parser, MTP speculative
+decoding, fp8 KV cache and a 262144 context. It holds both GPUs, so anything
+else wanting them fails while it runs.
+
+As it stands it does not survive a reboot, and it has no supervision. A
+`--restart unless-stopped` policy was tried and removed: combined with a corrupt
+torch.compile cache it produced a crash loop, each restart retrying the same bad
+cache. The cache has since been cleared and the container is healthy, but the
+episode is the argument for supervision that notices a failing start rather than
+repeating it blindly.
+
+Options:
+
+- **Leave it as it is.** A hand-started container, fine for evaluation. Gone
+  after a reboot, and nothing restarts it if it dies.
+- **Add a Docker restart policy.** One flag, `--restart unless-stopped`. Comes
+  back after a reboot, but retries indefinitely on a poisoned compile cache,
+  which is exactly the loop just escaped.
+- **Write a systemd unit.** Proper supervision with start limits so a repeated
+  early failure stops rather than loops, ordered after docker.service, and
+  visible in `systemctl --failed` alongside everything else on that host.
+- **Move it into k3s.** Consistent with how the rest of the box is run, but the
+  GPUs are not exposed to Kubernetes yet -- that needs the AMD device plugin and
+  CDI, which was deliberately deferred until after the cards were fitted.
+
+**Decided:** leave it as a hand-started container. It is an evaluation setup,
+not a service; it will not come back after a reboot and nothing supervises it.
+
+## Deploying the 1M-context Qwen3.8-27B MXFP4 model at max context
+
+`Solstice-AI/Qwen3.8-27B-TURBO-...-MXFP4-1M` is a dense 27B in MXFP4
+compressed-tensors, 18.9GB of weights, with `max_position_embeddings` of
+1,048,576 reached via YaRN (factor 4.0 over a 262144 native base).
+
+Its KV cost is an order of magnitude worse than the MoE currently deployed. Of
+64 layers, 16 are `full_attention` (the rest linear), with 4 KV heads at
+head_dim 256 -- **64 KiB per token at bf16**, against 6.3 KiB for the MoE.
+
+Holding a full 1M-token context therefore needs a 64 GiB KV pool at bf16. That
+exceeds the 64GB of VRAM on the pair before the 18.9GB of weights are counted,
+so it cannot be done. At fp8 the same context needs ~32 GiB, which does fit
+alongside ~9.5GB of weights per card.
+
+So the model's headline 1M context is reachable only with
+`--kv-cache-dtype fp8` -- the flag just removed at the user's request while
+investigating garbled reasoning output. That garbage was never reproduced and
+fp8 KV was never shown to cause it, but it has not been cleared either.
+
+Deploying also requires the GPUs, which the current model holds. Its container
+can be stopped without removing it; weights, configuration and warm compile
+cache all survive.
+
+Options:
+
+- **1M context with fp8 KV.** The advertised maximum, but re-enables the flag
+  just removed. If the garbled output returns, fp8 KV becomes the prime suspect
+  again -- which is itself information.
+- **~650K context, no fp8 KV.** The largest that fits with an unquantised KV
+  cache, keeping the change that was just made. Still far beyond the ~18K the
+  client actually sends.
+- **262144 context, no fp8 KV.** The model's native pre-YaRN length, avoiding
+  rope scaling entirely and leaving generous KV headroom for concurrency.
+
+## Whether to keep DFlash2 speculative decoding on the 27B target
+
+The 27B target is `Solstice-AI/Qwen3.8-27B-TURBO-...-Heretic-Uncensored-NM-DAU-MXFP4-1M`,
+a heavily merged and abliterated derivative of `Qwen/Qwen3.8-27B`, served at
+524288 context with fp8 KV over TP=2.
+
+`z-lab/Qwen3.8-27B-DFlash2` loads and runs -- vLLM accepts it as
+`method='dflash'`, and it is structurally correct: hidden_size 5120 and vocab
+248320 both match the target, and its `model_type: qwen3` avoids the trap that
+blocked a standalone 4B (any `qwen3_5` draft is forcibly reclassified as MTP and
+then fails on 5120 vs 2560).
+
+It is nonetheless a net loss. Draft acceptance is 5.0% (139 of 2768 tokens), so
+the drafting cost is paid every step and almost never avoids a target forward
+pass. Throughput falls from 39.0 to 28.5 tok/s, and the draft's 3.85GB takes the
+KV pool from 17.03 to 12.66 GiB, cutting concurrency at full context from 2.09
+to 1.49. The cause is semantic, not structural: DFlash2 is trained against stock
+Qwen3.8-27B, and this merge has drifted too far for its predictions to match.
+Output quality is unaffected either way, since the target verifies every drafted
+token.
+
+Options:
+
+- **Remove the draft.** Back to 39.0 tok/s and the full 17.03 GiB KV pool.
+  Speculative decoding is simply not available for this target.
+- **Keep it.** No quality risk, but 27% slower and less concurrency headroom --
+  no reason beyond leaving the plumbing in place for a future draft.
+- **Lower num_speculative_tokens to 1 or 2.** Reduces the wasted drafting per
+  step; at 5% acceptance it is unlikely to turn positive, but it is cheap to
+  measure before giving up on speculation entirely.
+
+## What to follow up after the Kuvryn-Scout latency diagnosis
+
+The latency question is answered: fastllm-proxy contributes ~13ms (p50 over
+28,972 embedding calls on the same path), and the time is in the engines.
+Thinking is genuinely off where the UI says Off -- `reasoning_effort:"none"` is
+sent on the wire and honoured by the 9b (0.31s / 0 thinking tokens, versus
+14.58s / 300 thinking tokens with the field absent). Context is sub-second; the
+16s figure was Context and Adjudication averaged together under one model name.
+
+Two unresolved items came out of the investigation, neither of which was the
+original question.
+
+Options:
+
+- **Investigate the 502s.** 108 of the 9b's calls failed in two days, roughly
+  12% of its traffic, against 14 on the 35B and 8 on the 27b. These are
+  failures rather than slowness and are concentrated on one engine, so the
+  cause is probably local to `:8001` -- KV exhaustion under its 0.17 memory
+  share, or the engine dropping requests when the shared GB10 saturates.
+- **Retune the 9b engine.** It runs on vLLM defaults: no speculative decoding,
+  no flashinfer attention, no fp8 KV cache, no chunked prefill, while the 35B
+  beside it has all four plus MTP. Measured engine-direct, the 9b does 15.6
+  tok/s against the 35B's 34-40 -- slower than a model four times its size.
+  This only pays off for the roles that keep thinking on (Deep review,
+  Verification, Adjudication). It means restarting a model others are using.
+- **Both**, 502s first, since a failing call costs more than a slow one.
+- **Neither.** The original question is answered; leave the rest.
+
+**Decided (2026-09-22): neither.** The latency question was the ask and it is
+answered. The 502s on `:8001` and the 9b's untuned engine flags are both real
+and both still open -- recorded here so they are not rediscovered from scratch.
+
+## How to apply the better 9b deployment config
+
+Follow-on from the Kuvryn-Scout latency work. The 9b was **not** started by hand:
+it is kuvryn-managed (`ai.kuvryn.managed=true`, deployment
+`6468dd59-e787-4796-9d4d-75ceeb0c75bc`, generation 2), with desired state pulled
+from `https://kuvryn-ai.kw.watteel.lab`. Editing the container locally would be
+reverted on the agent's next poll, so the change belongs in the kuvryn
+deployment config. `port` is a top-level field separate from `config`, so none
+of this touches 8001.
+
+The binding constraint is not the flags I first guessed. From the engine's own
+startup log: KV cache 9.7 GiB / 313,738 tokens, and **"Maximum concurrency for
+262,144 tokens per request: 1.20x"**. It also crashed once on first boot
+(`max_restarts: 1`) because 262144 needed 8.1 GiB of KV against 7.65 GiB
+available. Meanwhile the largest prompt ever sent to it in 7 days is 35,067
+tokens (p99 28,611). The 262144 context is ~7x more than anything used and is
+what holds concurrency at 1.2 requests.
+
+Two earlier claims of mine were wrong and are corrected here: the model is
+NVFP4-quantized, not bf16, so weights are ~5GB and KV was never starved by
+weight size; and it is a `qwen3_5` multimodal architecture with no MTP layers,
+so the 35B's `speculative_config` cannot be copied to it (a `qwen3_5` draft is
+forcibly reclassified as MTP and fails -- the same trap recorded above for the
+27B).
+
+Proposed config change (all keys verified against `internal/api/advanced_config.go`):
+
+    max_model_len          262144 -> 65536      concurrency 1.20x -> ~4.8x
+    kv_cache_dtype         (unset) -> "fp8"     roughly doubles KV -> ~9.5x
+    attention_backend      (unset) -> "flashinfer"
+    enable_chunked_prefill (unset) -> true      smooths the 9k-35k prefills
+    async_scheduling       (unset) -> true
+    max_num_batched_tokens (unset) -> 16384
+    load_format            (unset) -> "fastsafetensors"   (startup only)
+
+`gpu_memory_utilization` stays at 0.17 so the shared GB10 reservation is
+undisturbed. This likely also addresses the 108 502s: at 1.2x concurrency the
+queue backs up and the proxy's headers timeout fires.
+
+I cannot apply it -- `/api/v1/deployments` returns 401 and there is no kuvryn
+credential on this machine or CLI installed.
+
+Options:
+
+- **Pascal applies it in the kuvryn UI** from the JSON above.
+- **Pascal supplies an API token** and I apply it, then verify with the same
+  engine-direct benchmark before and after.
+- **Only `max_model_len`**, as the single lowest-risk change that does most of
+  the work; leave the flags for later.
+- **Leave it.** The deployment keeps its current behaviour.
+
+**Decided (2026-09-22): leave it as is.** No config change, no restart. The
+analysis above stands on its own if this is revisited -- the measured
+concurrency ceiling, the prompt-size evidence for 65536, and the two corrected
+claims about the model.
+
+## What to pick up after the OpenRouter provider-routing answer
+
+Two threads are open at once and neither is finished.
+
+**GLM-5.3-Flash / Z.ai.** The provider and the key are both fine: the key Pascal
+supplied returns 200 on `/models` at both `api/coding/paas/v4` and
+`api/paas/v4`, the catalogue lists `glm-5.3-flash`, and Z.ai is
+case-insensitive, so `GLM-5.3-Flash` completes successfully. The original 401
+is gone since Pascal set the key himself. What blocks it now is DNS, not
+credentials: `api.z.ai` gets **SERVFAIL from 192.168.10.136** while
+**192.168.10.139 answers it normally**, and .136 resolves it once DNSSEC
+checking is disabled (`dig +cd`). So .136 is failing DNSSEC validation on the
+`api.z.ai` -> Alibaba Global Accelerator (`*.aliyunga0017.com`) CNAME chain. CoreDNS
+forwards to the node's resolv.conf, so the cluster inherits the failure and the
+health probe reports "Temporary failure in name resolution". Because the probe
+never reaches Z.ai, the key Pascal set is still unverified. Pascal also asked me
+to set the token; I could not -- `/admin/*` needs a session cookie and there is
+no admin password or kuvryn-style credential available in this session.
+
+**OpenRouter backend pinning.** Answered: no change needed for the per-request
+case. A client can send OpenRouter's `provider` block today -- the SDK merges it
+via `providerutil.ApplyProviderOptions` (`maps.Copy` into the top level) and
+FastLLM relays it, which I proved with a probe test on kw covering both the
+byte-identical path and the alias re-serialising path. What does _not_ exist is
+configuring it per backend so every request carries it.
+
+Options:
+
+- **Fix the DNS validation on 192.168.10.136** so `api.z.ai` resolves, then
+  confirm the Z.ai probe clears and GLM-5.3-Flash actually serves. This is the
+  blocker for the model Pascal just made.
+- **Point CoreDNS at 192.168.10.139** (or add an override for api.z.ai) as a
+  narrower change that unblocks the cluster without touching .136.
+- **Add per-backend extra body fields to FastLLM**, so an OpenRouter backend can
+  pin `provider.order` without every caller sending it. A new column plus a
+  merge in `rewrite_model_if_needed`.
+- **Neither** -- both threads are documented well enough to resume later.
+
+**Decided (2026-09-22): neither.** Stopping here. The OpenRouter question is
+answered and needs no code. The Z.ai DNSSEC finding and the unverified token
+are recorded above so they can be resumed without re-deriving anything.
+
+## Scope of the Cloudflare Tunnel exposure for FastLLM
+
+The cluster already runs the pattern: `cloudflared-named` in the `novagrade`
+namespace, `cloudflare/cloudflared:latest`, args `tunnel --no-autoupdate run`,
+`TUNNEL_TOKEN` from secret `cloudflared-token`, 2 replicas, routing held in the
+Cloudflare dashboard rather than a local config file. Nothing about FastLLM
+makes it a harder case; there is no ingress in the `fastllm` namespace today and
+everything is reached over kube-vip LoadBalancer VIPs on the LAN.
+
+The constraint that shapes the design is Cloudflare's 100-second origin timeout
+(524), which measures time to first byte. Measured over 7 days of real traffic:
+non-streaming 92,593 calls, 1,012 of them over 100s (1.09%); streaming 12,277
+calls with TTFB averaging 9.7s and only 68 over 100s (0.55%). So roughly 1% of
+present traffic would fail, concentrated in the deep-review role that averages
+98s. The limit is Enterprise-only to raise, so the mitigation is to stream the
+long-running roles rather than to configure anything.
+
+Also noted while measuring: non-streaming max duration 2,085s and streaming max
+11,405s, which look like stuck connections and deserve their own look.
+
+Security shape: the gateway's API-key auth is the real boundary and is sound
+(SHA-256 hashing; `authorization` is in `REQUEST_ONLY_STRIPPED` so a client key
+never reaches a provider). The control plane on :4001 is a password-only admin
+UI. `fastllm-pg-dev` is a LoadBalancer on 192.168.10.127 and must never be
+routed. Every client header other than host/content-length/authorization and
+hop-by-hop is forwarded upstream, which is worth an allowlist once anonymous
+callers can reach it.
+
+Options:
+
+- **Gateway only.** One hostname to `fastllm-proxy:4000`. Admin stays LAN-only.
+  Smallest surface; API keys plus per-principal budgets and Cloudflare rate
+  limiting carry the security.
+- **Gateway, plus the control plane behind Cloudflare Access.** Adds remote
+  admin with SSO in front of the existing password.
+- **Gateway behind Cloudflare Access service tokens too.** Tightest, but every
+  client must then send Access headers as well as its API key, which breaks
+  plain OpenAI-compatible SDK usage.
+- **Discuss only for now**, build nothing.
+
+**Decided (2026-09-25): gateway only.** One hostname to `fastllm-proxy:4000`.
+The control plane and `fastllm-pg-dev` stay LAN-only. Security rests on the
+existing API-key auth plus per-principal budgets, with Cloudflare rate-limiting
+as a second layer. Streaming is the mitigation for the 100s edge timeout.

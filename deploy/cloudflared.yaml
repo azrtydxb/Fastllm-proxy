@@ -1,0 +1,108 @@
+# Cloudflare Tunnel connector for the gateway.
+#
+# Exposes `fastllm-proxy:4000` on a public hostname without opening a port,
+# forwarding anything, or publishing the cluster's address. The connector dials
+# *out* to Cloudflare, so nothing inbound has to be allowed.
+#
+# Purely additive: it adds no ingress and edits no Service, so the LAN path via
+# the kube-vip VIP keeps working exactly as before and deleting this Deployment
+# removes internet access without touching anything else.
+#
+# The gateway only — deliberately. The control plane on :4001 is a
+# password-only admin UI and belongs behind Cloudflare Access if it is ever
+# published, and `fastllm-pg-dev` is a database that must never be routed.
+# Widening this file to either is a security decision, not a config tweak.
+#
+# The route itself is *not* here. This is a remotely-managed tunnel: the
+# hostname and the service it maps to live in the Cloudflare dashboard, which
+# is why the container takes no config file and why changing the route needs no
+# redeploy. `TUNNEL_TOKEN` is what binds this connector to that configuration.
+#
+# ## The 100-second limit
+#
+# Cloudflare gives up on an origin that has sent no bytes for 100 seconds and
+# returns 524, and outside Enterprise that ceiling cannot be raised. It is
+# measured to *first byte*, not to completion, so a streaming response is
+# unaffected however long it runs while a non-streaming one is capped.
+#
+# Measured over the 7 days before this landed: of 92,593 non-streaming calls
+# 1,012 (1.09%) ran past 100s, while of 12,277 streaming calls only 68 (0.55%)
+# took that long to produce a first byte — first byte averaged 9.7s. So the fix
+# for a long role is to stream it, not to configure anything here.
+#
+# ## Before pointing clients at the public name
+#
+# The key check stays the same (SHA-256, and `authorization` is stripped before
+# a request goes upstream, so a caller's key never reaches a provider), but an
+# exposed key is now a spending risk rather than a nuisance. Give every
+# internet-facing principal a budget and a rate limit, and add a Cloudflare
+# rate-limiting rule on the hostname as a second, cheaper layer.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: fastllm
+  labels:
+    app: cloudflared
+spec:
+  # Two connectors so a node drain or a rollout never takes the tunnel down;
+  # Cloudflare load-balances across every connector registered to the tunnel.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      # Keep the two connectors off one node, or the pair buys nothing.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: cloudflared
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          # --no-autoupdate because a connector that restarts itself to upgrade
+          # does so outside any rollout, at a moment nothing here chose.
+          args: ["tunnel", "--no-autoupdate", "run"]
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-token
+                  key: token
+          # The connector's own health, not the gateway's: it says the process
+          # is up and serving metrics, and says nothing about whether the
+          # tunnel has edge connections. `cloudflared tunnel info` is what
+          # answers that.
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          ports:
+            - name: metrics
+              containerPort: 2000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]

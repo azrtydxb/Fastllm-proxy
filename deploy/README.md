@@ -53,6 +53,56 @@ Two Service objects rather than one with a comma-separated
 only the first address of such a list. It was tried, and it silently assigned
 one address while the annotation claimed two.
 
+## The gateway's third address: the internet
+
+`deploy/cloudflared.yaml` runs two Cloudflare Tunnel connectors that publish
+**`https://api-ai.watteel.com`** to `fastllm-proxy:4000`. Both LAN VIPs keep
+working unchanged; the tunnel adds no ingress and edits no Service, so removing
+the Deployment removes internet access and nothing else.
+
+The connector dials out, so no port is forwarded and the cluster's address is
+never published. The route — hostname to cluster Service — lives in the
+Cloudflare dashboard, not in the manifest, which is why the container mounts no
+config file and why changing the route needs no redeploy. The tunnel token is
+in the `cloudflared-token` Secret and, like the proxy token, is created with
+`kubectl create secret` rather than committed:
+
+```sh
+kubectl -n fastllm create secret generic cloudflared-token \
+  --from-file=token=/path/to/token   # --from-file keeps it out of the shell history
+```
+
+**The gateway only.** The control plane on `192.168.10.129:4001` is a
+password-only admin UI and `fastllm-pg-dev` on `.127` is a database; neither is
+routed, and adding either is a security decision rather than a config change.
+
+### ⚠️ `/health` tells an anonymous caller more than it should
+
+`/health` and `/healthz` are open by design so a probe never needs a key, and
+both return the _same_ full body: every backend's `api_base`, its model, and
+its request and error counts. On the LAN that is a useful ops endpoint. Through
+the tunnel it hands anyone who asks the internal addressing
+(`192.168.10.245:8000`, `:8001`, `:8890`), the model inventory, which
+third-party providers are in use, and live traffic volumes.
+
+Nothing authenticates behind it and no key is exposed, so this is
+reconnaissance rather than a breach — but it is more than a public endpoint
+should say. Until it is narrowed, block both paths at the Cloudflare edge; the
+durable fix is to keep the open endpoint to a bare status and require a key for
+the detail.
+
+### The 100-second ceiling
+
+Cloudflare abandons an origin that has produced no bytes for 100 seconds and
+returns 524, and outside Enterprise that cannot be raised. It measures time to
+_first_ byte, so a streaming response is unaffected however long it runs and a
+non-streaming one is capped.
+
+Against the 7 days before this landed: of 92,593 non-streaming calls 1,012
+(1.09%) ran past 100s, while of 12,277 streaming calls only 68 (0.55%) took
+that long to first byte — first byte averaged 9.7s. So a role that regularly
+runs long should stream; there is no setting here that helps.
+
 ## Split deployment
 
 Two Deployments, one Postgres, since Task 12:
