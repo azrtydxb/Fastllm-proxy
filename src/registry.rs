@@ -455,7 +455,7 @@ impl Backend {
 
         let stalled = self.consecutive_stalls.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
         if stalled {
-            self.healthy.store(false, Ordering::Relaxed);
+            self.eject("engine counters frozen while requests were running");
         }
         stalled
     }
@@ -545,7 +545,7 @@ impl Backend {
     pub fn note_timeout(&self, threshold: u32) {
         let failures = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
         if failures >= threshold {
-            self.healthy.store(false, Ordering::Relaxed);
+            self.eject("consecutive upstream header timeouts");
             self.consecutive_timeouts.store(0, Ordering::Relaxed);
         }
     }
@@ -580,6 +580,30 @@ impl Backend {
         self.consecutive_stalls.store(0, Ordering::Relaxed);
         self.healthy.store(true, Ordering::Relaxed);
         true
+    }
+
+    /// Take this backend out of rotation, saying why.
+    ///
+    /// Every path to "unhealthy" goes through here so that none of them is
+    /// silent. Two of them were, and it cost a user report to notice: a
+    /// backend left rotation, requests for its model answered 502, and the
+    /// only trace in the log was the *recovery* — "back in rotation" with
+    /// nothing before it. An operator reading that sees a backend healing
+    /// from an illness the log never mentioned.
+    ///
+    /// Logged at warn because it changes what the replica will serve, and
+    /// only on the transition: a backend that is already out stays out
+    /// quietly rather than repeating itself every probe interval.
+    fn eject(&self, reason: &str) {
+        if !self.healthy.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        tracing::warn!(
+            backend = %self.api_base,
+            model = %self.upstream_model,
+            reason,
+            "backend out of rotation"
+        );
     }
 
     /// Reset consecutive timeouts on a successful response.

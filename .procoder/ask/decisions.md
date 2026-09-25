@@ -1314,3 +1314,57 @@ Options:
 - **Move FastLLM onto Solder first**, so this and everything after it deploys
   on merge instead of by hand. Solder already runs on kw and manages
   kuvryn-scout; the work is mostly inventorying what `prune: true` would claim.
+
+## Kubernetes-native discovery for the node agent
+
+The agent finds endpoints by probing ports on `--advertise`. That is right for
+a bare host, which has no service registry; in Kubernetes it is guessing at
+something the API already knows exactly. Pascal's point, and it is correct.
+
+It fits the existing shape rather than needing a mode. `discover()` already
+composes optional sources -- explicit `--api-base`, plus the port probe -- and
+says so: "Sources compose and are all optional, which is what makes 'in Docker
+or not' fall out rather than being a mode." Kubernetes becomes a third source.
+The stdlib-only rule survives: the API is reachable with `urllib` using the
+ServiceAccount token and CA mounted in every pod, so no client library.
+
+Two decisions shape it, and the second is where this goes wrong quietly.
+
+**Which Services count.** A label or annotation opt-in (`fastllm.io/register`)
+is explicit and cannot surprise anyone. Probing every Service in the cluster
+would be the same guessing game in a different costume, and `serves_models`
+verifying `/v1/models` only limits the damage rather than avoiding it.
+
+**Which address gets registered.** This is the trap. The proxies run in _kw_
+and the Services would be in _novanas_, so a ClusterIP is not dialable and
+registering one hands the proxies an address they cannot reach -- the exact
+failure `--advertise` exists to prevent, and it surfaces at request time to a
+user rather than at registration. So: prefer the Service's LoadBalancer
+ingress IP, fall back to a NodePort on the node address, and refuse a
+ClusterIP outright rather than register something unreachable.
+
+Worth stating plainly: NovaNAS serves no models today -- nothing answers on
+:8000, :8001, :8890, :8891 or :11434, and there are no serving pods. The
+R9700s are in (`amd.com/gpu: 2` allocatable, device plugin running), so the
+agent would sit heartbeating an empty set until something starts. That is the
+design working, not a fault, but it means this lands ahead of the thing it
+discovers.
+
+A pod on novanas reaches the kw control plane in 62ms, and the CA to verify it
+is `kw-cluster-internal-ca`. The remaining blocker is a principal API key for
+`node-novanas`, which needs an admin session.
+
+Options:
+
+- **Label opt-in, LoadBalancer-or-NodePort address.** Services carrying
+  `fastllm.io/register: "true"` are registered at their LB ingress IP, or a
+  NodePort on the node address, never a ClusterIP. Explicit, and cannot
+  register something the proxies cannot dial.
+- **Label opt-in, address from an annotation.** The Service states its own
+  reachable address (`fastllm.io/advertise`), so the operator decides rather
+  than the agent inferring. More typing per Service, no inference to be wrong.
+- **Discover Pods rather than Services**, by label, using the pod IP. Wrong
+  across clusters -- kw cannot route novanas pod IPs -- but right if the agent
+  is ever used for a FastLLM inside the same cluster.
+- **Poll on the existing heartbeat interval** (simple, consistent with the
+  lease model) versus **watch the API** (instant, more connection handling).
