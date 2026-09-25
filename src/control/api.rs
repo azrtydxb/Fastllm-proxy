@@ -784,7 +784,7 @@ async fn post_provider_register(
         ));
     }
 
-    let id = crate::control::registry_agent::register(
+    let (id, changed) = crate::control::registry_agent::register(
         &ctx.pool,
         &api_base,
         body.node.trim(),
@@ -807,7 +807,13 @@ async fn post_provider_register(
             .await
             .map_err(|e| db_error("reading the provider back", &e))?;
 
-    refresh(&ctx).await;
+    // Only when the registration changed something the snapshot carries. A
+    // plain lease renewal does not, and republishing for it made every proxy
+    // in the fleet refetch and rebuild — clearing its response cache — every
+    // ~30 seconds, for nothing. See `registry_agent::register`.
+    if changed {
+        refresh(&ctx).await;
+    }
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -8926,6 +8932,88 @@ mod tests {
             .unwrap();
     }
 
+    /// A heartbeat that changes nothing must not look like a change.
+    ///
+    /// Agents re-register every few seconds to hold their lease. Renewing one
+    /// touches `lease_expires_at`, `node` and `engine`, none of which the
+    /// snapshot carries — but the route republished regardless, so the control
+    /// plane stamped a new snapshot version every ~30s forever. Every proxy
+    /// refetched, rebuilt its registry and cleared its response cache, which
+    /// is why a 300s `cache_ttl` never recorded a hit and the fleet page
+    /// always found some replica a beat behind.
+    ///
+    /// The cases that *do* matter are here too, because the cheap fix — never
+    /// republish on a heartbeat — would have been wrong.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_lease_renewal_is_not_a_change_but_a_rename_or_a_recovery_is() {
+        let (ctx, _cache) = test_ctx().await;
+        let _cleanup = TestCleanup::new().track_prefix("providers", "name", "heartbeat-");
+        let api_base = format!("http://10.9.9.9:{}/v1", std::process::id());
+        let name = unique_name("heartbeat");
+
+        let (id, created) = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "node-a",
+            Some(&name),
+            Some("vllm"),
+            120,
+        )
+        .await
+        .unwrap();
+        assert!(created, "a provider that did not exist is a change");
+
+        let (_, again) = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "node-a",
+            Some(&name),
+            Some("vllm"),
+            120,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !again,
+            "renewing a lease changes nothing the snapshot carries"
+        );
+
+        // A rename does reach the snapshot.
+        let renamed_to = unique_name("heartbeat");
+        let (_, renamed) = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "node-a",
+            Some(&renamed_to),
+            None,
+            120,
+        )
+        .await
+        .unwrap();
+        assert!(renamed, "a rename is published");
+
+        // So does coming back from degraded: that can put models back.
+        sqlx::query(
+            "UPDATE providers SET degraded_since = now(), degraded_reason = 'x' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let (_, recovered) = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "node-a",
+            Some(&renamed_to),
+            None,
+            120,
+        )
+        .await
+        .unwrap();
+        assert!(recovered, "clearing a degraded flag is a change");
+    }
+
     /// The agent owns a dynamic provider's name, and a renamed provider stays
     /// described correctly by the targets that point into it.
     #[tokio::test]
@@ -8937,7 +9025,7 @@ mod tests {
         let first = unique_name("named-by-agent");
         let second = unique_name("named-by-agent");
 
-        let id = crate::control::registry_agent::register(
+        let (id, _) = crate::control::registry_agent::register(
             &ctx.pool,
             &api_base,
             "some-node",

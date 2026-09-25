@@ -192,6 +192,21 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
+/// Register or renew a provider.
+///
+/// Returns the id and whether anything the *snapshot* carries changed.
+///
+/// That second value exists because this is a heartbeat: agents re-register
+/// every few seconds to keep their lease alive, and the caller republishes the
+/// snapshot when something changed. Renewing a lease changes
+/// `lease_expires_at`, `node` and `engine`, none of which are published — so
+/// treating every heartbeat as a change had the control plane stamp a new
+/// snapshot version every ~30s forever. Every proxy then refetched, rebuilt
+/// its registry and cleared its response cache, and the fleet never finished
+/// converging.
+///
+/// A heartbeat *can* still matter: it clears a degraded flag, which can bring
+/// a provider's models back, and it can rename. Those say true.
 pub async fn register(
     pool: &PgPool,
     api_base: &str,
@@ -199,17 +214,22 @@ pub async fn register(
     name: Option<&str>,
     engine: Option<&str>,
     ttl_seconds: i64,
-) -> Result<Uuid, sqlx::Error> {
+) -> Result<(Uuid, bool), sqlx::Error> {
     let api_base = api_base.trim_end_matches('/');
     // A provider is its endpoint, so an address already registered by hand
     // stays what it was: this must never quietly convert a static provider
     // into one that can expire.
-    if let Some((id, kind)) =
-        sqlx::query_as::<_, (Uuid, String)>("SELECT id, kind FROM providers WHERE api_base = $1")
-            .bind(api_base)
-            .fetch_optional(pool)
-            .await?
+    if let Some((id, kind, was_degraded)) = sqlx::query_as::<_, (Uuid, String, bool)>(
+        "SELECT id, kind, degraded_since IS NOT NULL FROM providers WHERE api_base = $1",
+    )
+    .bind(api_base)
+    .fetch_optional(pool)
+    .await?
     {
+        // Clearing a degraded flag can put a provider's models back in the
+        // snapshot, so that is a real change even though the agent sent the
+        // same heartbeat it always sends.
+        let mut changed = was_degraded;
         if kind == "dynamic" {
             sqlx::query(
                 "UPDATE providers
@@ -243,7 +263,7 @@ pub async fn register(
                     // Nothing to carry onto the targets: a target names a
                     // model, and which providers serve that model is the
                     // model's business (migration 0045).
-                    Ok(_) => {}
+                    Ok(r) => changed |= r.rows_affected() > 0,
                     Err(e) if is_unique_violation(&e) => {
                         tracing::warn!(
                             provider = %id,
@@ -256,7 +276,7 @@ pub async fn register(
                 }
             }
         }
-        return Ok(id);
+        return Ok((id, changed));
     }
 
     let host = api_base
@@ -288,6 +308,8 @@ pub async fn register(
     .bind(ttl_seconds as f64)
     .fetch_one(pool)
     .await
+    // A provider that did not exist a moment ago is unambiguously a change.
+    .map(|id| (id, true))
 }
 
 #[cfg(test)]
