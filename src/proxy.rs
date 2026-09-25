@@ -127,12 +127,38 @@ pub async fn handle(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // Liveness endpoints stay open so a probe never needs the master key.
+    // Liveness stays open so a probe never needs a key — but only the verdict
+    // does. The detail (every backend's `api_base`, the model inventory, live
+    // traffic counts) describes the private side of the deployment, and once
+    // the gateway is reachable from the internet an anonymous caller reading
+    // it is handed the internal addressing and the provider list. So the
+    // status code is public and the body is earned.
+    //
+    // `/metrics` has no useful reduced form — it is entirely detail — so it is
+    // refused outright rather than emptied.
+    //
+    // The rule is the deployment's own: a gateway that authenticates requests
+    // authenticates these too, and one running `open` (no auth anywhere)
+    // leaves them open, because there is nothing there to keep from whom.
     match (&method, path.as_str()) {
         (&Method::GET, "/health") | (&Method::GET, "/healthz") => {
-            return Ok(health_response(&state))
+            let snapshot = state.snapshot.load();
+            return Ok(health_response(
+                &state,
+                carries_a_valid_key(&req, &snapshot),
+            ));
         }
-        (&Method::GET, "/metrics") => return Ok(metrics_response(&state)),
+        (&Method::GET, "/metrics") => {
+            let snapshot = state.snapshot.load();
+            if !carries_a_valid_key(&req, &snapshot) {
+                return Ok(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_api_key",
+                    "missing or invalid bearer token",
+                ));
+            }
+            return Ok(metrics_response(&state));
+        }
         _ => {}
     }
 
@@ -2544,7 +2570,29 @@ fn models_response(
     )
 }
 
-fn health_response(state: &AppState) -> Response<ResBody> {
+/// Whether a request carries a key this snapshot accepts.
+///
+/// Distinct from [`authorize`] in what it does with the answer: `authorize`
+/// refuses a caller, this one only decides how much to tell them. So it
+/// returns a bool rather than a response, and a missing, malformed or expired
+/// key are all simply "no" — the caller still gets its liveness verdict.
+///
+/// Pure snapshot lookup, no I/O, so it is safe on the request path
+/// (`tests/no_io_on_hot_path.rs`).
+fn carries_a_valid_key(req: &Request<Incoming>, snapshot: &Snapshot) -> bool {
+    // `open` means this deployment authenticates nothing anywhere; withholding
+    // detail here would be a lock on one door of an open house.
+    if snapshot.open {
+        return true;
+    }
+    req.headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(bearer_token)
+        .is_some_and(|t| snapshot.authenticate_key(t, SystemTime::now()).is_ok())
+}
+
+fn health_response(state: &AppState, detailed: bool) -> Response<ResBody> {
     let registry = state.registry.load();
     let backends: Vec<serde_json::Value> = registry
         .backends()
@@ -2567,6 +2615,19 @@ fn health_response(state: &AppState) -> Response<ResBody> {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
+    // The status line a probe needs, and nothing a stranger can learn from.
+    // Same status code as the detailed form: liveness is the contract here,
+    // and a probe that had to authenticate to get the right code would be a
+    // probe that fails closed on a key rotation.
+    if !detailed {
+        return json_response(
+            status,
+            serde_json::json!({
+                "status": if healthy > 0 { "ok" } else { "no_healthy_backends" },
+            })
+            .to_string(),
+        );
+    }
     json_response(
         status,
         serde_json::json!({
@@ -2994,7 +3055,10 @@ mod tests {
         snapshot.version = 1_786_140_563;
         state.apply_snapshot(snapshot).unwrap();
 
-        let body = body_string(health_response(&state)).await;
+        // `true`: this is the detailed form's contract. The reduced body an
+        // anonymous caller gets deliberately omits `snapshot_version`, and
+        // `tests/observability_is_not_public.rs` pins that half.
+        let body = body_string(health_response(&state, true)).await;
         let health: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(health["snapshot_version"], 1_786_140_563u64);
         assert_eq!(health["keys"], 1, "a lagging pod is usually a key it lacks");

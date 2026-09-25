@@ -76,20 +76,30 @@ kubectl -n fastllm create secret generic cloudflared-token \
 password-only admin UI and `fastllm-pg-dev` on `.127` is a database; neither is
 routed, and adding either is a security decision rather than a config change.
 
-### ⚠️ `/health` tells an anonymous caller more than it should
+### What the open endpoints will and will not say
 
-`/health` and `/healthz` are open by design so a probe never needs a key, and
-both return the _same_ full body: every backend's `api_base`, its model, and
-its request and error counts. On the LAN that is a useful ops endpoint. Through
-the tunnel it hands anyone who asks the internal addressing
-(`192.168.10.245:8000`, `:8001`, `:8890`), the model inventory, which
-third-party providers are in use, and live traffic volumes.
+`/health`, `/healthz` and `/metrics` answer before authorisation, because a
+Kubernetes probe carries no credential. That made them the one place the
+tunnel could leak: the detailed health body names every backend's `api_base`
+— the internal addressing — plus the model inventory, which providers are in
+use and live traffic counts, and `/metrics` is the same again with latency
+histograms.
 
-Nothing authenticates behind it and no key is exposed, so this is
-reconnaissance rather than a breach — but it is more than a public endpoint
-should say. Until it is narrowed, block both paths at the Cloudflare edge; the
-durable fix is to keep the open endpoint to a bare status and require a key for
-the detail.
+So the verdict is public and the detail is earned:
+
+|                       | no key                                 | valid key           |
+| --------------------- | -------------------------------------- | ------------------- |
+| `/health`, `/healthz` | the status code, and `{"status": ...}` | the full body       |
+| `/metrics`            | `401`                                  | the full exposition |
+
+The status code is deliberately the same either way. If it moved with the
+caller's credential, a key rotation would read as an outage and Kubernetes
+would restart pods that were never unwell. A deployment running `open` serves
+everything to everyone, because there is nothing there to keep from whom.
+
+Pinned by `tests/observability_is_not_public.rs`. If you scrape with
+Prometheus, mint it a key of its own — see
+[docs/integrations.md](../docs/integrations.md#prometheus).
 
 ### The 100-second ceiling
 

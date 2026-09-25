@@ -217,15 +217,23 @@ the same per-model grant and counted in the same usage accounting.
 
 ### Prometheus
 
-`/metrics` on the data plane port, unauthenticated, no scrape config needed
-beyond pointing at it:
+`/metrics` on the data plane port, behind the same API keys as everything else
+— it names every backend's `api_base` and how much traffic each carries, which
+is not something to hand out to whoever asks. Any valid key will do; give the
+scraper one of its own so revoking it cannot take a model offline:
 
 ```yaml
 scrape_configs:
   - job_name: fastllm-proxy
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/fastllm-key # a key minted for scraping
     static_configs:
       - targets: ["gateway:4000"]
 ```
+
+A deployment running `open` (no authentication anywhere) serves it to anyone,
+since there is nothing there to keep from whom.
 
 Per-backend health, in-flight, request and error counts, latency histograms,
 cache counters, classifier timings and the snapshot version. A ready-made
