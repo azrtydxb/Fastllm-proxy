@@ -1029,8 +1029,11 @@ fn hits_of(recorder: &Recorder) -> usize {
 /// Needed because a rebuild clears the response cache — deliberately, see
 /// `AppState::apply_snapshot` — and this suite shares one database, so any
 /// other test's admin write can clear it underneath a cache assertion.
-fn snapshot_version(port: u16) -> u64 {
+fn snapshot_version(port: u16, key: &str) -> u64 {
+    // `/metrics` is detail, so it needs a key like any other detail — see
+    // `tests/observability_is_not_public.rs`. Any valid key will do.
     let body = ureq::get(&format!("http://127.0.0.1:{port}/metrics"))
+        .set("authorization", &format!("Bearer {key}"))
         .call()
         .expect("metrics")
         .into_string()
@@ -1146,7 +1149,7 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
     loop {
         attempt += 1;
         let before = hits_of(&recorder);
-        let version_before = snapshot_version(port);
+        let version_before = snapshot_version(port, &key);
 
         let (status, first) = chat(port, &key, body.clone());
         assert_eq!(status, 200, "{first}");
@@ -1160,7 +1163,7 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
         let (status, second) = chat(port, &key, body.clone());
         assert_eq!(status, 200, "{second}");
         let after_second = hits_of(&recorder);
-        let version_after = snapshot_version(port);
+        let version_after = snapshot_version(port, &key);
 
         if after_second == after_first {
             assert_eq!(first, second, "and byte-for-byte the same answer");
