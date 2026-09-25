@@ -1123,3 +1123,42 @@ Options:
 - **Revert the `/metrics` half** and gate only `/health`, leaving the 62KB
   exposition public. Smallest change; gives up most of the disclosure fix, since
   `/metrics` was the bigger leak of the two.
+
+## Which name the dashboard should answer on
+
+Pascal asked for `fastllm.kw.watteel.dev`, "similar like how other apps give me
+access". Those two are not the same thing here, so it is worth settling before
+building.
+
+Every app he is comparing against is on **`.lab`**: `kuvryn-ai`, `kuvryn`,
+`scout`, `grafana`, `nexora`, `headlamp`, `hubble`, `dhole`, `novamem` — all
+`<name>.kw.watteel.lab`, all resolving to `192.168.10.120`, the nginx ingress,
+each with a cert-manager `Certificate` off the `cluster-ca` ClusterIssuer. That
+is a LAN-only pattern; the CA is internal.
+
+**`.dev` is a different thing.** `fastllm.kw.watteel.dev` already resolves —
+to Cloudflare (104.21.18.206 / 172.67.183.88) — but nothing serves it: both it
+and `nexora.kw.watteel.dev` answer with no connection at all. So `*.kw.watteel.dev`
+is wildcard DNS at Cloudflare with no origin behind it, and putting the
+dashboard there means publishing it on the public internet, not adding an
+internal name.
+
+That matters more than usual because this is the **admin dashboard**, not the
+gateway. The session already decided (see the tunnel scope above) that the
+control plane is a password-only admin UI and should not be internet-facing
+without Cloudflare Access in front.
+
+Mechanics are the same either way and are already understood: the control plane
+serves TLS itself on 4001 (plain HTTP there gets nothing), so the ingress needs
+`nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"` — which none of the
+existing app ingresses need, since their backends are plain HTTP.
+
+Options:
+
+- **`fastllm.kw.watteel.lab`** — exactly the pattern every other app uses.
+  Ingress on the nginx class, a `Certificate` from `cluster-ca`, LAN only.
+  Nothing new is exposed; it just stops being an IP and a port.
+- **`fastllm.kw.watteel.dev`, public** — a route on the existing Cloudflare
+  tunnel to `fastllm-control:4001`. Reachable from anywhere, so it wants
+  Cloudflare Access in front of the login rather than the password alone.
+- **Both** — `.lab` for daily use, `.dev` behind Access for when away.

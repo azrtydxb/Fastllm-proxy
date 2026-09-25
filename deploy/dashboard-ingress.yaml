@@ -1,0 +1,71 @@
+# The dashboard on a name instead of an address.
+#
+# `https://fastllm.kw.watteel.lab` rather than `https://192.168.10.129:4001`.
+# Same pattern every other app on this cluster uses — nginx ingress on
+# `192.168.10.120`, a cert-manager `Certificate` from the `cluster-ca`
+# ClusterIssuer — so the browser trusts it the way it trusts grafana, headlamp
+# and the kuvryn apps, and there is no certificate warning to click through.
+#
+# LAN only, deliberately. `*.kw.watteel.lab` resolves on the local resolvers
+# and the CA is internal, so this adds a name and exposes nothing new. The
+# admin UI is password-only; publishing it beyond the LAN is a separate
+# decision and would want Cloudflare Access in front rather than this file
+# growing a second host.
+#
+# The VIP keeps working. This is additive — `fastllm-control` still answers on
+# `192.168.10.129:4001`, so anything pinned to the address is unaffected.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastllm-dashboard-tls
+  namespace: fastllm
+spec:
+  # Not the existing `fastllm-control-tls`: that one is the control plane's own
+  # serving certificate, issued for its in-cluster and VIP identities. This is
+  # the certificate nginx presents to the browser for this hostname, and the
+  # two have different names on them.
+  dnsNames:
+    - fastllm.kw.watteel.lab
+  issuerRef:
+    kind: ClusterIssuer
+    name: cluster-ca
+  secretName: fastllm-dashboard-tls
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastllm-dashboard
+  namespace: fastllm
+  annotations:
+    # The backend speaks TLS. Unlike every other app's ingress here, whose
+    # services are plain HTTP, `fastllm-control` serves HTTPS on 4001 and
+    # answers a plain HTTP request with nothing at all — so without this the
+    # ingress reaches a live port and gets a 502.
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Off, because the admin API streams: the usage and audit views read large
+    # result sets and buffering them makes the page appear to hang until the
+    # whole response is in nginx's memory.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Generous, for the same reason — a usage query over a long window is a
+    # slow read, not a stuck one.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - fastllm.kw.watteel.lab
+      secretName: fastllm-dashboard-tls
+  rules:
+    - host: fastllm.kw.watteel.lab
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastllm-control
+                port:
+                  name: admin

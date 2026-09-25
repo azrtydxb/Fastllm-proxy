@@ -138,6 +138,35 @@ The cert comes from the in-cluster `cluster-ca` `ClusterIssuer` (the same one `n
 
 If `--tls-cert`/`--tls-key` are ever both removed (a dev cluster with no real backend credentials, say), `fastllm-control` falls back to plain HTTP rather than refusing to start — but it logs a startup warning every time, precisely because that fallback is silent otherwise and this is data that should not travel in the clear by accident.
 
+### Reaching the dashboard by name
+
+`https://fastllm.kw.watteel.lab` — `dashboard-ingress.yaml`, the same shared
+nginx ingress on `192.168.10.120` that grafana, headlamp and the kuvryn apps
+use, with a `Certificate` from the same `cluster-ca` ClusterIssuer, so the
+browser trusts it without a warning.
+
+The VIP is untouched: `192.168.10.129:4001` still answers, and the ingress is a
+faithful passthrough — every path returns what the VIP returns.
+
+Two things differ from the other apps' ingresses and are worth knowing before
+copying one of theirs:
+
+- **`backend-protocol: "HTTPS"`.** `fastllm-control` terminates TLS itself (see
+  above) and answers a plain HTTP request with nothing at all. Every other app
+  here has a plain-HTTP backend and so needs no such annotation; without it
+  this one reaches a live port and returns 502.
+- **The hostname was already taken.** `*.kw.watteel.lab` wildcards to the
+  ingress, but `fastllm.kw.watteel.lab` had an explicit A record to
+  `192.168.10.125` — the _gateway_ VIP — which won over the wildcard and sent
+  browsers somewhere nothing listens on 443. Repointing that record at
+  `192.168.10.120` is what made this work, and it is a DNS change rather than a
+  cluster one, so it is not in this repo.
+
+LAN only. Publishing the admin UI beyond the LAN is a separate decision and
+would want Cloudflare Access in front of the login rather than the password
+alone; see "The gateway's third address" above for why the tunnel carries the
+gateway and not this.
+
 ### ⚠️ The admin API and UI are on their own VIP
 
 `fastllm-control`'s `/admin/*` requires a session cookie (`POST /login`, checked against `principals.password_hash` with Argon2id — see README.md's "Admin authentication" section and `src/control/auth.rs`). `/snapshot` and `/usage` are unchanged: they check `--proxy-token`, a separate shared secret for machine-to-machine polling and reporting (the proxy proving itself to the control plane), not a human login.
