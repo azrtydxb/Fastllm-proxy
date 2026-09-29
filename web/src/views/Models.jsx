@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { attempt, useLoader } from "../load.js";
 import { mergeBackends, backendKey } from "../fleet.js";
 import { AddModel } from "./AddModel.jsx";
+import { FlowControlCell } from "./FlowControl.jsx";
 import {
   Button,
   Card,
@@ -36,6 +37,9 @@ const BACKEND_COLS = [
   { label: "PROTOCOL", width: ".7fr" },
   { label: "CREDENTIAL", width: ".7fr" },
   { label: "MAX TOKENS", width: ".7fr", align: "right" },
+  // The admission gate: "off", or slots in use over the current ceiling,
+  // summed across proxy replicas. Click to set it and the upstream timeout.
+  { label: "FLOW CONTROL", width: ".9fr" },
   { label: "", width: "80px", align: "right" },
 ];
 
@@ -241,6 +245,7 @@ export function Models({ onUnauthorised }) {
       onUnauthorised,
     );
     if (ok) reload();
+    return ok;
   };
 
   const savePrices = async (m, patch) => {
@@ -551,6 +556,12 @@ export function Models({ onUnauthorised }) {
                         >
                           {b.default_max_tokens ?? "—"}
                         </Mono>,
+                        <FlowControlCell
+                          key="fc"
+                          backend={b}
+                          live={h}
+                          onSave={(patch) => saveBackend(b.id, patch)}
+                        />,
                         <Button
                           key="x"
                           variant="small"

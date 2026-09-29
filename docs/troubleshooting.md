@@ -186,10 +186,54 @@ few polls before concluding a replica is fine.
 
 ### A backend keeps being marked unhealthy
 
-Health is consecutive-failure based (`unhealthy_after`, default 2). A backend
-that is up but slow enough to exceed `--health-timeout` looks identical to one
-that is down. For long-loading engines, raise the timeout rather than the
-failure count.
+Two separate paths take a backend out of rotation, and they need different
+fixes, so find out which one it is before changing anything. On a build with
+`fa2c79d` or later, every ejection logs `backend out of rotation` with a
+`reason`; on anything older the ejection is silent and the only trace is the
+recovery.
+
+- **The health probe** (`GET /models`, `unhealthy_after`, default 2). A backend
+  slow enough to exceed `--health-timeout` looks identical to one that is down.
+  For long-loading engines, raise the timeout rather than the failure count.
+- **Upstream header timeouts** from real traffic
+  (`consecutive_timeout_threshold`, defaulting to `unhealthy_after`). A request
+  that gets no response headers within `upstream_timeout_seconds` counts as a
+  timeout, and that many in a row eject the backend. This is the one that bites
+  a busy local engine: the probe answers in milliseconds while real requests
+  queue inside vLLM long enough to time out, so the backend is ejected with
+  nothing wrong with it. A 35B on one GPU ran a 69% 502 rate this way, serving
+  13k-token prompts at 37s average first byte against a default budget.
+
+  Fix it in this order: set the backend's upstream timeout (Models page, FLOW
+  CONTROL, or `upstream_timeout_seconds` on `PATCH /admin/backends/{id}`) above
+  the real p99 time-to-first-byte; have the caller stream, which makes first
+  byte arrive in seconds regardless of generation length; raise
+  `consecutive_timeout_threshold` independently of `unhealthy_after`; and set
+  flow control on the backend (Models page, FLOW CONTROL) so the queue forms
+  in the proxy, bounded, instead of inside the engine.
+
+A backend shared by several models -- a pool is a policy over an existing
+model's backend, not a copy of it -- is one object with one health bit. Traffic
+through the pool ejecting it takes the model down too, and that is correct:
+it is the same engine.
+
+### A backend stays out of rotation although the engine answers
+
+If an ejected backend never logs `backend healthy, back in rotation` while its
+engine answers `/v1/models` in milliseconds, check that the prober is running
+at all. Look at the engine's own access log: each proxy should appear as a
+`GET /metrics` every `--engine-scrape-interval` (2s) **and** a
+`GET /v1/models` every `--health-interval` (10s). Scrapes with no probes from
+a proxy's node address means its prober has stopped. Nothing is logged when
+that happens, because nothing failed: the sweep is still waiting.
+
+Builds before `Upstream::fetch` bounded only a response's headers, so one
+backend that sent headers and then stalled its body (a host rebooting
+mid-response is enough) stopped the sweep for every backend, for good. With
+the prober gone, a backend ejected by timeouts on every replica has nothing
+left that can restore it. Restarting the proxies recovers immediately, since
+a fresh registry starts every backend healthy. Upgrading removes the cause:
+every background loop now reads the whole response under one deadline.
 
 ### Two nodes serving the same model behave differently
 

@@ -28,7 +28,7 @@
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{Method, Request};
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,16 +108,13 @@ impl Operator {
     }
 
     async fn send(&self, req: Request<Full<Bytes>>) -> Result<serde_json::Value> {
-        let resp = tokio::time::timeout(Duration::from_secs(10), self.client.request(req))
+        let resp = self
+            .client
+            .fetch(req, Duration::from_secs(10))
             .await
-            .map_err(|_| anyhow::anyhow!("the Kubernetes API did not answer within 10s"))??;
-        let status = resp.status();
-        let body = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| anyhow::anyhow!("reading the Kubernetes API response body: {e}"))?
-            .to_bytes();
+            .map_err(|e| e.or_timed_out("the Kubernetes API did not answer within 10s"))?;
+        let status = resp.status;
+        let body = resp.body;
         if !status.is_success() {
             // The API server's own message is far more useful than anything
             // this could invent — "is forbidden: User ... cannot patch" names

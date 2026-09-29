@@ -9,6 +9,9 @@ pub mod classifier;
 /// Exact-match response caching. Unconditional: it carries no model and costs
 /// nothing until a model turns it on.
 pub mod a2a;
+/// Bounded queueing in front of an engine, so its own unbounded queue never
+/// becomes the thing that makes every request slow.
+pub mod admission;
 pub mod cache;
 pub mod config;
 #[cfg(feature = "control")]

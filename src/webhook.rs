@@ -23,7 +23,7 @@
 
 use crate::upstream::Upstream;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::Request;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,17 +152,21 @@ pub fn spawn(
             // would turn one unreachable endpoint into a queue that never
             // drains — the condition being reported is still true and still
             // visible on /metrics and /admin/fleet.
-            match tokio::time::timeout(Duration::from_secs(5), upstream.request(req)).await {
-                Ok(Ok(resp)) => {
-                    let status = resp.status();
-                    // Drain so the connection can be reused rather than shut.
-                    let _ = resp.into_body().collect().await;
-                    if !status.is_success() {
+            // Read to the end so the connection can be reused, and under the
+            // same deadline as the headers: a receiver that stalled its body
+            // would otherwise stop every later notification. See
+            // `Upstream::fetch`.
+            match upstream.fetch(req, Duration::from_secs(5)).await {
+                Ok(fetched) => {
+                    if !fetched.status.is_success() {
+                        let status = fetched.status;
                         tracing::warn!(%status, "webhook receiver rejected a notification");
                     }
                 }
-                Ok(Err(e)) => tracing::warn!(error = %e, "webhook delivery failed"),
-                Err(_) => tracing::warn!("webhook delivery timed out"),
+                Err(crate::upstream::FetchError::TimedOut(_)) => {
+                    tracing::warn!("webhook delivery timed out")
+                }
+                Err(e) => tracing::warn!(error = %e, "webhook delivery failed"),
             }
         }
     });

@@ -933,6 +933,14 @@ async fn proxy_request(
     let inject_include_usage = needs_usage && streaming && model_field.is_none();
 
     let mut last_error: Option<String> = None;
+    // The most recent admission refusal, with the message it recorded as
+    // `last_error`. Kept beside it rather than folded in because the answer
+    // differs: a chain that ended on a saturated engine is a 503 with
+    // `Retry-After` -- come back shortly, it will take you -- while one that
+    // ended on an unreachable one is a 502. The message is what tells the
+    // two apart at the end: it matches `last_error` only if nothing failed
+    // differently afterwards.
+    let mut saturated: Option<(crate::admission::Rejected, String)> = None;
 
     // Two nested loops, and the distinction between them is the whole of
     // cross-model failover: the inner one moves between *backends of one
@@ -1042,9 +1050,53 @@ async fn proxy_request(
                 }
             };
 
+            // Admission: hold here while the engine's own queue is deep,
+            // rather than adding to it. Reads an atomic the metrics scraper
+            // filled, so the no-I/O rule still holds -- the awaiting is on a
+            // semaphore, not on the network.
+            let permit = match backend.admission() {
+                Some(gate) => {
+                    // Only wait when there is nowhere else to go. With an
+                    // untried sibling left, a saturated engine is a reason to
+                    // move on, exactly like a refused connection -- queueing
+                    // here while the sibling idles would have the gate defeat
+                    // the balancing it sits inside.
+                    let admitted = if state.router.has_candidate(pool, &tried) {
+                        gate.try_admit().ok_or_else(|| {
+                            gate.note_refused(crate::admission::Rejected::Full);
+                            crate::admission::Rejected::Full
+                        })
+                    } else {
+                        gate.admit().await
+                    };
+                    match admitted {
+                        Ok(permit) => Some(permit),
+                        Err(rejected) => {
+                            warn!(
+                                backend = %backend.api_base,
+                                model = %backend.upstream_model,
+                                reason = ?rejected,
+                                "refused at the admission gate"
+                            );
+                            let msg = format!(
+                                "upstream {} is saturated ({rejected:?})",
+                                backend.api_base
+                            );
+                            last_error = Some(msg.clone());
+                            saturated = Some((rejected, msg));
+                            if !state.router.has_candidate(pool, &tried) && more_models_after_this {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
+
             // The guard is taken before dispatch and moved into the response body,
             // so in-flight stays elevated for the whole generation.
-            let guard = InflightGuard::acquire(Arc::clone(&backend));
+            let guard = InflightGuard::with_permit(Arc::clone(&backend), permit);
 
             let dispatch = state.client.request(upstream_req);
             // Per-backend override: a long-context self-hosted engine may
@@ -1312,11 +1364,39 @@ async fn proxy_request(
     // stays in rotation and answers 502 for that one. Handing the request to a
     // replica that can serve it is the only thing left that keeps the promise
     // replicas are supposed to make.
-    if !already_forwarded(&parts.headers) {
+    // Did the chain end on a saturated engine rather than an unreachable one?
+    let ended_saturated = saturated
+        .as_ref()
+        .filter(|(_, msg)| last_error.as_deref() == Some(msg.as_str()))
+        .map(|(rejected, _)| *rejected);
+
+    // Not for a saturated engine: the sibling replica would dispatch to the
+    // same engine, adding load to the one thing that is already behind.
+    if ended_saturated.is_none() && !already_forwarded(&parts.headers) {
         if let Some(resp) = forward_to_peer(&state, &target_model, &parts.headers, &collected).await
         {
             return resp;
         }
+    }
+
+    if let Some(rejected) = ended_saturated {
+        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+        state
+            .telemetry
+            .record_outcome(crate::telemetry::Outcome::Unavailable);
+        // `NoBackend` rather than a new variant: this enum crosses the wire
+        // to the control plane, and one that does not know a new variant
+        // would drop the whole usage batch during a rolling deploy. The 503
+        // status is what distinguishes it in the rows.
+        record_refusal(
+            &state,
+            principal,
+            key_id,
+            &target_model,
+            StatusCode::SERVICE_UNAVAILABLE,
+            crate::usage::Refusal::NoBackend,
+        );
+        return overloaded_response(rejected);
     }
 
     state.requests_failed.fetch_add(1, Ordering::Relaxed);
@@ -2292,6 +2372,29 @@ fn error_response(status: StatusCode, kind: &str, message: &str) -> Response<Res
     json_response(status, body.to_string())
 }
 
+/// 503 with `Retry-After`, for a request the admission gate would not take.
+///
+/// 503 and not 429: 429 says the *caller* asked for too much and is a
+/// statement about their quota, while this says the backend is saturated and
+/// has nothing to do with who asked. A client that treats the two the same
+/// will retry either way; one that distinguishes them should not start
+/// throttling a principal that is within its limits.
+fn overloaded_response(rejected: crate::admission::Rejected) -> Response<ResBody> {
+    let secs = rejected.retry_after_seconds();
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("backend is saturated; retry after {secs}s"),
+            "type": "backend_overloaded",
+            "code": StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        }
+    });
+    let mut resp = json_response(StatusCode::SERVICE_UNAVAILABLE, body.to_string());
+    if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut().insert("retry-after", value);
+    }
+    resp
+}
+
 /// 429 with `Retry-After` (whole seconds, rounded up, at least 1 — a `0`
 /// would tell a client to retry immediately, which is what got it rate
 /// limited in the first place).
@@ -2885,6 +2988,93 @@ last scrape.\n",
         if let Some(rate) = b.prefix_cache_hit_rate() {
             out.push_str(&format!(
                 "fastllm_backend_prefix_cache_hit_rate{{api_base=\"{}\",model=\"{}\"}} {rate}\n",
+                b.api_base, b.upstream_model,
+            ));
+        }
+    }
+
+    // The engine's own view of its load, as last scraped. Only for backends
+    // that publish it and only while fresh, for the same reason as above: a
+    // 0 would claim an idle engine where the truth is "unknown".
+    let now = crate::registry::now_ms();
+    out.push_str(
+        "# HELP fastllm_backend_engine_requests Requests the engine itself reports, by state.\n",
+    );
+    out.push_str("# TYPE fastllm_backend_engine_requests gauge\n");
+    for b in registry.backends() {
+        if let Some((running, waiting)) = b.engine_queue(now) {
+            for (state_name, n) in [("running", running), ("waiting", waiting)] {
+                out.push_str(&format!(
+                    "fastllm_backend_engine_requests{{api_base=\"{}\",model=\"{}\",state=\"{state_name}\"}} {n}\n",
+                    b.api_base, b.upstream_model,
+                ));
+            }
+        }
+    }
+
+    // The admission gate, for backends that have one. `capacity` below
+    // `max_concurrent` is the gate actively holding traffic back because the
+    // engine's queue is deep. A refusal is either a 503 the caller saw or,
+    // when an untried sibling was left, the request moving to that sibling.
+    let gated: Vec<_> = registry
+        .backends()
+        .iter()
+        .filter_map(|b| b.admission().map(|g| (b, g.status())))
+        .collect();
+    for (name, kind, help, value) in [
+        (
+            "fastllm_admission_max_concurrent",
+            "gauge",
+            "Configured ceiling on concurrent requests to a gated backend.",
+            (|s: &crate::admission::Status| s.max_concurrent as u64) as fn(&_) -> u64,
+        ),
+        (
+            "fastllm_admission_capacity",
+            "gauge",
+            "Current ceiling; below max_concurrent while the engine's queue is deep.",
+            |s| s.capacity as u64,
+        ),
+        (
+            "fastllm_admission_in_use",
+            "gauge",
+            "Slots held by requests in progress.",
+            |s| s.in_use as u64,
+        ),
+        (
+            "fastllm_admission_queued",
+            "gauge",
+            "Requests waiting at the gate for a slot.",
+            |s| s.queued as u64,
+        ),
+        (
+            "fastllm_admission_admitted_total",
+            "counter",
+            "Requests the gate let through.",
+            |s| s.admitted_total,
+        ),
+    ] {
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+        for (b, st) in &gated {
+            out.push_str(&format!(
+                "{name}{{api_base=\"{}\",model=\"{}\"}} {}\n",
+                b.api_base,
+                b.upstream_model,
+                value(st)
+            ));
+        }
+    }
+    out.push_str(
+        "# HELP fastllm_admission_refused_total Requests the gate refused: `full` without \
+waiting (the wait queue was full, or a sibling was tried instead), `timed_out` after waiting.\n",
+    );
+    out.push_str("# TYPE fastllm_admission_refused_total counter\n");
+    for (b, st) in &gated {
+        for (reason, n) in [
+            ("full", st.refused_full_total),
+            ("timed_out", st.refused_timed_out_total),
+        ] {
+            out.push_str(&format!(
+                "fastllm_admission_refused_total{{api_base=\"{}\",model=\"{}\",reason=\"{reason}\"}} {n}\n",
                 b.api_base, b.upstream_model,
             ));
         }

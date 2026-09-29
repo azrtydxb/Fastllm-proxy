@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::upstream::Upstream;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::Request;
 use std::sync::Arc;
 
@@ -179,17 +179,14 @@ impl Minter {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Full::new(Bytes::from(body)))?;
 
-        let resp = tokio::time::timeout(Duration::from_secs(10), self.upstream.request(req))
+        let resp = self
+            .upstream
+            .fetch(req, Duration::from_secs(10))
             .await
-            .map_err(|_| anyhow!("minting a Google access token timed out"))??;
+            .map_err(|e| e.or_timed_out("minting a Google access token timed out"))?;
 
-        let status = resp.status();
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| anyhow!("reading Google's token response failed: {e}"))?
-            .to_bytes();
+        let status = resp.status;
+        let bytes = resp.body;
         if !status.is_success() {
             // Google's error body names the actual cause — clock skew, a
             // revoked key, an account without the role — and it is the only
@@ -341,7 +338,9 @@ mod tests {
                         move |req: hyper::Request<hyper::body::Incoming>| {
                             let counter = Arc::clone(&counter);
                             async move {
-                                let seen = req.into_body().collect().await.map(|b| b.to_bytes());
+                                let seen = http_body_util::BodyExt::collect(req.into_body())
+                                    .await
+                                    .map(|b| b.to_bytes());
                                 counter.fetch_add(1, Ordering::Relaxed);
                                 // The form body is parked where the assertions
                                 // below can read it back.

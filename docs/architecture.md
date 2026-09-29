@@ -245,6 +245,20 @@ split exists to prevent.
   differently and prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
   opt-in-visibly line the passthrough/translate split draws.
+- **The queue forms in the proxy, not in the engine** (flow control, set per
+  backend on the `model_backends` row; see `docs/operations/configuration.md`).
+  vLLM accepts everything and queues the surplus itself, unbounded, which makes
+  every request slow rather than failing any. A backend with a gate carries it
+  in the snapshot like any other backend setting; the proxy's engine scraper
+  halves the gate's ceiling while the engine's `num_requests_waiting` sits at
+  or above its high-water mark, and grows it by one per scrape once the queue
+  drains. Requests past the ceiling wait in the proxy, bounded, and are refused
+  with 503 and `Retry-After` beyond that. The request path only awaits a
+  semaphore, so it still performs no I/O. Each replica holds its own ceiling --
+  sharing it would mean a network round trip per request -- and the engine's
+  queue depth, which already reflects every replica's traffic, is what keeps
+  them honest. Each gate's state rides the existing health report to the
+  control plane, which is how the Fleet and Models pages show it.
 
 ## Behaviour notes
 

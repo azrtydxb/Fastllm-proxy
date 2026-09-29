@@ -182,7 +182,6 @@ impl std::error::Error for ProbeError {}
 /// for a provider that does not report, which is a different claim from "does
 /// not say".
 pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad, ProbeError> {
-    use http_body_util::BodyExt as _;
     let origin = metrics_origin(api_base);
     let url = format!("{origin}/metrics");
     let req = hyper::Request::builder()
@@ -195,24 +194,23 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
         .map_err(|e| ProbeError::NotAnEngine(format!("{url} is not a usable address: {e}")))?;
     // Shorter than the model-list probe: this is a nicety, and a slow answer
     // is worth less than a prompt sweep.
-    let resp =
-        match tokio::time::timeout(std::time::Duration::from_secs(5), client.request(req)).await {
-            Err(_) => return Err(ProbeError::Unreachable(format!("{url} timed out"))),
-            Ok(Err(e)) => return Err(ProbeError::Unreachable(format!("{url}: {e}"))),
-            Ok(Ok(resp)) => resp,
-        };
-    if !resp.status().is_success() {
+    //
+    // And over the body as well as the headers. This runs inside the proxy's
+    // scraper and the control plane's provider sweep, both single loops; with
+    // only the headers bounded, one engine that stalled mid-body would stop
+    // the whole sweep for good, silently -- the likeliest reason the control
+    // plane's once sat dead for two days. See `Upstream::fetch`.
+    let fetched = client
+        .fetch(req, std::time::Duration::from_secs(5))
+        .await
+        .map_err(|e| ProbeError::Unreachable(format!("{url}: {e}")))?;
+    if !fetched.status.is_success() {
         return Err(ProbeError::NotAnEngine(format!(
             "{url} answered {}",
-            resp.status()
+            fetched.status
         )));
     }
-    let body = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| ProbeError::Unreachable(format!("reading {url}: {e}")))?
-        .to_bytes();
+    let body = fetched.body;
     let body = std::str::from_utf8(&body)
         .map_err(|_| ProbeError::NotAnEngine(format!("{url} did not answer with text")))?;
     // `RUNNING` and nothing else decides whether this is an engine: it is the

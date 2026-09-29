@@ -1583,6 +1583,7 @@ fn spawn_health_reports(
         loop {
             ticker.tick().await;
             let registry = state.registry.load();
+            let now = fastllm_proxy::registry::now_ms();
             reporter.send(fastllm_proxy::health_report::HealthReport {
                 replica: replica.clone(),
                 advertise: advertise.clone(),
@@ -1619,6 +1620,9 @@ fn spawn_health_reports(
                         requests_total: b.requests_total(),
                         errors_total: b.errors_total(),
                         prefix_cache_hit_rate: b.prefix_cache_hit_rate(),
+                        engine_running: b.engine_queue(now).map(|(r, _)| r),
+                        engine_waiting: b.engine_queue(now).map(|(_, w)| w),
+                        admission: b.admission().map(|g| g.status()),
                     })
                     .collect(),
             });

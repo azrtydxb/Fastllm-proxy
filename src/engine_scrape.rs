@@ -142,6 +142,12 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 // overwrite it with the current one.
                 let stalled = backend.check_stall(&load, state.unhealthy_after);
                 backend.record_engine_inflight(&load, now_ms);
+                // The gate reacts to the engine's own queue, and this is where
+                // that number arrives. Fed after recording so the gate and the
+                // counters describe the same sample.
+                if let Some(gate) = backend.admission() {
+                    gate.observe(load.waiting);
+                }
                 if stalled {
                     debug!(
                         backend = %backend.api_base,

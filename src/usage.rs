@@ -21,7 +21,7 @@
 
 use crate::upstream::Upstream;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::Request;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -327,20 +327,20 @@ async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageE
         }
     };
 
-    match tokio::time::timeout(Duration::from_secs(10), upstream.request(req)).await {
-        Ok(Ok(resp)) if resp.status().is_success() => {
-            let _ = resp.into_body().collect().await;
-        }
-        Ok(Ok(resp)) => {
-            let status = resp.status();
-            let _ = resp.into_body().collect().await;
+    // Headers and body under one deadline: the flush is a single loop, and a
+    // response body that stalled would otherwise stop every later batch from
+    // being sent, with nothing logged. See `Upstream::fetch`.
+    match upstream.fetch(req, Duration::from_secs(10)).await {
+        Ok(fetched) if fetched.status.is_success() => {}
+        Ok(fetched) => {
+            let status = fetched.status;
             tracing::warn!(%status, count, "control plane rejected usage batch; dropped");
         }
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, count, "sending usage batch failed; dropped");
-        }
-        Err(_) => {
+        Err(crate::upstream::FetchError::TimedOut(_)) => {
             tracing::warn!(count, "sending usage batch timed out; dropped");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, count, "sending usage batch failed; dropped");
         }
     }
 }

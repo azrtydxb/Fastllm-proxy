@@ -62,6 +62,13 @@ migration alone, or add a new migration.
 - **`AppState::apply_snapshot` is the single write path** for the snapshot. It
   rebuilds the routing registry in the same call so the two cannot diverge.
   Never write to the snapshot cell directly.
+- **Background loops read responses with `Upstream::fetch`, never
+  `timeout(request())` plus a separate body read.** The timeout around
+  `request` ends at the headers; a body that stalls after them waits forever,
+  and every background task here is one loop, so one stalled peer stops it for
+  every backend without logging anything. Both proxies' health probers were
+  found stopped this way, and a healthy 35B stayed out of rotation because
+  nothing was left to restore it.
 - Performance claims need a measurement. `docs/performance.md` records what was
   tried and rejected, with numbers, so nobody re-litigates it from intuition.
 

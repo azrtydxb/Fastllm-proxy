@@ -1895,6 +1895,16 @@ struct BackendView {
     protocol: String,
     auth_header: String,
     default_max_tokens: Option<i32>,
+    /// Seconds this backend may take to send response headers; `None` is the
+    /// deployment's `--upstream-timeout`.
+    upstream_timeout_seconds: Option<i32>,
+    /// The admission gate (`crate::admission`). `None` is no gate; the three
+    /// tuning fields are always present so the UI can show what turning one
+    /// on would use. Same names `PATCH /admin/backends/{id}` takes.
+    admission_max_concurrent: Option<i32>,
+    admission_high_water: i32,
+    admission_max_queued: i32,
+    admission_max_wait_seconds: i32,
 }
 
 #[derive(Serialize)]
@@ -2032,6 +2042,9 @@ async fn list_models(
         String,      // p.protocol
         String,      // p.auth_header
         Option<i32>, // mb.default_max_tokens
+        Option<i32>, // mb.upstream_timeout_seconds
+        Option<i32>, // mb.admission_max_concurrent
+        Vec<i32>,    // ARRAY[high_water, max_queued, max_wait_seconds]
     );
     // Ordered by provider name so a model's backends read the same way twice
     // running; the routing order between them is the pool policy's business,
@@ -2040,7 +2053,10 @@ async fn list_models(
         "SELECT mb.provider_model_id, mb.id, p.id, p.name, p.api_base, \
              COALESCE(mb.upstream_model, m.name), \
              mb.input_price_per_mtok, mb.output_price_per_mtok, \
-             p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, mb.default_max_tokens \
+             p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, mb.default_max_tokens, \
+             mb.upstream_timeout_seconds, mb.admission_max_concurrent, \
+             ARRAY[mb.admission_high_water, mb.admission_max_queued, \
+                   mb.admission_max_wait_seconds] \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
          JOIN provider_models m ON m.id = mb.provider_model_id \
@@ -2077,6 +2093,9 @@ async fn list_models(
                                 protocol,
                                 auth_header,
                                 default_max_tokens,
+                                upstream_timeout_seconds,
+                                admission_max_concurrent,
+                                admission_tuning,
                             )| BackendView {
                                 id: *backend_id,
                                 provider_id: *provider_id,
@@ -2089,6 +2108,12 @@ async fn list_models(
                                 protocol: protocol.clone(),
                                 auth_header: auth_header.clone(),
                                 default_max_tokens: *default_max_tokens,
+                                upstream_timeout_seconds: *upstream_timeout_seconds,
+                                admission_max_concurrent: *admission_max_concurrent,
+                                // Always three: the query builds the array.
+                                admission_high_water: admission_tuning[0],
+                                admission_max_queued: admission_tuning[1],
+                                admission_max_wait_seconds: admission_tuning[2],
                             },
                         )
                         .collect(),
@@ -3412,6 +3437,22 @@ struct PatchBackend {
     output_price_per_mtok: Option<Option<i64>>,
     #[serde(default, deserialize_with = "double_option")]
     default_max_tokens: Option<Option<i32>>,
+    /// Seconds to wait for response headers; `null` returns to the
+    /// deployment's `--upstream-timeout`.
+    #[serde(default, deserialize_with = "double_option")]
+    upstream_timeout_seconds: Option<Option<i32>>,
+    /// Turns the admission gate on with this ceiling; `null` turns it off.
+    /// See `crate::admission`.
+    #[serde(default, deserialize_with = "double_option")]
+    admission_max_concurrent: Option<Option<i32>>,
+    /// Tuning for the gate. Plain options: these always have a value, so
+    /// there is nothing to clear -- absent leaves them alone.
+    #[serde(default)]
+    admission_high_water: Option<i32>,
+    #[serde(default)]
+    admission_max_queued: Option<i32>,
+    #[serde(default)]
+    admission_max_wait_seconds: Option<i32>,
 }
 
 async fn patch_backend(
@@ -3440,15 +3481,53 @@ async fn patch_backend(
             "default_max_tokens must be positive; send null to clear it".to_string(),
         ));
     }
+    // Checked here as well as by the columns' CHECK constraints so the caller
+    // gets a sentence naming the field instead of a constraint name.
+    for (name, value, min, hint) in [
+        (
+            "upstream_timeout_seconds",
+            body.upstream_timeout_seconds.flatten(),
+            1,
+            "; send null to use the deployment default",
+        ),
+        (
+            "admission_max_concurrent",
+            body.admission_max_concurrent.flatten(),
+            1,
+            "; send null to turn the gate off",
+        ),
+        ("admission_high_water", body.admission_high_water, 1, ""),
+        ("admission_max_queued", body.admission_max_queued, 0, ""),
+        (
+            "admission_max_wait_seconds",
+            body.admission_max_wait_seconds,
+            0,
+            "",
+        ),
+    ] {
+        if value.is_some_and(|v| v < min) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("{name} must be at least {min}{hint}"),
+            ));
+        }
+    }
 
     // `COALESCE($n, column)` would make "set to null" impossible, so each
-    // field carries its own "was it present" flag instead.
+    // nullable field carries its own "was it present" flag instead. The three
+    // gate tuning columns are NOT NULL, so for them absent and null are the
+    // same thing and COALESCE is exactly right.
     let done = sqlx::query(
         "UPDATE model_backends SET
-           upstream_model        = CASE WHEN $2 THEN $3 ELSE upstream_model        END,
-           input_price_per_mtok  = CASE WHEN $4 THEN $5 ELSE input_price_per_mtok  END,
-           output_price_per_mtok = CASE WHEN $6 THEN $7 ELSE output_price_per_mtok END,
-           default_max_tokens    = CASE WHEN $8 THEN $9 ELSE default_max_tokens    END
+           upstream_model           = CASE WHEN $2  THEN $3  ELSE upstream_model           END,
+           input_price_per_mtok     = CASE WHEN $4  THEN $5  ELSE input_price_per_mtok     END,
+           output_price_per_mtok    = CASE WHEN $6  THEN $7  ELSE output_price_per_mtok    END,
+           default_max_tokens       = CASE WHEN $8  THEN $9  ELSE default_max_tokens       END,
+           upstream_timeout_seconds = CASE WHEN $10 THEN $11 ELSE upstream_timeout_seconds END,
+           admission_max_concurrent = CASE WHEN $12 THEN $13 ELSE admission_max_concurrent END,
+           admission_high_water       = COALESCE($14, admission_high_water),
+           admission_max_queued       = COALESCE($15, admission_max_queued),
+           admission_max_wait_seconds = COALESCE($16, admission_max_wait_seconds)
          WHERE id = $1",
     )
     .bind(id)
@@ -3466,6 +3545,13 @@ async fn patch_backend(
     .bind(body.output_price_per_mtok.flatten())
     .bind(body.default_max_tokens.is_some())
     .bind(body.default_max_tokens.flatten())
+    .bind(body.upstream_timeout_seconds.is_some())
+    .bind(body.upstream_timeout_seconds.flatten())
+    .bind(body.admission_max_concurrent.is_some())
+    .bind(body.admission_max_concurrent.flatten())
+    .bind(body.admission_high_water)
+    .bind(body.admission_max_queued)
+    .bind(body.admission_max_wait_seconds)
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("backend update", &e))?;
@@ -12092,6 +12178,9 @@ mod tests {
                 requests_total: 100,
                 errors_total: 9,
                 prefix_cache_hit_rate: None,
+                engine_running: None,
+                engine_waiting: None,
+                admission: None,
             }],
         };
 

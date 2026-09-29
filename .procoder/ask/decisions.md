@@ -1412,3 +1412,69 @@ Options:
 - **Leave it and document it.** The upstream is at fault; the proxy relaying a
   contract violation faithfully is defensible, and the reporter can pin the
   provider. Cheapest, and it leaves our own failover blind.
+
+## How to stop the 35B backend flapping out of rotation
+
+The backend on `192.168.10.245:8000` is healthy, but `unhealthy_after: 2`
+ejects it after two consecutive upstream header timeouts. Kuvryn-Scout's
+~13k-token scans average 37s to first byte (max 978s), so the threshold is
+hit constantly: 6,925 × 502 against 3,087 × 200 in 24h. The pool has one
+member, so each ejection is a full outage until the fleet verdict withdraws it.
+
+- **Stop-gap now**: set `upstream_timeout_seconds` on that `model_backends`
+  row (NULL today) to ~300s, then deploy `fa2c79d` so ejections are logged.
+- **Deploy `fa2c79d` first**: get visibility before changing behaviour, and
+  confirm the ejection reason is timeouts rather than stalls.
+- **Fix it properly**: separate the timeout-based ejection threshold from the
+  probe-based one, so slow generations cannot mark a live engine dead.
+- **Make Kuvryn-Scout stream**: removes the header timeout entirely and gets
+  under the Cloudflare 524 ceiling, but it is a change in another repo.
+
+## Why the 35B shows offline even when the engine is healthy
+
+The live snapshot has two models on one backend:
+
+- `nvidia/Qwen3.6-35B-A3B-NVFP4` -> `http://192.168.10.245:8000/v1`, upstream `nvidia/Qwen3.6-35B-A3B-NVFP4`
+- `cacheaffinity-qwen3-6-35b-a3b-nvfp4` -> same api_base, same upstream model
+
+`main.rs:1611` reports one `BackendHealth` per registry entry, keyed by
+`(api_base, upstream_model)` — identical for both. Each has its own
+independent `healthy` AtomicBool. `web/src/fleet.js:43` merges on that key and
+sets `healthy = unhealthyOn.length === 0`, so one replica pushes the same key
+into both `healthyOn` and `unhealthyOn`. The row goes red as soon as *either*
+entry is ejected, and reports a `split` that is not a partition at all.
+
+Options for the fix:
+
+- Key the merge on the frontend model name too, so the two stay separate rows.
+- Include the model name in `BackendHealth` and have the UI group by it.
+- Deduplicate in the registry so one engine+upstream pair is one health bit
+  shared by every frontend model pointing at it.
+
+## Flow control: protecting vLLM from its own queue
+
+Already present: `engine_scrape.rs` scrapes `{api_base}/metrics` on a timer,
+`EngineLoad` parses `num_requests_running` and `num_requests_waiting`,
+`record_engine_inflight` stores `running + waiting` as one number with a 10s
+freshness window, and `max_inflight_per_backend` uses it as a routing
+condition. So the plumbing exists but it *spills over*, it does not queue.
+
+- Admission gate: store `waiting` separately, and on the hot path hold the
+  request on a bounded semaphore while the engine queue is above a high-water
+  mark. No I/O — it reads an atomic. 503 + Retry-After when the local queue
+  is also full.
+- Reuse the existing routing condition only: cheaper, but spills to another
+  target rather than protecting the engine.
+- Both: queue locally first, spill when the local queue fills.
+
+## Ship per-backend flow control and the stalled-loop fix
+
+Per-backend flow control (GUI + /metrics), the `Upstream::fetch` fix for the
+background loops that stopped silently, and the backend identity-key fix are
+done and verified on kw (565 passed, 0 failed; web suite green). Nothing is
+committed or deployed; the running proxies can still lose their health prober
+to a stalled body until this ships. Not yet checked in a real browser.
+
+- **Commit, let CI build, roll out, then verify both pages in a browser.**
+- **Commit only**: push to main, deploy later.
+- **Hold**: leave the changes uncommitted for review first.

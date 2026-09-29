@@ -123,6 +123,50 @@ impl Pool {
     }
 }
 
+/// A response read to the end. See [`Upstream::fetch`].
+#[derive(Debug)]
+pub struct Fetched {
+    pub status: hyper::StatusCode,
+    pub body: Bytes,
+}
+
+/// Why [`Upstream::fetch`] produced nothing.
+///
+/// Two cases rather than one error because callers log them differently: a
+/// deadline passing says the peer is slow or wedged, anything else says it
+/// is unreachable or broken.
+#[derive(Debug)]
+pub enum FetchError {
+    /// Headers and body together did not arrive within this.
+    TimedOut(Duration),
+    /// The connection, the request or the body read failed outright.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut(d) => write!(f, "no complete response within {d:?}"),
+            Self::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+impl FetchError {
+    /// As an `anyhow::Error`, with the caller's own words for a deadline.
+    ///
+    /// "No complete response within 10s" does not say *what* did not answer;
+    /// every caller already knows, and its message is the useful one.
+    pub fn or_timed_out(self, what: impl std::fmt::Display) -> anyhow::Error {
+        match self {
+            Self::TimedOut(_) => anyhow::anyhow!("{what}"),
+            Self::Failed(e) => e,
+        }
+    }
+}
+
 pub struct Config {
     pub max_idle_per_host: usize,
     pub idle_timeout: Duration,
@@ -146,6 +190,52 @@ impl Upstream {
             tls: tokio_rustls::TlsConnector::from(Arc::new(tls)),
             connect_timeout: cfg.connect_timeout,
         }
+    }
+
+    /// Send a request and read the whole response, all under one deadline.
+    ///
+    /// Every caller that is a background loop wants this, not [`request`]:
+    /// `request` resolves when the *headers* arrive, so a timeout wrapped
+    /// around it bounds nothing after that. A peer that sends headers and then
+    /// stalls the body -- a host that reboots mid-response, a connection that
+    /// silently drops, a hosted provider streaming a large `/models` list over
+    /// a bad link -- leaves the body read waiting forever, and nothing on a
+    /// plain TCP read will ever wake it.
+    ///
+    /// That is not a slow request, it is a dead loop. Each background task here
+    /// is one sequential loop, and one probe that never returns stops it for
+    /// good, for every backend, silently -- nothing has failed, so nothing is
+    /// logged. Both proxies' health probers were found stopped this way while
+    /// their metrics scrapers ran on (so a backend ejected by timeouts had
+    /// nothing left that could bring it back), and the control plane's
+    /// provider sweep once sat dead for two days. The hang itself was not
+    /// caught in the act; this is the one mechanism in those loops that stops
+    /// them without a trace, and `tests` below reproduces it.
+    ///
+    /// The body is small in every case this serves (a model list, Prometheus
+    /// text, a JSON verdict), so reading it whole is the point, not a cost.
+    ///
+    /// [`request`]: Self::request
+    pub async fn fetch(
+        &self,
+        req: Request<Full<Bytes>>,
+        deadline: Duration,
+    ) -> Result<Fetched, FetchError> {
+        use http_body_util::BodyExt as _;
+        let whole = async {
+            let resp = self.request(req).await.map_err(FetchError::Failed)?;
+            let status = resp.status();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| FetchError::Failed(anyhow::anyhow!("reading the body: {e}")))?
+                .to_bytes();
+            Ok(Fetched { status, body })
+        };
+        tokio::time::timeout(deadline, whole)
+            .await
+            .map_err(|_| FetchError::TimedOut(deadline))?
     }
 
     /// Send a request, reusing a pooled connection when one is available.
@@ -501,6 +591,106 @@ impl AsyncWrite for MaybeTls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_client() -> Upstream {
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        Upstream::new(
+            Config {
+                max_idle_per_host: 4,
+                idle_timeout: Duration::from_secs(30),
+                connect_timeout: Duration::from_secs(2),
+            },
+            tls,
+        )
+    }
+
+    /// A peer that answers with complete headers and then sends only part of
+    /// the body it promised, holding the connection open forever. The shape
+    /// of a host that dies mid-response: no FIN, no RST, just silence.
+    async fn stalls_after_headers() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                              content-length: 1000\r\n\r\n{\"data\":[",
+                        )
+                        .await;
+                    // Hold the socket open and never finish.
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    drop(sock);
+                });
+            }
+        });
+        addr
+    }
+
+    fn get(addr: std::net::SocketAddr) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method("GET")
+            .uri(format!("http://{addr}/v1/models"))
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    }
+
+    /// The production failure, reproduced. `request` succeeds -- the headers
+    /// arrived -- and the body read after it would wait forever. `fetch` must
+    /// give up at the deadline instead.
+    #[tokio::test]
+    async fn a_body_that_never_finishes_times_out() {
+        let addr = stalls_after_headers().await;
+        let client = test_client();
+
+        let started = Instant::now();
+        let outcome = client.fetch(get(addr), Duration::from_millis(300)).await;
+        assert!(
+            matches!(outcome, Err(FetchError::TimedOut(_))),
+            "expected a timeout, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "fetch must honour its deadline, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// And the premise the test above rests on: the old shape really does
+    /// hang. Without this, the case above could pass because the stub server
+    /// never got as far as sending headers, which would prove nothing.
+    #[tokio::test]
+    async fn a_timeout_on_request_alone_does_not_bound_the_body() {
+        use http_body_util::BodyExt as _;
+        let addr = stalls_after_headers().await;
+        let client = test_client();
+
+        let resp = tokio::time::timeout(Duration::from_secs(2), client.request(get(addr)))
+            .await
+            .expect("headers arrive promptly")
+            .expect("and the request succeeds");
+        assert_eq!(resp.status(), 200);
+
+        let body =
+            tokio::time::timeout(Duration::from_millis(500), resp.into_body().collect()).await;
+        assert!(
+            body.is_err(),
+            "the body read should still be waiting -- this is the hang fetch exists to bound"
+        );
+    }
 
     #[test]
     fn key_defaults_the_port_per_scheme() {

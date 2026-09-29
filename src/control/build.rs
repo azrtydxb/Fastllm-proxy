@@ -115,6 +115,33 @@ fn flatten_for(
 /// this decrypts the database's copy, it does not add protection to the
 /// snapshot itself. `/snapshot` must be TLS wherever a backend has a real
 /// credential, same as before this module existed.
+/// A backend's gate from its `model_backends` columns: `admission_max_concurrent`
+/// and `ARRAY[admission_high_water, admission_max_queued,
+/// admission_max_wait_seconds]`.
+///
+/// The three tuning columns travel as one array because the queries that read
+/// them already select as many columns as sqlx will decode into a tuple.
+/// `None` when `max_concurrent` is NULL -- no gate -- and also for an array of
+/// the wrong length, which would mean this and the query have drifted apart;
+/// no gate is the behaviour every backend had before gates existed, so that is
+/// the safe way to be wrong.
+///
+/// The columns are CHECK-constrained non-negative, so the casts cannot wrap.
+pub(crate) fn admission_settings(
+    max_concurrent: Option<i32>,
+    tuning: &[i32],
+) -> Option<crate::admission::Settings> {
+    let &[high_water, max_queued, max_wait_seconds] = tuning else {
+        return None;
+    };
+    Some(crate::admission::Settings {
+        max_concurrent: max_concurrent? as u32,
+        high_water: high_water as u32,
+        max_queued: max_queued as u32,
+        max_wait_seconds: max_wait_seconds as u32,
+    })
+}
+
 pub async fn build_snapshot(pool: &PgPool, key: &EncryptionKey) -> anyhow::Result<Snapshot> {
     build_snapshot_with(pool, key, embedder()).await
 }
@@ -193,6 +220,10 @@ pub async fn build_snapshot_with(
         Option<i64>,
         Option<i64>,
         Option<i32>,
+        // admission_max_concurrent (NULL is no gate), then the three tuning
+        // columns as one array -- see `admission_settings`.
+        Option<i32>,
+        Vec<i32>,
     );
     // One row per attachment (migration 0045), so a model served by two
     // machines yields two and its pool has two members for `router.rs` to
@@ -210,7 +241,9 @@ pub async fn build_snapshot_with(
          p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, \
          mb.default_max_tokens, p.credential_kind, mb.id, \
          mb.input_price_per_mtok, mb.output_price_per_mtok, \
-         mb.upstream_timeout_seconds \
+         mb.upstream_timeout_seconds, \
+         mb.admission_max_concurrent, \
+         ARRAY[mb.admission_high_water, mb.admission_max_queued, mb.admission_max_wait_seconds] \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
          JOIN provider_models m ON m.id = mb.provider_model_id \
@@ -236,6 +269,8 @@ pub async fn build_snapshot_with(
             input_price,
             output_price,
             upstream_timeout,
+            admission_max_concurrent,
+            admission_tuning,
         ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
             // A decrypt failure here is contained to this one backend, not
@@ -354,6 +389,7 @@ pub async fn build_snapshot_with(
                 auth_scheme: auth_scheme.clone(),
                 default_max_tokens: max_tokens.map(|n| n as u32),
                 upstream_timeout_seconds: upstream_timeout.map(|t| t as u64),
+                admission: admission_settings(*admission_max_concurrent, admission_tuning),
                 backend_id: Some(*backend_id),
                 input_price_per_mtok: *input_price,
                 output_price_per_mtok: *output_price,

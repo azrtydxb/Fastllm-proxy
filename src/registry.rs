@@ -81,14 +81,25 @@ impl Interner {
             hasher.update(k.as_bytes());
             hex::encode(hasher.finalize())
         });
+        // Every field a live `Backend` copies out of its definition belongs
+        // here. A backend whose key is unchanged is carried forward as the
+        // same object, settings and all, so a field missing from the key is
+        // one an edit never reaches: `upstream_timeout_seconds` was, and
+        // raising it through the database changed the snapshot and left every
+        // running proxy on the old timeout until it restarted.
         let key = format!(
-            "{api_base}|{}|{}|{}|{}|{}|{}",
+            "{api_base}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
             def.upstream_model,
             def.protocol.as_str(),
             def.auth_header,
             def.auth_scheme.as_deref().unwrap_or(""),
             key_digest.as_deref().unwrap_or(""),
             def.default_max_tokens.unwrap_or(0),
+            def.upstream_timeout_seconds,
+            def.admission,
+            def.input_price_per_mtok,
+            def.output_price_per_mtok,
+            def.backend_id,
         );
         let mut state = self.inner.lock();
         if let Some(uid) = state.map.get(&key) {
@@ -199,6 +210,21 @@ pub struct Backend {
     engine_last_prompt: AtomicU64,
     engine_last_gen: AtomicU64,
     engine_last_kv_tokens: AtomicU32,
+    /// Requests the engine has accepted and not started, as of the last
+    /// scrape. Kept apart from `engine_inflight`, which folds it together
+    /// with `running`: a ceiling wants the total, but admission control wants
+    /// the *queue*, because a queue is the engine saying it is behind while
+    /// `running` alone only says it is busy.
+    engine_waiting: AtomicU32,
+    /// The admission gate in front of this backend, when its row sets one.
+    ///
+    /// Built with the backend from its own settings, so changing them in the
+    /// admin API produces a new backend with a new gate -- the settings are
+    /// part of the identity key for exactly that reason (see `Interner`).
+    /// Fed by `crate::engine_scrape` from the engine's queue depth; a gated
+    /// backend that publishes no `/metrics` keeps a fixed ceiling at
+    /// `max_concurrent`, which is still a useful concurrency cap.
+    admission: Option<crate::admission::Admission>,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
     /// Exponentially weighted mean whole-request latency, in microseconds.
@@ -292,6 +318,8 @@ impl Backend {
             engine_last_prompt: AtomicU64::new(0),
             engine_last_gen: AtomicU64::new(0),
             engine_last_kv_tokens: AtomicU32::new(0),
+            engine_waiting: AtomicU32::new(0),
+            admission: def.admission.map(crate::admission::Admission::new),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             latency_ewma_us: AtomicU64::new(0),
@@ -403,6 +431,7 @@ impl Backend {
     pub fn record_engine_inflight(&self, load: &crate::engine_metrics::EngineLoad, now_ms: u64) {
         self.engine_inflight
             .store((load.running + load.waiting) as usize, Ordering::Relaxed);
+        self.engine_waiting.store(load.waiting, Ordering::Relaxed);
         self.engine_at.store(now_ms.max(1), Ordering::Relaxed);
         self.engine_last_ts.store(now_ms.max(1), Ordering::Relaxed);
         self.engine_last_prompt
@@ -477,6 +506,34 @@ impl Backend {
             return self.engine_inflight.load(Ordering::Relaxed);
         }
         self.inflight()
+    }
+
+    /// The engine's own queue depth at the last scrape, when that reading is
+    /// still fresh.
+    ///
+    /// `None` rather than 0 for a backend that has never reported or has
+    /// stopped: an unknown queue is not an empty one, and a gate that read it
+    /// as empty would grow its ceiling on the strength of no evidence.
+    pub fn engine_waiting(&self, now_ms: u64) -> Option<u32> {
+        let at = self.engine_at.load(Ordering::Relaxed);
+        if at == 0 || now_ms.saturating_sub(at) > Self::ENGINE_FRESH_FOR.as_millis() as u64 {
+            return None;
+        }
+        Some(self.engine_waiting.load(Ordering::Relaxed))
+    }
+
+    /// What the engine last said it is doing, `(running, waiting)`, when that
+    /// reading is still fresh. `None` for a backend that publishes no
+    /// `/metrics` or has stopped answering it -- unknown, not idle.
+    pub fn engine_queue(&self, now_ms: u64) -> Option<(u32, u32)> {
+        let waiting = self.engine_waiting(now_ms)?;
+        let total = self.engine_inflight.load(Ordering::Relaxed) as u32;
+        Some((total.saturating_sub(waiting), waiting))
+    }
+
+    /// The gate, if this backend has one.
+    pub fn admission(&self) -> Option<&crate::admission::Admission> {
+        self.admission.as_ref()
     }
 
     pub fn requests_total(&self) -> u64 {
@@ -639,13 +696,32 @@ impl Backend {
 /// token has been streamed to the client — not when the upstream headers
 /// arrive. Getting this wrong makes every streaming backend look idle and
 /// collapses least-loaded routing into round-robin.
-pub struct InflightGuard(Arc<Backend>);
+pub struct InflightGuard(
+    Arc<Backend>,
+    /// The admission slot this request holds, when the backend is gated.
+    ///
+    /// Carried here rather than beside the guard because the two have exactly
+    /// the same lifetime and the guard is already moved into the response
+    /// body: a slot released at the end of *headers* would let the next
+    /// caller in while this one is still generating, which is the pressure
+    /// the gate exists to apply. `None` for an ungated backend -- a hosted
+    /// provider, or a local one the scraper has not reached yet.
+    ///
+    /// Never read, only dropped: releasing the slot *is* its job, and that
+    /// happens when the guard does.
+    #[allow(dead_code)]
+    Option<crate::admission::Permit>,
+);
 
 impl InflightGuard {
     pub fn acquire(backend: Arc<Backend>) -> Self {
+        Self::with_permit(backend, None)
+    }
+
+    pub fn with_permit(backend: Arc<Backend>, permit: Option<crate::admission::Permit>) -> Self {
         backend.inflight.fetch_add(1, Ordering::Relaxed);
         backend.requests_total.fetch_add(1, Ordering::Relaxed);
-        Self(backend)
+        Self(backend, permit)
     }
 }
 
@@ -1163,6 +1239,64 @@ model_list:
         );
         assert!(!carried.is_healthy());
         assert_eq!(carried.inflight(), 1);
+    }
+
+    /// An edit to a setting the live backend holds must reach it.
+    ///
+    /// The registry carries a backend forward -- health, in-flight counts and
+    /// all -- whenever its identity key is unchanged, so every field `Backend`
+    /// copies out of its definition has to be in that key. The timeout was
+    /// not: raising it changed the snapshot and left every running proxy on
+    /// the old value until a restart. A gate set in the admin UI would have
+    /// done the same, silently.
+    #[test]
+    fn an_edited_timeout_or_gate_reaches_the_live_backend() {
+        let interner = Interner::default();
+        let def = |timeout: Option<u64>, gate: Option<u32>| BackendDef {
+            api_base: "http://10.0.0.1:8000/v1".into(),
+            upstream_model: "m".into(),
+            upstream_timeout_seconds: timeout,
+            admission: gate.map(|max| crate::admission::Settings {
+                max_concurrent: max,
+                high_water: 4,
+                max_queued: 8,
+                max_wait_seconds: 5,
+            }),
+            ..Default::default()
+        };
+        let entries = |d: BackendDef| {
+            std::iter::once(("m".to_string(), "http://10.0.0.1:8000/v1".to_string(), d))
+        };
+
+        let before =
+            Registry::build_from_entries(entries(def(None, None)), &interner, None).unwrap();
+        let old = Arc::clone(&before.backends()[0]);
+        assert!(old.admission().is_none());
+
+        let after = Registry::build_from_entries(
+            entries(def(Some(300), Some(6))),
+            &interner,
+            Some(&before),
+        )
+        .unwrap();
+        let new = &after.backends()[0];
+        assert!(
+            !Arc::ptr_eq(new, &old),
+            "a changed setting must not carry the old object"
+        );
+        assert_eq!(new.upstream_timeout_seconds, Some(300));
+        assert_eq!(
+            new.admission().map(|g| g.status().max_concurrent),
+            Some(6),
+            "the gate set in the admin API must exist on the running backend"
+        );
+
+        // And an unchanged definition still carries the live object, which
+        // is what keeps health and in-flight counts across every rebuild.
+        let again =
+            Registry::build_from_entries(entries(def(Some(300), Some(6))), &interner, Some(&after))
+                .unwrap();
+        assert!(Arc::ptr_eq(&again.backends()[0], new));
     }
 
     #[test]

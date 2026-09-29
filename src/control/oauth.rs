@@ -28,7 +28,6 @@
 //!    the refresh token for a new access token
 
 use anyhow::{anyhow, Context, Result};
-use http_body_util::BodyExt;
 use rand::Rng;
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -321,17 +320,13 @@ async fn exchange_tokens(verifier: &str, code: &str, client: &Upstream) -> Resul
         .header("content-type", "application/x-www-form-urlencoded")
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))?;
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), client.request(req))
+    let resp = client
+        .fetch(req, Duration::from_secs(10))
         .await
-        .map_err(|_| anyhow!("OAuth token exchange timed out"))??;
+        .map_err(|e| e.or_timed_out("OAuth token exchange timed out"))?;
 
-    let status = resp.status();
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow!("reading token response: {e}"))?
-        .to_bytes();
+    let status = resp.status;
+    let bytes = resp.body;
 
     if !status.is_success() {
         return Err(anyhow!(
@@ -375,17 +370,17 @@ async fn refresh_tokens(refresh_token: &str, client: &Upstream) -> Result<OAuthT
         .header("content-type", "application/x-www-form-urlencoded")
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))?;
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), client.request(req))
+    // Bounded through the body: this runs inside a snapshot build, and a
+    // refresh whose response stalled would hang every build after it -- and
+    // with it every admin write, since each one rebuilds. See
+    // `Upstream::fetch`.
+    let resp = client
+        .fetch(req, Duration::from_secs(10))
         .await
-        .map_err(|_| anyhow!("OAuth refresh timed out"))??;
+        .map_err(|e| e.or_timed_out("OAuth refresh timed out"))?;
 
-    let status = resp.status();
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow!("reading refresh response: {e}"))?
-        .to_bytes();
+    let status = resp.status;
+    let bytes = resp.body;
 
     if !status.is_success() {
         return Err(anyhow!(

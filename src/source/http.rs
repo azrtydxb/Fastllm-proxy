@@ -8,7 +8,7 @@ use crate::snapshot::Snapshot;
 use crate::source::SnapshotSource;
 use crate::upstream::Upstream;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{Request, StatusCode};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,20 +66,21 @@ impl SnapshotSource for HttpSource {
         }
         let req = builder.body(Full::new(Bytes::new()))?;
 
-        let resp = tokio::time::timeout(Duration::from_secs(10), self.upstream.request(req))
+        // The whole response under one deadline, body included. This is the
+        // snapshot poll: with only the headers bounded, a body that stalled
+        // would freeze this proxy's configuration for good, silently. See
+        // `Upstream::fetch`.
+        let resp = self
+            .upstream
+            .fetch(req, Duration::from_secs(10))
             .await
-            .map_err(|_| anyhow::anyhow!("fetching {} timed out", self.url))??;
+            .map_err(|e| e.or_timed_out(format!("fetching {} timed out", self.url)))?;
 
-        if resp.status() == StatusCode::NOT_MODIFIED {
+        if resp.status == StatusCode::NOT_MODIFIED {
             return Ok(None);
         }
-        let status = resp.status();
-        let body = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?
-            .to_bytes();
+        let status = resp.status;
+        let body = resp.body;
         if !status.is_success() {
             anyhow::bail!("control plane returned {status} fetching {}", self.url);
         }

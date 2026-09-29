@@ -112,6 +112,21 @@ pub struct BackendHealth {
     /// as plain "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache_hit_rate: Option<f32>,
+    /// What the engine last reported it is doing, when fresh. `None` for a
+    /// backend with no `/metrics` -- every hosted provider -- which is
+    /// unknown, not idle. `waiting` is the queue the admission gate reacts to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_running: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_waiting: Option<u32>,
+    /// This replica's admission gate for the backend, when it has one. Per
+    /// replica like every other field here: each proxy holds its own ceiling,
+    /// and the dashboard sums them.
+    ///
+    /// Optional and defaulted in both directions, so a control plane and a
+    /// proxy on either side of this change still understand each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<crate::admission::Status>,
 }
 
 /// Sends a report every `interval`.
@@ -183,8 +198,6 @@ async fn post(
     upstream: &Upstream,
     report: &HealthReport,
 ) -> anyhow::Result<Option<FleetVerdict>> {
-    use http_body_util::BodyExt as _;
-
     let body = serde_json::to_vec(report)?;
     let req = hyper::Request::builder()
         .method("POST")
@@ -196,21 +209,22 @@ async fn post(
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))?;
 
-    let resp = tokio::time::timeout(Duration::from_secs(5), upstream.request(req))
+    // Read whole rather than dropped, so the connection returns to the pool
+    // instead of being torn down every tick, and because the answer carries
+    // the fleet's view of every backend. Under one deadline with the headers:
+    // this is a single loop, and a body that stalled would otherwise end this
+    // replica's reporting for good. See `Upstream::fetch`.
+    let fetched = upstream
+        .fetch(req, Duration::from_secs(5))
         .await
-        .map_err(|_| anyhow::anyhow!("health report timed out"))??;
-    let status = resp.status();
-    // Drained rather than dropped, so the connection returns to the pool
-    // instead of being torn down once a second — and read rather than
-    // discarded, because the answer carries the fleet's view of every backend.
-    let body = resp.into_body().collect().await.map(|b| b.to_bytes());
-    if !status.is_success() {
-        anyhow::bail!("control plane answered {status}");
+        .map_err(|e| anyhow::anyhow!("health report: {e}"))?;
+    if !fetched.status.is_success() {
+        anyhow::bail!("control plane answered {}", fetched.status);
     }
     // An older control plane answers 204 with no body. That is not an error,
     // it is a deployment mid-upgrade, and the proxy simply learns nothing this
     // round rather than logging on every tick.
-    Ok(body.ok().and_then(|b| serde_json::from_slice(&b).ok()))
+    Ok(serde_json::from_slice(&fetched.body).ok())
 }
 
 /// What the control plane keeps: the latest report from each replica, and when
@@ -375,6 +389,9 @@ mod tests {
                 requests_total: 10,
                 errors_total: 0,
                 prefix_cache_hit_rate: None,
+                engine_running: None,
+                engine_waiting: None,
+                admission: None,
             }],
         }
     }

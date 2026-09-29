@@ -266,22 +266,19 @@ async fn fetch(
 }
 
 async fn get(client: &crate::upstream::Upstream, url: &str) -> anyhow::Result<bytes::Bytes> {
-    use http_body_util::BodyExt as _;
     let req = hyper::Request::builder()
         .method("GET")
         .uri(url)
         .header(hyper::header::USER_AGENT, "fastllm-proxy")
         .body(http_body_util::Full::new(bytes::Bytes::new()))?;
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(30), client.request(req))
+    // The catalogue is large, which is exactly when a body stalls: bounded
+    // through the end, not just to the headers. See `Upstream::fetch`.
+    let resp = client
+        .fetch(req, std::time::Duration::from_secs(30))
         .await
-        .map_err(|_| anyhow::anyhow!("fetching {url} timed out"))??;
-    let status = resp.status();
-    let body = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
-        .to_bytes();
+        .map_err(|e| e.or_timed_out(format!("fetching {url} timed out")))?;
+    let status = resp.status;
+    let body = resp.body;
     if !status.is_success() {
         anyhow::bail!("{url} answered {status}");
     }

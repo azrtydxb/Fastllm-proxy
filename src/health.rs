@@ -10,7 +10,7 @@
 //! a model listing at `{api_base}/models`, so nothing here needs to know which
 //! wire format the backend speaks.
 
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{Method, Request};
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,29 +72,27 @@ async fn sweep(state: &Arc<AppState>, probe_timeout: Duration) {
                 .body(Full::default())
                 .expect("probe URL was validated at config load");
 
-            let outcome = tokio::time::timeout(probe_timeout, state.client.request(request)).await;
-
-            let ok = match outcome {
-                Ok(Ok(resp)) => {
-                    let status = resp.status();
-                    // Drained anyway so the pooled connection is reusable, so
-                    // read it rather than discard it: this is the engine's own
-                    // `/models`, and it carries the context window. Keeping it
-                    // current costs nothing here and cannot go stale, which a
-                    // figure stored in the database can — `--max-model-len` is
-                    // chosen at engine start, and a restart changes it without
-                    // touching a row.
-                    let body = resp.into_body().collect().await;
-                    if status.is_success() {
-                        if let Ok(body) = body {
-                            if let Some(len) = context_length_of(&body.to_bytes()) {
-                                backend.record_context_length(len);
-                            }
+            // Headers *and* body under the one deadline. With a timeout around
+            // the request alone the body read was unbounded, and one backend
+            // that stalled mid-body would stop this sweep for every backend,
+            // forever. Both proxies were once found with this loop stopped and
+            // their scrapers still running -- so an ejected backend had nothing
+            // left that could bring it back. See `Upstream::fetch`.
+            let ok = match state.client.fetch(request, probe_timeout).await {
+                Ok(fetched) => {
+                    // This is the engine's own `/models`, and it carries the
+                    // context window. Keeping it current costs nothing here and
+                    // cannot go stale, which a figure stored in the database
+                    // can -- `--max-model-len` is chosen at engine start, and a
+                    // restart changes it without touching a row.
+                    if fetched.status.is_success() {
+                        if let Some(len) = context_length_of(&fetched.body) {
+                            backend.record_context_length(len);
                         }
                     }
-                    status.is_success()
+                    fetched.status.is_success()
                 }
-                Ok(Err(_)) | Err(_) => false,
+                Err(_) => false,
             };
 
             if ok {

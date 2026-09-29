@@ -775,3 +775,80 @@ Still subject to authorisation, like every other candidate: a caller never
 granted the fallback does not reach it, so it cannot widen anyone's access.
 Enforced by a partial unique index rather than convention, so "at most one
 model is the fallback" cannot drift into two.
+
+## Flow control in front of local engines — done (2026-09-29)
+
+Per-backend admission gates (`src/admission.rs`), set on the `model_backends`
+row from the Models page or `PATCH /admin/backends/{id}` (migration 0054). Built
+after a 35B on one GPU ran a 69% 502 rate for a day with nothing wrong with it:
+vLLM queued Kuvryn-Scout's 13k-token scans internally, first byte averaged 37s,
+two header timeouts in a row ejected the backend, and with one member in the
+pool every ejection was a full outage for the model until the fleet verdict
+withdrew it. The health probe answered in 1.7ms throughout and never saw any of
+it.
+
+A gated backend gets a semaphore whose ceiling the existing engine scraper
+halves while `num_requests_waiting >= high_water` and grows by one when the
+queue drains. Surplus waits in the proxy, bounded, and is refused with 503 and
+`Retry-After`. A saturated engine hands off to an untried sibling without
+waiting; peer forwarding is skipped for it, since the peer would dispatch to the
+same engine. The gate's state and the engine's own running/waiting counts go to
+`/metrics` and ride the health report to the Fleet and Models pages.
+
+First built as a deployment-wide `fastllm.admission` config section, and moved
+before it shipped: the right numbers are a property of each engine, and an
+operator wants to change them without a redeploy. `File` mode has no gates.
+
+`tests/admission.rs` sets gates through the admin API against a real control
+plane and runs the same burst with a gate and without one against a fake engine,
+which is what shows the gate, not timing, bounded it; it also reads the gate
+back from `/metrics` and `/admin/fleet`.
+
+Two bugs worth recording, because the obvious implementation has both:
+
+- `Semaphore::forget_permits` removes only *available* permits, and an
+  overloaded engine is exactly when none are, so a naive shrink does nothing
+  when it matters and every held permit comes back at full strength. Shrinking
+  records the shortfall as debt that returning permits repay by being
+  forgotten.
+- A setting edited on a backend never reached running proxies. The registry
+  carries a backend forward whenever its identity key is unchanged, and the key
+  left out `upstream_timeout_seconds` and the prices -- so raising a timeout
+  changed the snapshot and nothing else until a restart. Every field `Backend`
+  copies from its definition is in the key now, gates included;
+  `an_edited_timeout_or_gate_reaches_the_live_backend` fails against the old
+  key.
+
+Known gap carried forward: **per replica, not per engine.** N proxies admit up
+to N × `admission_max_concurrent`. Sharing the ceiling would put a network round
+trip on the request path; the engine's queue depth already reflects every
+replica's traffic, which is what keeps them in check.
+
+## Background loops that stopped without a trace — fixed (2026-09-29)
+
+Both proxies' health probers were found stopped while their metrics scrapers
+ran on: every engine's access log showed each proxy's `GET /metrics` every 2s
+and not one `GET /v1/models`. With nothing probing, a backend that header
+timeouts had ejected on both replicas could never come back, so a healthy 35B
+stayed down until the proxies were restarted.
+
+The mechanism: every background caller wrapped `tokio::time::timeout` around
+`Upstream::request`, which resolves at the headers, and then read the body
+with no deadline at all. One peer that sent headers and went silent stopped
+that loop for every backend, logging nothing, because nothing had failed.
+Thirteen callers had the shape. `Upstream::fetch` now bounds headers and body
+together, and all of them use it: the health prober, the engine scraper and the
+control plane's provider sweep (the likeliest cause of that sweep's two dead
+days), the snapshot poll, the fleet report, usage flushing, limit
+reconciliation, webhooks, OAuth exchange and refresh (refresh runs inside
+every snapshot build), the Kubernetes API client, pricing, and GCP tokens.
+
+The stall itself was not caught in the act. It is the one mechanism in those
+loops that stops them without a trace, and `tests/probe_liveness.rs`
+reproduces the production symptom through the real binary. That test fails
+against the previous `health.rs` and passes against this one.
+
+Not built: a supervisor that restarts a loop that stops ticking. With every
+read bounded there is no remaining way for these loops to wait forever. A
+watchdog would be a second mechanism guarding against the absence of the
+first, and it could restart a loop partway through a sweep.

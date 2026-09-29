@@ -51,7 +51,6 @@ pub async fn served_models_as(
     api_base: &str,
     credential: Option<Credential<'_>>,
 ) -> anyhow::Result<Vec<String>> {
-    use http_body_util::BodyExt as _;
     let url = format!("{}/models", api_base.trim_end_matches('/'));
     let mut builder = hyper::Request::builder()
         .method("GET")
@@ -69,16 +68,16 @@ pub async fn served_models_as(
     // Short, because this runs on a schedule against every provider and a
     // hung endpoint must not hold the sweep up. A provider that cannot answer
     // in ten seconds is not one a request should be routed to either.
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(10), client.request(req))
+    //
+    // Body included in that: this is the provider sweep, one loop over every
+    // provider, and with only the headers bounded a single stalled body would
+    // stop it for good. See `Upstream::fetch`.
+    let fetched = client
+        .fetch(req, std::time::Duration::from_secs(10))
         .await
-        .map_err(|_| anyhow::anyhow!("{url} timed out"))??;
-    let status = resp.status();
-    let body = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading {url}: {e}"))?
-        .to_bytes();
+        .map_err(|e| e.or_timed_out(format!("{url} timed out")))?;
+    let status = fetched.status;
+    let body = fetched.body;
     if !status.is_success() {
         anyhow::bail!("{url} answered {status}");
     }

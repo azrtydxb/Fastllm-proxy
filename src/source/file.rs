@@ -88,6 +88,10 @@ impl SnapshotSource for FileSource {
                 auth_scheme: entry.litellm_params.auth_scheme_or_default(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
                 upstream_timeout_seconds: None,
+                // Never from a file: a gate is set per backend in the admin
+                // API and the Models page, where it can be seen and changed
+                // without a redeploy. `File` mode has neither, so no gates.
+                admission: None,
                 // No database, so no attachment row to name, and nowhere in
                 // the file format to write a price. `File` mode prices
                 // nothing, which is all these three are for.

@@ -22,7 +22,7 @@
 use crate::limiter::{Allowance, Limiter, ObservedCounts};
 use crate::upstream::Upstream;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::Request;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -135,20 +135,17 @@ async fn report(
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))?;
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), upstream.request(req))
+    // Body and headers under one deadline: this is a loop, and a stalled body
+    // would end reconciliation for good. See `Upstream::fetch`.
+    let resp = upstream
+        .fetch(req, Duration::from_secs(10))
         .await
-        .map_err(|_| anyhow::anyhow!("reconciliation request timed out"))??;
+        .map_err(|e| e.or_timed_out("reconciliation request timed out"))?;
 
-    if !resp.status().is_success() {
-        anyhow::bail!("control plane returned {}", resp.status());
+    if !resp.status.is_success() {
+        anyhow::bail!("control plane returned {}", resp.status);
     }
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading reconciliation response body: {e}"))?
-        .to_bytes();
-    let parsed: ReconcileResponseBody = serde_json::from_slice(&bytes)?;
+    let parsed: ReconcileResponseBody = serde_json::from_slice(&resp.body)?;
     Ok(parsed
         .allowances
         .into_iter()

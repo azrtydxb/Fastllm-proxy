@@ -1056,6 +1056,100 @@ await goto("deployment");
   );
 }
 
+// Models: flow control is set per backend, in the GUI. The dashboard shows
+// the gate's live state from the fleet, and the editor PATCHes the backend.
+await goto("models");
+{
+  const root = document.getElementById("root");
+  check(
+    "a gated backend shows its live gate state",
+    root.textContent.includes("4/4 (of 8)"),
+    "expected slots in use over the lowered ceiling",
+  );
+  const cells = $("*").filter(
+    (el) =>
+      el.title ===
+      "Click to set flow control and the upstream timeout for this backend",
+  );
+  check(
+    "every backend row has a flow control cell",
+    cells.length === 3,
+    `found ${cells.length}`,
+  );
+  const offCell = cells.find((el) => el.textContent.trim() === "off");
+  check("an ungated backend reads off", !!offCell);
+
+  sent.length = 0;
+  await click(offCell, "the flow control cell");
+  const input = (label) =>
+    $("label")
+      .find((l) => l.textContent.startsWith(label))
+      ?.querySelector("input");
+  const max = input("Max concurrent");
+  check(
+    "the editor opens with the gate fields",
+    !!max && !!input("High water"),
+  );
+  await fill(max, "6");
+  await fill(input("Upstream timeout"), "240");
+  await click(byText("save"));
+  const call = lastCall("PATCH", "/admin/backends/");
+  check("saving flow control sends PATCH", !!call, "no PATCH was sent");
+  check(
+    "the gate and timeout are sent as numbers",
+    call?.body?.admission_max_concurrent === 6 &&
+      call?.body?.upstream_timeout_seconds === 240,
+    JSON.stringify(call?.body),
+  );
+
+  // Blank turns the gate off, and it has to be sent as null -- absent would
+  // leave it on, which is the opposite of what clearing the field means.
+  sent.length = 0;
+  await goto("models");
+  const onCell = $("*").find(
+    (el) =>
+      el.title ===
+        "Click to set flow control and the upstream timeout for this backend" &&
+      el.textContent.includes("4/4"),
+  );
+  await click(onCell, "the gated backend's cell");
+  await fill(input("Max concurrent"), "");
+  await click(byText("save"));
+  const off = lastCall("PATCH", "/admin/backends/");
+  check(
+    "clearing max concurrent turns the gate off",
+    off?.body &&
+      "admission_max_concurrent" in off.body &&
+      off.body.admission_max_concurrent === null,
+    JSON.stringify(off?.body),
+  );
+  check(
+    "a typo is refused rather than sent",
+    await (async () => {
+      sent.length = 0;
+      await goto("models");
+      const c = $("*").find(
+        (el) =>
+          el.title ===
+          "Click to set flow control and the upstream timeout for this backend",
+      );
+      await click(c);
+      await fill(input("Max concurrent"), "6,5");
+      await click(byText("save"));
+      return !lastCall("PATCH", "/admin/backends/");
+    })(),
+    "a malformed number was PATCHed",
+  );
+}
+
+// Fleet: the engine's own queue and the gate, per backend.
+await goto("fleet");
+{
+  const text = document.getElementById("root").textContent;
+  check("the fleet shows the engine's queue", text.includes("6 run · 9 wait"));
+  check("the fleet shows the gate", text.includes("4/4 (of 8) · 3 waiting"));
+}
+
 // Logout last, on purpose: it is a real control and must work, but clicking
 // it mid-run invalidates every screen after it.
 await goto("overview");

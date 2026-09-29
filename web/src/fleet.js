@@ -56,6 +56,15 @@ export function mergeBackends(reports) {
           prefixRates: [],
           healthyOn: [],
           unhealthyOn: [],
+          // The engine's own queue, as each replica last scraped it. Every
+          // replica reads the same engine, so these are one number seen
+          // several times, not parts of a total -- see the merge below.
+          engineRunning: null,
+          engineWaiting: null,
+          // The admission gate. Summed, unlike the engine: each replica holds
+          // its own ceiling and its own queue, so the fleet's figure is the
+          // total. `null` until a replica reports a gate.
+          admission: null,
         };
         byKey.set(key, row);
       }
@@ -66,6 +75,32 @@ export function mergeBackends(reports) {
         row.prefixRates.push(b.prefix_cache_hit_rate);
       }
       (b.healthy ? row.healthyOn : row.unhealthyOn).push(report.replica);
+      // Largest, not summed and not the first: replicas scrape at different
+      // moments, and the one that saw the deepest queue is the one that
+      // explains why the gate is holding back.
+      if (typeof b.engine_waiting === "number") {
+        row.engineWaiting = Math.max(row.engineWaiting ?? 0, b.engine_waiting);
+        row.engineRunning = Math.max(
+          row.engineRunning ?? 0,
+          b.engine_running ?? 0,
+        );
+      }
+      if (b.admission) {
+        const a = (row.admission ??= {
+          replicas: 0,
+          max_concurrent: 0,
+          capacity: 0,
+          in_use: 0,
+          queued: 0,
+          admitted_total: 0,
+          refused_full_total: 0,
+          refused_timed_out_total: 0,
+        });
+        a.replicas += 1;
+        for (const k of Object.keys(a)) {
+          if (k !== "replicas") a[k] += b.admission[k] ?? 0;
+        }
+      }
     }
   }
   return [...byKey.values()]
@@ -84,6 +119,12 @@ export function mergeBackends(reports) {
       // The partition signal — some replicas can reach it and some cannot.
       split: row.healthyOn.length > 0 && row.unhealthyOn.length > 0,
       errorRate: row.requests > 0 ? row.errors / row.requests : 0,
+      // The gate is holding traffic back: the engine's queue drove the
+      // ceiling below what was configured, or callers are waiting at it.
+      throttled:
+        row.admission !== null &&
+        (row.admission.capacity < row.admission.max_concurrent ||
+          row.admission.queued > 0),
     }))
     .sort(
       (a, b) =>

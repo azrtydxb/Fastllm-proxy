@@ -120,6 +120,7 @@ fastllm:
   balance_rel: 1.5 # relative slack multiplier
   affinity_slots: 65536 # prefix-affinity cache entries
   unhealthy_after: 2 # consecutive failed probes before eviction
+  consecutive_timeout_threshold: 2 # consecutive header timeouts before eviction
 ```
 
 `openai/`, `vllm/`, `hosted_vllm/` and `openai_like/` prefixes are stripped from `litellm_params.model`; a name that is genuinely `Qwen/Qwen3-1.7B` keeps its org. `not-needed`, `none` and `null` API keys are treated as absent.
@@ -149,6 +150,71 @@ auth:
 ```
 
 Absent `auth:` means open (no key required) — today's behaviour when no master key is set either. In `Http` mode (`--control-url` given), `auth:` is ignored: keys live in the database and are managed through the control plane's admin API instead. `fastllm-proxy import` carries an existing `auth:` block into that database unchanged (see "Migrating a `File`-mode deployment" above), so the same keys authorise the same models on either side of the move. `limits` is `File` mode's mirror of the control plane's `limits` table (see "Rate limits" above) — either field alone, both, or neither. `budget` is the same mirror of the `budgets` table (see "P3: usage accounting and budgets" above).
+
+### Protecting an engine from its own queue
+
+vLLM accepts every request and queues the surplus itself, unbounded. A burst
+does not fail -- it makes every request slow, including the ones already
+running, until first-byte latency crosses the upstream timeout and the timeout
+path ejects a backend that was working. Flow control moves that queue into the
+proxy, where it is bounded and a caller can be told "not now" at once.
+
+It is set **per backend**, on the Models page (the FLOW CONTROL cell of each
+backend row) or with `PATCH /admin/backends/{id}` -- never in a config file,
+because the right numbers are a property of the engine, and changing them must
+not need a redeploy. `File` mode has no gates.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `admission_max_concurrent` | off (`null`) | Most concurrent requests each proxy replica sends the engine. Setting it turns the gate on; `null` turns it off. |
+| `admission_high_water` | 4 | Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves. |
+| `admission_max_queued` | 64 | Requests allowed to wait at the proxy; beyond it they get 503. |
+| `admission_max_wait_seconds` | 30 | How long a request waits for a slot before 503. |
+| `upstream_timeout_seconds` | `--upstream-timeout` | Time to first byte before the request fails. Edited in the same dialog because it is the other half of the same problem. |
+
+The engine scraper (`--engine-scrape-interval`, default 2s) halves the gate's
+ceiling while the engine reports `high_water` or more requests waiting, and
+raises it by one per scrape once that queue has drained to zero. Requests past
+the ceiling wait at the proxy, up to `max_queued` of them for up to
+`max_wait_seconds`; beyond that they get **503 with `Retry-After`** and
+`"type": "backend_overloaded"`. That is deliberately not 429: it is a statement
+about the backend, not the caller's quota. Changes reach running proxies on
+their next snapshot poll.
+
+- **A pool still balances.** A request that finds its engine's gate full moves
+  to an untried sibling without waiting, and only queues when there is nowhere
+  else to go.
+- **Each replica has its own ceiling**, so N proxies admit up to N times
+  `admission_max_concurrent` between them. The engine's queue depth reflects all
+  of their traffic, so each backs off on what the others sent too.
+- **Running requests are never cut off.** A lowered ceiling takes effect as
+  slots come free.
+- **An engine with no `/metrics`** keeps a fixed ceiling at
+  `admission_max_concurrent` -- still a concurrency cap, just not an adaptive one.
+
+Start with `admission_high_water` at a few requests -- a small queue is an
+engine keeping its GPU busy, not one falling behind -- and
+`admission_max_concurrent` at roughly the engine's `--max-num-seqs` divided by
+the number of proxy replicas.
+
+**Seeing it work.** The Fleet page shows, per backend, the engine's own
+running/waiting counts and the gate's slots in use over its current ceiling
+(amber while it is holding traffic back); hover for admitted and refused totals.
+The Models page shows the same in each backend's FLOW CONTROL cell. For
+dashboards, `/metrics` carries:
+
+| Series | Type | Meaning |
+|---|---|---|
+| `fastllm_backend_engine_requests{state="running"\|"waiting"}` | gauge | What the engine itself reports, when fresh. |
+| `fastllm_admission_max_concurrent` | gauge | The configured ceiling. |
+| `fastllm_admission_capacity` | gauge | The current ceiling; below the configured one while the engine is behind. |
+| `fastllm_admission_in_use` | gauge | Slots held by requests in progress. |
+| `fastllm_admission_queued` | gauge | Requests waiting at the gate. |
+| `fastllm_admission_admitted_total` | counter | Requests let through. |
+| `fastllm_admission_refused_total{reason="full"\|"timed_out"}` | counter | Refused at once (queue full, or moved to a sibling) or after waiting. |
+
+All are labelled `api_base` and `model`, per replica; sum across replicas for
+the fleet.
 
 ### Tuning affinity
 

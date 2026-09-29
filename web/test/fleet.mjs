@@ -6,7 +6,12 @@
 // and says nothing about any replica's health. What decides it is how long the
 // newest snapshot has been available. These cases pin that in both directions.
 import assert from "node:assert/strict";
-import { fleetSummary, convergenceGrace, classifyLag } from "../src/fleet.js";
+import {
+  fleetSummary,
+  convergenceGrace,
+  classifyLag,
+  mergeBackends,
+} from "../src/fleet.js";
 
 const CONFIG = { config_poll_seconds: 5, health_report_interval_seconds: 10 };
 const GRACE = 20; // 5 + 10 + 5
@@ -256,6 +261,80 @@ check("without history classifyLag is the age signal alone", () => {
     NOW_MS,
   );
   assert.deepEqual(idle.laggards, ["b"]);
+});
+
+// Admission and the engine's queue, merged across replicas. The two merge
+// differently on purpose: every replica holds its own gate, so gates sum; they
+// all scrape one engine, so its queue is the deepest any of them saw.
+const gated = (replica, admission, waiting) => ({
+  replica,
+  snapshot_version: 1,
+  backends: [
+    {
+      api_base: "http://e/v1",
+      model: "m",
+      healthy: true,
+      inflight: 0,
+      requests_total: 0,
+      errors_total: 0,
+      engine_running: 3,
+      engine_waiting: waiting,
+      admission,
+    },
+  ],
+});
+const gate = (capacity, in_use, queued) => ({
+  max_concurrent: 8,
+  capacity,
+  in_use,
+  queued,
+  admitted_total: 10,
+  refused_full_total: 1,
+  refused_timed_out_total: 2,
+});
+
+check("gates sum across replicas; the engine's queue does not", () => {
+  const [b] = mergeBackends([
+    gated("a", gate(4, 4, 2), 7),
+    gated("b", gate(8, 1, 0), 5),
+  ]);
+  assert.equal(b.admission.replicas, 2);
+  assert.equal(b.admission.max_concurrent, 16);
+  assert.equal(b.admission.capacity, 12);
+  assert.equal(b.admission.in_use, 5);
+  assert.equal(b.admission.queued, 2);
+  assert.equal(b.admission.refused_full_total, 2);
+  assert.equal(b.admission.refused_timed_out_total, 4);
+  assert.equal(b.engineWaiting, 7, "the deepest queue any replica saw");
+  assert.equal(b.engineRunning, 3);
+  assert.equal(b.throttled, true);
+});
+
+check("an idle gate is not throttling", () => {
+  const [b] = mergeBackends([gated("a", gate(8, 1, 0), 0)]);
+  assert.equal(b.throttled, false);
+});
+
+check("no gate and no engine metrics read as unknown, not zero", () => {
+  const [b] = mergeBackends([
+    {
+      replica: "a",
+      snapshot_version: 1,
+      backends: [
+        {
+          api_base: "https://openrouter.ai/api/v1",
+          model: "x",
+          healthy: true,
+          inflight: 0,
+          requests_total: 0,
+          errors_total: 0,
+        },
+      ],
+    },
+  ]);
+  assert.equal(b.admission, null);
+  assert.equal(b.engineWaiting, null);
+  assert.equal(b.throttled, false);
 });
 
 console.log(failures ? `\n${failures} failed` : "\nfleet: all passed");

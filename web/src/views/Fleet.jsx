@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { useLoader } from "../load.js";
 import { fleetSummary, convergenceGrace, useSnapshotLag } from "../fleet.js";
+import { EngineQueue, FlowStatus } from "./FlowControl.jsx";
 import { FleetMap } from "./FleetMap.jsx";
 import {
   Banner,
@@ -53,6 +54,12 @@ const BACKEND_COLS = [
   // stopped being true: after a restart one backend here served at 0% while
   // its sibling ran at 96%, and both read as plain "healthy".
   { label: "PREFIX CACHE", width: ".9fr", align: "right" },
+  // What the engine itself says: requests running and waiting in its own
+  // queue. The queue is the signal flow control reacts to.
+  { label: "ENGINE", width: ".9fr", align: "right" },
+  // The admission gate, summed across replicas: slots in use over the current
+  // ceiling. Amber while it is holding traffic back. Set on the Models page.
+  { label: "FLOW CONTROL", width: "1.2fr", align: "right" },
 ];
 
 const NODE_COLS = [
@@ -457,6 +464,8 @@ export function Fleet({ onUnauthorised, config }) {
                       ? "—"
                       : `${Math.round(b.prefixHitRate * 100)}%`}
                   </Mono>,
+                  <EngineQueue key="q" live={b} />,
+                  <FlowStatus key="fc" live={b} />,
                 ]}
               />
             ))}

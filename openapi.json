@@ -170,7 +170,7 @@
     },
     "/admin/backends/{id}": {
       "patch": {
-        "summary": "Change what one model costs and is called at one provider. An explicit null clears a field; an absent field is left alone",
+        "summary": "Change what one model costs, is called, and how it is protected at one provider. An explicit null clears a field; an absent field is left alone",
         "operationId": "patch_admin_backends_id",
         "tags": ["admin"],
         "requestBody": {
@@ -193,6 +193,37 @@
                   "default_max_tokens": {
                     "type": ["integer", "null"],
                     "description": "Supplied when a request omits max_tokens and this provider requires one"
+                  },
+                  "upstream_timeout_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1,
+                    "description": "Seconds this backend may take to send response headers. Null returns to the deployment's --upstream-timeout"
+                  },
+                  "admission_max_concurrent": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1,
+                    "description": "Turns on flow control: at most this many concurrent requests per proxy replica, the rest held at the proxy. The ceiling halves while the engine reports admission_high_water or more requests waiting and grows back as its queue drains. Null turns it off"
+                  },
+                  "admission_high_water": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Engine queue depth (vllm:num_requests_waiting) at which the ceiling halves"
+                  },
+                  "admission_max_queued": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Requests allowed to wait at the proxy for a slot; beyond it callers get 503 with Retry-After"
+                  },
+                  "admission_max_wait_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "How long a request waits for a slot before 503 with Retry-After"
                   }
                 }
               }
