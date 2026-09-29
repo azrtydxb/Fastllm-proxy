@@ -465,7 +465,7 @@ export function Fleet({ onUnauthorised, config }) {
                       : `${Math.round(b.prefixHitRate * 100)}%`}
                   </Mono>,
                   <EngineQueue key="q" live={b} />,
-                  <FlowStatus key="fc" live={b} />,
+                  <FlowStatus key="fc" live={b} alignEnd />,
                 ]}
               />
             ))}

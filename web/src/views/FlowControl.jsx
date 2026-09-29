@@ -28,7 +28,7 @@ import {
  * backend yet. Amber when the gate is holding traffic back -- the engine's
  * queue drove the ceiling below what was configured, or callers are waiting.
  */
-export function FlowStatus({ live, compact = false }) {
+export function FlowStatus({ live, compact = false, alignEnd = false }) {
   const a = live?.admission;
   if (!a) return <Mono style={{ color: "var(--fg-5)" }}>—</Mono>;
   const refused = a.refused_full_total + a.refused_timed_out_total;
@@ -40,7 +40,16 @@ export function FlowStatus({ live, compact = false }) {
     `${fmtCompact(a.refused_full_total)} refused at once (queue full or ` +
     `moved to a sibling), ${fmtCompact(a.refused_timed_out_total)} after waiting`;
   return (
-    <Row gap={6} style={{ flexWrap: "nowrap" }}>
+    // A flex row ignores the table cell's text alignment, so a right-aligned
+    // column has to ask for it: without this the Fleet page drew the figure
+    // hard against the ENGINE column instead of under its own header.
+    <Row
+      gap={6}
+      style={{
+        flexWrap: "nowrap",
+        justifyContent: alignEnd ? "flex-end" : undefined,
+      }}
+    >
       <Mono
         title={title}
         style={{
