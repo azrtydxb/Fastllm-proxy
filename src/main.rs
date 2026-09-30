@@ -104,6 +104,13 @@ struct Cli {
     #[arg(long, default_value_t = 64)]
     max_body_mb: usize,
 
+    /// Request bodies held in memory at once, across all requests, in MiB.
+    /// A request that cannot get its share within 5s is refused with 503.
+    /// Sized by memory limit, not traffic: it must sit well under it, since a
+    /// body is briefly held twice while it is joined.
+    #[arg(long, env = "FASTLLM_MAX_INFLIGHT_BODY_MB", default_value_t = 512)]
+    max_inflight_body_mb: usize,
+
     /// Idle upstream connections kept per backend.
     #[arg(long, default_value_t = 256)]
     pool_max_idle: usize,
@@ -1504,6 +1511,11 @@ fn build_app_state(
         legacy_master_key,
         snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
         max_body_bytes: cli.max_body_mb.saturating_mul(1024 * 1024),
+        body_budget: Arc::new(tokio::sync::Semaphore::new(
+            cli.max_inflight_body_mb.saturating_mul(1024).max(1),
+        )),
+        body_budget_kib: cli.max_inflight_body_mb.saturating_mul(1024).max(1),
+        retry_budget: Default::default(),
         max_retries: cli.max_retries,
         #[cfg(feature = "classifier")]
         classifier: ArcSwap::from_pointee(fastllm_proxy::classifier::Classifier::default()),

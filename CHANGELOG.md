@@ -316,6 +316,27 @@ source for _why_ anything is the way it is; this file is the summary.
     stops making every proxy rebuild routing and clear its cache.
   - Usage batches the control plane could not take are retried (bounded)
     instead of dropped, and flushed on shutdown.
+  - A snapshot is applied only if its routing table builds: the table is
+    built first, so a failure no longer leaves auth on the new policy and
+    routing on the old one with no retry.
+  - A snapshot with the same policy under a new version replaces the stored one
+    without rebuilding the registry or clearing the cache.
+    `content_eq` now also compares MCP servers, agents, prompt classes and the
+    fallback model, which it used to ignore.
+  - Snapshot builds that publish are serialised, so a slow periodic build can
+    no longer store an older view of the database over a newer admin write.
+  - The provider sweep and the usage roll-up run on one control-plane replica
+    at a time (a Postgres advisory lock), so a second replica is safe.
+  - Request bodies share a process-wide budget (`--max-inflight-body-mb`,
+    default 512); a request that cannot get its share in 5s is refused with 503.
+  - Retries onto a sibling backend are capped at a fifth of recent requests
+    (plus a floor of 10 per 10s). A slow backend used to push its whole load
+    onto its siblings at the moment they could least take it. A request
+    refused a retry gets what it already got; failover to the next _model_ in
+    a chain is not limited.
+  - `fastllm_backend_ejections_total`, and `deploy/monitoring.yaml` with a
+    ServiceMonitor and alerts for replica disagreement, flapping, no backends,
+    dropped usage and upstream 5xx.
   - Readiness is `/readyz`, failing only while draining, with
     `--shutdown-delay` (5s) of continued serving after `SIGTERM`. It no
     longer tracks backends.

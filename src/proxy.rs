@@ -567,6 +567,15 @@ where
     let received_at = Instant::now();
     let (parts, body) = req.into_parts();
 
+    // Held until this function returns -- through retries and failover, which
+    // is when the body is still resident -- and released before a streaming
+    // response finishes, since the response does not borrow the request.
+    let _body_budget = match reserve_body(&state, &parts.headers).await {
+        Ok(permit) => permit,
+        Err(resp) => return *resp,
+    };
+    state.retry_budget.note_request();
+
     let collected = match Limited::new(body, state.max_body_bytes).collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
@@ -1193,6 +1202,12 @@ where
                     if !state.router.has_candidate(pool, &tried) && more_models_after_this {
                         break;
                     }
+                    // Past the retry budget the next backend is not tried:
+                    // sending a slow backend's traffic to its siblings is how a
+                    // partial slowdown becomes a total one.
+                    if !state.retry_budget.allow() {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -1234,7 +1249,10 @@ where
                         // set would discard this response and answer with a
                         // synthetic 502, throwing away the upstream's own
                         // diagnostics; on a single-node pool that is every 5xx.
-                        if attempt < state.max_retries && state.router.has_candidate(pool, &tried) {
+                        if attempt < state.max_retries
+                            && state.router.has_candidate(pool, &tried)
+                            && state.retry_budget.allow()
+                        {
                             last_error =
                                 Some(format!("upstream {} returned {}", backend.api_base, status));
                             state.telemetry.retries.fetch_add(1, Ordering::Relaxed);
@@ -1428,6 +1446,9 @@ where
                     last_error = Some(format!("upstream {} unreachable: {e}", backend.api_base));
                     warn!(backend = %backend.api_base, error = %e, "upstream request failed");
                     if !state.router.has_candidate(pool, &tried) && more_models_after_this {
+                        break;
+                    }
+                    if !state.retry_budget.allow() {
                         break;
                     }
                     continue;
@@ -2987,6 +3008,40 @@ fn models_response(
     )
 }
 
+/// Take this request's share of the process-wide body budget, or refuse.
+///
+/// Charged from `Content-Length` when there is one; a body with none (chunked)
+/// is charged 1 MiB and still capped per request by `Limited`. Waits briefly
+/// rather than failing at once, so a burst of uploads queues instead of
+/// bouncing, but not long enough for a stuck upload to hold every other
+/// caller's connection open.
+async fn reserve_body(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Box<Response<ResBody>>> {
+    let bytes = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1024 * 1024)
+        .min(state.max_body_bytes);
+    let kib = bytes.div_ceil(1024).clamp(1, state.body_budget_kib);
+    let want = u32::try_from(kib).unwrap_or(u32::MAX);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Arc::clone(&state.body_budget).acquire_many_owned(want),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(Box::new(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded",
+            "the gateway is holding too many request bodies; retry shortly",
+        ))),
+    }
+}
+
 /// `POST /v1/messages`: an Anthropic-shaped request, served by the ordinary
 /// request path.
 ///
@@ -3438,6 +3493,19 @@ waiting (the wait queue was full, or a sibling was tried instead), `timed_out` a
             "fastllm_backend_healthy{{api_base=\"{}\"}} {}\n",
             b.api_base,
             u8::from(b.is_healthy())
+        ));
+    }
+
+    out.push_str(
+        "# HELP fastllm_backend_ejections_total Times a backend left rotation, for any reason.\n",
+    );
+    out.push_str("# TYPE fastllm_backend_ejections_total counter\n");
+    for b in registry.backends() {
+        out.push_str(&format!(
+            "fastllm_backend_ejections_total{{api_base=\"{}\",model=\"{}\"}} {}\n",
+            b.api_base,
+            b.upstream_model,
+            b.ejections_total()
         ));
     }
 

@@ -93,6 +93,10 @@ So the verdict is public and the detail is earned:
 | `/health`, `/healthz` | the status code, and `{"status": ...}` | the full body       |
 | `/metrics`            | `401`                                  | the full exposition |
 
+`deploy/monitoring.yaml` is a ServiceMonitor and a PrometheusRule for the
+Prometheus operator. `/metrics` needs a key, so it reads a bearer token from a
+Secret named in the file; the alerts compare replicas, so it scrapes each pod.
+
 `/livez` exists because liveness and readiness are different questions.
 `/health` answers 503 when no backend is healthy — right for readiness, and
 catastrophic for liveness, where it would have the kubelet restart every pod

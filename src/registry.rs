@@ -245,6 +245,8 @@ pub struct Backend {
     admission: Option<crate::admission::Admission>,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
+    /// Times this backend has been taken out of rotation, for any reason.
+    ejections_total: AtomicU64,
     /// Exponentially weighted mean whole-request latency, in microseconds.
     ///
     /// One `AtomicU64` rather than reading the histogram beside it, because
@@ -344,6 +346,7 @@ impl Backend {
             admission: def.admission.map(crate::admission::Admission::new),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            ejections_total: AtomicU64::new(0),
             latency_ewma_us: AtomicU64::new(0),
             duration: crate::telemetry::Histogram::new(),
         })
@@ -562,6 +565,10 @@ impl Backend {
         self.requests_total.load(Ordering::Relaxed)
     }
 
+    pub fn ejections_total(&self) -> u64 {
+        self.ejections_total.load(Ordering::Relaxed)
+    }
+
     pub fn errors_total(&self) -> u64 {
         self.errors_total.load(Ordering::Relaxed)
     }
@@ -682,6 +689,7 @@ impl Backend {
         if !self.healthy.swap(false, Ordering::Relaxed) {
             return;
         }
+        self.ejections_total.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             backend = %self.api_base,
             model = %self.upstream_model,
@@ -748,7 +756,11 @@ impl Backend {
     pub fn mark_probe_failed(&self, threshold: u32) -> bool {
         let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
         if failures >= threshold {
-            return self.healthy.swap(false, Ordering::Relaxed);
+            let was_healthy = self.healthy.swap(false, Ordering::Relaxed);
+            if was_healthy {
+                self.ejections_total.fetch_add(1, Ordering::Relaxed);
+            }
+            return was_healthy;
         }
         false
     }
