@@ -329,6 +329,11 @@ source for _why_ anything is the way it is; this file is the summary.
     at a time (a Postgres advisory lock), so a second replica is safe.
   - Request bodies share a process-wide budget (`--max-inflight-body-mb`,
     default 512); a request that cannot get its share in 5s is refused with 503.
+  - Retries onto a sibling backend are capped at a fifth of recent requests
+    (plus a floor of 10 per 10s). A slow backend used to push its whole load
+    onto its siblings at the moment they could least take it. A request
+    refused a retry gets what it already got; failover to the next _model_ in
+    a chain is not limited.
   - `fastllm_backend_ejections_total`, and `deploy/monitoring.yaml` with a
     ServiceMonitor and alerts for replica disagreement, flapping, no backends,
     dropped usage and upstream 5xx.

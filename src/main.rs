@@ -1515,6 +1515,7 @@ fn build_app_state(
             cli.max_inflight_body_mb.saturating_mul(1024).max(1),
         )),
         body_budget_kib: cli.max_inflight_body_mb.saturating_mul(1024).max(1),
+        retry_budget: Default::default(),
         max_retries: cli.max_retries,
         #[cfg(feature = "classifier")]
         classifier: ArcSwap::from_pointee(fastllm_proxy::classifier::Classifier::default()),

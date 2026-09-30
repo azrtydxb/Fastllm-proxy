@@ -865,8 +865,9 @@ is stored; same-policy snapshots adopted without a rebuild; advisory-lock
 leader for the control plane's sweeps; a global request-body budget; ejection
 metric and `deploy/monitoring.yaml`.
 
-Still open, from the same audits: no retry budget (a slow backend still gets
-each request retried onto its siblings); rate-limit shares start at 1.0 on a new
+Retry budget added (a fifth of recent requests plus a floor).
+
+Still open, from the same audits: rate-limit shares start at 1.0 on a new
 replica; the snapshot build is O(rows) every 5s with unbounded queries; the
 snapshot is written to a node-local emptyDir in plaintext; the control plane
 has one Postgres instance; readiness/liveness of the control plane do no I/O;

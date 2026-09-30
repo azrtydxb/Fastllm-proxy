@@ -50,6 +50,8 @@ pub struct AppState {
     /// (twice each while a body was joined into one buffer) and an OOM kill
     /// that took every in-flight generation with it.
     pub body_budget: Arc<tokio::sync::Semaphore>,
+    /// Caps retries at a fraction of recent requests. See [`crate::retry_budget`].
+    pub retry_budget: crate::retry_budget::RetryBudget,
     /// The size `body_budget` was created with, in KiB.
     pub body_budget_kib: usize,
     pub max_retries: usize,
@@ -289,6 +291,7 @@ impl AppState {
             max_body_bytes: 1024,
             body_budget: Arc::new(tokio::sync::Semaphore::new(1024)),
             body_budget_kib: 1024,
+            retry_budget: Default::default(),
             max_retries: 0,
             upstream_headers_timeout: Duration::from_secs(1),
             unhealthy_after: 1,

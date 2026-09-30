@@ -30,6 +30,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod reconcile;
 pub mod registry;
+pub mod retry_budget;
 pub mod router;
 pub mod routing;
 pub mod snapshot;
