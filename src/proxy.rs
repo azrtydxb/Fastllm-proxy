@@ -156,6 +156,24 @@ pub async fn handle(
                 serde_json::json!({ "status": "alive" }).to_string(),
             ))
         }
+        // Readiness for the kubelet: is this pod one the Service should send
+        // traffic to. Deliberately *not* about backends -- `/health` is 503
+        // with none healthy, and a fleet whose backends fail together then had
+        // every pod unready at once, leaving the Service with no endpoints and
+        // clients a connection error instead of a structured one. A replica
+        // with no backend can still forward to a peer or explain itself.
+        (&Method::GET, "/readyz") => {
+            let draining = state.draining.load(Ordering::Relaxed);
+            return Ok(json_response(
+                if draining {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                },
+                serde_json::json!({ "status": if draining { "draining" } else { "ready" } })
+                    .to_string(),
+            ));
+        }
         (&Method::GET, "/health") | (&Method::GET, "/healthz") => {
             let snapshot = state.snapshot.load();
             return Ok(health_response(
@@ -1439,7 +1457,8 @@ where
     // Not for a saturated engine: the sibling replica would dispatch to the
     // same engine, adding load to the one thing that is already behind.
     if ended_saturated.is_none() && !already_forwarded(&parts.headers) {
-        if let Some(resp) = forward_to_peer(&state, &target_model, &parts.headers, &collected).await
+        if let Some(resp) =
+            forward_to_peer(&state, &target_model, &subpath, &parts.headers, &collected).await
         {
             return resp;
         }
@@ -1509,6 +1528,7 @@ fn already_forwarded(headers: &HeaderMap) -> bool {
 async fn forward_to_peer(
     state: &Arc<AppState>,
     target_model: &str,
+    subpath: &str,
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Option<Response<ResBody>> {
@@ -1524,7 +1544,10 @@ async fn forward_to_peer(
             % addrs.len(),
     )?;
 
-    let uri = format!("http://{pick}/v1/chat/completions");
+    // The path the client used, not a fixed chat one: an embeddings or rerank
+    // request forwarded to `/chat/completions` reached the sibling as the
+    // wrong kind of request.
+    let uri = format!("http://{pick}/v1{subpath}");
     let mut builder = Request::builder().method(Method::POST).uri(&uri);
     let out = builder.headers_mut()?;
     for (name, value) in headers.iter() {
@@ -1538,7 +1561,13 @@ async fn forward_to_peer(
     out.insert(FORWARDED_HEADER, HeaderValue::from_static("1"));
 
     let req = builder.body(Full::new(body.clone())).ok()?;
-    match state.client.request(req).await {
+    // Bounded like any other dispatch. This runs after every local attempt has
+    // failed, so a peer that never answers would hold the client, and the
+    // request body, for as long as the client was willing to wait.
+    let sent = tokio::time::timeout(state.upstream_headers_timeout, state.client.request(req))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("peer sent no headers in time")));
+    match sent {
         Ok(resp) => {
             tracing::info!(
                 model = %target_model,
@@ -1784,12 +1813,15 @@ fn may_hide_an_error(resp: &Response<UpstreamBody>) -> bool {
 /// what the status should have been; this makes the response agree. The body is
 /// left as the upstream wrote it, and served from the buffer.
 async fn unmask_error(resp: &mut Response<UpstreamBody>) -> anyhow::Result<()> {
+    let limit = MASKED_ERROR_SCAN_LIMIT as usize;
     let body = resp
         .body_mut()
-        .buffer()
+        .buffer(limit)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    if let Some(status) = embedded_error_status(&body) {
+    // `None` is a body past the limit: too big to be an error document, and
+    // already on its way to the client untouched.
+    if let Some(status) = body.and_then(|b| embedded_error_status(&b)) {
         *resp.status_mut() = status;
     }
     Ok(())

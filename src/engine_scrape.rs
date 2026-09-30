@@ -140,7 +140,15 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 // Stall first, record second: the check compares the scrape
                 // against the *previous* stored reading, and recording would
                 // overwrite it with the current one.
-                let stalled = backend.check_stall(&load, state.unhealthy_after);
+                let stalled = backend.check_stall(
+                    &load,
+                    // Ten seconds of silence at the default scrape rate, not
+                    // four: a long unchunked prefill or a graph capture
+                    // freezes every counter for a few seconds on an engine
+                    // that is working, and ejecting it for that is how a busy
+                    // GPU got taken out of rotation.
+                    state.unhealthy_after.max(5),
+                );
                 backend.record_engine_inflight(&load, now_ms);
                 // The gate reacts to the engine's own queue, and this is where
                 // that number arrives. Fed after recording so the gate and the

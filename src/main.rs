@@ -137,6 +137,12 @@ struct Cli {
     #[arg(long, default_value_t = 25, env = "FASTLLM_SHUTDOWN_GRACE")]
     shutdown_grace: u64,
 
+    /// Seconds to keep accepting connections after SIGTERM while `/readyz`
+    /// already answers 503, so the Service stops routing here before the
+    /// listener closes.
+    #[arg(long, env = "FASTLLM_SHUTDOWN_DELAY", default_value_t = 5)]
+    shutdown_delay: u64,
+
     /// Seconds between health reports to the control plane. Backend health
     /// only exists in the data plane, so this is the only way a management UI
     /// can see it.
@@ -1513,6 +1519,7 @@ fn build_app_state(
         started: Instant::now(),
         requests_ok: AtomicU64::new(0),
         requests_failed: AtomicU64::new(0),
+        draining: std::sync::atomic::AtomicBool::new(false),
         usage,
         limiter: Arc::new(fastllm_proxy::limiter::Limiter::new()),
         telemetry: Arc::new(fastllm_proxy::telemetry::Telemetry::new()),
@@ -1683,6 +1690,11 @@ fn replica_id() -> String {
     format!("{}-{nanos}-{n}", std::process::id())
 }
 
+/// Inbound connections accepted at once. Far above real traffic (a fleet of
+/// gateways multiplexes onto few connections) and below the descriptor limit
+/// of a typical container, so the ceiling is hit by abuse, not by load.
+const MAX_INBOUND_CONNECTIONS: usize = 20_000;
+
 /// Health sweeps and the proxy listener's accept loop. Common to `--role
 /// all` and `--role proxy` — everything role-specific (building `state`,
 /// wiring a poller/SIGHUP/the admin API) has already happened by the time
@@ -1718,7 +1730,21 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
     }
     info!(%addr, "fastllm-proxy listening");
 
-    let shutdown = shutdown_signal();
+    // On the signal, flip readiness and keep serving for a moment before the
+    // listener closes. See `AppState::draining`.
+    let shutdown = {
+        let state = Arc::clone(&state);
+        let delay = Duration::from_secs(cli.shutdown_delay);
+        async move {
+            shutdown_signal().await;
+            state.draining.store(true, Ordering::Relaxed);
+            info!(
+                delay_seconds = delay.as_secs(),
+                "draining: readiness now failing"
+            );
+            tokio::time::sleep(delay).await;
+        }
+    };
     tokio::pin!(shutdown);
 
     // Told once, on signal: stop keep-alive and finish what is in flight.
@@ -1735,9 +1761,22 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
                     Ok(pair) => pair,
                     Err(e) => {
                         error!(error = %e, "accept failed");
+                        // Out of file descriptors fails every accept at once;
+                        // retrying with no pause is a busy loop that also
+                        // floods the log.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
                 };
+                // Past this a connection is shed at the door rather than
+                // accepted and starved: nothing bounded them before, so a burst
+                // (or a client that opens sockets and says nothing) ran the
+                // process out of descriptors, after which even health probes
+                // failed to connect.
+                if live.load(Ordering::Relaxed) >= MAX_INBOUND_CONNECTIONS {
+                    warn!("too many open connections, dropping {peer}");
+                    continue;
+                }
                 if let Err(e) = stream.set_nodelay(true) {
                     warn!(error = %e, "could not set TCP_NODELAY on {peer}");
                 }
@@ -1748,6 +1787,11 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
                 tokio::spawn(async move {
                     let service = service_fn(move |req| proxy::handle(req, Arc::clone(&state)));
                     let conn = http1::Builder::new()
+                        // A client must finish its request line and headers
+                        // within this or the connection is closed; otherwise a
+                        // socket that sends one byte a minute is held forever.
+                        .timer(hyper_util::rt::TokioTimer::new())
+                        .header_read_timeout(Duration::from_secs(30))
                         .keep_alive(true)
                         // Let the client stop uploading while the response is
                         // still streaming, and vice versa.
@@ -1786,6 +1830,9 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
     }
 
     drain(&close_tx, &live, Duration::from_secs(cli.shutdown_grace)).await;
+    // The connections that just finished produced usage that is still queued.
+    // Without this it died with the process, on every rollout.
+    state.usage.flush_now(Duration::from_secs(5)).await;
     Ok(())
 }
 

@@ -98,11 +98,12 @@ spec:
             {{- if .Values.proxy.caBundle }}
             - {name: control-ca, mountPath: /etc/fastllm/ca, readOnly: true}
             {{- end }}
-          # Readiness tracks backends: /health is 503 with none healthy, which
-          # correctly pulls this pod out of the Service. Liveness must NOT use
-          # it, or a dead backend would restart-loop a healthy proxy.
+          # Readiness is /readyz: 200 until the pod starts draining. It does not
+          # track backends -- /health does, and with backends down together that
+          # emptied the Service. Liveness must not use /health either, or a dead
+          # backend would restart-loop a healthy proxy.
           readinessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet: {path: /readyz, port: http}
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:

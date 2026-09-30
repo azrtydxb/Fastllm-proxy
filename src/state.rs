@@ -55,6 +55,12 @@ pub struct AppState {
     pub started: Instant,
     pub requests_ok: AtomicU64,
     pub requests_failed: AtomicU64,
+    /// Set when shutdown begins. `/readyz` answers 503 from then on, while the
+    /// listener keeps accepting for `--shutdown-delay`: the endpoints
+    /// controller removes a terminating pod on its own schedule, and closing
+    /// the listener first sent it connections it could no longer take -- resets
+    /// on every rollout.
+    pub draining: std::sync::atomic::AtomicBool,
 
     /// The data-plane half of the Snapshot protocol's reverse channel
     /// (`POST /usage`, see `crate::usage`), recorded into on every
@@ -256,6 +262,7 @@ impl AppState {
             started: Instant::now(),
             requests_ok: AtomicU64::new(0),
             requests_failed: AtomicU64::new(0),
+            draining: std::sync::atomic::AtomicBool::new(false),
             usage: crate::usage::UsageReporter::disabled(),
             limiter: Arc::new(crate::limiter::Limiter::new()),
             telemetry: std::sync::Arc::new(crate::telemetry::Telemetry::new()),

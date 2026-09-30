@@ -293,6 +293,32 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Fixed
 
+- **Stability under load** (audit of 2026-09-30). Each item is a mechanism
+  found by reading the code, fixed without a reproduction:
+  - A backend ejected by _traffic_ (header timeouts, a frozen engine) is out
+    for 30s doubling to 5m, and neither a passing `/models` probe nor the
+    fleet's vote can lift it early. A wedged engine answers `/models`, so the
+    probe used to re-admit it at once and it cycled at the probe interval. It
+    returns on probation: one more timeout and it is out again, for longer.
+  - The stall detector needs 10s of frozen counters, not 4.
+  - Health probes run once per endpoint, not once per model behind it. A
+    provider with ten models was probed ten times per interval per replica.
+  - The admission queue count no longer leaks when a client hangs up while
+    waiting, which used to shrink `max_queued` until the gate refused
+    everything.
+  - An upstream body that goes silent for 5 minutes is abandoned instead of
+    holding its slot forever.
+  - The listener sheds connections past 20,000, times out slow headers (30s)
+    and backs off on `accept` errors instead of spinning.
+  - The disguised-error check (#28) reads at most 64 KiB and replays the rest.
+  - Peer forwarding uses the request's own path and has a timeout.
+  - Spend inside a 5% band is no longer a snapshot change, so a usage flush
+    stops making every proxy rebuild routing and clear its cache.
+  - Usage batches the control plane could not take are retried (bounded)
+    instead of dropped, and flushed on shutdown.
+  - Readiness is `/readyz`, failing only while draining, with
+    `--shutdown-delay` (5s) of continued serving after `SIGTERM`. It no
+    longer tracks backends.
 - **An upstream error sent with HTTP 200 is now returned with its real status**
   (#28). A non-streaming JSON `200` whose body is `{"error":…}` (a gateway in
   front of NVIDIA, saturated) takes the `error.code` it declares, so clients

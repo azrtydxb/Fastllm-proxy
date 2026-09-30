@@ -302,12 +302,17 @@ impl Admission {
         }
 
         self.queued.fetch_add(1, Ordering::Relaxed);
+        // A guard, not a `fetch_sub` after the await: hyper drops the handler
+        // future when a client hangs up, and a decrement that only runs on
+        // the way out of the await never runs then. Every impatient client
+        // would leak one `max_queued` slot for good, until the gate refused
+        // everything with an idle engine behind it.
+        let _queued = QueuedGuard(&self.queued);
         let outcome = tokio::time::timeout(
             self.settings.max_wait(),
             Arc::clone(&self.sem).acquire_owned(),
         )
         .await;
-        self.queued.fetch_sub(1, Ordering::Relaxed);
 
         match outcome {
             // `acquire_owned` errors only when the semaphore is closed, and
@@ -381,6 +386,15 @@ impl Admission {
     }
 }
 
+/// Decrements the waiting count when dropped, however the wait ended.
+struct QueuedGuard<'a>(&'a AtomicUsize);
+
+impl Drop for QueuedGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +408,28 @@ mod tests {
             // tests that are not about waiting do not spend time doing it.
             max_wait_seconds: 0,
         }
+    }
+
+    /// A caller that hangs up while waiting must give its queue slot back.
+    /// Hyper cancels the handler by dropping it, which skips any code after
+    /// the await -- the leak this fails against.
+    #[tokio::test]
+    async fn a_cancelled_wait_gives_back_its_queue_slot() {
+        let gate = Arc::new(Admission::new(Settings {
+            max_concurrent: 1,
+            max_queued: 1,
+            max_wait_seconds: 60,
+            ..settings()
+        }));
+        let _held = gate.admit().await.unwrap();
+        for _ in 0..3 {
+            let g = Arc::clone(&gate);
+            let waiter = tokio::spawn(async move { g.admit().await });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waiter.abort();
+            let _ = waiter.await;
+        }
+        assert_eq!(gate.queued(), 0, "aborted waiters left the count behind");
     }
 
     /// What the dashboard and `/metrics` read. Held slots, the moving
