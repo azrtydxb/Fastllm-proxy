@@ -860,14 +860,20 @@ Fixed: traffic-ejection with backoff, probe dedupe, the admission queue leak,
 body idle timeout, listener limits, spend-banded snapshot equality, usage
 retry and shutdown flush, `/readyz` and a shutdown delay.
 
-Still open, from the same audits: a stale rebuild can overwrite a newer admin
-write (no version check on publish); a failed registry rebuild leaves auth and
-routing on different snapshots with no retry; snapshot versions are the DB
-clock, so a second control-plane replica would make proxies flap; the control
-plane has no leader election for its sweeps; request bodies have no global
-memory budget; no retry budget; rate-limit shares start at 1.0 on a new
-replica; no alerts ship. The fleet vote is still authoritative for
-probe-caused ejections.
+Second batch, same day: publish serialised; registry built before the snapshot
+is stored; same-policy snapshots adopted without a rebuild; advisory-lock
+leader for the control plane's sweeps; a global request-body budget; ejection
+metric and `deploy/monitoring.yaml`.
+
+Still open, from the same audits: no retry budget (a slow backend still gets
+each request retried onto its siblings); rate-limit shares start at 1.0 on a new
+replica; the snapshot build is O(rows) every 5s with unbounded queries; the
+snapshot is written to a node-local emptyDir in plaintext; the control plane
+has one Postgres instance; readiness/liveness of the control plane do no I/O;
+the fleet vote is still authoritative for probe-caused ejections. Snapshot
+versions are still the database clock, which is now harmless to proxies
+(same-policy versions are adopted, not rebuilt) but would make a second
+control plane's ETags alternate.
 
 ## Anthropic frontend, disguised errors, ejected-pool last resort — done (2026-09-30)
 

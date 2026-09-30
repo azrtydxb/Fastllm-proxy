@@ -44,6 +44,14 @@ pub struct AppState {
     /// below for why that is the only way in.
     pub snapshot: Arc<ArcSwap<Snapshot>>,
     pub max_body_bytes: usize,
+    /// KiB of request body the process will hold at once, across every
+    /// request. `max_body_bytes` bounds one request; nothing bounded their sum,
+    /// so a few hundred concurrent large uploads meant gigabytes resident
+    /// (twice each while a body was joined into one buffer) and an OOM kill
+    /// that took every in-flight generation with it.
+    pub body_budget: Arc<tokio::sync::Semaphore>,
+    /// The size `body_budget` was created with, in KiB.
+    pub body_budget_kib: usize,
     pub max_retries: usize,
     /// Bounds time-to-first-byte only. Generation itself is unbounded — a long
     /// completion is not a hung upstream.
@@ -200,6 +208,29 @@ impl AppState {
     }
 
     pub fn apply_snapshot(&self, snap: Snapshot) -> anyhow::Result<usize> {
+        // The same policy under a new version is not news: two control-plane
+        // builds of identical rows carry different clock-derived versions, and
+        // applying each rebuilt the routing table and wiped the response cache
+        // for nothing -- on every poll, behind a Service that spreads polls
+        // over several control-plane pods. The snapshot is still replaced, so
+        // the version this replica reports (and the spend it holds) stays
+        // current; the registry and the cache are what stay untouched.
+        if self.snapshot.load().content_eq(&snap) {
+            self.snapshot.store(Arc::new(snap));
+            return Ok(self.registry.load().backends().len());
+        }
+        // The routing table is built from the *incoming* snapshot before
+        // anything is replaced. It used to be built after the snapshot was
+        // stored, so a build that failed left authorisation on the new policy
+        // and routing on the old one -- a key revoked or a model added took
+        // effect for auth and not for routing -- and, because the version was
+        // already recorded, the next poll got a 304 and never tried again.
+        // Now a snapshot that cannot be routed is not applied at all, and the
+        // poller sees the same version as new on its next tick and retries.
+        let next =
+            Registry::build_from_snapshot(&snap, &self.interner, Some(&self.registry.load()))?;
+        let count = next.backends().len();
+
         #[cfg(feature = "classifier")]
         self.rebuild_classifier(&snap);
         self.telemetry
@@ -214,7 +245,8 @@ impl AppState {
             self.cache.clear();
         }
         self.snapshot.store(Arc::new(snap));
-        self.rebuild_registry_from_snapshot()
+        self.registry.store(Arc::new(next));
+        Ok(count)
     }
 
     /// An `AppState` wired up for tests, in this module and others.
@@ -255,6 +287,8 @@ impl AppState {
             legacy_master_key: None,
             snapshot: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
             max_body_bytes: 1024,
+            body_budget: Arc::new(tokio::sync::Semaphore::new(1024)),
+            body_budget_kib: 1024,
             max_retries: 0,
             upstream_headers_timeout: Duration::from_secs(1),
             unhealthy_after: 1,
@@ -446,22 +480,6 @@ impl AppState {
     #[cfg(all(feature = "classifier", not(feature = "classifier-tier2")))]
     fn refined_embedding(&self, _text: &str) -> Option<Vec<f32>> {
         None
-    }
-
-    /// Rebuild the routing `Registry` from the snapshot already stored in
-    /// `self.snapshot`, and swap it in.
-    ///
-    /// Live backends carry over, so a reload does not reset health or lose
-    /// in-flight accounting for connections still streaming. Not `pub` to
-    /// external callers as a way to update policy — `apply_snapshot` is,
-    /// precisely so a snapshot write can never skip this step.
-    fn rebuild_registry_from_snapshot(&self) -> anyhow::Result<usize> {
-        let snap = self.snapshot.load();
-        let current = self.registry.load();
-        let next = Registry::build_from_snapshot(&snap, &self.interner, Some(&current))?;
-        let count = next.backends().len();
-        self.registry.store(Arc::new(next));
-        Ok(count)
     }
 
     /// SIGHUP's handler in `File` mode: re-read the config file right now

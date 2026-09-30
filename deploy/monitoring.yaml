@@ -1,0 +1,88 @@
+# Scraping and alerting for the gateway, for a cluster running the Prometheus
+# operator (kube-prometheus-stack).
+#
+# /metrics is authenticated, so Prometheus needs a bearer token: create a
+# principal with a key, then
+#
+#   kubectl -n fastllm create secret generic fastllm-metrics-token \
+#     --from-literal=token=sk-...
+#
+# Endpoints discovery scrapes every proxy pod separately, which is the point:
+# the alerts below compare replicas with each other, and a Service-level scrape
+# would show a random one.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastllm-proxy
+  namespace: fastllm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastllm-proxy
+  endpoints:
+    - port: api
+      path: /metrics
+      interval: 15s
+      authorization:
+        type: Bearer
+        credentials:
+          name: fastllm-metrics-token
+          key: token
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fastllm-proxy
+  namespace: fastllm
+spec:
+  groups:
+    - name: fastllm-fleet
+      rules:
+        # Replicas serving different policy. A few seconds of skew is a poll
+        # interval; minutes is a replica that stopped converging.
+        - alert: FastllmReplicasDisagreeOnSnapshot
+          expr: max(fastllm_snapshot_version) != min(fastllm_snapshot_version)
+          for: 3m
+          labels: { severity: warning }
+          annotations:
+            summary: "Proxy replicas are serving different snapshot versions"
+            description: "A replica has stopped applying snapshots. Check its logs for 'registry rebuild failed'."
+
+        - alert: FastllmSnapshotStale
+          expr: fastllm_snapshot_age_seconds > 900
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "A proxy's snapshot has not changed in 15 minutes"
+            description: "Age is the time since the last content change, so this is only meaningful on a deployment that changes often; treat it as a hint, not a page."
+
+        # A backend leaving rotation is normal; leaving repeatedly is not.
+        - alert: FastllmBackendFlapping
+          expr: increase(fastllm_backend_ejections_total[30m]) > 6
+          for: 0m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.model }} on {{ $labels.api_base }} was ejected {{ $value }} times in 30m"
+            description: "The log line 'backend out of rotation' names the reason: probe, header timeouts, or frozen engine counters."
+
+        - alert: FastllmNoHealthyBackends
+          expr: sum(fastllm_backend_healthy) == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "No backend is in rotation on any replica"
+
+        - alert: FastllmUsageBeingDropped
+          expr: increase(fastllm_usage_reports_dropped_total[10m]) > 0
+          for: 0m
+          labels: { severity: warning }
+          annotations:
+            summary: "Usage events are being dropped; budgets are under-counting"
+            description: "The control plane is unreachable or slow. Events are retried up to a bound and dropped beyond it."
+
+        - alert: FastllmUpstreamServerErrors
+          expr: sum(rate(fastllm_upstream_status_total{status=~"5.."}[5m])) / sum(rate(fastllm_upstream_status_total[5m])) > 0.05
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "More than 5% of upstream responses are 5xx"

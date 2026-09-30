@@ -794,6 +794,10 @@ impl Snapshot {
             && principals_eq_modulo_spend(&self.principals, &other.principals)
             && self.frontend_models == other.frontend_models
             && self.open == other.open
+            && self.mcp_servers == other.mcp_servers
+            && self.a2a_agents == other.a2a_agents
+            && self.prompt_classes == other.prompt_classes
+            && self.fallback_model == other.fallback_model
             && models_eq(&self.models, &other.models)
     }
 

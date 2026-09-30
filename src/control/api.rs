@@ -6544,6 +6544,11 @@ async fn post_reconcile(
 /// turns "silently wrong until someone notices by accident" into something
 /// an operator (or an alert on that endpoint) can actually see.
 async fn refresh(ctx: &Ctx) {
+    // One build-and-publish at a time. A slow periodic build that started
+    // before an admin write used to finish after the write's own refresh and
+    // store an older view of the database over the newer one, bringing back a
+    // revoked key or a removed grant until the next tick.
+    let _publishing = PUBLISH.lock().await;
     // Before the build reads them: a model created a moment ago may be the one
     // a target has been waiting for by name since it was deleted, and the id
     // is what keeps that target attached across a later rename.
@@ -6578,6 +6583,54 @@ async fn refresh(ctx: &Ctx) {
     }
 }
 
+/// Try to become the control-plane replica that runs a background sweep.
+///
+/// Every sweep used to run on every control-plane pod, so a second replica --
+/// or the overlap while a rollout surges one -- doubled the provider probes and
+/// ran the usage roll-up in two transactions at once. A Postgres advisory lock
+/// elects one runner per tick without a new dependency: the database is
+/// already the thing every replica agrees on. Non-blocking, so a replica that
+/// loses skips this tick. `None` also when the database cannot be reached,
+/// which is when a sweep could not run anyway.
+async fn try_leader(pool: &PgPool, key: i64) -> Option<Leadership> {
+    let mut conn = pool.acquire().await.ok()?;
+    let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(key)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or(false);
+    held.then_some(Leadership { conn, key })
+}
+
+/// The lock, held on the connection that took it. Advisory locks are
+/// per-session, so releasing must happen on this same connection.
+struct Leadership {
+    conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    key: i64,
+}
+
+impl Leadership {
+    async fn release(mut self) {
+        if sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(self.key)
+            .execute(&mut *self.conn)
+            .await
+            .is_err()
+        {
+            // If it cannot be released, closing the connection is what
+            // releases it. Returning it to the pool would leave this replica
+            // holding the lock for good.
+            drop(self.conn.detach());
+        }
+    }
+}
+
+const LOCK_PROVIDER_SWEEP: i64 = 0x464c_4c4d_0001;
+const LOCK_USAGE_RETENTION: i64 = 0x464c_4c4d_0002;
+
+/// Serialises snapshot builds that publish. See [`refresh`].
+static PUBLISH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// One rebuild-and-maybe-publish cycle: build the current database state and
 /// compare it against what is already published, publishing only if the
 /// content actually differs.
@@ -6594,6 +6647,7 @@ async fn rebuild_once(
     cache: &dyn SnapshotSink,
     key: &EncryptionKey,
 ) -> anyhow::Result<()> {
+    let _publishing = PUBLISH.lock().await;
     let next = build_snapshot(pool, key).await?;
     let current = cache.current_snapshot();
     if current.content_eq(&next) {
@@ -6769,6 +6823,9 @@ pub fn spawn_provider_sweep(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let Some(leader) = try_leader(&pool, LOCK_PROVIDER_SWEEP).await else {
+                continue;
+            };
             // The registrar is the other thing that creates models, and the
             // one that deletes them in the first place.
             if let Err(e) = crate::control::registry_agent::relink_targets(&pool).await {
@@ -6807,6 +6864,7 @@ pub fn spawn_provider_sweep(
                 // taking the control plane down over it would cost service.
                 Err(e) => tracing::warn!(error = %e, "provider sweep failed; will retry next tick"),
             }
+            leader.release().await;
         }
     });
 }
@@ -6817,6 +6875,9 @@ pub fn spawn_usage_retention(pool: PgPool) {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let Some(leader) = try_leader(&pool, LOCK_USAGE_RETENTION).await else {
+                continue;
+            };
             match roll_up_and_prune_usage(&pool).await {
                 Ok((0, 0)) => {}
                 Ok((rolled, pruned)) => tracing::info!(
@@ -6827,8 +6888,11 @@ pub fn spawn_usage_retention(pool: PgPool) {
                 ),
                 // Warn, never fail: losing a roll-up costs disk, and taking
                 // the control plane down over it would cost service.
-                Err(e) => tracing::warn!(error = %e, "usage roll-up failed; will retry next tick"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "usage roll-up failed; will retry next tick")
+                }
             }
+            leader.release().await;
         }
     });
 }
