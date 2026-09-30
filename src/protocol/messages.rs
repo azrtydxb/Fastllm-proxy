@@ -16,7 +16,8 @@
 //! What has no OpenAI equivalent is refused by name rather than dropped, for
 //! the reason [`super`] gives: a translator that silently does less than it was
 //! asked is worse than none. Thinking blocks are the one deliberate omission --
-//! see [`convert_assistant`].
+//! see [`convert_assistant`]. (Reasoning in a *response* is translated, to
+//! `thinking` blocks; it is only the ones a client sends back that are dropped.)
 
 use bytes::Bytes;
 use hyper::body::{Body, Frame};
@@ -292,6 +293,15 @@ fn tool_result_text(content: Option<&Value>) -> String {
     }
 }
 
+/// The reasoning text of an OpenAI message or stream delta, under whichever
+/// name the backend uses (`reasoning_content` is DeepSeek's, `reasoning` is
+/// newer vLLM's and OpenRouter's).
+fn reasoning_of(v: &Value) -> Option<&str> {
+    v.get("reasoning_content")
+        .or_else(|| v.get("reasoning"))
+        .and_then(Value::as_str)
+}
+
 /// OpenAI `finish_reason` to Anthropic `stop_reason`.
 fn stop_reason(finish: &str) -> &'static str {
     match finish {
@@ -349,6 +359,13 @@ pub fn completion_to_message(body: &[u8], model: &str) -> Result<Vec<u8>, String
     let message = choice.get("message").unwrap_or(&Value::Null);
 
     let mut content = Vec::new();
+    // A reasoning model spends its tokens here before it writes any answer;
+    // with `max_tokens` small enough, this is all the reply contains. Dropping
+    // it returned an empty message for a request that had worked. vLLM has
+    // used both spellings.
+    if let Some(thought) = reasoning_of(message).filter(|t| !t.is_empty()) {
+        content.push(json!({ "type": "thinking", "thinking": thought, "signature": "" }));
+    }
     if let Some(text) = message
         .get("content")
         .and_then(Value::as_str)
@@ -465,6 +482,7 @@ fn frame(event: &str, data: &Value) -> Vec<u8> {
 }
 
 enum Open {
+    Thinking(u32),
     Text(u32),
     Tool { block: u32, upstream: u64 },
 }
@@ -572,6 +590,9 @@ impl StreamConverter {
             return;
         };
         if let Some(delta) = choice.get("delta") {
+            if let Some(thought) = reasoning_of(delta).filter(|t| !t.is_empty()) {
+                self.thinking(thought, out);
+            }
             if let Some(text) = delta
                 .get("content")
                 .and_then(Value::as_str)
@@ -616,7 +637,7 @@ impl StreamConverter {
 
     fn close_block(&mut self, out: &mut Vec<u8>) {
         let index = match self.open.take() {
-            Some(Open::Text(i)) => i,
+            Some(Open::Thinking(i)) | Some(Open::Text(i)) => i,
             Some(Open::Tool { block, .. }) => block,
             None => return,
         };
@@ -634,6 +655,29 @@ impl StreamConverter {
             &json!({ "type": "content_block_start", "index": index, "content_block": block }),
         ));
         index
+    }
+
+    fn thinking(&mut self, thought: &str, out: &mut Vec<u8>) {
+        let index = match self.open {
+            Some(Open::Thinking(i)) => i,
+            _ => {
+                self.close_block(out);
+                let i = self.open_block(
+                    json!({ "type": "thinking", "thinking": "", "signature": "" }),
+                    out,
+                );
+                self.open = Some(Open::Thinking(i));
+                i
+            }
+        };
+        out.extend(frame(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "thinking_delta", "thinking": thought },
+            }),
+        ));
     }
 
     fn text(&mut self, text: &str, out: &mut Vec<u8>) {
@@ -863,6 +907,56 @@ mod tests {
         assert_eq!(out["usage"]["input_tokens"], 60);
         assert_eq!(out["usage"]["cache_read_input_tokens"], 40);
         assert_eq!(out["usage"]["output_tokens"], 7);
+    }
+
+    /// A reasoning model that runs out of `max_tokens` while still thinking
+    /// returns `content: null` and its text in `reasoning`. That used to
+    /// become an empty message.
+    #[test]
+    fn reasoning_becomes_a_thinking_block() {
+        let out = v(&completion_to_message(
+            br#"{"id":"x","choices":[{"finish_reason":"length","message":{"content":null,"reasoning":"hm"}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":40}}"#,
+            "m",
+        )
+        .unwrap());
+        assert_eq!(out["content"][0]["type"], "thinking");
+        assert_eq!(out["content"][0]["thinking"], "hm");
+        assert_eq!(out["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn streamed_reasoning_opens_its_own_block_before_the_answer() {
+        let mut c = StreamConverter::new("m".into());
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"a\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"b\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut out = c.push(sse.as_bytes());
+        out.extend(c.finish());
+        let ev = events(&out);
+        let names: Vec<&str> = ev.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "message_start",
+                "ping",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+        assert_eq!(ev[2].1["content_block"]["type"], "thinking");
+        assert_eq!(ev[4].1["delta"]["thinking"], "b");
+        assert_eq!(ev[6].1["content_block"]["type"], "text");
     }
 
     fn events(bytes: &[u8]) -> Vec<(String, Value)> {
