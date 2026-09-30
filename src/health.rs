@@ -51,11 +51,30 @@ fn context_length_of(body: &[u8]) -> Option<u64> {
 
 async fn sweep(state: &Arc<AppState>, probe_timeout: Duration) {
     let backends: Vec<_> = state.registry.load().backends().to_vec();
-    let mut tasks = JoinSet::new();
 
+    // One probe per endpoint, not per backend. A backend is one (endpoint,
+    // model) pair, so a provider serving ten models was being asked for its
+    // model list ten times every interval by every replica -- for OpenRouter
+    // that is ten copies of a 760 KB document, and the probe that timed out
+    // was largely the fleet competing with itself. Backends sharing an
+    // endpoint and credentials share one answer.
+    let mut groups: std::collections::HashMap<String, Vec<_>> = Default::default();
     for backend in backends {
+        let mut key = backend.api_base.to_string();
+        for (name, value) in &backend.headers {
+            key.push('\n');
+            key.push_str(name.as_str());
+            key.push(':');
+            key.push_str(&String::from_utf8_lossy(value.as_bytes()));
+        }
+        groups.entry(key).or_default().push(backend);
+    }
+
+    let mut tasks = JoinSet::new();
+    for members in groups.into_values() {
         let state = Arc::clone(state);
         tasks.spawn(async move {
+            let backend = &members[0];
             let url = backend.url_for("/models");
             let mut builder = Request::builder().method(Method::GET).uri(&url);
             // The probe has to authenticate, or a backend that requires a key
@@ -87,7 +106,9 @@ async fn sweep(state: &Arc<AppState>, probe_timeout: Duration) {
                     // restart changes it without touching a row.
                     if fetched.status.is_success() {
                         if let Some(len) = context_length_of(&fetched.body) {
-                            backend.record_context_length(len);
+                            for b in &members {
+                                b.record_context_length(len);
+                            }
                         }
                     }
                     fetched.status.is_success()
@@ -95,16 +116,19 @@ async fn sweep(state: &Arc<AppState>, probe_timeout: Duration) {
                 Err(_) => false,
             };
 
-            if ok {
-                if backend.mark_probe_ok() {
-                    info!(backend = %backend.api_base, "backend healthy, back in rotation");
+            for backend in &members {
+                if ok {
+                    if backend.mark_probe_ok() {
+                        info!(backend = %backend.api_base, model = %backend.upstream_model, "backend healthy, back in rotation");
+                    }
+                } else if backend.mark_probe_failed(state.unhealthy_after) {
+                    warn!(
+                        backend = %backend.api_base,
+                        model = %backend.upstream_model,
+                        "backend failed {} consecutive probes, out of rotation",
+                        state.unhealthy_after
+                    );
                 }
-            } else if backend.mark_probe_failed(state.unhealthy_after) {
-                warn!(
-                    backend = %backend.api_base,
-                    "backend failed {} consecutive probes, out of rotation",
-                    state.unhealthy_after
-                );
             }
         });
     }

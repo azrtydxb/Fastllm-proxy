@@ -331,6 +331,7 @@ impl Upstream {
                 saw_eof: false,
                 replay: None,
                 buffered: false,
+                idle: None,
             },
         ))
     }
@@ -390,7 +391,22 @@ pub struct UpstreamBody {
     /// the client exactly as it would have uninspected.
     replay: Option<Bytes>,
     buffered: bool,
+    /// Armed the first time the body has nothing to give, and pushed back on
+    /// every frame. See [`BODY_IDLE_TIMEOUT`].
+    idle: Option<Pin<Box<tokio::time::Sleep>>>,
 }
+
+/// How long a response body may go without a byte before it is abandoned.
+///
+/// `--upstream-timeout` ends at the headers, so before this a body that
+/// stalled afterwards -- a wedged engine, a half-open connection, a node that
+/// rebooted -- waited forever, holding the request's in-flight count and its
+/// admission slot for as long as the client stayed connected. A handful of
+/// those starves a gated engine of every slot while it looks healthy.
+///
+/// Generous on purpose: this is silence *between* bytes, and a long prefill
+/// behind a streaming response legitimately produces none for minutes.
+pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl Body for UpstreamBody {
     type Data = Bytes;
@@ -402,8 +418,12 @@ impl Body for UpstreamBody {
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
 
+        // What `buffer` read comes out first, then whatever it did not.
+        if let Some(b) = this.replay.take() {
+            return Poll::Ready(Some(Ok(Frame::data(b))));
+        }
         if this.buffered {
-            return Poll::Ready(this.replay.take().map(|b| Ok(Frame::data(b))));
+            return Poll::Ready(None);
         }
 
         // Moving bytes off the socket is this poll's job. This is the whole
@@ -431,7 +451,13 @@ impl Body for UpstreamBody {
                 this.state = None;
                 Poll::Ready(Some(Err(e.into())))
             }
-            Poll::Ready(Some(Ok(f))) => Poll::Ready(Some(Ok(f))),
+            Poll::Ready(Some(Ok(f))) => {
+                if let Some(idle) = this.idle.as_mut() {
+                    idle.as_mut()
+                        .reset(tokio::time::Instant::now() + BODY_IDLE_TIMEOUT);
+                }
+                Poll::Ready(Some(Ok(f)))
+            }
             // Nothing buffered and the connection is gone: the response was
             // truncated. Returning Pending here would wait for a wakeup that
             // can never come — measured as a client hanging until its own
@@ -443,13 +469,28 @@ impl Body for UpstreamBody {
                     BoxError::from,
                 ))))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                let idle = this
+                    .idle
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(BODY_IDLE_TIMEOUT)));
+                if idle.as_mut().poll(cx).is_ready() {
+                    this.state = None;
+                    return Poll::Ready(Some(Err(BoxError::from(format!(
+                        "upstream sent nothing for {}s mid-response",
+                        BODY_IDLE_TIMEOUT.as_secs()
+                    )))));
+                }
+                Poll::Pending
+            }
         }
     }
 
     fn is_end_stream(&self) -> bool {
+        if self.replay.is_some() {
+            return false;
+        }
         if self.buffered {
-            return self.replay.is_none();
+            return true;
         }
         self.inner.is_end_stream()
     }
@@ -460,22 +501,26 @@ impl Body for UpstreamBody {
                 self.replay.as_ref().map_or(0, |b| b.len() as u64),
             );
         }
+        // A replayed prefix makes the inner hint an undercount.
+        if self.replay.is_some() {
+            return hyper::body::SizeHint::default();
+        }
         self.inner.size_hint()
     }
 }
 
 impl UpstreamBody {
-    /// Read the rest of the body into memory and return it, leaving it to be
-    /// served from there.
+    /// Read the body into memory, up to `limit` bytes, and serve it from there.
     ///
     /// For the one caller that has to look at a non-streaming response before
     /// deciding what it is (a provider can answer 200 with an error document).
-    /// Only ever for a body that is finite by construction; a stream must
-    /// never be passed here, since it would turn the incremental path into a
-    /// batch one.
-    pub async fn buffer(&mut self) -> Result<Bytes, BoxError> {
+    /// Returns the whole body when it ended within `limit`. Past `limit` it
+    /// stops reading and returns `None`: what was read is replayed ahead of the
+    /// rest, so the client still receives every byte, and a large or endless
+    /// body is never held in memory. Must not be used on a stream.
+    pub async fn buffer(&mut self, limit: usize) -> Result<Option<Bytes>, BoxError> {
         if self.buffered {
-            return Ok(self.replay.clone().unwrap_or_default());
+            return Ok(Some(self.replay.clone().unwrap_or_default()));
         }
         let mut acc = bytes::BytesMut::new();
         loop {
@@ -485,6 +530,10 @@ impl UpstreamBody {
                     if let Ok(data) = f.into_data() {
                         acc.extend_from_slice(&data);
                     }
+                    if acc.len() > limit {
+                        self.replay = Some(acc.freeze());
+                        return Ok(None);
+                    }
                 }
                 Some(Err(e)) => return Err(e),
                 None => break,
@@ -493,7 +542,7 @@ impl UpstreamBody {
         let bytes = acc.freeze();
         self.replay = Some(bytes.clone());
         self.buffered = true;
-        Ok(bytes)
+        Ok(Some(bytes))
     }
 
     /// Hand the connection back, but only if this response actually finished.

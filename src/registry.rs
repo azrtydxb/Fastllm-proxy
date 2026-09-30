@@ -167,6 +167,24 @@ pub struct Backend {
     /// deadlocked vLLM answers `GET /v1/models` just fine, so sharing the
     /// counter would let the probe wipe the stall evidence every sweep.
     consecutive_stalls: AtomicU32,
+    /// Why the backend is out, when it is. `true` means *traffic* put it
+    /// there (timeouts, a frozen engine) rather than a failed probe.
+    ///
+    /// The distinction is the whole point. A wedged engine's API frontend
+    /// keeps answering `GET /models`, so a probe is the wrong judge of an
+    /// ejection traffic caused: letting it re-admit meant the backend went
+    /// out, came straight back, took a burst of full-timeout requests and went
+    /// out again on a cycle as short as the probe interval. A traffic
+    /// ejection is instead timed (see [`Backend::eject`]) and a probe may only
+    /// lift it once that time has passed.
+    ejected_by_traffic: AtomicBool,
+    /// Consecutive traffic ejections; sets how long the next one lasts.
+    ejection_streak: AtomicU32,
+    /// When the current traffic ejection may be lifted, unix milliseconds.
+    ejected_until_ms: AtomicU64,
+    /// When the last traffic ejection began, unix milliseconds. Lets a
+    /// backend that has been well for a long while start its backoff over.
+    last_ejected_ms: AtomicU64,
     inflight: AtomicUsize,
     /// What the engine itself says is in flight, and when it said so.
     ///
@@ -308,6 +326,10 @@ impl Backend {
             consecutive_failures: AtomicU32::new(0),
             consecutive_timeouts: AtomicU32::new(0),
             consecutive_stalls: AtomicU32::new(0),
+            ejected_by_traffic: AtomicBool::new(false),
+            ejection_streak: AtomicU32::new(0),
+            ejected_until_ms: AtomicU64::new(0),
+            last_ejected_ms: AtomicU64::new(0),
             inflight: AtomicUsize::new(0),
             engine_inflight: AtomicUsize::new(0),
             prefix_hit_permille: AtomicUsize::new(usize::MAX),
@@ -484,7 +506,7 @@ impl Backend {
 
         let stalled = self.consecutive_stalls.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
         if stalled {
-            self.eject("engine counters frozen while requests were running");
+            self.eject_for_traffic("engine counters frozen while requests were running");
         }
         stalled
     }
@@ -602,7 +624,7 @@ impl Backend {
     pub fn note_timeout(&self, threshold: u32) {
         let failures = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
         if failures >= threshold {
-            self.eject("consecutive upstream header timeouts");
+            self.eject_for_traffic("consecutive upstream header timeouts");
             self.consecutive_timeouts.store(0, Ordering::Relaxed);
         }
     }
@@ -629,7 +651,12 @@ impl Backend {
     /// this cannot resurrect a dead backend: the fleet only ever buys a
     /// re-examination, never a conclusion.
     pub fn reconsider(&self) -> bool {
-        if self.healthy.load(Ordering::Relaxed) {
+        // The fleet's "I can reach it" is a statement about reachability, and a
+        // traffic ejection is a statement about how the backend behaves under
+        // *this* replica's load. Peers that are idle or lightly loaded report
+        // healthy for an engine that is drowning for the busy one, so their
+        // vote cannot overturn it; only the timer can.
+        if self.healthy.load(Ordering::Relaxed) || self.ejected_by_traffic.load(Ordering::Relaxed) {
             return false;
         }
         self.consecutive_failures.store(0, Ordering::Relaxed);
@@ -663,14 +690,56 @@ impl Backend {
         );
     }
 
+    /// Eject on evidence from real traffic, for a period that grows with each
+    /// repeat.
+    ///
+    /// 30s, doubling to a five-minute ceiling: long enough to stop feeding a
+    /// backend that is struggling, short enough that a transient does not
+    /// bench it for good. A backend that has been out of trouble for ten
+    /// minutes starts over at 30s.
+    fn eject_for_traffic(&self, reason: &str) {
+        const BASE_MS: u64 = 30_000;
+        const CEILING_MS: u64 = 300_000;
+        const FORGIVE_MS: u64 = 600_000;
+        if !self.healthy.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.last_ejected_ms.load(Ordering::Relaxed)) > FORGIVE_MS {
+            self.ejection_streak.store(0, Ordering::Relaxed);
+        }
+        let streak = self.ejection_streak.fetch_add(1, Ordering::Relaxed);
+        let backoff = (BASE_MS << streak.min(4)).min(CEILING_MS);
+        self.last_ejected_ms.store(now, Ordering::Relaxed);
+        self.ejected_until_ms
+            .store(now + backoff, Ordering::Relaxed);
+        self.ejected_by_traffic.store(true, Ordering::Relaxed);
+        self.eject(reason);
+    }
+
     /// Reset consecutive timeouts on a successful response.
     pub fn reset_timeout_count(&self) {
         self.consecutive_timeouts.store(0, Ordering::Relaxed);
     }
 
     /// Record a successful health probe.
+    ///
+    /// Returns true if this brought the backend back. A backend that traffic
+    /// ejected stays out until its timer has run down, however well it answers
+    /// the probe -- see [`Backend::ejected_by_traffic`].
     pub fn mark_probe_ok(&self) -> bool {
         self.consecutive_failures.store(0, Ordering::Relaxed);
+        if self.ejected_by_traffic.load(Ordering::Relaxed) {
+            if now_ms() < self.ejected_until_ms.load(Ordering::Relaxed) {
+                return false;
+            }
+            self.ejected_by_traffic.store(false, Ordering::Relaxed);
+            // One strike from ejection, not a clean slate: a backend let back
+            // in on probation that times out again is out again at once.
+            self.consecutive_timeouts
+                .store(u32::MAX / 2, Ordering::Relaxed);
+            self.consecutive_stalls.store(0, Ordering::Relaxed);
+        }
         !self.healthy.swap(true, Ordering::Relaxed)
     }
 
@@ -688,6 +757,12 @@ impl Backend {
     pub fn url_for(&self, subpath: &str) -> String {
         format!("{}{}", self.api_base, subpath)
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Increments a backend's in-flight count for as long as it is alive.
@@ -1186,6 +1261,36 @@ model_list:
         assert!(b.is_healthy());
         b.note_timeout(2);
         assert!(!b.is_healthy());
+    }
+
+    /// A backend traffic ejected stays out however well it answers the probe,
+    /// and neither the fleet's vote nor the probe can shorten the timer. A
+    /// wedged engine passes `GET /models`, which is what made it flap.
+    #[test]
+    fn a_probe_cannot_lift_a_traffic_ejection_early() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        b.note_timeout(1);
+        assert!(!b.is_healthy());
+        assert!(!b.mark_probe_ok(), "the probe is not the judge here");
+        assert!(!b.reconsider(), "nor is the fleet's vote");
+        assert!(!b.is_healthy());
+
+        // Once the timer has run out a passing probe lets it back, on
+        // probation: one more timeout and it is out again, for longer.
+        b.ejected_until_ms.store(1, Ordering::Relaxed);
+        assert!(b.mark_probe_ok());
+        assert!(b.is_healthy());
+        b.note_timeout(2);
+        assert!(
+            !b.is_healthy(),
+            "probation is one strike, not a clean slate"
+        );
+        let first = b.ejected_until_ms.load(Ordering::Relaxed);
+        assert!(
+            first > now_ms() + 50_000,
+            "second ejection backs off longer"
+        );
     }
 
     #[test]

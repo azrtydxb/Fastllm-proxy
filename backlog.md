@@ -853,6 +853,22 @@ read bounded there is no remaining way for these loops to wait forever. A
 watchdog would be a second mechanism guarding against the absence of the
 first, and it could restart a loop partway through a sweep.
 
+## Stability audit — first fixes done (2026-09-30)
+
+Four read-only audits (health, snapshot/limits, request path, control plane).
+Fixed: traffic-ejection with backoff, probe dedupe, the admission queue leak,
+body idle timeout, listener limits, spend-banded snapshot equality, usage
+retry and shutdown flush, `/readyz` and a shutdown delay.
+
+Still open, from the same audits: a stale rebuild can overwrite a newer admin
+write (no version check on publish); a failed registry rebuild leaves auth and
+routing on different snapshots with no retry; snapshot versions are the DB
+clock, so a second control-plane replica would make proxies flap; the control
+plane has no leader election for its sweeps; request bodies have no global
+memory budget; no retry budget; rate-limit shares start at 1.0 on a new
+replica; no alerts ship. The fleet vote is still authoritative for
+probe-caused ejections.
+
 ## Anthropic frontend, disguised errors, ejected-pool last resort — done (2026-09-30)
 
 Three GitHub issues, one change.

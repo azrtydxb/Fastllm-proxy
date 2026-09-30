@@ -195,6 +195,7 @@ ever reach them.
 
 | flag               | default |                                                                                                                                                                                  |
 | ------------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--shutdown-delay` | `5`     | Seconds to keep accepting after `SIGTERM` while `/readyz` already answers 503, so the Service stops routing here before the listener closes. Runs before `--shutdown-grace`      |
 | `--shutdown-grace` | `25`    | Seconds to let in-flight requests finish after `SIGTERM`. Kubernetes `SIGKILL`s at `terminationGracePeriodSeconds` (30 by default), so this sits under it. `0` exits immediately |
 
 ## Secrets that are not flags

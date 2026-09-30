@@ -193,9 +193,24 @@ pub struct ReporterConfig {
 pub struct UsageReporter {
     tx: mpsc::Sender<UsageEvent>,
     dropped: Arc<AtomicU64>,
+    /// Asks the flush task to send what it holds now, and say when it has.
+    flush_tx: mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl UsageReporter {
+    /// Send everything queued and held, then return -- or return after
+    /// `wait` if the control plane is not answering.
+    ///
+    /// Called once on shutdown. Nothing else flushed then, so every rollout
+    /// discarded up to a flush interval of usage per replica, and budgets
+    /// under-counted by that much each time.
+    pub async fn flush_now(&self, wait: Duration) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if self.flush_tx.send(done_tx).await.is_ok() {
+            let _ = tokio::time::timeout(wait, done_rx).await;
+        }
+    }
+
     /// Enqueue one event for the next batch flush. Never blocks: a full
     /// queue means the control plane (or the network to it) is not keeping
     /// up, and the design's answer to that is to drop the event, not to
@@ -242,6 +257,7 @@ impl UsageReporter {
             Self {
                 tx,
                 dropped: Arc::new(AtomicU64::new(0)),
+                flush_tx: mpsc::channel(1).0,
             },
             rx,
         )
@@ -255,22 +271,49 @@ impl UsageReporter {
 pub fn spawn(cfg: ReporterConfig, upstream: Arc<Upstream>) -> UsageReporter {
     let (tx, rx) = mpsc::channel(cfg.queue_capacity);
     let dropped = Arc::new(AtomicU64::new(0));
-    tokio::spawn(run(cfg, upstream, rx));
-    UsageReporter { tx, dropped }
+    let (flush_tx, flush_rx) = mpsc::channel(1);
+    tokio::spawn(run(cfg, upstream, rx, flush_rx, Arc::clone(&dropped)));
+    UsageReporter {
+        tx,
+        dropped,
+        flush_tx,
+    }
 }
 
-async fn run(cfg: ReporterConfig, upstream: Arc<Upstream>, mut rx: mpsc::Receiver<UsageEvent>) {
+/// What a batch may grow to while the control plane is unreachable, as a
+/// multiple of `batch_max`. Beyond it the oldest events go, and are counted.
+const RETAIN_BATCHES: usize = 20;
+
+async fn run(
+    cfg: ReporterConfig,
+    upstream: Arc<Upstream>,
+    mut rx: mpsc::Receiver<UsageEvent>,
+    mut flush_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
+    dropped: Arc<AtomicU64>,
+) {
     let mut batch = Vec::with_capacity(cfg.batch_max);
     let mut ticker = tokio::time::interval(cfg.flush_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A failed delivery is retried, so the events stay in `batch`; this keeps
+    // the retry from becoming an attempt per incoming event (each of which
+    // waits out a 10s timeout while the queue behind it fills).
+    let mut failures: u32 = 0;
+    let mut not_before = tokio::time::Instant::now();
     loop {
         tokio::select! {
+            Some(done) = flush_rx.recv() => {
+                while let Ok(event) = rx.try_recv() {
+                    batch.push(event);
+                }
+                flush(&cfg, &upstream, &mut batch).await;
+                let _ = done.send(());
+            }
             maybe = rx.recv() => {
                 match maybe {
                     Some(event) => {
                         batch.push(event);
-                        if batch.len() >= cfg.batch_max {
-                            flush(&cfg, &upstream, &mut batch).await;
+                        if batch.len() >= cfg.batch_max && tokio::time::Instant::now() >= not_before {
+                            attempt(&cfg, &upstream, &mut batch, &mut failures, &mut not_before, &dropped).await;
                         }
                     }
                     // The sender (and every `UsageReporter` clone) is gone:
@@ -283,21 +326,58 @@ async fn run(cfg: ReporterConfig, upstream: Arc<Upstream>, mut rx: mpsc::Receive
                 }
             }
             _ = ticker.tick() => {
-                flush(&cfg, &upstream, &mut batch).await;
+                if tokio::time::Instant::now() >= not_before {
+                    attempt(&cfg, &upstream, &mut batch, &mut failures, &mut not_before, &dropped).await;
+                }
             }
         }
     }
 }
 
-/// One best-effort delivery attempt. Fire-and-forget per the design: a
-/// failure is logged and the batch is dropped, never retried — retrying
-/// would either block later flushes behind a dead control plane or need its
-/// own unbounded buffer, both of which reintroduce the coupling this module
-/// exists to avoid. "Dropping usage rather than blocking a request is
-/// deliberate — billing accuracy is not worth failing inference."
-async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageEvent>) {
-    if batch.is_empty() {
+/// One delivery attempt with backoff and a bound on what is kept.
+async fn attempt(
+    cfg: &ReporterConfig,
+    upstream: &Upstream,
+    batch: &mut Vec<UsageEvent>,
+    failures: &mut u32,
+    not_before: &mut tokio::time::Instant,
+    dropped: &AtomicU64,
+) {
+    if flush(cfg, upstream, batch).await {
+        *failures = 0;
         return;
+    }
+    *failures += 1;
+    *not_before =
+        tokio::time::Instant::now() + Duration::from_secs((2u64 << (*failures).min(5)).min(60));
+    let cap = cfg.batch_max * RETAIN_BATCHES;
+    if batch.len() > cap {
+        let excess = batch.len() - cap;
+        batch.drain(..excess);
+        dropped.fetch_add(excess as u64, Ordering::Relaxed);
+        tracing::warn!(
+            excess,
+            "usage backlog past its bound; oldest events dropped"
+        );
+    }
+}
+
+/// One delivery attempt. Returns whether `batch` was dealt with; on `false`
+/// the events are still in it, to be tried again.
+///
+/// Retried when the failure says the control plane did not take them: it was
+/// unreachable, timed out, or answered 5xx/429. Dropped when it answered and
+/// refused (any other 4xx), since resending the same bytes cannot change the
+/// answer. This used to drop every failure, on the reasoning that a retry
+/// would couple inference to the control plane's health; the retry here is
+/// bounded (see `RETAIN_BATCHES`) and off the request path, and the price of
+/// the old choice was budgets that under-counted by whatever an outage or a
+/// rollout swallowed. A timeout may mean the control plane did commit, so a
+/// retry can double-count a batch -- deliberate, because spend counted twice
+/// errs toward refusing and spend lost errs toward overspending.
+async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageEvent>) -> bool {
+    if batch.is_empty() {
+        return true;
     }
     let count = batch.len();
     let body = match serde_json::to_vec(&UsageBatch { events: batch }) {
@@ -305,10 +385,9 @@ async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageE
         Err(e) => {
             tracing::warn!(error = %e, count, "could not encode usage batch; dropping it");
             batch.clear();
-            return;
+            return true;
         }
     };
-    batch.clear();
 
     let req = match Request::builder()
         .method("POST")
@@ -323,7 +402,8 @@ async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageE
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "could not build usage report request; dropping batch");
-            return;
+            batch.clear();
+            return true;
         }
     };
 
@@ -331,16 +411,25 @@ async fn flush(cfg: &ReporterConfig, upstream: &Upstream, batch: &mut Vec<UsageE
     // response body that stalled would otherwise stop every later batch from
     // being sent, with nothing logged. See `Upstream::fetch`.
     match upstream.fetch(req, Duration::from_secs(10)).await {
-        Ok(fetched) if fetched.status.is_success() => {}
-        Ok(fetched) => {
-            let status = fetched.status;
-            tracing::warn!(%status, count, "control plane rejected usage batch; dropped");
+        Ok(fetched) if fetched.status.is_success() => {
+            batch.clear();
+            true
         }
-        Err(crate::upstream::FetchError::TimedOut(_)) => {
-            tracing::warn!(count, "sending usage batch timed out; dropped");
+        Ok(fetched)
+            if fetched.status.is_server_error()
+                || fetched.status == hyper::StatusCode::TOO_MANY_REQUESTS =>
+        {
+            tracing::warn!(status = %fetched.status, count, "control plane could not take the usage batch; will retry");
+            false
+        }
+        Ok(fetched) => {
+            tracing::warn!(status = %fetched.status, count, "control plane rejected usage batch; dropped");
+            batch.clear();
+            true
         }
         Err(e) => {
-            tracing::warn!(error = %e, count, "sending usage batch failed; dropped");
+            tracing::warn!(error = %e, count, "sending usage batch failed; will retry");
+            false
         }
     }
 }

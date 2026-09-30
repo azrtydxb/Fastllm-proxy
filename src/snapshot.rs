@@ -716,6 +716,47 @@ fn models_eq(a: &[ModelDef], b: &[ModelDef]) -> bool {
     a == b
 }
 
+/// Principals equal apart from how much of a budget has been spent, except
+/// where the spend crosses something that matters.
+///
+/// Spend used to count in full, so every usage flush that moved a budgeted
+/// principal's counter made the next rebuild publish a new snapshot, and every
+/// proxy answered by rebuilding its routing table and wiping the response
+/// cache -- every 5-10 seconds under steady traffic, which left the fleet
+/// permanently mid-convergence and a 300s cache TTL worth nothing.
+///
+/// What a proxy does with the counters is refuse an exhausted principal and
+/// evaluate routing rules that key on the percentage used. So a change is
+/// published when the principal crosses into or out of exhaustion, or moves
+/// into another 5% band of either cap; movement inside a band is noise. That
+/// is at most twenty publishes per principal per window instead of one per
+/// flush, and exhaustion is enforced no later than it was.
+fn principals_eq_modulo_spend(
+    a: &HashMap<PrincipalId, Principal>,
+    b: &HashMap<PrincipalId, Principal>,
+) -> bool {
+    fn band(used: u64, total: Option<u64>) -> Option<u64> {
+        let total = total?;
+        if total == 0 || used >= total {
+            return Some(u64::MAX);
+        }
+        Some((used as u128 * 20 / total as u128) as u64)
+    }
+    fn normalised(p: &Principal) -> Principal {
+        let mut p = p.clone();
+        if let Some(bud) = p.budget.as_mut() {
+            let tokens = band(bud.tokens_used, bud.tokens_total);
+            let cost = band(bud.cost_used_micros, bud.cost_total_micros);
+            bud.tokens_used = tokens.unwrap_or(0);
+            bud.cost_used_micros = cost.unwrap_or(0);
+        }
+        p
+    }
+    a.len() == b.len()
+        && a.iter()
+            .all(|(id, x)| b.get(id).is_some_and(|y| normalised(x) == normalised(y)))
+}
+
 impl Snapshot {
     /// Whether two snapshots carry the same policy, ignoring `version`.
     ///
@@ -729,11 +770,10 @@ impl Snapshot {
     /// spam an info log). This is what lets the rebuilder tell "the database
     /// was polled" apart from "the database actually changed".
     pub fn content_eq(&self, other: &Snapshot) -> bool {
-        // `principals` carries `Budget.tokens_used`, so a usage report that
-        // pushes a principal over (or further over) budget correctly counts
-        // as a content change here — that is what makes the periodic
-        // rebuilder (`control::api::rebuild_once`) actually publish the
-        // updated counter rather than treating it as noise.
+        // `principals` carries `Budget.tokens_used`, compared by band rather
+        // than exactly -- see `principals_eq_modulo_spend`. A usage report that
+        // pushes a principal into exhaustion or another 5% band is a change;
+        // one that moves a counter inside a band is not.
         //
         // `models` is compared as a *set*, not a list. Its order carries no
         // meaning — routing looks models up by name — but `Vec` equality is
@@ -751,7 +791,7 @@ impl Snapshot {
         // fleet was permanently mid-convergence. Nothing said so; the version
         // simply kept moving.
         self.keys == other.keys
-            && self.principals == other.principals
+            && principals_eq_modulo_spend(&self.principals, &other.principals)
             && self.frontend_models == other.frontend_models
             && self.open == other.open
             && models_eq(&self.models, &other.models)
@@ -1446,6 +1486,32 @@ mod tests {
         assert!(
             !a.content_eq(&c),
             "a real grant change must not compare equal"
+        );
+    }
+
+    /// Spend moving inside a 5% band is not a change; crossing a band, or
+    /// into exhaustion, is. The first half is what stopped the fleet rebuilding
+    /// and clearing its cache on every usage flush.
+    #[test]
+    fn spend_inside_a_band_is_not_a_content_change() {
+        let with_used = |used: u64| {
+            let mut s = snapshot_with("sk-good", &["qwen3"], None);
+            s.principals
+                .get_mut(&crate::snapshot::tid(1))
+                .unwrap()
+                .budget = Some(Budget {
+                tokens_total: Some(1000),
+                tokens_used: used,
+                cost_total_micros: None,
+                cost_used_micros: 0,
+            });
+            s
+        };
+        assert!(with_used(100).content_eq(&with_used(120)), "same 5% band");
+        assert!(!with_used(100).content_eq(&with_used(160)), "next band");
+        assert!(
+            !with_used(990).content_eq(&with_used(1000)),
+            "running out is always a change"
         );
     }
 

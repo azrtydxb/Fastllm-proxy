@@ -552,10 +552,12 @@ pub fn proxy_deployment(
             ..Default::default()
         }]),
         env: Some(env),
-        // Readiness tracks backends — /health is 503 with none healthy, which
-        // correctly pulls the pod out of the Service. Liveness must NOT use
-        // it: a backend outage would then restart-loop a healthy proxy.
-        readiness_probe: Some(probe("/health", "http", false, 10, 3)),
+        // `/readyz`, not `/health`: it fails only while the pod is draining.
+        // `/health` is 503 with no healthy backend, which pulled every pod out
+        // of the Service together when backends went down at once. Liveness
+        // must not use `/health` either: a backend outage would restart-loop a
+        // healthy proxy.
+        readiness_probe: Some(probe("/readyz", "http", false, 5, 2)),
         // Liveness and startup ask `/livez`, not `/metrics`. `/metrics` was
         // only ever standing in for a liveness endpoint — it was the one route
         // that stayed 200 while the process lived — and that stopped being

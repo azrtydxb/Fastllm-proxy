@@ -96,8 +96,11 @@ So the verdict is public and the detail is earned:
 `/livez` exists because liveness and readiness are different questions.
 `/health` answers 503 when no backend is healthy — right for readiness, and
 catastrophic for liveness, where it would have the kubelet restart every pod
-during a backend outage. So the probes split: readiness asks `/health`,
-liveness and startup ask `/livez`. They used to ask `/metrics`, which was only
+during a backend outage. Readiness has the same flaw at fleet scale: with
+backends down together every pod went unready at once and the Service had no
+endpoints. So the probes split three ways: readiness asks `/readyz` (200 until
+the pod is draining, then 503 for `--shutdown-delay` seconds while it keeps
+serving), liveness and startup ask `/livez`, and `/health` is for people. They used to ask `/metrics`, which was only
 ever standing in for a liveness endpoint because it was the one route that
 stayed 200 while the process lived — gating it restart-looped every pod on a
 401, which is how `/livez` came to exist.

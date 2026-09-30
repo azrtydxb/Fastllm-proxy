@@ -99,13 +99,12 @@ spec:
             # which this pod has no use for and no business holding) — see
             # the `items` selector below.
             - { name: control-ca, mountPath: /etc/fastllm/ca, readOnly: true }
-          # Readiness tracks backends: /health is 503 with none healthy, which
-          # correctly pulls this pod out of the Service. Liveness must NOT use
-          # it — spark2 being down would then restart-loop a perfectly healthy
-          # proxy — so it probes /metrics, which answers whenever the process
-          # is alive.
+          # Readiness is /readyz: 200 until the pod starts draining. It does not
+          # track backends -- /health does, and with backends down together that
+          # emptied the Service. Liveness probes /livez for the same reason:
+          # spark2 being down must not restart-loop a healthy proxy.
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /readyz, port: http }
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:

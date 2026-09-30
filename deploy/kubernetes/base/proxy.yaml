@@ -83,12 +83,12 @@ spec:
             # Ephemeral by design: a pod that never started has no cache to
             # fall back to anyway.
             - { name: snapshot-cache, mountPath: /var/lib/fastllm }
-          # Readiness tracks backends — /health answers 503 with none healthy,
-          # which correctly pulls this pod out of the Service. Liveness must
-          # NOT use it: a backend outage would then restart-loop a perfectly
-          # healthy proxy. /metrics answers whenever the process is alive.
+          # Readiness is /readyz: 200 until the pod starts draining. It does not
+          # track backends -- /health does, and with backends down together that
+          # emptied the Service. Liveness must not use /health either: a backend
+          # outage would restart-loop a perfectly healthy proxy.
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /readyz, port: http }
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
