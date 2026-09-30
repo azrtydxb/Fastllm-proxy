@@ -247,6 +247,7 @@ impl UsageReporter {
         Self {
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
+            flush_tx: mpsc::channel(1).0,
         }
     }
 

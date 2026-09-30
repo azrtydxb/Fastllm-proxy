@@ -759,12 +759,6 @@ impl Backend {
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
 /// Increments a backend's in-flight count for as long as it is alive.
 ///
 /// Held by the response body wrapper, so the count only drops when the last
