@@ -10,6 +10,11 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **Reasoning through `/v1/messages`.** A backend's `reasoning` /
+  `reasoning_content` becomes `thinking` blocks, streamed as `thinking_delta`.
+  Found running it against the live gateway: a reasoning model that spends its
+  `max_tokens` thinking returns `content: null`, which came back as an empty
+  message.
 - **An Anthropic Messages frontend** (#30). `POST /v1/messages` with streaming
   SSE, `tool_use`/`tool_result`, images, `stop_reason` and `usage` (cached
   tokens included); `x-api-key` or bearer auth; `POST /v1/messages/count_tokens`
