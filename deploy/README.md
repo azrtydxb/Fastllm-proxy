@@ -10,12 +10,12 @@ walks through all five shapes from a bare binary up to this one.
 | --------- | ----------------------------------------------------------------------------------------------------------- |
 | Namespace | `fastllm`                                                                                                   |
 | Image     | `192.168.10.131/azrtydxb/fastllm-proxy/proxy:main` (Nexus, anonymous pull)                                  |
-| VIP       | `192.168.10.126` via kube-vip — proxy traffic only, see below                                               |
+| VIP       | `192.168.10.126` via Cilium L2 — proxy traffic only, see below                                              |
 | Backends  | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
 > **These are one cluster's manifests, not a template.** They carry concrete
 > values for the cluster they run on — a private registry at `192.168.10.131`,
-> kube-vip VIPs at `.125`/`.126` (gateway) and `.129` (admin), and a
+> Cilium L2 VIPs at `.125`/`.126` (gateway) and `.129` (admin), and a
 > `cluster-ca` ClusterIssuer. They are kept concrete on purpose: a manifest
 > full of `<PLACEHOLDER>` cannot be applied, so it silently stops being tested,
 > and these are applied continuously.
@@ -24,12 +24,12 @@ walks through all five shapes from a bare binary up to this one.
 > which takes all of the above as values. If you would rather adapt these
 > directly, the cluster-specific values are:
 >
-> | where                             | what to change                                                                |
-> | --------------------------------- | ----------------------------------------------------------------------------- |
-> | `control.yaml`, `deployment.yaml` | `image:` — registry host and pinned digest                                    |
-> | `service.yaml`, `control.yaml`    | `kube-vip.io/loadbalancerIPs` — or drop the annotation and let your LB assign |
-> | `control.yaml`                    | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                     |
-> | `control.yaml`                    | the CNPG `Cluster` — or point `FASTLLM_DATABASE_URL` at your own Postgres     |
+> | where                               | what to change                                                                       |
+> | ----------------------------------- | ------------------------------------------------------------------------------------ |
+> | `control.yaml`, `deployment.yaml`   | `image:` — registry host and pinned digest                                           |
+> | `service.yaml`, `fastllmproxy.yaml` | `lbipam.cilium.io/ips` and `loadBalancerClass` — or drop them and let your LB assign |
+> | `control.yaml`                      | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                            |
+> | `control.yaml`                      | the CNPG `Cluster` — or point `FASTLLM_DATABASE_URL` at your own Postgres            |
 
 ## The gateway's two addresses
 

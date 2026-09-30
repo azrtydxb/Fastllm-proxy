@@ -10,8 +10,13 @@
 #                       not own. The operator selects by
 #                       `app.kubernetes.io/*`, so without these labels on the
 #                       pods both VIPs would resolve to no endpoints.
-#   serviceAnnotations  kube-vip pins the addresses by annotation. Drop them
-#                       and the VIP is released and reassigned.
+#   serviceAnnotations  Cilium LB-IPAM pins the addresses by annotation
+#                       (kw moved from kube-vip to Cilium L2 on 2026-09-30).
+#                       Drop them and the VIP is released and reassigned.
+#                       The live Services also carry
+#                       loadBalancerClass io.cilium/l2-announcer and the pool
+#                       label lb.kw.watteel.lab/announcer=cilium, which the
+#                       operator does not set and server-side apply leaves.
 #   control.serviceType The admin plane is deliberately reachable on .129,
 #                       TLS-only — see deploy/README.md for the three
 #                       preconditions that rests on. The CRD refuses this
@@ -57,8 +62,7 @@ spec:
     tlsSecretName: fastllm-control-tls
     serviceType: LoadBalancer
     serviceAnnotations:
-      kube-vip.io/loadbalancerIPs: 192.168.10.129
-      kube-vip.io/vipHost: km02
+      lbipam.cilium.io/ips: 192.168.10.129
     resources:
       requests: { cpu: 200m, memory: 384Mi }
       limits: { cpu: "1", memory: 1Gi }
@@ -72,8 +76,7 @@ spec:
     upstreamTimeout: 120
     serviceType: LoadBalancer
     serviceAnnotations:
-      kube-vip.io/loadbalancerIPs: 192.168.10.125
-      kube-vip.io/vipHost: km02
+      lbipam.cilium.io/ips: 192.168.10.125
     # Both addresses the gateway already answers on. The names are the merge
     # key an existing Service is patched against, so they match the live ones
     # exactly — change a name and the node port is reallocated.

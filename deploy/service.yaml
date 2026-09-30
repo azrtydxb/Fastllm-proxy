@@ -8,7 +8,7 @@ kind: Service
 metadata:
   name: fastllm-proxy
   namespace: fastllm
-  labels: { app: fastllm-proxy }
+  labels: { app: fastllm-proxy, lb.kw.watteel.lab/announcer: cilium }
   annotations:
     # One of two pinned VIPs. The second is a separate Service below, because
     # the kube-vip running here brings up only the first address of a
@@ -30,9 +30,12 @@ metadata:
     # `spec.loadBalancerIP` is deliberately absent — it is deprecated, it holds
     # only one address, and when it disagrees with this annotation the result
     # depends on which kube-vip reads first.
-    kube-vip.io/loadbalancerIPs: "192.168.10.125"
+    lbipam.cilium.io/ips: "192.168.10.125"
 spec:
   type: LoadBalancer
+  # kw announces LoadBalancer addresses with Cilium L2 since 2026-09-30; the
+  # class is immutable, so changing it means recreating the Service.
+  loadBalancerClass: io.cilium/l2-announcer
   selector: { app: fastllm-proxy }
   ports:
     - { name: http, port: 80, targetPort: http }
@@ -43,7 +46,7 @@ kind: Service
 metadata:
   name: fastllm-proxy-alt
   namespace: fastllm
-  labels: { app: fastllm-proxy }
+  labels: { app: fastllm-proxy, lb.kw.watteel.lab/announcer: cilium }
   annotations:
     # The second address, selecting the same pods.
     #
@@ -56,9 +59,12 @@ metadata:
     # Both are pinned *here*, in this file, and nowhere else. The moves were
     # never kube-vip drifting: this manifest pinned .126 while a second,
     # differing manifest pinned .125, and whichever was applied last won.
-    kube-vip.io/loadbalancerIPs: "192.168.10.126"
+    lbipam.cilium.io/ips: "192.168.10.126"
 spec:
   type: LoadBalancer
+  # kw announces LoadBalancer addresses with Cilium L2 since 2026-09-30; the
+  # class is immutable, so changing it means recreating the Service.
+  loadBalancerClass: io.cilium/l2-announcer
   selector: { app: fastllm-proxy }
   ports:
     - { name: http, port: 80, targetPort: http }
