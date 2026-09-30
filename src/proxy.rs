@@ -3370,6 +3370,12 @@ fn metrics_response(state: &AppState) -> Response<ResBody> {
     // both globally and per model.
     state.telemetry.render(&mut out);
 
+    // Every per-backend series below is keyed by `api_base` AND `model`.
+    // `api_base` alone is not a backend: every OpenRouter model shares
+    // `https://openrouter.ai/api/v1`, and series labelled by it alone were
+    // emitted once per backend with identical labels — Prometheus keeps the
+    // first sample of a repeated series and drops the rest, so five backends'
+    // numbers became one. tests/metrics_series_unique.rs pins this.
     out.push_str("# HELP fastllm_backend_inflight Requests currently streaming from a backend.\n");
     out.push_str("# TYPE fastllm_backend_inflight gauge\n");
     for b in registry.backends() {
@@ -3490,8 +3496,9 @@ waiting (the wait queue was full, or a sibling was tried instead), `timed_out` a
     out.push_str("# TYPE fastllm_backend_healthy gauge\n");
     for b in registry.backends() {
         out.push_str(&format!(
-            "fastllm_backend_healthy{{api_base=\"{}\"}} {}\n",
+            "fastllm_backend_healthy{{api_base=\"{}\",model=\"{}\"}} {}\n",
             b.api_base,
+            b.upstream_model,
             u8::from(b.is_healthy())
         ));
     }
@@ -3513,8 +3520,9 @@ waiting (the wait queue was full, or a sibling was tried instead), `timed_out` a
     out.push_str("# TYPE fastllm_backend_requests_total counter\n");
     for b in registry.backends() {
         out.push_str(&format!(
-            "fastllm_backend_requests_total{{api_base=\"{}\"}} {}\n",
+            "fastllm_backend_requests_total{{api_base=\"{}\",model=\"{}\"}} {}\n",
             b.api_base,
+            b.upstream_model,
             b.requests_total()
         ));
     }
@@ -3528,7 +3536,7 @@ waiting (the wait queue was full, or a sibling was tried instead), `timed_out` a
         b.duration.render(
             &mut out,
             "fastllm_backend_duration_seconds",
-            &format!("api_base=\"{}\"", b.api_base),
+            &format!("api_base=\"{}\",model=\"{}\"", b.api_base, b.upstream_model),
         );
     }
 
@@ -3536,8 +3544,9 @@ waiting (the wait queue was full, or a sibling was tried instead), `timed_out` a
     out.push_str("# TYPE fastllm_backend_errors_total counter\n");
     for b in registry.backends() {
         out.push_str(&format!(
-            "fastllm_backend_errors_total{{api_base=\"{}\"}} {}\n",
+            "fastllm_backend_errors_total{{api_base=\"{}\",model=\"{}\"}} {}\n",
             b.api_base,
+            b.upstream_model,
             b.errors_total()
         ));
     }
