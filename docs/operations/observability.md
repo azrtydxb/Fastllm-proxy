@@ -27,7 +27,7 @@ classification detail without the rest.
 
 ## Metrics worth knowing about
 
-Most are self-describing from their `# HELP` text. Four are not obvious:
+Most are self-describing from their `# HELP` text. Five are not obvious:
 
 - **`fastllm_classify_escalations_total` is not `fastllm_classified_refined_total`.**
   The second counts prompts the transformer _decided_; the first counts prompts
@@ -39,6 +39,13 @@ Most are self-describing from their `# HELP` text. Four are not obvious:
   A model's p99 rising says the model got slow. The per-backend one says which
   replica did, which is the difference between "the provider is degraded" and
   "one of our two GPUs is".
+- **Per-backend series are keyed by `api_base` _and_ `model`.** `api_base`
+  alone does not name a backend — every OpenRouter model shares
+  `https://openrouter.ai/api/v1` — so `fastllm_backend_healthy`,
+  `…_requests_total`, `…_errors_total` and `…_duration_seconds` used to repeat
+  one series per backend and Prometheus kept only the first
+  (`PrometheusDuplicateTimestamps`). Aggregate over `model` to get a whole
+  host: `sum by (api_base) (rate(fastllm_backend_requests_total[5m]))`.
 - **`fastllm_upstream_status_total` keeps 429 separate from other 4xx.** It is
   the retryable one, and the reason a pool that passes every health check can
   still refuse a request — lumping it with client errors hides the signal that
