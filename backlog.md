@@ -806,7 +806,7 @@ back from `/metrics` and `/admin/fleet`.
 
 Two bugs worth recording, because the obvious implementation has both:
 
-- `Semaphore::forget_permits` removes only *available* permits, and an
+- `Semaphore::forget_permits` removes only _available_ permits, and an
   overloaded engine is exactly when none are, so a naive shrink does nothing
   when it matters and every held permit comes back at full strength. Shrinking
   records the shortfall as debt that returning permits repay by being
@@ -852,3 +852,24 @@ Not built: a supervisor that restarts a loop that stops ticking. With every
 read bounded there is no remaining way for these loops to wait forever. A
 watchdog would be a second mechanism guarding against the absence of the
 first, and it could restart a loop partway through a sweep.
+
+## Anthropic frontend, disguised errors, ejected-pool last resort — done (2026-09-30)
+
+Three GitHub issues, one change.
+
+- **#30 `/v1/messages`.** `src/protocol/messages.rs` translates the request to a
+  chat completion and the answer back, and the request goes through the same
+  `proxy_request` as everything else, so no policy is reimplemented. Not built,
+  deliberately: native pass-through to an Anthropic backend (translated twice
+  today, which is correct and lossy on thinking blocks), and an exact
+  `count_tokens` (it would need a tokenizer or a network call on the request
+  path; it is an estimate).
+- **#28 200-with-an-error.** `unmask_error` reads a small non-streaming JSON 200
+  and gives it the status its `error.code` declares, before retry, failover and
+  telemetry look at it. A stream is never read. The cost is one buffered read of
+  a body of at most 64 KiB (by declared length) on that path.
+- **#29 flapping.** The mechanism that ejects is still the probe, and the
+  logging from `fa2c79d` names it. What changed is the consequence: a model
+  whose every backend is out, with nothing further in its chain, now tries them
+  anyway. Root cause of the probes failing was not established from the issue's
+  logs; if it recurs, the `backend out of rotation` line says which route.

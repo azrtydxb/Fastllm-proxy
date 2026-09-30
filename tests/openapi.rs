@@ -217,10 +217,16 @@ fn the_spec_describes_no_route_that_does_not_exist() {
     // router, so they are checked against their own sources. The MCP routes
     // are read from `MCP_ROUTES` rather than repeated here: a second
     // hand-maintained list is the drift this whole file exists to catch.
-    let mut data_plane: BTreeSet<String> = ["/v1/models", "/health", "/metrics"]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let mut data_plane: BTreeSet<String> = [
+        "/v1/models",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/health",
+        "/metrics",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
     data_plane.extend(mcp_routes().into_iter().map(|(_, p)| format!("/v1{p}")));
     // Templated by agent name, so there is no literal path to enumerate from
     // a const the way `MCP_ROUTES` is. Listed here and asserted below to be

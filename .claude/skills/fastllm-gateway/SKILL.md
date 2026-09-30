@@ -28,7 +28,9 @@ curl http://192.168.10.125/v1/chat/completions -H "Authorization: Bearer <key>" 
 | `POST` | `/v1/embeddings` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |
 | `POST` | `/v1/images/edits` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |
 | `POST` | `/v1/images/generations` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |
-| `GET` | `/v1/models` | Models this key may invoke. Filtered by the caller's grants | — |
+| `POST` | `/v1/messages` | Anthropic Messages API. Translated to a chat completion and served by the ordinary request path, so routing, budgets, rate limits and RBAC apply unchanged | — |
+| `POST` | `/v1/messages/count_tokens` | Best-effort input token count for a Messages request. An estimate from the text, answered locally | — |
+| `GET` | `/v1/models` | Models this key may invoke. Filtered by the caller's grants. Anthropic-shaped when the request carries `anthropic-version` | — |
 | `POST` | `/v1/moderations` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |
 | `POST` | `/v1/rerank` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |
 | `POST` | `/v1/responses` | Proxied to the backend serving `model`. Forwarded byte-for-byte for an `openai` backend | — |

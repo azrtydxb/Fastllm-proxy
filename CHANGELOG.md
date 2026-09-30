@@ -10,6 +10,15 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Added
 
+- **An Anthropic Messages frontend** (#30). `POST /v1/messages` with streaming
+  SSE, `tool_use`/`tool_result`, images, `stop_reason` and `usage` (cached
+  tokens included); `x-api-key` or bearer auth; `POST /v1/messages/count_tokens`
+  as a local estimate; `GET /v1/models` in Anthropic's shape when the request
+  carries `anthropic-version`. Translated onto the ordinary request path, so
+  routing, budgets, rate limits and RBAC apply unchanged. Thinking blocks are
+  dropped, and an Anthropic backend behind it is translated twice rather than
+  passed through.
+
 - **An id is a uuid, and no longer a count.** All 17 tables that have an
   identity migrate from `BIGSERIAL` to UUID v4 (migration 0041), generated from
   the live foreign-key graph rather than hand-typed and tested by migrating a
@@ -284,6 +293,15 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ### Fixed
 
+- **An upstream error sent with HTTP 200 is now returned with its real status**
+  (#28). A non-streaming JSON `200` whose body is `{"error":…}` (a gateway in
+  front of NVIDIA, saturated) takes the `error.code` it declares, so clients
+  retry, failover fires and error counters see it. Streams are never read.
+- **A backend a probe ejected is the last resort, not a 502** (#29). When a
+  model's every backend is out of rotation and nothing is left in its chain,
+  the least-loaded one is tried anyway. The probe timeout is
+  `--health-timeout` (default 3s) and the header timeout `--upstream-timeout`
+  (default 120s); both were already flags.
 - `POST /admin/models` silently dropped `context_length`: the field was
   PATCH-only, so a caller who sent it at creation got 201 and a model with no
   context window. It is settable at creation now.

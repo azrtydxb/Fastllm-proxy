@@ -168,6 +168,26 @@ impl Router {
         Some(Arc::clone(chosen))
     }
 
+    /// The last resort when [`pick`](Self::pick) finds nothing healthy: the
+    /// least-loaded untried backend, ejected or not.
+    ///
+    /// Ejection is a suspicion formed by a probe; a request is evidence. A
+    /// probe fails for reasons that say nothing about serving -- a `/models`
+    /// answer slower than the probe timeout on a busy engine, a replica-local
+    /// network blip -- and #29 was exactly that: every backend of a model
+    /// ejected by probes while each answered real requests in milliseconds, so
+    /// the caller got `502 no healthy backend` from a fleet that was up.
+    /// Trying an ejected backend costs one connect error when it really is
+    /// dead; refusing to costs a whole outage when it is not. Callers use it
+    /// only when there is no further model to fail over to, so a genuinely
+    /// dead pool still hands over to the next model without the detour.
+    pub fn pick_ejected(&self, pool: &Pool, exclude: &[BackendUid]) -> Option<Arc<Backend>> {
+        pool.iter()
+            .filter(|b| !exclude.contains(&b.uid))
+            .min_by_key(|b| b.inflight())
+            .cloned()
+    }
+
     /// Would [`pick`](Self::pick) still find a backend if these were excluded?
     ///
     /// Answers the retry question — "is there anywhere else to send this?" —
@@ -393,6 +413,22 @@ model_list:
             backends: base.backends.clone(),
             policy: Some(policy),
         })
+    }
+
+    /// #29: a pool whose every backend a probe ejected has no healthy pick,
+    /// but the last resort still finds them, and honours what was tried.
+    #[test]
+    fn an_ejected_pool_still_has_a_last_resort() {
+        let r = router(Policy::RoundRobin);
+        let pool = two_node_pool();
+        for b in &pool.backends {
+            b.mark_probe_failed(1);
+        }
+        assert!(r.pick(&pool, 1, &[]).is_none());
+        let first = r.pick_ejected(&pool, &[]).expect("last resort");
+        let second = r.pick_ejected(&pool, &[first.uid]).expect("the other one");
+        assert_ne!(first.uid, second.uid);
+        assert!(r.pick_ejected(&pool, &[first.uid, second.uid]).is_none());
     }
 
     /// A pool's own policy wins over the deployment's.

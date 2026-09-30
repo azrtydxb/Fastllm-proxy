@@ -121,7 +121,7 @@ const HOP_BY_HOP: &[&str] = &[
 const REQUEST_ONLY_STRIPPED: &[&str] = &["host", "content-length", "authorization"];
 
 pub async fn handle(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<ResBody>, hyper::Error> {
     let path = req.uri().path().to_string();
@@ -188,6 +188,28 @@ pub async fn handle(
     // saves the per-request `Principal` clone (name `String` +
     // `allowed_models: HashSet<String>`) that used to happen on every
     // authenticated request via `.cloned()`.
+    // Anthropic clients send the key as `x-api-key`, not a bearer token. It is
+    // moved to `Authorization` here, once, so authentication, the peer
+    // forward and everything after see one spelling. An explicit
+    // `Authorization` wins: the SDKs send only one, and a caller that sends
+    // both has said which it means.
+    if !req.headers().contains_key(hyper::header::AUTHORIZATION) {
+        let bearer = req
+            .headers()
+            .get("x-api-key")
+            .and_then(|k| k.to_str().ok())
+            .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k.trim())).ok());
+        if let Some(bearer) = bearer {
+            req.headers_mut()
+                .insert(hyper::header::AUTHORIZATION, bearer);
+        }
+    }
+    let anthropic_route = method == Method::POST
+        && matches!(
+            path.strip_prefix("/v1").unwrap_or(&path),
+            "/messages" | "/messages/count_tokens"
+        );
+
     let snapshot = state.snapshot.load_full();
     let (principal, auth_key_id) = match authorize(&req, &snapshot) {
         Ok(p) => p,
@@ -197,15 +219,31 @@ pub async fn handle(
             state
                 .telemetry
                 .record_rejection(crate::telemetry::Rejection::Unauthenticated);
-            return Ok(*rejection);
+            return Ok(if anthropic_route {
+                to_anthropic_error(*rejection).await
+            } else {
+                *rejection
+            });
         }
     };
 
     if method == Method::GET && (path == "/v1/models" || path == "/models") {
-        return Ok(models_response(&state, &snapshot, principal));
+        // Anthropic's SDKs always send `anthropic-version`; OpenAI's never do.
+        let anthropic = req.headers().contains_key("anthropic-version");
+        return Ok(models_response(&state, &snapshot, principal, anthropic));
     }
 
     let subpath = path.strip_prefix("/v1").unwrap_or(&path);
+
+    if method == Method::POST {
+        match subpath {
+            "/messages" => {
+                return Ok(messages_request(req, state, principal, auth_key_id, &snapshot).await)
+            }
+            "/messages/count_tokens" => return Ok(count_tokens(req, &state).await),
+            _ => {}
+        }
+    }
 
     // The MCP gateway. Separate from `PROXIED_SUFFIXES` because these are not
     // pass-through: the gateway answers `servers` itself, fans `tools/list`
@@ -490,8 +528,8 @@ fn resolve_target_models(
         )
     )
 )]
-async fn proxy_request(
-    req: Request<Incoming>,
+async fn proxy_request<B>(
+    req: Request<B>,
     state: Arc<AppState>,
     subpath: String,
     principal: Option<&Principal>,
@@ -499,7 +537,11 @@ async fn proxy_request(
     // row this function writes can name it.
     key_id: Option<crate::snapshot::KeyId>,
     snapshot: &Snapshot,
-) -> Response<ResBody> {
+) -> Response<ResBody>
+where
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<BoxError>,
+{
     // Taken before the body is even collected, so the measurement covers
     // everything this proxy is responsible for — including waiting on a slow
     // client's upload, which is otherwise invisible and looks like upstream
@@ -960,7 +1002,12 @@ async fn proxy_request(
         let mut tried: Vec<BackendUid> = Vec::new();
 
         for attempt in 0..=state.max_retries {
-            let Some(backend) = state.router.pick(pool, prefix, &tried) else {
+            let picked = state.router.pick(pool, prefix, &tried).or_else(|| {
+                (!more_models_after_this)
+                    .then(|| state.router.pick_ejected(pool, &tried))
+                    .flatten()
+            });
+            let Some(backend) = picked else {
                 break;
             };
             tried.push(backend.uid);
@@ -1130,6 +1177,25 @@ async fn proxy_request(
                     }
                     continue;
                 }
+            };
+
+            // A 200 that is really an error (#28) has to be unmasked before the
+            // status drives retry, failover, telemetry and the client's own
+            // retry logic. Only a finite, JSON, native-protocol response is
+            // read; a stream or a translated backend never is.
+            let result = match result {
+                Ok(mut resp)
+                    if !streaming
+                        && backend.protocol.is_passthrough()
+                        && may_hide_an_error(&resp) =>
+                {
+                    match tokio::time::timeout(timeout, unmask_error(&mut resp)).await {
+                        Ok(Ok(())) => Ok(resp),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(anyhow::anyhow!("upstream stalled sending its body")),
+                    }
+                }
+                other => other,
             };
 
             match result {
@@ -1680,6 +1746,85 @@ fn build_upstream_request(
 /// for as long as the body is still streaming, and — for a principal with a
 /// budget or a token-rate limit — feeding forwarded bytes into a bounded tail
 /// buffer so real usage can be reported once the stream ends (P3).
+/// Largest body [`unmask_error`] will buffer, judged by the declared length.
+/// An error document is a few hundred bytes; anything declared bigger than this
+/// is a real payload (an embedding batch) that is not worth holding.
+const MASKED_ERROR_SCAN_LIMIT: u64 = 64 * 1024;
+
+/// Is this a response whose 200 might be an error in disguise?
+///
+/// Cheap and header-only, so the hot path pays a couple of comparisons: a
+/// success status, JSON (or unlabelled) content, and a declared length small
+/// enough to be an error document. Binary audio and large payloads fall out
+/// here without being read.
+fn may_hide_an_error(resp: &Response<UpstreamBody>) -> bool {
+    if resp.status() != StatusCode::OK {
+        return false;
+    }
+    let json = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|ct| ct.contains("json"));
+    let small = resp
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_none_or(|n| n <= MASKED_ERROR_SCAN_LIMIT);
+    json && small
+}
+
+/// Give a disguised error its real status.
+///
+/// Some upstreams -- a gateway in front of NVIDIA, in #28 -- answer `200` with
+/// `{"error":{"message":..,"code":502}}`. Every OpenAI client keys its retries
+/// on the status, so a 200 is a success it never retries, and every counter of
+/// non-2xx responses reads a saturated provider as healthy. The document says
+/// what the status should have been; this makes the response agree. The body is
+/// left as the upstream wrote it, and served from the buffer.
+async fn unmask_error(resp: &mut Response<UpstreamBody>) -> anyhow::Result<()> {
+    let body = resp
+        .body_mut()
+        .buffer()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(status) = embedded_error_status(&body) {
+        *resp.status_mut() = status;
+    }
+    Ok(())
+}
+
+/// The status a `200` body declares, if the body is an error document.
+///
+/// An error document is `{"error": ...}` with no `choices` or `data` beside it;
+/// a completion that merely mentions the word is left alone. The document's own
+/// `error.code` is trusted when it is a 4xx/5xx and a bare 502 otherwise, since
+/// "the upstream failed" is the one thing known for sure.
+fn embedded_error_status(body: &[u8]) -> Option<StatusCode> {
+    // A real completion is bigger than this only if it is not an error, so the
+    // parse is bounded on the one path that can be hot.
+    if body.len() > MASKED_ERROR_SCAN_LIMIT as usize {
+        return None;
+    }
+    let doc: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = doc.as_object()?;
+    if obj.contains_key("choices") || obj.contains_key("data") {
+        return None;
+    }
+    let error = obj.get("error").filter(|e| !e.is_null())?;
+    let code = error.get("code").or_else(|| obj.get("code")).and_then(|c| {
+        c.as_u64()
+            .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+    });
+    Some(
+        code.and_then(|c| u16::try_from(c).ok())
+            .and_then(|c| StatusCode::from_u16(c).ok())
+            .filter(|s| s.is_client_error() || s.is_server_error())
+            .unwrap_or(StatusCode::BAD_GATEWAY),
+    )
+}
+
 fn finish_response(
     resp: Response<UpstreamBody>,
     guard: InflightGuard,
@@ -2732,6 +2877,7 @@ fn models_response(
     state: &AppState,
     snapshot: &Snapshot,
     principal: Option<&Principal>,
+    anthropic: bool,
 ) -> Response<ResBody> {
     // Frontend models only. They are the sole name a client may use, so
     // listing a provider model would offer something that 404s the moment it
@@ -2777,10 +2923,183 @@ fn models_response(
             entry
         })
         .collect();
+    if anthropic {
+        let entries: Vec<serde_json::Value> = data
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+            .map(|id| {
+                serde_json::json!({
+                    "type": "model",
+                    "id": id,
+                    "display_name": id,
+                    "created_at": "1970-01-01T00:00:00Z",
+                })
+            })
+            .collect();
+        let first = entries.first().and_then(|e| e.get("id")).cloned();
+        let last = entries.last().and_then(|e| e.get("id")).cloned();
+        return json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "data": entries,
+                "has_more": false,
+                "first_id": first,
+                "last_id": last,
+            })
+            .to_string(),
+        );
+    }
     json_response(
         StatusCode::OK,
         serde_json::json!({ "object": "list", "data": data }).to_string(),
     )
+}
+
+/// `POST /v1/messages`: an Anthropic-shaped request, served by the ordinary
+/// request path.
+///
+/// The body is translated to a chat completion and handed to
+/// [`proxy_request`] as if the client had sent that, so routing, affinity,
+/// budgets, rate limits and RBAC all apply with no second implementation to
+/// drift. Only the two ends differ, and both are in
+/// [`protocol::messages`](crate::protocol::messages). A backend that itself
+/// speaks Anthropic is translated twice, not passed through -- correct, and
+/// lossy in the ways that module documents.
+async fn messages_request(
+    req: Request<Incoming>,
+    state: Arc<AppState>,
+    principal: Option<&Principal>,
+    key_id: Option<crate::snapshot::KeyId>,
+    snapshot: &Snapshot,
+) -> Response<ResBody> {
+    let (mut parts, body) = req.into_parts();
+    let collected = match Limited::new(body, state.max_body_bytes).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            let too_large = e
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some();
+            let status = if too_large {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return anthropic_error(status, &format!("could not read the request body: {e}"));
+        }
+    };
+    let translated = match protocol::messages::request_to_openai(&collected) {
+        Ok(t) => t,
+        Err(msg) => return anthropic_error(StatusCode::BAD_REQUEST, &msg),
+    };
+    parts.uri = hyper::Uri::from_static("/v1/chat/completions");
+    parts.headers.remove(CONTENT_LENGTH);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let req = Request::from_parts(parts, Full::new(Bytes::from(translated.body)));
+    let resp = proxy_request(
+        req,
+        state,
+        "/chat/completions".to_string(),
+        principal,
+        key_id,
+        snapshot,
+    )
+    .await;
+    into_anthropic_response(resp, translated.stream, translated.model).await
+}
+
+/// The reply half of [`messages_request`].
+async fn into_anthropic_response(
+    resp: Response<ResBody>,
+    stream: bool,
+    model: String,
+) -> Response<ResBody> {
+    if !resp.status().is_success() {
+        return to_anthropic_error(resp).await;
+    }
+    let (mut parts, body) = resp.into_parts();
+    parts.headers.remove(CONTENT_LENGTH);
+    if stream {
+        parts
+            .headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        return Response::from_parts(
+            parts,
+            protocol::messages::MessagesStream::new(body, model).boxed(),
+        );
+    }
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            return anthropic_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream body failed: {e}"),
+            )
+        }
+    };
+    match protocol::messages::completion_to_message(&bytes, &model) {
+        Ok(out) => {
+            parts
+                .headers
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            Response::from_parts(parts, full(Bytes::from(out)))
+        }
+        Err(msg) => anthropic_error(StatusCode::BAD_GATEWAY, &msg),
+    }
+}
+
+/// An Anthropic-shaped error response.
+fn anthropic_error(status: StatusCode, message: &str) -> Response<ResBody> {
+    json_response(
+        status,
+        String::from_utf8(protocol::messages::error_body(status.as_u16(), message))
+            .unwrap_or_default(),
+    )
+}
+
+/// Re-shape an OpenAI-style error response for an Anthropic client, keeping
+/// its status, its message and its headers (`Retry-After` among them).
+async fn to_anthropic_error(resp: Response<ResBody>) -> Response<ResBody> {
+    let (mut parts, body) = resp.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+    let out = protocol::messages::error_from_openai(parts.status.as_u16(), &bytes);
+    parts.headers.remove(CONTENT_LENGTH);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Response::from_parts(parts, full(Bytes::from(out)))
+}
+
+/// `POST /v1/messages/count_tokens`, best effort.
+///
+/// Answered locally from an estimate (see
+/// [`protocol::messages::estimate_input_tokens`]): it performs no I/O, which
+/// is the rule for anything on the request path.
+async fn count_tokens(req: Request<Incoming>, state: &AppState) -> Response<ResBody> {
+    let collected = match Limited::new(req.into_body(), state.max_body_bytes)
+        .collect()
+        .await
+    {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                &format!("could not read the request body: {e}"),
+            )
+        }
+    };
+    match protocol::messages::estimate_input_tokens(&collected) {
+        Ok(n) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "input_tokens": n }).to_string(),
+        ),
+        Err(msg) => anthropic_error(StatusCode::BAD_REQUEST, &msg),
+    }
 }
 
 /// Whether a request carries a key this snapshot accepts.
@@ -3271,6 +3590,49 @@ mod tests {
     }
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    /// #28: the exact document the saturated NVIDIA upstream sent with a 200.
+    #[test]
+    fn a_disguised_error_takes_the_status_it_declares() {
+        let body =
+            br#"{"error":{"message":"Upstream error from Nvidia: ResourceExhausted","code":502}}"#;
+        assert_eq!(embedded_error_status(body), Some(StatusCode::BAD_GATEWAY));
+        let limited = br#"{"error":{"message":"slow down","code":"429"}}"#;
+        assert_eq!(
+            embedded_error_status(limited),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+    }
+
+    /// No usable code still means the upstream failed; a code that is not an
+    /// error status is not believed.
+    #[test]
+    fn an_error_without_a_usable_code_is_a_502() {
+        assert_eq!(
+            embedded_error_status(br#"{"error":"boom"}"#),
+            Some(StatusCode::BAD_GATEWAY)
+        );
+        assert_eq!(
+            embedded_error_status(br#"{"error":{"code":200}}"#),
+            Some(StatusCode::BAD_GATEWAY)
+        );
+    }
+
+    /// The failure this guards against is the opposite one: turning a good
+    /// answer into an error.
+    #[test]
+    fn real_completions_are_left_alone() {
+        assert_eq!(
+            embedded_error_status(br#"{"choices":[{"message":{"content":"error"}}],"error":null}"#),
+            None
+        );
+        assert_eq!(
+            embedded_error_status(br#"{"data":[],"error":{"code":500}}"#),
+            None
+        );
+        assert_eq!(embedded_error_status(br#"{"error":null,"id":"x"}"#), None);
+        assert_eq!(embedded_error_status(b"not json"), None);
+    }
 
     /// These two responses are built from a complete body, so collecting it is
     /// a formality rather than a stream read.

@@ -193,6 +193,11 @@ curl http://localhost:4000/v1/chat/completions \
   -d '{"model":"my-model","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+Anthropic-native clients work too, with only the base URL changed: set
+`ANTHROPIC_BASE_URL=http://localhost:4000` and the key as `ANTHROPIC_API_KEY`
+(sent as `x-api-key`). `POST /v1/messages` is translated onto the same path,
+so routing, budgets and RBAC apply unchanged.
+
 The management UI is on the same port as the admin API — open `https://localhost:4001/`
 and the same login works.
 

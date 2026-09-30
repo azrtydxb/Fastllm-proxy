@@ -195,18 +195,12 @@
                     "description": "Supplied when a request omits max_tokens and this provider requires one"
                   },
                   "upstream_timeout_seconds": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
+                    "type": ["integer", "null"],
                     "minimum": 1,
                     "description": "Seconds this backend may take to send response headers. Null returns to the deployment's --upstream-timeout"
                   },
                   "admission_max_concurrent": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
+                    "type": ["integer", "null"],
                     "minimum": 1,
                     "description": "Turns on flow control: at most this many concurrent requests per proxy replica, the rest held at the proxy. The ceiling halves while the engine reports admission_high_water or more requests waiting and grows back as its queue drains. Null turns it off"
                   },
@@ -3229,9 +3223,64 @@
         ]
       }
     },
+    "/v1/messages": {
+      "post": {
+        "summary": "Anthropic Messages API. Translated to a chat completion and served by the ordinary request path, so routing, budgets, rate limits and RBAC apply unchanged",
+        "operationId": "anthropic_messages",
+        "tags": ["data plane"],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An Anthropic message, or an Anthropic SSE event stream when `stream` is true"
+          },
+          "400": {
+            "description": "Malformed request, or a content block with no OpenAI equivalent"
+          },
+          "401": {
+            "description": "No key (`x-api-key` or bearer), or an unknown one"
+          },
+          "403": {
+            "description": "The key holds no model:invoke grant for this model"
+          },
+          "429": {
+            "description": "Rate limited; Retry-After is in whole seconds"
+          },
+          "502": {
+            "description": "No backend in the chain could be reached"
+          }
+        }
+      }
+    },
+    "/v1/messages/count_tokens": {
+      "post": {
+        "summary": "Best-effort input token count for a Messages request. An estimate from the text, answered locally",
+        "operationId": "anthropic_count_tokens",
+        "tags": ["data plane"],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{\"input_tokens\": n}`"
+          },
+          "400": {
+            "description": "Malformed request"
+          },
+          "401": {
+            "description": "No key, or an unknown one"
+          }
+        }
+      }
+    },
     "/v1/models": {
       "get": {
-        "summary": "Models this key may invoke. Filtered by the caller's grants",
+        "summary": "Models this key may invoke. Filtered by the caller's grants. Anthropic-shaped when the request carries `anthropic-version`",
         "operationId": "list_models",
         "tags": ["data plane"],
         "security": [
