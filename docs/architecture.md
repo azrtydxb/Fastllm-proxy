@@ -13,8 +13,10 @@ container in a lab and a scaled deployment in Kubernetes.
 ```mermaid
 flowchart LR
     client([OpenAI client])
+    aclient([Anthropic client<br/>Claude Code, SDKs])
 
     subgraph dp["Data plane — --role proxy"]
+        msgs["/v1/messages<br/>Anthropic ⇄ OpenAI shape"]
         auth[authenticate + authorise]
         classify["classify prompt<br/>(only if classes exist)"]
         route[resolve model, evaluate rules]
@@ -35,6 +37,8 @@ flowchart LR
     backend([vLLM / SGLang / OpenRouter<br/>/ any OpenAI-compatible])
 
     client -->|"Bearer sk-…"| auth --> route --> limit --> fwd --> backend
+    aclient -->|"x-api-key"| msgs -->|"chat completion"| auth
+    fwd -.->|"response translated back"| msgs
     limit -.->|"backend.protocol ≠ openai"| xlate
     xlate -.-> native([Anthropic / Gemini<br/>native API])
     auth -.reads.-> snap
@@ -78,6 +82,20 @@ principal, an expiry comparison, one set lookup for the model, and — when the
 principal has a limit — an `RwLock` read plus up to two short mutex-guarded
 bucket operations. No graph walk, no I/O, no lock held across an await, no
 allocation beyond what the body already needed.
+
+## The Anthropic frontend
+
+`POST /v1/messages` (`src/protocol/messages.rs`) faces the client rather than
+the backend. The request is translated to a chat completion and handed to the
+same `proxy_request` every other call uses, so routing, cache affinity,
+budgets, rate limits and RBAC are not reimplemented and cannot drift; the
+answer, streamed or not, is translated back to Anthropic's shape. `x-api-key`
+is moved to `Authorization` before authentication.
+
+Known limits, because a translator should say what it does not do: thinking
+blocks are dropped in both directions, `count_tokens` is an estimate, and a
+backend that itself speaks Anthropic is translated twice rather than passed
+through.
 
 ## Two execution modes
 

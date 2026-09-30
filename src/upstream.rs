@@ -329,6 +329,8 @@ impl Upstream {
                 conn_done: false,
                 conn_err: None,
                 saw_eof: false,
+                replay: None,
+                buffered: false,
             },
         ))
     }
@@ -383,6 +385,11 @@ pub struct UpstreamBody {
     /// the terminal chunk has been read — relying on it alone meant streaming
     /// responses never returned their connection to the pool.
     saw_eof: bool,
+    /// The whole body, once [`buffer`](UpstreamBody::buffer) has read it.
+    /// Handed out as the single frame, so a body that was inspected reaches
+    /// the client exactly as it would have uninspected.
+    replay: Option<Bytes>,
+    buffered: bool,
 }
 
 impl Body for UpstreamBody {
@@ -394,6 +401,10 @@ impl Body for UpstreamBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
+
+        if this.buffered {
+            return Poll::Ready(this.replay.take().map(|b| Ok(Frame::data(b))));
+        }
 
         // Moving bytes off the socket is this poll's job. This is the whole
         // point of the module: no channel, no second task, no wakeup per frame.
@@ -437,15 +448,54 @@ impl Body for UpstreamBody {
     }
 
     fn is_end_stream(&self) -> bool {
+        if self.buffered {
+            return self.replay.is_none();
+        }
         self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
+        if self.buffered {
+            return hyper::body::SizeHint::with_exact(
+                self.replay.as_ref().map_or(0, |b| b.len() as u64),
+            );
+        }
         self.inner.size_hint()
     }
 }
 
 impl UpstreamBody {
+    /// Read the rest of the body into memory and return it, leaving it to be
+    /// served from there.
+    ///
+    /// For the one caller that has to look at a non-streaming response before
+    /// deciding what it is (a provider can answer 200 with an error document).
+    /// Only ever for a body that is finite by construction; a stream must
+    /// never be passed here, since it would turn the incremental path into a
+    /// batch one.
+    pub async fn buffer(&mut self) -> Result<Bytes, BoxError> {
+        if self.buffered {
+            return Ok(self.replay.clone().unwrap_or_default());
+        }
+        let mut acc = bytes::BytesMut::new();
+        loop {
+            let frame = std::future::poll_fn(|cx| Pin::new(&mut *self).poll_frame(cx)).await;
+            match frame {
+                Some(Ok(f)) => {
+                    if let Ok(data) = f.into_data() {
+                        acc.extend_from_slice(&data);
+                    }
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        let bytes = acc.freeze();
+        self.replay = Some(bytes.clone());
+        self.buffered = true;
+        Ok(bytes)
+    }
+
     /// Hand the connection back, but only if this response actually finished.
     ///
     /// A half-read body means the peer is mid-response and the connection

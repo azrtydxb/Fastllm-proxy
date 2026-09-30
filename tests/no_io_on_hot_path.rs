@@ -283,6 +283,40 @@ fn tail_buffer_push_body_contains_no_await_or_io_tokens() {
     assert_no_await_or_io_tokens(&body, "TailBuffer::push");
 }
 
+/// The Anthropic frontend (`src/protocol/messages.rs`) puts translation on the
+/// request path of every `/v1/messages` call: request in, completion out, and a
+/// converter run per streamed chunk. All of it is `Value` in, `Value` out, and
+/// `count_tokens` is an estimate precisely so that it needs no tokenizer
+/// service. Pinned so a later "make the count exact" cannot slip a call in.
+const _MESSAGES_REQUEST_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
+    &[u8],
+) -> Result<
+    fastllm_proxy::protocol::messages::Translated,
+    String,
+> = fastllm_proxy::protocol::messages::request_to_openai;
+const _MESSAGES_ESTIMATE_IS_SYNC_AND_TAKES_NO_HANDLE: fn(&[u8]) -> Result<u64, String> =
+    fastllm_proxy::protocol::messages::estimate_input_tokens;
+const _MESSAGES_STREAM_PUSH_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
+    &mut fastllm_proxy::protocol::messages::StreamConverter,
+    &[u8],
+) -> Vec<u8> = fastllm_proxy::protocol::messages::StreamConverter::push;
+
+#[test]
+fn messages_translation_contains_no_await_or_io_tokens() {
+    let source = include_str!("../src/protocol/messages.rs");
+    for (prefix, name) in [
+        ("pub fn request_to_openai(", "request_to_openai"),
+        ("pub fn completion_to_message(", "completion_to_message"),
+        ("pub fn estimate_input_tokens(", "estimate_input_tokens"),
+        (
+            "pub fn push(&mut self, bytes: &[u8])",
+            "StreamConverter::push",
+        ),
+    ] {
+        assert_no_await_or_io_tokens(&extract_fn_body(source, prefix), name);
+    }
+}
+
 /// End-to-end sanity check that the surface asserted above actually behaves
 /// as authorisation: a known key resolves to a principal whose grants are
 /// enforced. This does not itself guard against I/O (the compile-time

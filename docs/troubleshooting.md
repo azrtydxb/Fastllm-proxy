@@ -195,6 +195,10 @@ recovery.
 - **The health probe** (`GET /models`, `unhealthy_after`, default 2). A backend
   slow enough to exceed `--health-timeout` looks identical to one that is down.
   For long-loading engines, raise the timeout rather than the failure count.
+  A model whose backends are _all_ out is still tried, ejected ones last, when
+  there is no further model in its chain to fail over to: a probe is a
+  suspicion and a request is evidence, so a probe-only ejection no longer turns
+  into `502 no healthy backend` for a fleet that is serving (#29).
 - **Upstream header timeouts** from real traffic
   (`consecutive_timeout_threshold`, defaulting to `unhealthy_after`). A request
   that gets no response headers within `upstream_timeout_seconds` counts as a

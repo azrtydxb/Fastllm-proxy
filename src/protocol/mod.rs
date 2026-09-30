@@ -24,6 +24,7 @@ use std::fmt;
 pub mod anthropic;
 pub mod body;
 pub mod gemini;
+pub mod messages;
 
 #[cfg(test)]
 mod tests;
