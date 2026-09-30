@@ -13,7 +13,11 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: fastllm-proxy
+  # Not `fastllm-proxy`: the operator owns that name and deletes a
+  # ServiceMonitor by it whenever `observability.serviceMonitor.enabled` is
+  # false, which is how the first version of this file disappeared. The
+  # operator's own has no authorization, so it cannot scrape `/metrics`.
+  name: fastllm-proxy-metrics
   namespace: fastllm
 spec:
   selector:
