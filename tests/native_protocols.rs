@@ -66,6 +66,7 @@ fn suffix(port: u16) -> String {
 fn cleanup_for(suffix: &str) -> TestCleanup {
     TestCleanup::new()
         .track_suffix("provider_models", "name", suffix)
+        .track_suffix("frontend_models", "name", suffix)
         .track_suffix("principals", "name", suffix)
         .track_suffix("api_keys", "name", suffix)
         // `grant_one_model` mints a role and a permission per test as well.
@@ -354,6 +355,10 @@ async fn provision(
         "upstream_model": "provider-model-name",
         "upstream_api_key": UPSTREAM_KEY,
         "protocol": protocol,
+        // Pinned by every test through this helper, and asserted by the
+        // native passthrough one: the operator-set constant header must
+        // survive API -> database -> snapshot -> registry -> upstream.
+        "extra_headers": {"user-agent": "claude-cli/2.0.14 (external, cli)"},
     });
     if let Some(n) = default_max_tokens {
         backend["default_max_tokens"] = serde_json::json!(n);
@@ -363,6 +368,29 @@ async fn provision(
         cookie,
         &format!("/admin/provider-models/{provider_model_id}/backends"),
         backend,
+    );
+
+    // A frontend model in front of it. A database with *any* frontend models
+    // refuses bare provider-model names (`resolve_target_models`), and that
+    // is the live deployment's shape — a test that only worked against an
+    // empty database passed CI and failed everywhere else. The default
+    // target routes straight back, mirroring migration 0034.
+    let fm = admin_post(
+        admin_port,
+        cookie,
+        "/admin/frontend-models",
+        serde_json::json!({"name": model, "description": "native protocol e2e"}),
+    );
+    let frontend_model_id = fm["id"]
+        .as_str()
+        .expect("frontend model id")
+        .parse::<uuid::Uuid>()
+        .expect("frontend model id");
+    admin_post(
+        admin_port,
+        cookie,
+        &format!("/admin/frontend-models/{frontend_model_id}/defaults"),
+        serde_json::json!({"provider_model_id": provider_model_id, "position": 0}),
     );
 
     let principal = format!("np-principal-{suffix}");
@@ -525,6 +553,11 @@ async fn an_anthropic_backend_receives_the_messages_api_and_answers_an_openai_cl
     };
     assert_eq!(header("x-api-key").as_deref(), Some(UPSTREAM_KEY));
     assert_eq!(header("anthropic-version").as_deref(), Some("2023-06-01"));
+    // The operator's pinned header overrides the client's own.
+    assert_eq!(
+        header("user-agent").as_deref(),
+        Some("claude-cli/2.0.14 (external, cli)")
+    );
     assert_ne!(
         header("authorization").as_deref(),
         Some(format!("Bearer {key}").as_str()),
@@ -1108,6 +1141,26 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
             "upstream_api_key": UPSTREAM_KEY,
         }),
     );
+    // Same reason `provision` creates one: a database with any frontend
+    // models refuses bare provider-model names, so the test may not assume
+    // it is running against an empty one.
+    let fm = admin_post(
+        admin_port,
+        &cookie,
+        "/admin/frontend-models",
+        serde_json::json!({"name": model, "description": ""}),
+    );
+    let frontend_model_id = fm["id"]
+        .as_str()
+        .expect("frontend model id")
+        .parse::<uuid::Uuid>()
+        .expect("frontend model id");
+    admin_post(
+        admin_port,
+        &cookie,
+        &format!("/admin/frontend-models/{frontend_model_id}/defaults"),
+        serde_json::json!({"provider_model_id": provider_model_id, "position": 0}),
+    );
 
     let principal = format!("cache-sa-{suffix}");
     let principal_id: uuid::Uuid = sqlx::query_scalar(
@@ -1179,5 +1232,241 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
             attempt < 5,
             "a rebuild cleared the cache on every one of {attempt} attempts"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native Anthropic passthrough: an Anthropic *client* meets an Anthropic
+// backend, and the bytes go through unbent.
+// ---------------------------------------------------------------------------
+
+/// `(status, body)` for a `POST /v1/messages` in the client's own shape.
+fn messages(port: u16, key: &str, body: &str) -> (u16, String) {
+    match ureq::post(&format!("http://127.0.0.1:{port}/v1/messages"))
+        .set("content-type", "application/json")
+        .set("x-api-key", key)
+        .set("anthropic-version", "2023-06-01")
+        .set("user-agent", "claude-cli/2.0.14 (external, cli)")
+        .send_string(body)
+    {
+        Ok(r) => {
+            let status = r.status();
+            let mut buf = String::new();
+            let _ = r.into_reader().read_to_string(&mut buf);
+            (status, buf)
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            let mut buf = String::new();
+            let _ = r.into_reader().read_to_string(&mut buf);
+            (code, buf)
+        }
+        Err(e) => panic!("messages request failed: {e}"),
+    }
+}
+
+/// The Claude-Code-shaped body the passthrough exists to protect: `metadata`
+/// and per-block `cache_control` markers, both of which a round trip through
+/// the OpenAI shape drops — and both of which an upstream that fingerprints
+/// coding-agent traffic looks for.
+const CLAUDE_CODE_BODY: &str = concat!(
+    r#"{"model":"MODEL_PLACEHOLDER","max_tokens":64,"metadata":{"user_id":"user_abc123_account_789def_session_012"},"system":["#,
+    r#"{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},"#,
+    r#"{"type":"text","text":"Here is useful information about the environment.","cache_control":{"type":"ephemeral"}}],"#,
+    r#""messages":[{"role":"user","content":[{"type":"text","text":"Say hello"}]}]}"#,
+);
+
+const NATIVE_PORT: u16 = 14801;
+
+/// The end-to-end property the whole change is about: what the provider
+/// receives is what the client sent — same fields, same key order — modulo
+/// the model alias and the auth swap. The old double translation failed every
+/// one of these assertions silently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_native_anthropic_request_reaches_the_provider_untranslated() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, upstream_port) = (NATIVE_PORT, NATIVE_PORT + 1, NATIVE_PORT + 2);
+
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let recorder: Recorder = Arc::new(Mutex::new(Seen::default()));
+    spawn_mock(
+        upstream_port,
+        Arc::clone(&recorder),
+        MockResponse::json(ANTHROPIC_BODY),
+    )
+    .await;
+
+    let admin_name = format!("np-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+
+    let (key, model) = provision(
+        &pool,
+        admin_port,
+        &cookie,
+        &suffix,
+        "anthropic",
+        &format!("http://127.0.0.1:{upstream_port}/v1"),
+        Some(256),
+    )
+    .await;
+    wait_for_model(port, &key, &model);
+
+    let body = CLAUDE_CODE_BODY.replace("MODEL_PLACEHOLDER", &model);
+    let (status, got) = messages(port, &key, &body);
+    assert_eq!(status, 200, "{got}");
+
+    // The response is the provider's own bytes, not a translation of them.
+    assert_eq!(got, ANTHROPIC_BODY, "response must pass through verbatim");
+
+    // What the provider received. The guard lives only inside this scope:
+    // the usage loop below awaits, and a std MutexGuard must not cross it.
+    let (sent_path, sent, seen_body, seen_headers): (
+        String,
+        serde_json::Value,
+        String,
+        Vec<(String, String)>,
+    );
+    {
+        let seen = recorder.lock().unwrap();
+        sent_path = seen.path.clone();
+        sent = serde_json::from_str(&seen.body).expect("JSON");
+        seen_body = seen.body.clone();
+        seen_headers = seen.headers.clone();
+    }
+    assert_eq!(sent_path, "/v1/messages");
+    assert_eq!(sent["model"], serde_json::json!("provider-model-name"));
+
+    // The fields the double translation used to lose.
+    assert_eq!(
+        sent["metadata"]["user_id"],
+        serde_json::json!("user_abc123_account_789def_session_012")
+    );
+    assert_eq!(sent["system"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        sent["system"][1]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+
+    // Key order survives the model rewrite: the body still opens with
+    // `model`, the first key the client sent, not with the alphabetically
+    // first one a serde_json BTreeMap round trip would have produced.
+    let expected_head = r#"{"model":"provider-model-name","max_tokens":64,"metadata":"#;
+    assert!(
+        seen_body.starts_with(expected_head),
+        "key order must be preserved, got: {seen_body}"
+    );
+
+    // The header work is unchanged: provider key in, client key never out.
+    let header = |name: &str| {
+        seen_headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(header("x-api-key").as_deref(), Some(UPSTREAM_KEY));
+    assert_eq!(header("anthropic-version").as_deref(), Some("2023-06-01"));
+    assert_ne!(
+        header("authorization").as_deref(),
+        Some(format!("Bearer {key}").as_str()),
+        "the client's key must never be forwarded to the provider"
+    );
+
+    // And the request was still accounted for, at the counts the provider's
+    // own response reported.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let row: Option<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT prompt_tokens, completion_tokens, usage_reported \
+             FROM usage_events WHERE model_name = $1 ORDER BY at DESC LIMIT 1",
+        )
+        .bind(&model)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        match row {
+            Some((12, 5, true)) => break,
+            _ if Instant::now() >= deadline => {
+                panic!("no usage row with 12/5 reported for {model}, last: {row:?}")
+            }
+            _ => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+/// The streaming twin: the client receives the provider's event sequence
+/// byte-for-byte — no reframing — and usage still lands, recovered by the
+/// head-of-stream scanner (input) plus the tail (output).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_native_anthropic_stream_reaches_the_client_byte_for_byte() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, upstream_port) = (NATIVE_PORT + 10, NATIVE_PORT + 11, NATIVE_PORT + 12);
+
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let recorder: Recorder = Arc::new(Mutex::new(Seen::default()));
+    spawn_mock(
+        upstream_port,
+        Arc::clone(&recorder),
+        MockResponse::streaming(ANTHROPIC_BODY, ANTHROPIC_SSE),
+    )
+    .await;
+
+    let admin_name = format!("np-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+
+    let (key, model) = provision(
+        &pool,
+        admin_port,
+        &cookie,
+        &suffix,
+        "anthropic",
+        &format!("http://127.0.0.1:{upstream_port}/v1"),
+        Some(256),
+    )
+    .await;
+    wait_for_model(port, &key, &model);
+
+    let body = CLAUDE_CODE_BODY
+        .replace("MODEL_PLACEHOLDER", &model)
+        .replace(r#""max_tokens":64,"#, r#""max_tokens":64,"stream":true,"#);
+    let (status, got) = messages(port, &key, &body);
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got, ANTHROPIC_SSE, "stream must pass through verbatim");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let row: Option<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT prompt_tokens, completion_tokens, usage_reported \
+             FROM usage_events WHERE model_name = $1 ORDER BY at DESC LIMIT 1",
+        )
+        .bind(&model)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        match row {
+            Some((9, 6, true)) => break,
+            _ if Instant::now() >= deadline => {
+                panic!("no usage row with 9/6 reported for {model}, last: {row:?}")
+            }
+            _ => std::thread::sleep(Duration::from_millis(250)),
+        }
     }
 }

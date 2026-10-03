@@ -302,6 +302,21 @@ impl Backend {
                 HeaderValue::from_static(anthropic::API_VERSION),
             ));
         }
+        // The operator's own constants, pushed last so they win: this is the
+        // configured escape hatch when neither the auth header nor the
+        // protocol constants are what the endpoint wants, and because
+        // `build_upstream_request` applies this list over the client's
+        // headers, a pinned `user-agent` overrides the caller's too — which
+        // is the point of pinning one.
+        for (name, value) in &def.extra_headers {
+            let name = HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes()).with_context(
+                || format!("extra header name {name:?} for {api_base} is not a valid header name"),
+            )?;
+            let value = HeaderValue::from_str(value).with_context(|| {
+                format!("extra header value for {name} on {api_base} is not a valid header value")
+            })?;
+            headers.push((name, value));
+        }
         Ok(Self {
             uid,
             api_base,

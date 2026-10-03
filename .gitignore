@@ -38,3 +38,9 @@ __pycache__/
 # walks the filesystem rather than git, and a stale copy of `web/` in here was
 # reported as vulnerable dependencies this repo had already upgraded.
 .kilo/
+
+# macOS AppleDouble files, materialised whenever a file with an xattr is
+# copied. `sqlx::migrate!` refuses to compile with a `._0042_*.sql` beside the
+# real migration, so one of these in `migrations/` fails the build with an
+# error that names nothing useful.
+._*

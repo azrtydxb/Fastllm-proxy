@@ -190,6 +190,13 @@ pub struct BackendDef {
     /// Prefix before the key, `Bearer` for the usual case. `None` sends the
     /// raw key, which is what the two providers above require.
     pub auth_scheme: Option<String>,
+    /// Constant headers every request to this provider carries, as `(name,
+    /// value)` pairs. Empty is every provider until an operator sets one.
+    /// Applied after the auth header and the protocol constants, so an
+    /// operator's value wins over both — this is the escape hatch for an
+    /// endpoint that wants neither, and it deliberately overrides whatever
+    /// the *client* sent under the same name.
+    pub extra_headers: Vec<(String, String)>,
     /// Supplies `max_tokens` for providers that demand one when the request
     /// did not set it. `None` means such a request is refused rather than
     /// silently capped at a number nobody chose.
@@ -226,6 +233,7 @@ impl Default for BackendDef {
             protocol: Protocol::OpenAi,
             auth_header: "authorization".into(),
             auth_scheme: Some("Bearer".into()),
+            extra_headers: Vec::new(),
             default_max_tokens: None,
             upstream_timeout_seconds: None,
             admission: None,
@@ -501,6 +509,10 @@ pub struct WireBackendDef {
     pub auth_header: String,
     #[serde(default = "default_auth_scheme")]
     pub auth_scheme: Option<String>,
+    /// Absent from an older control plane, which is "no extra headers" — the
+    /// behaviour every backend had before operators could pin any.
+    #[serde(default)]
+    pub extra_headers: Vec<(String, String)>,
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
     /// Per-backend override for the upstream timeout (seconds). `None` means
@@ -941,6 +953,7 @@ impl Snapshot {
                             protocol: b.protocol.as_str().to_string(),
                             auth_header: b.auth_header.clone(),
                             auth_scheme: b.auth_scheme.clone(),
+                            extra_headers: b.extra_headers.clone(),
                             default_max_tokens: b.default_max_tokens,
                             upstream_timeout_seconds: b.upstream_timeout_seconds,
                             admission: b.admission,
@@ -1133,6 +1146,7 @@ impl Snapshot {
                                 protocol,
                                 auth_header: b.auth_header,
                                 auth_scheme: b.auth_scheme,
+                                extra_headers: b.extra_headers,
                                 default_max_tokens: b.default_max_tokens,
                                 upstream_timeout_seconds: b.upstream_timeout_seconds,
                                 admission: b.admission,

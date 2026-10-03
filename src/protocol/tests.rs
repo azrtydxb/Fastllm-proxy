@@ -1241,3 +1241,50 @@ fn no_cache_breakpoint_is_placed_on_a_message() {
         "{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Native-stream usage scanning (the passthrough path's accounting)
+// ---------------------------------------------------------------------------
+
+/// The scanner must reassemble events split across arbitrary byte boundaries —
+/// the whole reason it feeds an `SseDecoder` rather than scanning lines — and
+/// must take `input_tokens` from `message_start`, the first event, which no
+/// tail window holds for a long stream.
+#[test]
+fn anthropic_stream_usage_reads_both_counts_across_split_frames() {
+    let mut scan = anthropic::StreamUsage::default();
+    let stream = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"he\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":6}}\n\n",
+    );
+    // Split at awkward offsets: mid-JSON and mid-separator.
+    scan.push(&stream.as_bytes()[..37]);
+    scan.push(&stream.as_bytes()[37..200]);
+    scan.push(&stream.as_bytes()[200..]);
+    assert_eq!(scan.usage(), Some((9, 6)));
+}
+
+/// A stream that carries no usage events reports nothing, rather than a pair
+/// of zeros that would read as "a free request".
+#[test]
+fn anthropic_stream_usage_with_no_usage_events_is_none() {
+    let mut scan = anthropic::StreamUsage::default();
+    scan.push(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
+    scan.push(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    assert_eq!(scan.usage(), None);
+}
+
+/// The last `message_delta` wins: Anthropic reports cumulative totals, and
+/// taking the first would bill a one-token answer for a thousand-token one.
+#[test]
+fn anthropic_stream_usage_last_delta_wins() {
+    let mut scan = anthropic::StreamUsage::default();
+    scan.push(
+        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n",
+    );
+    scan.push(
+        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":44}}\n\n",
+    );
+    assert_eq!(scan.usage(), Some((0, 44)));
+}

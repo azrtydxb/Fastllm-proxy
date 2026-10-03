@@ -243,15 +243,27 @@ fn balanced_object_at(buf: &[u8], from: usize) -> Option<&[u8]> {
 /// embeddings API omits `completion_tokens` entirely, and requiring it meant
 /// every embedding request was recorded as "counts unknown" no matter how
 /// well the response was formed.
+///
+/// Anthropic's spellings (`input_tokens` / `output_tokens`) are accepted as
+/// aliases: a native Anthropic response forwarded verbatim carries them, and
+/// without the aliases every such response recorded "counts unknown" despite
+/// a perfectly formed report. The non-streaming JSON case is fully covered by
+/// the aliases alone — the whole `usage` object sits in the tail. The
+/// streaming case is not: `input_tokens` lives in `message_start`, the first
+/// event of the stream, outside any tail window, so a native Anthropic
+/// *stream* additionally carries [`crate::protocol::anthropic::StreamUsage`],
+/// whose counts take precedence in `UsageTracking::finish` when present.
 fn usage_from_value(usage: &serde_json::Value) -> Option<UsageTokens> {
     if usage.is_null() {
         return None;
     }
     let prompt = usage
         .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
         .and_then(serde_json::Value::as_u64);
     let completion = usage
         .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
         .and_then(serde_json::Value::as_u64);
     if prompt.is_none() && completion.is_none() {
         return None;
@@ -567,5 +579,60 @@ mod tests {
             .expect("must parse past the brace in the string");
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 9);
+    }
+}
+
+#[cfg(test)]
+mod anthropic_tests {
+    use super::*;
+
+    /// A native Anthropic non-streaming response, forwarded verbatim. Its
+    /// `usage` uses `input_tokens`/`output_tokens` and sits at the end of the
+    /// document — inside the tail window, so the aliases alone must find it.
+    #[test]
+    fn an_anthropic_json_body_yields_input_and_output_tokens() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(
+            br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":5}}"#,
+        );
+        let usage = tail.extract_usage().expect("anthropic usage must be found");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 5);
+    }
+
+    /// The streaming counterpart the aliases cannot cover alone: the tail
+    /// only ever sees `message_delta`'s cumulative `output_tokens` —
+    /// `message_start` is the first event and long evicted. This pins what
+    /// the tail contributes (completion, prompt unknown), which is the half
+    /// [`crate::protocol::anthropic::StreamUsage`] is merged over.
+    #[test]
+    fn an_anthropic_stream_tail_yields_only_the_cumulative_output() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(
+            br#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        );
+        let usage = tail.extract_usage().expect("output_tokens must be found");
+        assert_eq!(usage.completion_tokens, 6);
+        assert_eq!(usage.prompt_tokens, 0);
+    }
+
+    /// OpenAI spellings still win when both are present, so a provider that
+    /// carries the two vocabularies side by side is read as OpenAI, not
+    /// double-read.
+    #[test]
+    fn openai_spellings_take_precedence_over_the_aliases() {
+        let mut tail = TailBuffer::new(DEFAULT_CAPACITY);
+        tail.push(
+            br#"{"usage":{"prompt_tokens":7,"completion_tokens":3,"input_tokens":100,"output_tokens":200}}"#,
+        );
+        let usage = tail.extract_usage().expect("usage must be found");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
     }
 }

@@ -476,3 +476,68 @@ pub fn on_event(t: &mut StreamTranslator, event: &SseEvent, out: &mut Vec<u8>) {
         _ => {}
     }
 }
+
+/// Incremental usage extractor for a *native* Anthropic stream.
+///
+/// The tail buffer alone cannot account for one of these: `message_start` —
+/// the only event that carries `usage.input_tokens` — is the **first** event
+/// of the stream, and a long generation evicts it from the 8 KiB tail window
+/// long before the stream ends. So the passthrough path runs this scanner
+/// alongside the tail buffer: both are fed the same bytes the client receives
+/// (`StreamUsage::push` is a sync, bounded-memory feed, and the parse is
+/// event-shaped rather than per-frame), and `usage` is read once, at end of
+/// stream, exactly like `TailBuffer::extract_usage`.
+///
+/// `message_delta` reports the *cumulative* `output_tokens` and recurs until
+/// the end, so the last one seen wins; `message_start` seeds `input_tokens`
+/// once. An unparseable event is skipped rather than fatal — the stream is
+/// already committed to the client, and usage accounting may not be the thing
+/// that truncates it.
+#[derive(Default)]
+pub struct StreamUsage {
+    sse: super::SseDecoder,
+    prompt: Option<u32>,
+    completion: Option<u32>,
+}
+
+impl StreamUsage {
+    /// Feed one forwarded frame. Sync and bounded: the decoder retains only
+    /// the current partial event, the same contract `TrackedBody` already
+    /// accepts for `TailBuffer::push` (pinned by `tests/no_io_on_hot_path.rs`).
+    pub fn push(&mut self, data: &[u8]) {
+        for event in self.sse.push(data) {
+            let Ok(parsed) = serde_json::from_str::<StreamEvent>(&event.data) else {
+                continue;
+            };
+            match parsed.kind.as_str() {
+                // `message_start` carries the input count for the whole
+                // message; there is exactly one per stream.
+                "message_start" => {
+                    if let Some(usage) = parsed.message.as_ref().and_then(|m| m.usage.as_ref()) {
+                        self.prompt = Some(usage.input_tokens);
+                    }
+                }
+                // Cumulative totals, replaced rather than accumulated — the
+                // same rule the translated path applies at `anthropic.rs`'s
+                // `message_delta` arm above.
+                "message_delta" => {
+                    if let Some(usage) = parsed.usage.as_ref() {
+                        self.completion = Some(usage.output_tokens);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The counts seen so far, when the stream carried any. `(prompt,
+    /// completion)` — the same pairing `tail_buffer::UsageTokens` carries. A
+    /// count never seen is reported as zero, matching how the translated path
+    /// treats a stream whose `message_start` carried nothing.
+    pub fn usage(&self) -> Option<(u32, u32)> {
+        match (self.prompt, self.completion) {
+            (None, None) => None,
+            (prompt, completion) => Some((prompt.unwrap_or(0), completion.unwrap_or(0))),
+        }
+    }
+}

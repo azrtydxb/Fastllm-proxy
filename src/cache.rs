@@ -211,12 +211,12 @@ impl ResponseCache {
 fn fxhash(bytes: &[u8]) -> u64 {
     const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
     let mut hash: u64 = 0;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let v = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) yields 8 bytes"));
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let v = u64::from_le_bytes(*chunk);
         hash = (hash.rotate_left(5) ^ v).wrapping_mul(SEED);
     }
-    for &b in chunks.remainder() {
+    for &b in remainder {
         hash = (hash.rotate_left(5) ^ u64::from(b)).wrapping_mul(SEED);
     }
     hash

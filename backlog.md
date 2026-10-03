@@ -876,6 +876,40 @@ versions are still the database clock, which is now harmless to proxies
 (same-policy versions are adopted, not rebuilt) but would make a second
 control plane's ETags alternate.
 
+## Native Anthropic passthrough and pinned headers — done (2026-10-03)
+
+Z.ai's coding plan fingerprints its traffic and blocked the key when the
+requests stopped looking like Claude Code. They had a point: the
+`/v1/messages` frontend translated every body to OpenAI and back, which
+dropped `metadata`, per-block `cache_control` markers and the client's key
+order — a loss no genuine Claude Code build produces, and exactly what a
+fingerprinter sees.
+
+- **Native passthrough.** An Anthropic-frontend request routed to an
+  `anthropic` backend now goes through with the client's own bytes, model
+  alias and auth aside (`src/proxy.rs`, the third execution mode). Responses
+  — stream or not — are forwarded byte for byte, marked `NativeAnthropic` so
+  the OpenAI→Anthropic conversion does not touch them, and excluded from the
+  response cache, whose keys are cut from the OpenAI translation. Usage is
+  still accounted: `input_tokens` arrives in the stream's first event, so
+  `StreamUsage` (`src/protocol/anthropic.rs`) mirrors the stream while the
+  tail buffer covers the rest, and `usage_from_value` learned
+  `input_tokens`/`output_tokens` for the non-streaming case.
+- **Key order survives aliasing.** `serde_json` gained `preserve_order`, so
+  `rewrite_model_if_needed`'s re-serialisation keeps the client's key order
+  instead of alphabetising it.
+- **Pinned headers.** `extra_headers` on providers (migration 0055) — an
+  object of constant headers every request to that provider carries,
+  validated at the API surface, winning over the client's own, settable at
+  backend attach, provider create, and `PATCH /admin/providers/{id}`. It
+  makes the proxy say what the operator decided; it does not fake what the
+  client is — a non-Anthropic client's translated body still reads as what
+  it is, deliberately.
+- **The e2e harness stopped assuming an empty database.** `provision` now
+  creates the frontend model it serves through, so `tests/native_protocols.rs`
+  runs against any database, not only one where the File-mode carve-out
+  still applies.
+
 ## Anthropic frontend, disguised errors, ejected-pool last resort — done (2026-09-30)
 
 Three GitHub issues, one change.

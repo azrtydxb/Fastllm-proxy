@@ -36,10 +36,11 @@ comes from:
   Heroku). The entry still earns its place — it fills in the protocol and the
   header that vendor wants its key in, which is the half that is easy to get
   wrong.
+
 - **Custom endpoint** — type the address of anything else: a vLLM on the LAN,
   an Ollama on a workstation, a public vendor the catalogue does not list. This
   is a `static` provider whether the host is on your network or the internet:
-  `cloud` means *we* preconfigured it, not that it is somewhere far away.
+  `cloud` means _we_ preconfigured it, not that it is somewhere far away.
   Protocol defaults to `openai`, which is what almost everything speaks.
 
 Nothing is served by adding a provider. It carries the endpoint and the
@@ -88,17 +89,18 @@ move them and this file cannot notice.
 | Xinference · Llamafile · Docker Model Runner · Lemonade  | local servers, same row shape                                                                                                                                                                         |
 | **Voyage AI** · **Jina AI** · Infinity · TEI             | embeddings and rerank — `/v1/embeddings`, `/v1/rerank`                                                                                                                                                |
 
-| reached through their own wire format |                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------- |
-| **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks |
-| **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`        |
+| reached through their own wire format |                                                                                                                                                                                  |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks                                                                                            |
+| **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`                                                                                                   |
+| **Z.ai** (coding plan)                | `"protocol": "anthropic"` at `https://api.z.ai/api/anthropic` — an Anthropic-frontend client is passed through natively, which is what the plan's client fingerprinting requires |
 
 ## Picking one
 
 The **Provider models** screen offers a provider list: choose one and its base
 URL, protocol and auth header are filled in, so you paste a key and stop.
 
-What is in that list is what this page documents an *endpoint* for. It names
+What is in that list is what this page documents an _endpoint_ for. It names
 about a hundred providers and gives a host for thirty-odd of them; the rest are
 counted rather than specified, and seeding them would mean inventing base URLs.
 A list that confidently prefills a wrong endpoint is worse than one that admits
@@ -170,6 +172,25 @@ curl -sk -b /tmp/ck -X POST https://control:4001/admin/provider-models/7/backend
   }'
 ```
 
+**Pinned headers.** `extra_headers` — on the backend attach, on
+`POST /admin/providers`, or on `PATCH /admin/providers/{id}` — is an object of
+name → value that every request to that provider carries, overriding the
+client's own header of the same name. The reason it exists: some endpoints
+judge a request by headers the caller used to supply, and `user-agent` is the
+one that comes up — Z.ai's coding plan refuses a key whose traffic does not
+look like Claude Code, and a pinned agent string is the part of that
+appearance the proxy can be told:
+
+```bash
+curl -sk -b /tmp/ck -X PATCH https://control:4001/admin/providers/3 \
+  -H 'content-type: application/json' \
+  -d '{"extra_headers": {"user-agent": "claude-cli/2.0.14 (external, cli)"}}'
+```
+
+A header that no client of the deployment sends is the honest case for this —
+it makes the proxy say what the operator decided, not fake what the client
+is. The body a non-Anthropic client sends still reads as what it is.
+
 Posting that a second time against the same model with a different provider
 attaches it there too, and the two form one **pool**: the proxy chooses between
 them per request, which is what lets prefix-cache affinity send a conversation
@@ -227,7 +248,8 @@ reached through a translator rather than a base URL:
 flowchart LR
     C["client<br/>OpenAI request"] --> P{"backend<br/>protocol?"}
     P -->|openai| B1["upstream<br/>bytes forwarded unchanged"]
-    P -->|anthropic| T1["translate →<br/>Messages API<br/>x-api-key"] --> B2["api.anthropic.com"]
+    P -->|"anthropic +<br/>OpenAI client"| T1["translate →<br/>Messages API<br/>x-api-key"] --> B2["api.anthropic.com"]
+    P -->|"anthropic +<br/>Anthropic client"| B4["upstream<br/>bytes forwarded unchanged<br/>(native passthrough)"]
     P -->|gemini| T2["translate →<br/>generateContent<br/>model in the URL"] --> B3["generativelanguage<br/>.googleapis.com"]
     B1 --> R1["response returned<br/>byte-for-byte"]
     B2 --> R2["SSE re-framed<br/>to OpenAI chunks"]

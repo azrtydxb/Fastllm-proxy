@@ -721,6 +721,8 @@ struct ProviderView {
     /// provider fronting a few hundred models would make this response the
     /// wrong shape for the question it answers.
     model_count: i64,
+    /// The pinned headers, shown so the edit form can offer to change them.
+    extra_headers: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -1069,12 +1071,14 @@ async fn list_providers(
         Option<f32>,
         Option<chrono::DateTime<chrono::Utc>>,
         i64,
+        serde_json::Value,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT p.id, p.name, p.kind, p.api_base, p.protocol, p.auth_header, p.auth_scheme, \
              p.upstream_api_key IS NOT NULL, p.catalogue_key, p.node, \
              p.engine_running, p.engine_waiting, p.engine_kv_cache, p.engine_load_at, \
-             (SELECT count(*) FROM model_backends mb WHERE mb.provider_id = p.id) \
+             (SELECT count(*) FROM model_backends mb WHERE mb.provider_id = p.id), \
+             p.extra_headers \
          FROM providers p ORDER BY p.name",
     )
     .fetch_all(&ctx.pool)
@@ -1100,6 +1104,7 @@ async fn list_providers(
                     engine_kv_cache,
                     engine_load_at,
                     model_count,
+                    extra_headers,
                 )| ProviderView {
                     id,
                     name,
@@ -1116,6 +1121,7 @@ async fn list_providers(
                     engine_kv_cache,
                     engine_load_at,
                     model_count,
+                    extra_headers,
                 },
             )
             .collect(),
@@ -1159,6 +1165,11 @@ struct NewProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
+    /// Constant headers every request to this provider carries, as an object
+    /// of name → value. See `NewBackend::extra_headers` — this is the same
+    /// knob on the route that creates a provider before any model attaches.
+    #[serde(default)]
+    extra_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Trim, normalise and check an address the way every writer of `api_base`
@@ -1406,6 +1417,7 @@ async fn post_provider(
             None => default_scheme.map(str::to_string),
         },
     };
+    let extra_headers = validate_extra_headers(body.extra_headers.as_ref())?;
 
     let credential_kind = body
         .credential_kind
@@ -1541,8 +1553,8 @@ async fn post_provider(
     }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO providers (name, kind, api_base, protocol, auth_header, auth_scheme, \
-         upstream_api_key, credential_kind, catalogue_key) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+         upstream_api_key, credential_kind, catalogue_key, extra_headers) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
     .bind(&name)
     .bind(&kind)
@@ -1553,6 +1565,7 @@ async fn post_provider(
     .bind(&encrypted)
     .bind(&credential_kind)
     .bind(body.catalogue_key.as_deref().filter(|k| !k.is_empty()))
+    .bind(&extra_headers)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| db_error("provider creation", &e))?;
@@ -1638,6 +1651,10 @@ struct PatchProvider {
     upstream_api_key: Option<String>,
     #[serde(default)]
     credential_kind: Option<String>,
+    /// Set (or, with an empty object, cleared) in one patch. Absent leaves
+    /// whatever is there, the same rule the other optional fields follow.
+    #[serde(default)]
+    extra_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// `PATCH /admin/providers/{id}` — rename it, move it, rotate its key, or hand
@@ -1786,6 +1803,15 @@ async fn patch_provider(
             .execute(&ctx.pool)
             .await
             .map_err(|e| db_error("changing a provider's credential kind", &e))?;
+    }
+    if let Some(headers) = &body.extra_headers {
+        let extra_headers = validate_extra_headers(Some(headers))?;
+        sqlx::query("UPDATE providers SET extra_headers = $1 WHERE id = $2")
+            .bind(&extra_headers)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| db_error("changing a provider's extra headers", &e))?;
     }
     // A rotated key or a moved address is checked the same way a new provider
     // is, and against the row as it will be *after* this patch: changing the
@@ -3078,6 +3104,13 @@ struct NewBackend {
     /// provider here that cannot use a static secret.
     #[serde(default)]
     credential_kind: Option<String>,
+    /// Constant headers every request to this provider carries, as an object
+    /// of name → value. The reason it exists is a pinned `user-agent`: an
+    /// endpoint that judges a request by its headers gets the spelling the
+    /// operator chose, for every client behind the proxy. Stored on the
+    /// provider, like the auth knobs it sits beside.
+    #[serde(default)]
+    extra_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl NewBackend {
@@ -3087,6 +3120,7 @@ impl NewBackend {
     fn openai(api_base: &str, upstream_api_key: Option<String>) -> Self {
         Self {
             provider_id: None,
+            extra_headers: None,
             api_base: Some(api_base.into()),
             upstream_model: None,
             upstream_api_key,
@@ -3104,6 +3138,44 @@ impl NewBackend {
 /// Fill in the auth defaults a protocol implies, so an operator adding an
 /// Anthropic backend does not have to know that it wants a raw key in
 /// `x-api-key` rather than a bearer token — and cannot get it wrong.
+/// Validate an operator-supplied `extra_headers` object and store-shape it.
+///
+/// Every name must be a valid header name (lowercased, as headers travel) and
+/// every value a valid header value — checked here, at the write, because the
+/// alternative is a backend that vanishes from routing on the next rebuild
+/// and explains itself only in the control plane's log. The map is ordered
+/// (`BTreeMap`) so the stored JSON is deterministic, which makes the
+/// provider-identity comparison below meaningful.
+fn validate_extra_headers(
+    headers: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<serde_json::Value, ApiError> {
+    let Some(map) = headers else {
+        return Ok(serde_json::json!({}));
+    };
+    let mut out = serde_json::Map::new();
+    for (name, value) in map {
+        let name = name.trim();
+        let header_name = http::HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes())
+            .map_err(|_| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("extra header name {name:?} is not a valid header name"),
+                )
+            })?;
+        http::HeaderValue::from_str(value).map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!("extra header {header_name}'s value is not a valid header value"),
+            )
+        })?;
+        out.insert(
+            header_name.as_str().to_string(),
+            serde_json::Value::String(value.clone()),
+        );
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 fn auth_defaults_for(protocol: &str) -> (&'static str, Option<&'static str>) {
     match protocol {
         "anthropic" => ("x-api-key", None),
@@ -3344,6 +3416,7 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
         Some(s) => Some(s),
         None => default_scheme.map(str::to_string),
     };
+    let extra_headers = validate_extra_headers(body.extra_headers.as_ref())?;
 
     // Same endpoint and auth means the same provider, which is the whole point
     // of the split: one credential shared by every model on it, so rotating it
@@ -3351,12 +3424,14 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
     // the caller has just demonstrated a newer one.
     let id: Uuid = match sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM providers WHERE api_base = $1 AND protocol = $2 \
-         AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4",
+         AND auth_header = $3 AND auth_scheme IS NOT DISTINCT FROM $4 \
+         AND extra_headers IS NOT DISTINCT FROM $5",
     )
     .bind(&api_base)
     .bind(&protocol)
     .bind(&auth_header)
     .bind(&auth_scheme)
+    .bind(&extra_headers)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| db_error("provider lookup", &e))?
@@ -3387,8 +3462,8 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
             let name = unique_provider_name(ctx, &host).await?;
             sqlx::query_scalar(
                 "INSERT INTO providers (name, kind, api_base, protocol, auth_header, \
-                 auth_scheme, upstream_api_key, credential_kind) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                 auth_scheme, upstream_api_key, credential_kind, extra_headers) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
             )
             .bind(&name)
             .bind(kind)
@@ -3398,6 +3473,7 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
             .bind(&auth_scheme)
             .bind(&encrypted)
             .bind(&credential_kind)
+            .bind(&extra_headers)
             .fetch_one(&ctx.pool)
             .await
             .map_err(|e| db_error("provider creation", &e))?
@@ -8851,6 +8927,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(name.clone()),
                 kind: None,
                 catalogue_key: Some("anthropic".into()),
@@ -8909,6 +8986,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("cat-provider")),
                 kind: None,
                 catalogue_key: Some("anthropic".into()),
@@ -8930,6 +9008,7 @@ mod tests {
                 RequireConfigWrite,
                 Path(id),
                 Json(PatchProvider {
+                    extra_headers: None,
                     name: None,
                     kind: None,
                     api_base: None,
@@ -8977,6 +9056,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("handover-provider")),
                 kind: None,
                 catalogue_key: None,
@@ -8994,6 +9074,7 @@ mod tests {
         assert_eq!(created.0["kind"], "static");
 
         let patch = |kind: &str| PatchProvider {
+            extra_headers: None,
             name: None,
             kind: Some(kind.to_string()),
             api_base: None,
@@ -9218,6 +9299,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("named-by-agent")),
                 kind: None,
                 catalogue_key: None,
@@ -9417,6 +9499,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("placeholder-provider")),
                 kind: None,
                 catalogue_key: Some("vertex".into()),
@@ -9445,6 +9528,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("leased-provider")),
                 kind: Some("dynamic".into()),
                 catalogue_key: None,
@@ -9476,6 +9560,7 @@ mod tests {
             State(ctx.clone()),
             RequireConfigWrite,
             Json(NewProvider {
+                extra_headers: None,
                 name: Some(unique_name("byid-provider")),
                 kind: None,
                 catalogue_key: None,
@@ -9514,6 +9599,7 @@ mod tests {
             RequireConfigWrite,
             Path(model_id),
             Json(NewBackend {
+                extra_headers: None,
                 provider_id: Some(provider_id),
                 api_base: Some("http://somewhere-else:8000/v1".into()),
                 upstream_model: None,
@@ -9536,6 +9622,7 @@ mod tests {
             RequireConfigWrite,
             Path(model_id),
             Json(NewBackend {
+                extra_headers: None,
                 provider_id: Some(provider_id),
                 api_base: None,
                 upstream_model: Some("llama-3.1-8b".into()),
@@ -11060,6 +11147,7 @@ mod tests {
             RequireConfigWrite,
             Path(model_id),
             Json(NewBackend {
+                extra_headers: None,
                 input_price_per_mtok: Some(1_000_000),
                 output_price_per_mtok: Some(1_000_000),
                 ..NewBackend::openai(&stub_provider(), None)
@@ -11299,6 +11387,7 @@ mod tests {
                 RequireConfigWrite,
                 Path(model_id),
                 Json(NewBackend {
+                    extra_headers: None,
                     input_price_per_mtok: price,
                     output_price_per_mtok: price,
                     ..NewBackend::openai(&stub_provider(), None)
@@ -11402,6 +11491,7 @@ mod tests {
                 RequireConfigWrite,
                 Path(model_id),
                 Json(NewBackend {
+                    extra_headers: None,
                     // Different prices on purpose: the same weights cost
                     // different amounts at different vendors, which is why a
                     // price cannot live on the model.
@@ -11500,6 +11590,7 @@ mod tests {
             RequireConfigWrite,
             Path(id),
             Json(NewBackend {
+                extra_headers: None,
                 input_price_per_mtok: Some(3_000_000),
                 output_price_per_mtok: Some(15_000_000),
                 ..NewBackend::openai(&stub_provider(), None)
@@ -11617,6 +11708,7 @@ mod tests {
         let vertex = |key: Option<String>, kind: Option<&str>| {
             NewBackend {
             provider_id: None,
+            extra_headers: None,
             api_base: Some("https://europe-west1-aiplatform.googleapis.com/v1/projects/p/locations/europe-west1/endpoints/openapi".into()),
             upstream_model: None,
             upstream_api_key: key,
@@ -11711,6 +11803,7 @@ mod tests {
                     .unwrap(),
             ),
             Json(NewBackend {
+                extra_headers: None,
                 api_base: Some("http://chatgpt:8000/v1".into()),
                 upstream_model: Some("gpt-4o".into()),
                 credential_kind: Some("chatgpt_oauth".into()),

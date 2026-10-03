@@ -365,13 +365,13 @@ impl AffinityCache {
 fn fxhash(bytes: &[u8]) -> u64 {
     const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
     let mut hash: u64 = 0;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) yields 8 bytes"));
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         hash = (hash.rotate_left(5) ^ word).wrapping_mul(SEED);
     }
     let mut tail: u64 = 0;
-    for (i, b) in chunks.remainder().iter().enumerate() {
+    for (i, b) in remainder.iter().enumerate() {
         tail |= (*b as u64) << (i * 8);
     }
     hash = (hash.rotate_left(5) ^ tail).wrapping_mul(SEED);
