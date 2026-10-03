@@ -1525,3 +1525,5 @@ The live `fastllm` namespace is owned by a `FastllmProxy` CR (`fastllm.fastllm`)
       --type=merge -p '{"spec":{"image":"...:sha-<short>"}}'
 
 **Decided:** record it here and in the repo docs on the next docs pass; used for this deployment.
+
+**Decided (follow-ups):** fixed in #38 and deployed as `sha-cb75148` — the probe carve-out is gated on the coding-plan Anthropic base *and* the 200-wrapper body, so `zai` and every other provider keep the strict refusal; catalogue entry `zai_coding_anthropic` added (0056); the providers screen edits `extra_headers`. Verified live: the coding base passes the probe (409 clash with the real provider proves acceptance), a bogus general-Z.ai base is still refused, and a throwaway create through the carve-out returned 201 and was deleted. Bonus find: `/v1/models` answers a real list when the key is presented as `x-api-key`; the 200-wrapper only appears for the `Authorization: Bearer` shape the Claude Code door uses.
