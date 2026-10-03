@@ -89,7 +89,14 @@ pub async fn served_models_as(
         .get("data")
         .or_else(|| parsed.get("models"))
         .and_then(|d| d.as_array())
-        .ok_or_else(|| anyhow::anyhow!("{url} returned no model list"))?;
+        .ok_or_else(|| {
+            // The snippet is what lets `control::api::verified` tell a provider
+            // that answered "wrong path" wrapped in a 200 from one that answered
+            // something else entirely. Capped, and it is a probe response, not
+            // user content.
+            let snippet = String::from_utf8_lossy(&body[..body.len().min(160)]);
+            anyhow::anyhow!("{url} returned no model list (body: {snippet})")
+        })?;
     Ok(data
         .iter()
         .filter_map(|m| {

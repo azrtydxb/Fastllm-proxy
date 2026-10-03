@@ -50,7 +50,7 @@ registering all of them is not what anyone means by adding one.
 
 ## The catalogue
 
-**80 providers work today — 78 reached as-is, 2 through their own wire
+**81 providers work today — 78 reached as-is, 3 through their own wire
 format.** The count and these tables are checked against each other by
 `tests/doc_claims.rs`, so the number cannot drift away from the rows.
 
@@ -89,11 +89,11 @@ move them and this file cannot notice.
 | Xinference · Llamafile · Docker Model Runner · Lemonade  | local servers, same row shape                                                                                                                                                                         |
 | **Voyage AI** · **Jina AI** · Infinity · TEI             | embeddings and rerank — `/v1/embeddings`, `/v1/rerank`                                                                                                                                                |
 
-| reached through their own wire format |                                                                                                                                                                                  |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks                                                                                            |
-| **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`                                                                                                   |
-| **Z.ai** (coding plan)                | `"protocol": "anthropic"` at `https://api.z.ai/api/anthropic` — an Anthropic-frontend client is passed through natively, which is what the plan's client fingerprinting requires |
+| reached through their own wire format |                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Anthropic**                         | `"protocol": "anthropic"` — Messages API, `x-api-key`, SSE re-framed to OpenAI chunks                                                                                                                                                                                                                                                  |
+| **Gemini**                            | `"protocol": "gemini"` — `generateContent`, model in the URL, `x-goog-api-key`                                                                                                                                                                                                                                                         |
+| **Z.ai** (coding plan)                | `"protocol": "anthropic"` at `https://api.z.ai/api/anthropic` — catalogue key `zai_coding_anthropic`; an Anthropic-frontend client is passed through natively, which is what the plan's client fingerprinting requires. The endpoint has no `/models`, so the provider-create probe accepts its 200-wrapped 404 there and nowhere else |
 
 ## Picking one
 
