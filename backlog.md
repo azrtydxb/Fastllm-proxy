@@ -909,6 +909,13 @@ fingerprinter sees.
   creates the frontend model it serves through, so `tests/native_protocols.rs`
   runs against any database, not only one where the File-mode carve-out
   still applies.
+- **Follow-ups, done (2026-10-04), scoped to the coding plan alone.** The
+  provider-create probe accepts Z.ai's 200-wrapped 404 at the coding plan's
+  Anthropic endpoint only — the general Z.ai provider (`zai`,
+  `/api/paas/v4`) and every other host keep the strict refusal — and the
+  endpoint is a catalogue entry (`zai_coding_anthropic`, migration 0056) so
+  the Add provider dropdown offers it. The providers screen grew a pinned
+  headers field, reading from and writing `extra_headers`.
 
 ## Anthropic frontend, disguised errors, ejected-pool last resort — done (2026-09-30)
 

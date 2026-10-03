@@ -61,6 +61,28 @@ function derivedName(apiBase) {
 // lease, and losing that lease is what eventually removes it.
 const KIND_TONE = { dynamic: "accent", cloud: "violet", static: "quiet" };
 
+// Pinned headers between the object the API stores and the `NAME: value`
+// lines a form can edit. A line without a colon is skipped rather than
+// fatal — the hint says the shape, and a half-typed line must not become a
+// bogus header name sent upstream.
+function headersToText(headers) {
+  return Object.entries(headers || {})
+    .map(([name, value]) => `${name}: ${value}`)
+    .join("\n");
+}
+
+function textToHeaders(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(":");
+    if (at <= 0) continue;
+    const name = line.slice(0, at).trim();
+    const value = line.slice(at + 1).trim();
+    if (name) out[name] = value;
+  }
+  return out;
+}
+
 const BLANK = {
   mode: "cloud",
   catalogue_key: "",
@@ -207,6 +229,15 @@ export function Providers({ onUnauthorised, go }) {
           // Absent leaves the stored credential alone — the form cannot read
           // it back, so it must not send an empty one and wipe it.
           upstream_api_key: edit.upstream_api_key || undefined,
+          // Sent only when the box changed: absent leaves what is stored, so
+          // saving an untouched form never rewrites headers. An emptied box
+          // that did change is an explicit clear, which the API accepts as
+          // `{}`.
+          extra_headers:
+            (edit.extra_headers_text ?? "") !==
+            (edit.extra_headers_original ?? "")
+              ? textToHeaders(edit.extra_headers_text ?? "")
+              : undefined,
         }),
       setError,
       onUnauthorised,
@@ -223,6 +254,8 @@ export function Providers({ onUnauthorised, go }) {
     setEdit({
       name: g.host,
       api_base: g.origin,
+      extra_headers_text: headersToText(g.extra_headers),
+      extra_headers_original: headersToText(g.extra_headers),
       // Seeded only where the form offers it, so a protocol the form never
       // showed cannot be re-sent, let alone changed.
       protocol:
@@ -287,6 +320,7 @@ export function Providers({ onUnauthorised, go }) {
       kind: p.kind,
       node: p.node,
       protocol: p.protocol,
+      extra_headers: p.extra_headers,
       credential_kind: p.credential_kind,
       load:
         p.engine_load_at === null || p.engine_load_at === undefined
@@ -759,6 +793,12 @@ export function Providers({ onUnauthorised, go }) {
                           : ""}
                       </Muted>
                     )}
+                    {g.extra_headers &&
+                      Object.keys(g.extra_headers).length > 0 && (
+                        <Muted>
+                          pinned: {Object.keys(g.extra_headers).join(", ")}
+                        </Muted>
+                      )}
                     {g.reported === 0 ? (
                       <Muted>not yet probed</Muted>
                     ) : (

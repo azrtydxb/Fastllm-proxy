@@ -1268,9 +1268,46 @@ async fn verified(
     match reach_provider(api_base, protocol, auth_header, auth_scheme, key).await {
         Reachability::Serving(n) => Ok(format!("reached, serving {n} models")),
         Reachability::Rejected(why) => refuse("rejected that credential", why),
+        // Z.ai's coding-plan Anthropic endpoint (`zai_coding_anthropic` in the
+        // catalogue) has no `/models`, and answers the probe with HTTP 200
+        // wrapping the 404 — `{"code":500,"msg":"404 NOT_FOUND","success":false}`.
+        // That shape at *that* endpoint is the endpoint saying "wrong path",
+        // not "wrong key", and it is the plan's only door for Claude Code, so
+        // the save goes through with a note. Scoped deliberately: the general
+        // Z.ai provider (`zai`, `/api/paas/v4`) and every other host keep the
+        // strict probe — a 404-shaped answer elsewhere is still treated as the
+        // mistyped address it overwhelmingly is.
+        Reachability::NoModelList(why) | Reachability::Unreachable(why)
+            if is_the_zai_coding_plan_200_wrapper(api_base, &why) =>
+        {
+            Ok(
+                "reached; the coding-plan Anthropic endpoint publishes no /models to probe"
+                    .to_string(),
+            )
+        }
         Reachability::NoModelList(why) => refuse("did not answer with a model list", why),
         Reachability::Unreachable(why) => refuse("could not be reached", why),
     }
+}
+
+/// Whether this probe failure is the Z.ai coding plan's known no-model-list
+/// shape, at the coding plan's Anthropic endpoint, and nothing beside it.
+///
+/// Two facts must hold together. The base must be the coding plan's Claude
+/// Code door — matched by prefix rather than equality because operators
+/// append `/v1`, the way the proxy itself appends `/messages` to whatever
+/// base it is given; the general Z.ai entry (`https://api.z.ai/api/paas/v4`)
+/// does not match, which is the point, and neither does any other host. And
+/// the failure must be that endpoint's actual answer: HTTP 200 wrapping the
+/// 404 as `{"code":500,"msg":"404 NOT_FOUND","success":false}`, which
+/// `served_models_as` quotes in its error. Either fact alone is not the
+/// carve-out — a wrapper-shaped answer from anywhere else keeps the strict
+/// probe, and so does any other failure from this endpoint.
+fn is_the_zai_coding_plan_200_wrapper(api_base: &str, why: &str) -> bool {
+    api_base
+        .trim_end_matches('/')
+        .starts_with("https://api.z.ai/api/anthropic")
+        && why.contains("\"success\":false")
 }
 
 /// Dial a provider the way a request would, and classify what came back.
@@ -8853,6 +8890,110 @@ mod tests {
         let mut rest = String::new();
         reader.read_to_string(&mut rest).unwrap();
         assert!(rest.contains("stub-model"), "got {rest:?}");
+    }
+
+    /// A listener that answers `GET /models` the way Z.ai's coding-plan
+    /// Anthropic endpoint answers everything: HTTP 200 wrapping the 404.
+    fn stub_zai_coding_anthropic() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read as _, Write as _};
+                let mut request = Vec::new();
+                let mut buf = [0u8; 512];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let body = br#"{"code":500,"msg":"404 NOT_FOUND","success":false}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The shape the carve-out keys on must actually reach the
+    /// classification: the wrapper is quoted into the failure, and the
+    /// failure is `NoModelList`, not `Unreachable` — a probe error that
+    /// drifted before it got here would silently fall back to the strict
+    /// refusal and the coding plan would stop saving.
+    #[tokio::test]
+    async fn a_200_wrapped_404_reaches_the_classifier_with_its_body() {
+        let base = stub_zai_coding_anthropic();
+        match reach_provider(
+            &base,
+            "anthropic",
+            "authorization",
+            Some("Bearer"),
+            Some("k"),
+        )
+        .await
+        {
+            Reachability::NoModelList(why) => {
+                assert!(why.contains("returned no model list"), "{why}");
+                assert!(
+                    why.contains("\"success\":false"),
+                    "body must be quoted: {why}"
+                );
+            }
+            other => panic!(
+                "expected NoModelList carrying the wrapper, got {}",
+                match other {
+                    Reachability::Rejected(w) => format!("Rejected({w})"),
+                    Reachability::NoModelList(w) => format!("NoModelList({w})"),
+                    Reachability::Unreachable(w) => format!("Unreachable({w})"),
+                    Reachability::Serving(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    /// The carve-out's scope, both edges: the coding-plan endpoint at any
+    /// spelling an operator might type gets it; the general Z.ai provider,
+    /// any other vendor, and any other failure from this endpoint do not.
+    #[test]
+    fn the_200_wrapper_carve_out_belongs_to_the_coding_plan_endpoint_alone() {
+        let wrapper = r#"... returned no model list (body: {"code":500,"msg":"404 NOT_FOUND","success":false})"#;
+        let other_failure = r#"..."#;
+
+        for base in [
+            "https://api.z.ai/api/anthropic",
+            "https://api.z.ai/api/anthropic/",
+            "https://api.z.ai/api/anthropic/v1",
+        ] {
+            assert!(
+                is_the_zai_coding_plan_200_wrapper(base, wrapper),
+                "{base} is the coding plan's door and must be accepted"
+            );
+            assert!(
+                !is_the_zai_coding_plan_200_wrapper(base, other_failure),
+                "a different failure at {base} must still be refused"
+            );
+        }
+        for base in [
+            "https://api.z.ai/api/paas/v4",
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.anthropic.com/v1",
+        ] {
+            assert!(
+                !is_the_zai_coding_plan_200_wrapper(base, wrapper),
+                "{base} is not the coding plan's Anthropic door"
+            );
+        }
     }
 
     #[tokio::test]
