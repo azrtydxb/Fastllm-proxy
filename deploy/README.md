@@ -515,7 +515,7 @@ plane mints and refreshes the access token, so the proxy pods need no Google
 credentials and no egress to `oauth2.googleapis.com`; the control plane does.
 
 Reaching Anthropic or Gemini directly means adding `"protocol":"anthropic"`
-or `"protocol":"gemini"`. Two operational notes:
+or `"protocol":"gemini"`. Three operational notes:
 
 - Anthropic backends want `"default_max_tokens": 4096` (or whatever suits).
   Without it, any client request that omits `max_tokens` gets a 400 — the
@@ -523,6 +523,14 @@ or `"protocol":"gemini"`. Two operational notes:
 - Translated backends serve `/chat/completions` only. Text, tool calling and
   image/audio input all work, streaming included; the embeddings/audio
   endpoints return 501. Use an OpenRouter backend for those.
+- An `anthropic` backend reached by an Anthropic client (`POST /v1/messages`)
+  is **native passthrough**: the client's request bytes go upstream as sent,
+  and the response comes back untouched. That fidelity is the point — Z.ai's
+  coding plan refuses a key whose traffic does not look like Claude Code, and
+  a twice-translated body never does. When the callers are _not_ Claude Code
+  and the endpoint still wants a fixed client header, pin it with
+  `extra_headers` on the provider (`PATCH /admin/providers/{id}`), which
+  overrides the client's header of that name on every request.
 
 The control plane needs egress to the provider and its CA in the trust store;
 public roots are already present in the image, so the hosted providers work

@@ -86,6 +86,9 @@ impl SnapshotSource for FileSource {
                     .clone()
                     .unwrap_or_else(|| "authorization".to_string()),
                 auth_scheme: entry.litellm_params.auth_scheme_or_default(),
+                // `File` mode has no admin surface to set these, so they are
+                // always empty here; the field exists for the control plane.
+                extra_headers: Vec::new(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
                 upstream_timeout_seconds: None,
                 // Never from a file: a gate is set per backend in the admin

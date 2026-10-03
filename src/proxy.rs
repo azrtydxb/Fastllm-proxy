@@ -322,7 +322,9 @@ pub async fn handle(
 
     if method == Method::POST && PROXIED_SUFFIXES.contains(&subpath) {
         let subpath = subpath.to_string();
-        return Ok(proxy_request(req, state, subpath, principal, auth_key_id, &snapshot).await);
+        return Ok(
+            proxy_request(req, state, subpath, principal, auth_key_id, &snapshot, None).await,
+        );
     }
 
     Ok(error_response(
@@ -546,6 +548,7 @@ fn resolve_target_models(
         )
     )
 )]
+#[allow(clippy::too_many_arguments)]
 async fn proxy_request<B>(
     req: Request<B>,
     state: Arc<AppState>,
@@ -555,6 +558,14 @@ async fn proxy_request<B>(
     // row this function writes can name it.
     key_id: Option<crate::snapshot::KeyId>,
     snapshot: &Snapshot,
+    // The request's bytes in the *client's own* wire format, when that is not
+    // OpenAI. Only the Anthropic frontend sets it. Held so the native
+    // passthrough fork — a frontend that matches a backend's protocol — can
+    // forward the original body instead of a round-trip translation that
+    // loses `metadata`, `cache_control` markers and `thinking` config, and
+    // re-sorts the key order. `None` is every other frontend, which has no
+    // second shape; the translation source stays the request itself.
+    anthropic_original: Option<Bytes>,
 ) -> Response<ResBody>
 where
     B: Body<Data = Bytes> + Send + 'static,
@@ -1039,12 +1050,44 @@ where
             };
             tried.push(backend.uid);
 
-            // The fork between the two execution modes, and the only branch the
+            // The fork between the execution modes, and the only branch the
             // passthrough path pays for. `is_passthrough` is a match on a
-            // `Copy` enum; everything under the `else` is unreachable for an
-            // OpenAI-compatible backend, which is every backend unless an
-            // operator configured otherwise.
-            let (upstream_body, upstream_subpath) = if backend.protocol.is_passthrough() {
+            // `Copy` enum; everything under the final `else` is unreachable
+            // for an OpenAI-compatible backend, which is every backend unless
+            // an operator configured otherwise.
+            //
+            // The third execution mode, beside the two above it: the client's
+            // wire format *is* the backend's. The Anthropic frontend's bytes
+            // go to an Anthropic backend unread except for the model name,
+            // because a round trip through the OpenAI shape is not merely
+            // lossy (`metadata`, `cache_control` markers and `thinking` all
+            // fall out) -- it is exactly what an upstream that fingerprints
+            // Claude Code traffic detects. Native is the whole point.
+            let native_anthropic =
+                anthropic_original.is_some() && backend.protocol == protocol::Protocol::Anthropic;
+            let (upstream_body, upstream_subpath) = if native_anthropic {
+                // Injecting `stream_options` is an OpenAI concept and has no
+                // business in an Anthropic body; the model rewrite is the
+                // only mutation.
+                let body = match rewrite_model_if_needed(
+                    anthropic_original.as_ref().expect("checked just above"),
+                    &requested_model,
+                    &backend.upstream_model,
+                    None,
+                    false,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            &format!("could not rewrite model name for alias: {e}"),
+                        );
+                    }
+                };
+                (body, Cow::Borrowed("/messages"))
+            } else if backend.protocol.is_passthrough() {
                 let body = match rewrite_model_if_needed(
                     &collected,
                     &requested_model,
@@ -1318,7 +1361,7 @@ where
                     // whenever `principal` is `None` (an open snapshot has no
                     // principal to attribute usage to), so this `and_then` never
                     // silently drops tracking that was actually wanted.
-                    if !backend.protocol.is_passthrough() {
+                    if !backend.protocol.is_passthrough() && !native_anthropic {
                         // Attributed to the model that actually answered, not the
                         // head of the chain: after a failover those differ, and
                         // billing the model that refused the request would make
@@ -1369,6 +1412,8 @@ where
                             .flatten()
                             .map(|p| UsageTracking {
                                 tail: TailBuffer::new(crate::tail_buffer::DEFAULT_CAPACITY),
+                                anthropic_stream: native_anthropic
+                                    .then(protocol::anthropic::StreamUsage::default),
                                 metrics: state.telemetry.model(candidate_model),
                                 principal_id: p.id,
                                 key_id,
@@ -1392,9 +1437,18 @@ where
                     // Non-2xx is excluded because an error is a statement about
                     // *now* — serving a 429 from cache would keep a provider's
                     // bad minute alive long after it ended.
-                    if let (Some(key), Some(ttl), false, true) =
-                        (cache_key, cache_ttl, streaming, status.is_success())
-                    {
+                    // A native Anthropic response's bytes are not the shape
+                    // the cache key was cut from (the key hashes the OpenAI
+                    // translation of the request), so caching one would serve
+                    // Anthropic-shaped bytes to an OpenAI-frontend caller.
+                    // Skipped rather than re-keyed: the native path exists for
+                    // fingerprint fidelity, and a cached hit would skip it.
+                    if let (Some(key), Some(ttl), false, true) = (
+                        cache_key.filter(|_| !native_anthropic),
+                        cache_ttl,
+                        streaming,
+                        status.is_success(),
+                    ) {
                         let cache = Arc::clone(&state.cache);
                         let content_type = resp
                             .headers()
@@ -1435,6 +1489,14 @@ where
                             .on_backend(Arc::clone(&backend)),
                         ),
                     );
+                    // Marked for [`into_anthropic_response`]: the bytes are
+                    // already in the client's protocol, so the OpenAI→Anthropic
+                    // conversion it would otherwise apply must not run. Only
+                    // this return path can produce a native response -- the
+                    // translated branch returns earlier.
+                    if native_anthropic {
+                        resp.extensions_mut().insert(NativeAnthropic);
+                    }
                     stamp_route_headers(&mut resp, &route_reason, candidate_model);
                     if let Some(status) = &rate_limit_status {
                         stamp_rate_limit_headers(&mut resp, status);
@@ -1940,6 +2002,12 @@ fn translated_response(
 /// consumption is worth reading at all.
 struct UsageTracking {
     tail: TailBuffer,
+    /// The incremental Anthropic-usage scanner, `Some` only on the native
+    /// Anthropic passthrough path. The tail buffer alone cannot see
+    /// `message_start`'s `input_tokens` on a long stream -- it is the first
+    /// event and evicted early -- so this mirrors the same bytes event-wise.
+    /// Read once, at end of stream, in `finish`.
+    anthropic_stream: Option<protocol::anthropic::StreamUsage>,
     /// Where to add the token counts, independent of whether they are also
     /// reported to the control plane.
     metrics: Option<Arc<crate::telemetry::ModelMetrics>>,
@@ -1982,7 +2050,31 @@ impl UsageTracking {
     /// second into the first is how a dashboard ends up quietly understating
     /// consumption.
     fn finish(mut self, timing: Option<&crate::telemetry::RequestTiming>) {
-        let tokens = self.tail.extract_usage();
+        // The tail answer stands for every shape it can see. The scanner's
+        // counts, where it saw the stream, take precedence per count: it
+        // watched `message_start` at the head of the stream, which no tail
+        // window can hold, so its `input_tokens` is authoritative and the
+        // tail's is the fallback.
+        let tail_tokens = self.tail.extract_usage();
+        let tokens = match self.anthropic_stream.take().and_then(|s| s.usage()) {
+            Some((prompt, completion)) => Some(match tail_tokens {
+                Some(t) => crate::tail_buffer::UsageTokens {
+                    prompt_tokens: if prompt > 0 { prompt } else { t.prompt_tokens },
+                    completion_tokens: if completion > 0 {
+                        completion
+                    } else {
+                        t.completion_tokens
+                    },
+                    cost_micros: t.cost_micros,
+                },
+                None => crate::tail_buffer::UsageTokens {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    cost_micros: None,
+                },
+            }),
+            None => tail_tokens,
+        };
         if let (Some(m), Some(t)) = (&self.metrics, tokens.as_ref()) {
             m.prompt_tokens
                 .fetch_add(u64::from(t.prompt_tokens), Ordering::Relaxed);
@@ -2095,6 +2187,12 @@ impl Body for TrackedBody {
             if let Some(data) = frame.data_ref() {
                 if let Some(tracking) = this.usage_tracking.as_mut() {
                     tracking.tail.push(data);
+                    // The Anthropic scanner is event-shaped, not per-frame:
+                    // it buffers only the current partial event, so this is
+                    // the same bounded sync feed the tail push already is.
+                    if let Some(scan) = tracking.anthropic_stream.as_mut() {
+                        scan.push(data);
+                    }
                 }
                 // Time to first token, from the only place that knows when the
                 // first byte actually reaches the client.
@@ -2673,6 +2771,9 @@ async fn cache_and_finish(
     // where the token counts are read from.
     if let Some(mut tracking) = tracking {
         tracking.tail.push(&collected);
+        if let Some(scan) = tracking.anthropic_stream.as_mut() {
+            scan.push(&collected);
+        }
         tracking.finish(Some(&timing));
     }
     // A buffered response has no separate first-byte moment, and `first_byte`
@@ -3042,6 +3143,16 @@ async fn reserve_body(
     }
 }
 
+/// Marks a response whose bytes are already in the client's wire format.
+///
+/// Set only by the native Anthropic passthrough (an Anthropic-frontend
+/// request served by an Anthropic backend), and read only by
+/// [`into_anthropic_response`], whose OpenAI→Anthropic conversion must not
+/// touch those bytes. Travels in the response's extensions, which never
+/// reach the wire.
+#[derive(Debug, Clone, Copy)]
+struct NativeAnthropic;
+
 /// `POST /v1/messages`: an Anthropic-shaped request, served by the ordinary
 /// request path.
 ///
@@ -3050,8 +3161,13 @@ async fn reserve_body(
 /// budgets, rate limits and RBAC all apply with no second implementation to
 /// drift. Only the two ends differ, and both are in
 /// [`protocol::messages`](crate::protocol::messages). A backend that itself
-/// speaks Anthropic is translated twice, not passed through -- correct, and
-/// lossy in the ways that module documents.
+/// speaks Anthropic is **not** translated twice: [`proxy_request`] is also
+/// handed the original bytes, and for an Anthropic backend it forwards those
+/// verbatim (model name aside) and marks the response
+/// [`NativeAnthropic`] so [`into_anthropic_response`] leaves it alone. The
+/// original bytes are the whole point — a twice-translated body has lost the
+/// client's `metadata`, `cache_control` markers and `thinking` config, and
+/// reads as machine-generated to an upstream that fingerprints them.
 async fn messages_request(
     req: Request<Incoming>,
     state: Arc<AppState>,
@@ -3084,6 +3200,12 @@ async fn messages_request(
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let req = Request::from_parts(parts, Full::new(Bytes::from(translated.body)));
+    // The original bytes travel with the request: for an Anthropic backend
+    // [`proxy_request`] forwards them verbatim instead of round-tripping the
+    // body through the OpenAI shape, which loses exactly the fields an
+    // upstream that fingerprints Claude Code traffic looks for (`metadata`,
+    // `cache_control` markers, `thinking` config) and even re-sorts the key
+    // order. `None` is every other frontend, which has no second shape.
     let resp = proxy_request(
         req,
         state,
@@ -3091,6 +3213,7 @@ async fn messages_request(
         principal,
         key_id,
         snapshot,
+        Some(collected),
     )
     .await;
     into_anthropic_response(resp, translated.stream, translated.model).await
@@ -3102,6 +3225,13 @@ async fn into_anthropic_response(
     stream: bool,
     model: String,
 ) -> Response<ResBody> {
+    // A native passthrough response is already Anthropic-shaped on both
+    // counts that matter: success bytes need no conversion, and an upstream
+    // error document is Anthropic's own shape, not one `error_from_openai`
+    // should re-dress. Hand it to the client as it arrived.
+    if resp.extensions().get::<NativeAnthropic>().is_some() {
+        return resp;
+    }
     if !resp.status().is_success() {
         return to_anthropic_error(resp).await;
     }

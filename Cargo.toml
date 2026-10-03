@@ -43,7 +43,15 @@ http-body-util = "0.1"
 http = "1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+# `preserve_order`: JSON objects keep the key order they were parsed in
+# instead of alphabetising. Two reasons it is load-bearing, not cosmetic:
+# `rewrite_model_if_needed` re-serialises a client's body to swap the model
+# name, and on the Anthropic passthrough path that body must stay
+# byte-faithful to what the client sent — a silently alphabetised key order
+# is a fingerprint upstreams can and do fingerprint. And translated request
+# bodies come out in the order the code builds them, which is the order real
+# clients use, rather than an obviously machine-sorted one.
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

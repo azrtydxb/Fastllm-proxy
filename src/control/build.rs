@@ -214,6 +214,7 @@ pub async fn build_snapshot_with(
         String,
         String,
         Option<String>,
+        serde_json::Value,
         Option<i32>,
         String,
         Uuid,
@@ -238,7 +239,7 @@ pub async fn build_snapshot_with(
     // "no healthy backend".
     let backend_rows: Vec<BackendRow> = sqlx::query_as(
         "SELECT mb.provider_model_id, p.api_base, COALESCE(mb.upstream_model, m.name), \
-         p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, \
+         p.upstream_api_key, p.protocol, p.auth_header, p.auth_scheme, p.extra_headers, \
          mb.default_max_tokens, p.credential_kind, mb.id, \
          mb.input_price_per_mtok, mb.output_price_per_mtok, \
          mb.upstream_timeout_seconds, \
@@ -263,6 +264,7 @@ pub async fn build_snapshot_with(
             protocol,
             auth_header,
             auth_scheme,
+            extra_headers_json,
             max_tokens,
             credential_kind,
             backend_id,
@@ -380,6 +382,34 @@ pub async fn build_snapshot_with(
                 );
                 continue;
             };
+            // Contained like every other malformed input to a snapshot
+            // build: a header entry that is not a string is dropped with a
+            // log, not the backend, and a column that is not an object at
+            // all drops all of them. The API surface validates on write;
+            // this is for a row that reached the database another way.
+            let mut extra_headers: Vec<(String, String)> = Vec::new();
+            match extra_headers_json {
+                serde_json::Value::Object(map) => {
+                    for (header_name, header_value) in map {
+                        match header_value.as_str() {
+                            Some(value) => {
+                                extra_headers.push((header_name.clone(), value.to_string()))
+                            }
+                            None => tracing::error!(
+                                header = %header_name,
+                                model = %name,
+                                api_base = %base,
+                                "dropping extra header: its value is not a JSON string"
+                            ),
+                        }
+                    }
+                }
+                _ => tracing::error!(
+                    model = %name,
+                    api_base = %base,
+                    "dropping extra headers: providers.extra_headers is not a JSON object"
+                ),
+            }
             backends.push(BackendDef {
                 api_base: base.trim_end_matches('/').to_string(),
                 upstream_model: upstream.clone(),
@@ -387,6 +417,7 @@ pub async fn build_snapshot_with(
                 protocol,
                 auth_header: auth_header.clone(),
                 auth_scheme: auth_scheme.clone(),
+                extra_headers,
                 default_max_tokens: max_tokens.map(|n| n as u32),
                 upstream_timeout_seconds: upstream_timeout.map(|t| t as u64),
                 admission: admission_settings(*admission_max_concurrent, admission_tuning),

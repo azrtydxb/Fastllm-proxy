@@ -196,7 +196,11 @@ curl http://localhost:4000/v1/chat/completions \
 Anthropic-native clients work too, with only the base URL changed: set
 `ANTHROPIC_BASE_URL=http://localhost:4000` and the key as `ANTHROPIC_API_KEY`
 (sent as `x-api-key`). `POST /v1/messages` is translated onto the same path,
-so routing, budgets and RBAC apply unchanged.
+so routing, budgets and RBAC apply unchanged — and when the routed backend
+itself speaks Anthropic (`"protocol": "anthropic"`, e.g. Z.ai's coding
+endpoint), the client's request goes to it verbatim rather than re-serialised:
+`metadata`, `cache_control` markers and the key order all survive, which is
+what endpoints that fingerprint coding-agent traffic check for.
 
 The management UI is on the same port as the admin API — open `https://localhost:4001/`
 and the same login works.

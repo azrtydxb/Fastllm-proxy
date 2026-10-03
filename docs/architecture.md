@@ -92,25 +92,42 @@ budgets, rate limits and RBAC are not reimplemented and cannot drift; the
 answer, streamed or not, is translated back to Anthropic's shape. `x-api-key`
 is moved to `Authorization` before authentication.
 
-Known limits, because a translator should say what it does not do: thinking
-blocks are dropped in both directions, `count_tokens` is an estimate, and a
-backend that itself speaks Anthropic is translated twice rather than passed
-through.
+When the routed backend itself speaks Anthropic, the translation stops at the
+frontend: `proxy_request` holds the client's original bytes and forwards those
+verbatim (model alias and auth aside), marked so the answer is handed back
+without the OpenAI→Anthropic conversion. This is not an optimisation — a
+twice-translated body has lost `metadata`, the per-block `cache_control`
+markers and the client's key order, and that loss is exactly what an upstream
+that fingerprints coding-agent traffic (Z.ai's coding plan, for one) detects
+and refuses.
 
-## Two execution modes
+Known limits, because a translator should say what it does not do: thinking
+blocks are dropped in both directions on the translated path (the native
+passthrough has none), `count_tokens` is an estimate, and only
+`/chat/completions` is translated — the other proxied suffixes are `501` on a
+native-protocol backend.
+
+## Three execution modes
 
 The dotted branch above is the whole of multi-provider support, and it is
 drawn dotted on purpose: it is not on the default path.
 
-|                   | passthrough (`protocol = openai`)                | translated (`anthropic`, `gemini`)             |
-| ----------------- | ------------------------------------------------ | ---------------------------------------------- |
-| request body      | forwarded as-is, or one splice for a model alias | parsed and re-serialised into the native shape |
-| response body     | never parsed; forwarded byte for byte            | parsed, re-framed into OpenAI chunks           |
-| usage             | bounded tail buffer, one parse at end of stream  | already parsed, exactly, during translation    |
-| endpoints         | all seven proxied suffixes                       | `/chat/completions` only; the rest are `501`   |
-| tool calling      | passthrough, untouched                           | translated both directions, streaming included |
-| image/audio input | passthrough, untouched                           | `data:` URLs translated inline; never fetched  |
-| overhead          | zero measured against a real vLLM                | one parse per frame                            |
+|               | passthrough (`protocol = openai`)                | native (`anthropic` backend behind `/v1/messages`) | translated (`anthropic`, `gemini`)             |
+| ------------- | ------------------------------------------------ | -------------------------------------------------- | ---------------------------------------------- |
+| request body  | forwarded as-is, or one splice for a model alias | the client's own bytes, model alias aside          | parsed and re-serialised into the native shape |
+| response body | never parsed; forwarded byte for byte            | forwarded byte for byte                            | parsed, re-framed into OpenAI chunks           |
+| usage         | bounded tail buffer, one parse at end of stream  | tail buffer plus a head-of-stream scanner          | already parsed, exactly, during translation    |
+| endpoints     | all seven proxied suffixes                       | `/v1/messages` only                                | `/chat/completions` only; the rest are `501`   |
+
+The native mode exists for the same fidelity reason as the passthrough — the
+client's request reaches the provider exactly as the client built it — with
+one addition the OpenAI case does not have: an Anthropic stream reports
+`input_tokens` in its _first_ event, which no bounded tail can hold, so
+`StreamUsage` (`src/protocol/anthropic.rs`) mirrors the stream event-wise for
+accounting while the bytes themselves go straight through.
+| tool calling | passthrough, untouched | translated both directions, streaming included |
+| image/audio input | passthrough, untouched | `data:` URLs translated inline; never fetched |
+| overhead | zero measured against a real vLLM | one parse per frame |
 
 Most providers are the left column, including OpenRouter — which is why
 "support every provider `genai` supports" is mostly a configuration exercise

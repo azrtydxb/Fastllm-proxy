@@ -371,3 +371,28 @@ fn authorisation_reads_only_the_snapshot() {
     assert!(p.may_invoke("m"));
     assert!(!p.may_invoke("other-model"));
 }
+
+/// The native Anthropic passthrough's per-frame side: `StreamUsage::push`
+/// runs in `TrackedBody::poll_frame` beside `TailBuffer::push`, so it inherits
+/// the identical contract — a sync, bounded-memory feed of the raw forwarded
+/// bytes. Were it `async fn`, or were it handed a handle instead of bytes,
+/// this coercion fails to compile.
+const _ANTHROPIC_STREAM_USAGE_PUSH_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
+    &mut fastllm_proxy::protocol::anthropic::StreamUsage,
+    &[u8],
+) = fastllm_proxy::protocol::anthropic::StreamUsage::push;
+
+#[test]
+fn anthropic_stream_usage_push_body_contains_no_await_or_io_tokens() {
+    let source = include_str!("../src/protocol/anthropic.rs");
+    let body = extract_fn_body(source, "pub fn push(&mut self, data: &[u8]) {");
+
+    assert!(
+        body.contains("self.sse"),
+        "sanity check failed: `StreamUsage::push` no longer touches `self.sse`; \
+         either the function was rewritten (update this test to match) or the \
+         extraction above grabbed the wrong span"
+    );
+
+    assert_no_await_or_io_tokens(&body, "StreamUsage::push");
+}
