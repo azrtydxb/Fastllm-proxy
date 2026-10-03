@@ -199,7 +199,7 @@ impl Drop for Permit {
         };
         let repaid = self
             .debt
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
             .is_ok();
         if repaid {
             // Out of circulation for good: this is the ceiling coming down.
@@ -367,7 +367,7 @@ impl Admission {
         // circulation instead of being forgotten and re-added.
         let forgave = self
             .debt
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
             .is_ok();
         if !forgave {
             self.sem.add_permits(1);
