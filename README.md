@@ -7,7 +7,7 @@
 
 **The lowest-overhead LLM router.** Production-ready, highly available, and one OpenAI-compatible endpoint in front of everything you serve — written in Rust.
 
-It fronts any number of inference backends (vLLM, SGLang, llama.cpp, or any of [80 providers](docs/providers.md)) behind one address: **0.76 µs of work per request**, no I/O on the request path, and response bodies that are never parsed. It reads LiteLLM-format config files unchanged, so it drops into an existing setup without rewriting anything.
+It fronts any number of inference backends (vLLM, SGLang, llama.cpp, or any of [81 providers](docs/providers.md)) behind one address: **0.76 µs of work per request**, no I/O on the request path, and response bodies that are never parsed. It reads LiteLLM-format config files unchanged, so it drops into an existing setup without rewriting anything.
 
 ## Quick start
 
@@ -35,7 +35,7 @@ Clients point at `:4000`; the management UI is at `https://localhost:4001/`.
 - **Cache-affinity routing** with a load escape hatch. A shared prefix goes back to the node that already has its KV cache, unless that node is meaningfully hotter than the least-loaded one.
 - **Opaque response bodies.** Upstream frames reach the client exactly as they arrived — never deserialised, never re-encoded, never buffered.
 - **Cache-affinity routing, frontend models, rule-based and semantic routing** — see below.
-- **80 providers, and any OpenAI-compatible endpoint** — see below.
+- **81 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
 - **Control plane / data plane split** by a runtime flag, so one image is a single container in a lab and a scaled deployment in Kubernetes.
@@ -45,7 +45,7 @@ It reads LiteLLM-format config files unchanged, so it drops into an existing set
 
 ## Providers
 
-**80 providers work today — 78 reached as-is, 2 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on the list; the list exists so you do not have to go and find the base URL.
+**81 providers work today — 78 reached as-is, 3 through their own wire format — and adding one is a row in a table, not a code change and not a release.** Anything speaking the OpenAI API is already supported, whether or not it is on the list; the list exists so you do not have to go and find the base URL.
 
 A caveat that list is explicit about, because the number is otherwise a boast: **"works" here means "is a configuration row that this proxy will forward to correctly"**, which follows from the endpoint being OpenAI-shaped. The ones exercised against real traffic in this repo's tests and on its dev cluster are marked ✓ there.
 
