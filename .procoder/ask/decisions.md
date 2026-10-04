@@ -1527,3 +1527,11 @@ The live `fastllm` namespace is owned by a `FastllmProxy` CR (`fastllm.fastllm`)
 **Decided:** record it here and in the repo docs on the next docs pass; used for this deployment.
 
 **Decided (follow-ups):** fixed in #38 and deployed as `sha-cb75148` — the probe carve-out is gated on the coding-plan Anthropic base *and* the 200-wrapper body, so `zai` and every other provider keep the strict refusal; catalogue entry `zai_coding_anthropic` added (0056); the providers screen edits `extra_headers`. Verified live: the coding base passes the probe (409 clash with the real provider proves acceptance), a bogus general-Z.ai base is still refused, and a throwaway create through the carve-out returned 201 and was deleted. Bonus find: `/v1/models` answers a real list when the key is presented as `x-api-key`; the 200-wrapper only appears for the `Authorization: Bearer` shape the Claude Code door uses.
+
+**Decided (Codex door):** "do the same for the default Z.ai coding provider" — scoped the same way, shipped as #39 and deployed as `sha-2c4ab3c`. The honest core again: a genuine Codex request is not rewritten at all (frontend model named after the upstream id, `inject_include_usage` no longer touches Responses bodies), so Codex traffic arrives as Codex sent it. Catalogue `zai_coding_responses` for `https://api.z.ai/api/v1`; probe reads `slug`. Verified with the real Codex CLI 0.160.0 through the gateway: reply OK, usage row 8509/3. The general `zai` provider and the Claude Code door are untouched.
+
+## Leave the broken global codex install alone
+
+The npm `@openai/codex` install in `/opt/homebrew/lib/node_modules` is missing its platform binary (empty `vendor/aarch64-apple-darwin/codex/` dir), and a fresh npx/npm copy of the same version is SIGKILLed at spawn even after moving it out of /tmp — something on this Mac kills that binary. The working one is the app-server daemon's: `~/.codex/packages/app-server-daemon/releases/0.160.0-aarch64-apple-darwin/bin/codex`. Used that for verification; did not reinstall or modify anything global.
+
+**Decided:** use the daemon binary when codex is needed; the user can reinstall npm codex themselves if they want it fixed.
