@@ -1535,3 +1535,9 @@ The live `fastllm` namespace is owned by a `FastllmProxy` CR (`fastllm.fastllm`)
 The npm `@openai/codex` install in `/opt/homebrew/lib/node_modules` is missing its platform binary (empty `vendor/aarch64-apple-darwin/codex/` dir), and a fresh npx/npm copy of the same version is SIGKILLed at spawn even after moving it out of /tmp — something on this Mac kills that binary. The working one is the app-server daemon's: `~/.codex/packages/app-server-daemon/releases/0.160.0-aarch64-apple-darwin/bin/codex`. Used that for verification; did not reinstall or modify anything global.
 
 **Decided:** use the daemon binary when codex is needed; the user can reinstall npm codex themselves if they want it fixed.
+
+## Investigate #29's root cause now?
+
+One open issue remains: #29, healthy backends ejected without any ejection log line (11 re-admissions, 7 fleet withdrawals, zero ejection lines over 45 minutes). Mitigation shipped in #31/#32/#33; the cause of the unlogged ejections is the open part. Candidate paths: the stall detector's frozen-engine heuristic, fleet disagreement, or consecutive-timeout fed by slow large-prompt prefills.
+
+**Decided:** investigate now — trace the unlogged ejection path, fix the cause or make it name itself, then close the issue.
