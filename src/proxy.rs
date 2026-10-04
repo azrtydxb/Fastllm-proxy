@@ -1009,8 +1009,15 @@ where
     // attempts. `model_field.is_none()` restricts injection to the JSON
     // chat/completions-shaped routes: the multipart audio routes have no
     // `stream_options` to inject into and are never streaming completions.
+    // `/responses` needs naming despite being JSON too: the Responses API
+    // has no `stream_options` at all, and a streaming Codex request with the
+    // field spliced in stops being the request the client sent — which is
+    // both a fingerprint upstreams can see and a body a strict endpoint may
+    // refuse. Its usage is accounted the other way: the tail extractor reads
+    // `input_tokens`/`output_tokens` straight out of `response.completed`.
     let needs_usage = principal_needs_usage(principal);
-    let inject_include_usage = needs_usage && streaming && model_field.is_none();
+    let inject_include_usage =
+        needs_usage && streaming && model_field.is_none() && subpath == "/chat/completions";
 
     let mut last_error: Option<String> = None;
     // The most recent admission refusal, with the message it recorded as
