@@ -930,6 +930,119 @@ async fn a_passthrough_backend_is_forwarded_byte_for_byte() {
     );
 }
 
+/// The Responses API, end to end on a passthrough backend: the body Codex
+/// sends goes upstream byte-exact — key order kept, and **no**
+/// `stream_options.include_usage` spliced in. The Responses API has no such
+/// field; injecting it made the request one the client did not send, on the
+/// one route whose whole point is speaking to Codex exactly as Codex spoke.
+/// Its usage is accounted instead by the tail extractor reading
+/// `input_tokens`/`output_tokens` out of `response.completed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_responses_request_is_forwarded_byte_for_byte() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (port, admin_port, upstream_port) = (14821, 14822, 14823);
+
+    // Deliberately odd: a leading unknown field, irregular spacing, a
+    // newline. Anything a fingerprinter could read as machine-touched must
+    // survive, and `stream_options` must not appear.
+    const RESPONSES_REQUEST: &str = concat!(
+        r#"{"zzz_unknown_field":[1,2,3],   "model":"MODEL_PLACEHOLDER","#,
+        r#""input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"#,
+        r#""stream":true,"store":false}"#,
+    );
+    const RESPONSES_SSE: &str = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ver\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n",
+    );
+
+    let suffix = suffix(port);
+    let _cleanup = cleanup_for(&suffix);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to postgres");
+
+    let recorder: Recorder = Arc::new(Mutex::new(Seen::default()));
+    spawn_mock(
+        upstream_port,
+        Arc::clone(&recorder),
+        MockResponse::streaming(
+            r#"{"error":"non-streaming must not be asked"}"#,
+            RESPONSES_SSE,
+        ),
+    )
+    .await;
+
+    let admin_name = format!("np-admin-{suffix}");
+    support::bootstrap_login_user(&pool, &admin_name).await;
+    let _proc = start_all(port, admin_port, &database_url);
+    let cookie = support::login_cookie(admin_port, &admin_name);
+
+    let (key, model) = provision(
+        &pool,
+        admin_port,
+        &cookie,
+        &suffix,
+        "openai",
+        &format!("http://127.0.0.1:{upstream_port}/v1"),
+        None,
+    )
+    .await;
+    wait_for_model(port, &key, &model);
+
+    let body = RESPONSES_REQUEST.replace("MODEL_PLACEHOLDER", &model);
+    let (status, got) = messages_raw(port, &key, "/v1/responses", &body);
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got, RESPONSES_SSE, "the stream must pass through verbatim");
+
+    // The guard lives only inside this scope: the usage loop below awaits.
+    let (sent_path, sent_body);
+    {
+        let seen = recorder.lock().unwrap();
+        sent_path = seen.path.clone();
+        sent_body = seen.body.clone();
+    }
+    assert_eq!(sent_path, "/v1/responses");
+    // The alias rewrite re-serialises compactly, which is where the fixture's
+    // irregular spacing goes; key order survives it (`preserve_order`). With
+    // frontend and upstream names matched — how the Codex door is wired — no
+    // rewrite runs at all and the body is a clone.
+    let expected = body
+        .replace(&model, "provider-model-name")
+        .replace(",   \"", ",\"");
+    assert_eq!(
+        sent_body, expected,
+        "the Responses body must be untouched apart from the model alias"
+    );
+    assert!(
+        !sent_body.contains("stream_options"),
+        "usage injection must never touch a Responses body"
+    );
+
+    // Usage still lands, read from `response.completed`'s Anthropic-spelled
+    // counts by the same tail aliases the native passthrough uses.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let row: Option<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT prompt_tokens, completion_tokens, usage_reported \
+             FROM usage_events WHERE model_name = $1 ORDER BY at DESC LIMIT 1",
+        )
+        .bind(&model)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        match row {
+            Some((7, 3, true)) => break,
+            _ if Instant::now() >= deadline => {
+                panic!("no usage row with 7/3 reported for {model}, last: {row:?}")
+            }
+            _ => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
 const ANTHROPIC_TOOL_BODY: &str = r#"{"id":"msg_tool","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_e2e","name":"get_weather","input":{"city":"Paris"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":9}}"#;
 
 /// Tool calling end to end, through a real proxy rather than the translator
@@ -1242,7 +1355,13 @@ async fn an_identical_request_is_answered_from_cache_without_touching_the_provid
 
 /// `(status, body)` for a `POST /v1/messages` in the client's own shape.
 fn messages(port: u16, key: &str, body: &str) -> (u16, String) {
-    match ureq::post(&format!("http://127.0.0.1:{port}/v1/messages"))
+    messages_raw(port, key, "/v1/messages", body)
+}
+
+/// `(status, body)` for a `POST` to any proxied path, with the auth and
+/// client markers a coding agent presents.
+fn messages_raw(port: u16, key: &str, path: &str, body: &str) -> (u16, String) {
+    match ureq::post(&format!("http://127.0.0.1:{port}{path}"))
         .set("content-type", "application/json")
         .set("x-api-key", key)
         .set("anthropic-version", "2023-06-01")

@@ -97,11 +97,15 @@ pub async fn served_models_as(
             let snippet = String::from_utf8_lossy(&body[..body.len().min(160)]);
             anyhow::anyhow!("{url} returned no model list (body: {snippet})")
         })?;
+    // `slug` is what a Codex-shaped model descriptor calls its id — the
+    // Responses API doors speak this dialect, and without it such a provider
+    // probes as "serving 0 models".
     Ok(data
         .iter()
         .filter_map(|m| {
             m.get("id")
                 .or_else(|| m.get("name"))
+                .or_else(|| m.get("slug"))
                 .and_then(|i| i.as_str())
                 .map(str::to_owned)
         })
