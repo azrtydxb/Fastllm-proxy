@@ -1602,3 +1602,18 @@ hand so qwen3.5-9b served correctly before the new control plane was deployed.
 
 **Decided:** fix on FastLLM's side rather than editing kuvryn-managed
 Deployments, which kuvryn would reconcile back.
+
+## Expose the ASR and TTS to clients?
+
+`nemotron-3.5-asr` (gx10-48f4:8093) and `breeze` TTS (gx10-9c17:8092) are now
+registered and healthy, but a learned model is inventory, not an exposure
+(ADR 0002): no client can reach them until a frontend model points at them, and
+callers then need a `model:invoke` grant on it.
+
+Options:
+
+- **Create frontend models `nemotron-3.5-asr` and `breeze`**, reachable at
+  `/v1/audio/transcriptions` and `/v1/audio/speech` for principals granted them.
+- **Leave them unexposed** for now.
+
+**Decided:** expose both — frontend models `nemotron-3.5-asr` and `breeze`.
