@@ -194,9 +194,9 @@ is which.
 
 Renaming is therefore a matter of changing `--provider-name` and letting the
 next heartbeat carry it. That is safe: routing resolves a target by its
-**model's** name, so a provider's name is descriptive. The rename is carried
-onto the targets that describe it, so nothing is left naming a provider that no
-longer exists.
+**model's** name, so a provider's name is descriptive. Nothing else refers to a
+provider by name — a target names a model, and which providers serve it is the
+model's business — so a rename leaves nothing dangling.
 
 A name another provider already holds is declined — with a warning in the
 control plane's log — and the heartbeat still succeeds. A collision is not a

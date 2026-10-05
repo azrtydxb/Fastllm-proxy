@@ -446,7 +446,7 @@ jobs:
 
   release-agent:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, ui]
+    needs: [test, ui, agent]
     runs-on: arc-azrtydxb-publish
     timeout-minutes: 30
     permissions: { contents: read, packages: write }

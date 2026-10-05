@@ -171,6 +171,36 @@ class Discovery(unittest.TestCase):
         self.assertEqual(agent.LABEL_OF[url], "gx10-48f4")
 
 
+class StaleModel(unittest.TestCase):
+    # Breaks if a model the engine stopped listing keeps naming its provider.
+    def test_an_empty_answer_forgets_the_model(self):
+        answers = [{"data": [{"id": "bge-m3"}]}, {"data": []}]
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps(answers.pop(0)).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}/v1"
+            agent.MODEL_OF.clear()
+            self.assertTrue(agent.serves_models(base, 2))
+            self.assertEqual(agent.MODEL_OF[base], "bge-m3")
+            self.assertTrue(agent.serves_models(base, 2))
+            self.assertNotIn(base, agent.MODEL_OF)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class AdvertiseScheme(unittest.TestCase):
     def setUp(self):
         self._kube_get, self._node_addresses = agent.kube_get, agent.node_addresses

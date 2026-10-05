@@ -56,8 +56,12 @@ def serves_models(base, timeout):
         if not isinstance(data, list):
             return False
         ids = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+        # Overwritten on every answer: an engine that stops listing a model
+        # must not keep naming its provider after it.
         if ids:
             MODEL_OF[base] = ids[0]
+        else:
+            MODEL_OF.pop(base, None)
         return True
     except Exception:
         return False
