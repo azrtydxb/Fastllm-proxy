@@ -85,7 +85,7 @@ docker run -d --name fastllm \
   -e FASTLLM_ROLE=all \
   -e FASTLLM_DATABASE_URL=postgres://fastllm@db/fastllm \
   -e FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  ghcr.io/azrtydxb/fastllm-proxy:v0.3.2
+  ghcr.io/azrtydxb/fastllm-proxy:v0.3.3
 ```
 
 Note the asymmetry in the port mappings: `:4000` is published, `:4001` is
@@ -233,7 +233,7 @@ reason to run a controller:
 ```console
 $ kubectl -n fastllm get fllm
 NAME      PHASE   GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.3.2   2m
+fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.3.3   2m
 ```
 
 `IMAGE` is what is actually serving, not what was asked for — during an

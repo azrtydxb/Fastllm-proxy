@@ -6,6 +6,34 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## 0.3.3 — 2026-10-05
+
+### Changed
+
+- **Every provider is named `<cluster>-<node>-<model>-<port>`.** Services
+  advertised through `fastllm.io/advertise` were named `<cluster>-<port>`
+  because the agent knew neither their node nor their model, so two engines
+  on one port in one cluster collided and the second fell back to a bare
+  address. The agent now takes the node from the pods a Service selects and
+  the model from the first id `/v1/models` answers with, folds each part to
+  lowercase `[a-z0-9.]` and dashes, and leaves out a part it cannot know.
+  Names travel on every heartbeat, so upgrading the agent renames existing
+  providers in place; routing follows model names, not provider names.
+
+### Fixed
+
+- **A provider deleted mid-sweep no longer fails the whole sweep.** The sweep
+  read each provider's kind in a second query; one deleted in between (a
+  lapsed lease, an operator's delete) found no row and aborted the sweep for
+  every other provider. It is also why one control-plane test failed
+  intermittently.
+
+### Security
+
+- **`fastllm.io/advertise` is honoured only for `http(s)` URLs.** urllib also
+  opens `file://` paths, so anyone able to annotate a Service could otherwise
+  choose what the agent reads.
+
 ## 0.3.2 — 2026-10-05
 
 ### Fixed

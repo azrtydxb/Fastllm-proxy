@@ -42,7 +42,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: proxy
-          image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.2
+          image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.3
           args:
             - --role=proxy
             - --policy=cache-affinity
