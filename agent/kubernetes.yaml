@@ -77,12 +77,11 @@ spec:
       serviceAccountName: fastllm-node-agent
       containers:
         - name: agent
-          # Any Python works: the agent is standard library only, on purpose,
-          # so there is nothing to install and no image to build and keep
-          # current.
-          image: python:3.13-slim
-          command:
-            ["python3", "/opt/fastllm/fastllm-node-agent.py", "--kubernetes"]
+          # The release build ships this image (agent/Dockerfile): python plus
+          # the script, entrypoint baked in — the container args are the
+          # agent's flags.
+          image: ghcr.io/azrtydxb/fastllm-node-agent:latest
+          command: ["--kubernetes"]
           env:
             - name: FASTLLM_CONTROL_URL
               value: https://192.168.10.129:4001
@@ -102,7 +101,6 @@ spec:
                   name: fastllm-agent-token
                   key: token
           volumeMounts:
-            - { name: script, mountPath: /opt/fastllm }
             - { name: ca, mountPath: /etc/fastllm, readOnly: true }
           resources:
             requests: { cpu: 10m, memory: 64Mi }
@@ -114,10 +112,6 @@ spec:
             runAsUser: 65532
             capabilities: { drop: ["ALL"] }
       volumes:
-        - name: script
-          configMap:
-            name: fastllm-node-agent
-            defaultMode: 0555
         # The control plane's certificate comes from an internal CA no public
         # root store has heard of. There is deliberately no way to skip
         # verification: the token above travels over this connection, and an

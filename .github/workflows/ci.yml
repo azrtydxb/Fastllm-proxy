@@ -436,6 +436,32 @@ jobs:
           platforms: linux/arm64
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
 
+  release-agent:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, ui]
+    runs-on: arc-azrtydxb-publish
+    timeout-minutes: 30
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Pure python, both platforms from one builder: COPY needs no emulation,
+      # so the amd64 layers build from the arm64 runner without a cross node.
+      - name: Node agent (multiarch)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: agent/Dockerfile
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fastllm-node-agent:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fastllm-node-agent:latest
+
   release-amd64:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
