@@ -2,8 +2,8 @@ apiVersion: v2
 name: fastllm-proxy
 description: Low-latency OpenAI-compatible LLM gateway — cache-affinity routing, RBAC, usage accounting
 type: application
-version: 0.3.2
-appVersion: "0.3.2"
+version: 0.3.3
+appVersion: "0.3.3"
 home: https://github.com/azrtydxb/Fastllm-proxy
 sources:
   - https://github.com/azrtydxb/Fastllm-proxy

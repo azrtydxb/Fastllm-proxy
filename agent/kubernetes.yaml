@@ -84,7 +84,7 @@ spec:
           # the script, entrypoint baked in. Pinned to the release rather than
           # `latest`, so what runs is what was tested, and it moves with each
           # release (tests/release_consistency.rs holds it there).
-          image: ghcr.io/azrtydxb/fastllm-node-agent:v0.3.2
+          image: ghcr.io/azrtydxb/fastllm-node-agent:v0.3.3
           # `args`, not `command`: `command` replaces the image's entrypoint,
           # and the container would try to execute `--kubernetes` itself.
           args: ["--kubernetes"]
