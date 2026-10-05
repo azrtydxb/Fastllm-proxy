@@ -6,6 +6,26 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## 0.3.2 — 2026-10-05
+
+### Fixed
+
+- **A host that swapped models is re-learned, not stranded.** When a Spark's
+  engine went from qwen3.5-9b to the 35B on the same port, the sweep called it
+  a mismatch and marked it degraded — and a degraded provider is one the sweep
+  does not reconcile, so the registry kept routing qwen3.5-9b to an engine that
+  no longer had it. The agent's heartbeat cleared the flag every thirty
+  seconds, so the provider's models also flapped in and out of every snapshot.
+  A dynamic provider's mismatch is now reported and resolved in the same pass;
+  a static or cloud provider's still degrades and waits for a human.
+- **The node agent finds engines that name their port only in a health
+  probe**, as the audio.cpp servers (nemotron ASR, Breeze TTS) on kw do: the
+  numeric port of an `httpGet` readiness, liveness or startup probe is read
+  after `--port`.
+- **Providers on one cluster get distinct names.** Under `--kubernetes` the
+  name adds the node or Service — `kw-gx10-9c17-8000` — so two engines on one
+  port on different nodes no longer collide.
+
 ## 0.3.1 — 2026-10-05
 
 ### Fixed

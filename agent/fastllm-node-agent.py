@@ -136,6 +136,32 @@ def port_from_command(container):
     return out
 
 
+def port_from_probes(container):
+    """The port a container's own health probes say it serves HTTP on.
+
+    The last declaration to read, for an engine that takes its port from a
+    config file rather than a flag -- the audio.cpp servers on kw do, and an
+    `httpGet` readiness probe is the only place their pod spec names the port.
+    Like `--port`, this reads what the operator already wrote rather than
+    guessing. A named port refers to a declared `containerPort`, which would
+    have been read already, so only numbers count here.
+    """
+    out = []
+    for kind in ("readinessProbe", "livenessProbe", "startupProbe"):
+        port = ((container.get(kind) or {}).get("httpGet") or {}).get("port")
+        if isinstance(port, int):
+            out.append(port)
+        elif isinstance(port, str) and port.isdigit():
+            out.append(int(port))
+    return list(dict.fromkeys(out))
+
+
+# Which node or service each Kubernetes candidate belongs to, so two endpoints
+# on the same port in one cluster get different provider names. Written by the
+# discovery thread, read by the heartbeat; each assignment is one dict store.
+LABEL_OF = {}
+
+
 def kube_candidates(args):
     """Addresses this cluster actually exposes, from the API rather than a guess.
 
@@ -186,7 +212,9 @@ def kube_candidates(args):
                 ):
                     addr = ing.get("ip") or ing.get("hostname")
                     if addr and port.get("port"):
-                        found.append(f"http://{addr}:{port['port']}/v1")
+                        url = f"http://{addr}:{port['port']}/v1"
+                        found.append(url)
+                        LABEL_OF[url] = meta.get("name")
             elif kind == "NodePort" and port.get("nodePort") and args.advertise:
                 found.append(f"http://{args.advertise}:{port['nodePort']}/v1")
 
@@ -218,9 +246,13 @@ def kube_candidates(args):
                 ]
                 if not ports:
                     ports += port_from_command(c)
+                if not ports:
+                    ports += port_from_probes(c)
             for hp in ports:
                 if advertise:
-                    found.append(f"http://{advertise}:{hp}/v1")
+                    url = f"http://{advertise}:{hp}/v1"
+                    found.append(url)
+                    LABEL_OF[url] = spec.get("nodeName")
 
     # Two Services can front the same endpoint; register it once.
     return list(dict.fromkeys(found))
@@ -298,6 +330,13 @@ def provider_name(args, api_base):
     would rename the first one behind the operator's back.
     """
     base = args.provider_name or args.node
+    # One agent answers for a whole cluster, so `--node` is the cluster and
+    # every engine on port 8000 would be `kw-8000`: the second to register
+    # kept an address for a name. The node (or Service) it runs on tells them
+    # apart -- `kw-gx10-9c17-8000` -- and says where to look.
+    label = LABEL_OF.get(api_base) if args.kubernetes else None
+    if label:
+        base = f"{base}-{label}"
     tail = api_base.split("://", 1)[-1].split("/")[0]
     port = tail.rsplit(":", 1)[-1] if ":" in tail else ""
     return f"{base}-{port}" if port else base

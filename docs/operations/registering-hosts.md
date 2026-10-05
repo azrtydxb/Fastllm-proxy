@@ -80,12 +80,20 @@ that — `hostNetwork: true`, no ports declared, serving on 8000 — and a scan
 that only reads port fields finds nothing while the engine answers happily.
 
 So for a host-network pod the agent takes, in order: a declared `hostPort`, then
-a declared `containerPort` (under host networking that _is_ a node port), and
-failing both, the `--port` flag from the container's command. That last one is
-reading a declaration the operator already wrote, which is what makes it not a
-port scan — but it is still a fallback. **Declaring `containerPort` on a
-host-network pod is the better fix**, costs nothing, and makes the API describe
-the pod properly for everything that reads it, not just this agent.
+a declared `containerPort` (under host networking that _is_ a node port), then
+the `--port` flag from the container's command, and failing all three, the
+numeric port of an `httpGet` readiness, liveness or startup probe. The last two
+read declarations the operator already wrote, which is what makes them not a
+port scan — the audio servers on kw take their port from a config file, and
+their readiness probe is the only place the pod spec names it. Still, they are
+fallbacks. **Declaring `containerPort` on a host-network pod is the better
+fix**, costs nothing, and makes the API describe the pod properly for everything
+that reads it, not just this agent.
+
+One agent speaks for the whole cluster, so `--node` names the cluster, and a
+provider's name adds the node (or Service) the endpoint is on before the port:
+`kw-gx10-9c17-8000` and `kw-gx10-48f4-8000`. Without it two engines on one port
+on different nodes shared a name, and the second kept a bare address.
 
 ### What it needs
 

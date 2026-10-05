@@ -556,7 +556,21 @@ pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepRepo
             Probe::Healthy => None,
             Probe::Mismatch { ref missing } => {
                 report.mismatched.push(name.clone());
-                Some(format!("serving something else; missing {missing:?}"))
+                // Still reported — it is the one change no liveness probe sees —
+                // but a *dynamic* provider is not degraded for it. Its models
+                // are learned from what it serves, so a host that swapped
+                // models is resolved by learning the swap, just below; marking
+                // it degraded skipped exactly that, and the registry kept
+                // naming the old model forever. Worse, the agent's heartbeat
+                // clears the flag every thirty seconds, so the provider's
+                // models flapped in and out of the snapshot on every sweep. A
+                // static or cloud provider's list is a human's, and a mismatch
+                // there stays a finding for one.
+                if kind == "dynamic" {
+                    None
+                } else {
+                    Some(format!("serving something else; missing {missing:?}"))
+                }
             }
             Probe::Unreachable { ref error } => {
                 report.unreachable.push(name.clone());

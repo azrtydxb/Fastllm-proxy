@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "fastllm-operator"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "fastllm-proxy"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -6951,9 +6951,13 @@ pub fn spawn_provider_sweep(
                         // operator cannot see any other way: the host is up,
                         // the probe is green, and it is serving the wrong
                         // thing.
+                        // A dynamic provider's list was re-learned in the
+                        // same pass; a static or cloud one is degraded and
+                        // left for a human.
                         tracing::warn!(
                             providers = ?r.mismatched,
-                            "provider is serving models other than those registered on it"
+                            "provider is serving models other than those registered on it; \
+                             a dynamic provider's models were re-learned"
                         );
                     }
                     if !r.unreachable.is_empty() {
@@ -8837,6 +8841,12 @@ mod tests {
     /// — the alternative was a bypass flag that only tests ever set, which is
     /// how a check quietly stops being tested at all.
     fn stub_provider() -> String {
+        stub_serving("stub-model")
+    }
+
+    /// [`stub_provider`], answering with one chosen model id.
+    fn stub_serving(model: &str) -> String {
+        let body = format!(r#"{{"object":"list","data":[{{"id":"{model}"}}]}}"#);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -8856,7 +8866,6 @@ mod tests {
                     }
                 }
                 eprintln!("STUB GOT >>>{}<<<", String::from_utf8_lossy(&request));
-                let body = br#"{"object":"list","data":[{"id":"stub-model"}]}"#;
                 let _ = stream.write_all(
                     format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
@@ -8865,7 +8874,7 @@ mod tests {
                     )
                     .as_bytes(),
                 );
-                let _ = stream.write_all(body);
+                let _ = stream.write_all(body.as_bytes());
                 let _ = stream.flush();
                 let _ = stream.shutdown(std::net::Shutdown::Write);
             }
@@ -9316,6 +9325,83 @@ mod tests {
     ///
     /// The cases that *do* matter are here too, because the cheap fix — never
     /// republish on a heartbeat — would have been wrong.
+    /// A host that swapped models is learned, not degraded.
+    ///
+    /// Found on kw: a Spark's engine went from qwen3.5-9b to the 35B on the
+    /// same port. The sweep called it a mismatch, marked it degraded — and a
+    /// degraded provider is exactly one the sweep does not reconcile, so the
+    /// registry named qwen3.5-9b on that endpoint indefinitely, while the
+    /// agent's heartbeat cleared the flag every thirty seconds and the
+    /// provider's models flapped in and out of every snapshot.
+    ///
+    /// Sweeps every provider in the database, so run it against a scratch
+    /// database, never a live one.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_dynamic_provider_that_swapped_models_is_learned_not_degraded() {
+        let (ctx, _cache) = test_ctx().await;
+        let name = unique_name("swapped");
+        let _cleanup = TestCleanup::new()
+            .track_prefix("providers", "name", "swapped-")
+            .track_prefix("provider_models", "name", "swapped-");
+        let old_model = format!("{name}-old");
+        let new_model = format!("{name}-new");
+        let api_base = stub_serving(&new_model);
+
+        let (id, _) = crate::control::registry_agent::register(
+            &ctx.pool,
+            &api_base,
+            "node-a",
+            Some(&name),
+            None,
+            120,
+        )
+        .await
+        .unwrap();
+        // What the registry learned before the swap.
+        let old_id: Uuid =
+            sqlx::query_scalar("INSERT INTO provider_models (name) VALUES ($1) RETURNING id")
+                .bind(&old_model)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO model_backends (provider_model_id, provider_id, upstream_model) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(old_id)
+        .bind(id)
+        .bind(&old_model)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let report = crate::control::registry_agent::sweep(&ctx.pool, &upstream_client())
+            .await
+            .unwrap();
+
+        // Still reported: an operator should hear that a host changed.
+        assert!(report.mismatched.contains(&name), "{:?}", report.mismatched);
+        // But learned, rather than left naming what the host stopped serving.
+        let attached: Vec<String> =
+            sqlx::query_scalar("SELECT upstream_model FROM model_backends WHERE provider_id = $1")
+                .bind(id)
+                .fetch_all(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(attached, vec![new_model]);
+        let (degraded, seen): (bool, bool) = sqlx::query_as(
+            "SELECT degraded_since IS NOT NULL, last_seen_at IS NOT NULL \
+             FROM providers WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(!degraded, "a host that swapped models is up, not degraded");
+        assert!(seen, "and the sweep says it saw it");
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres"]
     async fn a_lease_renewal_is_not_a_change_but_a_rename_or_a_recovery_is() {
