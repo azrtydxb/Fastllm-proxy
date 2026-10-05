@@ -6,9 +6,20 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
-## Unreleased
+## 0.3.0 — 2026-10-05
 
 ### Added
+
+- **The node agent ships as an image, and speaks Kubernetes.** The host agent
+  — the thing that registers a machine's model endpoints with FastLLM and
+  keeps the lease warm — is packaged as
+  `ghcr.io/azrtydxb/fastllm-node-agent` (arm64 + amd64, built by the release
+  job), and under `--kubernetes` it discovers what to register from the API
+  instead of probing ports: exposed Services (NodePort, LoadBalancer) and
+  hostNetwork pods, each addressed by its own node's InternalIP and accepted
+  only if it answers `/v1/models`. `agent/kubernetes.yaml` runs it against
+  kw, where it registers the engines running on the gx10 nodes. The
+  registering-hosts operations doc carries the deploy steps.
 
 - **Reasoning through `/v1/messages`.** A backend's `reasoning` /
   `reasoning_content` becomes `thinking` blocks, streamed as `thinking_delta`.
