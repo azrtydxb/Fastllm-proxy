@@ -25,6 +25,11 @@ Check every hunk for:
   content at runtime, never as a literal.
 - Prose and markdown: code spans unbroken, lists formatted, wording that
   says what the code actually does.
+- Every claim in the PR description is visible in the final diff.
+- A cache derived from a remote answer is overwritten on every valid
+  answer, including an empty one.
+- A changed contract in a doc is grepped for elsewhere in the docs and
+  updated everywhere it is stated.
 
 End with a verdict line: findings counted by severity, or exactly
 "Nothing found — open the PR."
