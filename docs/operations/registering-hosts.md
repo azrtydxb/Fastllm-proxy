@@ -99,12 +99,17 @@ the agent's own outbound reachability says nothing about it.
 
 ```bash
 kubectl apply -f agent/kubernetes.yaml
-kubectl -n fastllm-agent create configmap fastllm-node-agent \
-  --from-file=fastllm-node-agent.py=agent/fastllm-node-agent.py
 kubectl -n fastllm-agent create secret generic fastllm-control-ca --from-file=ca.crt
 kubectl -n fastllm-agent create secret generic fastllm-agent-token \
   --from-literal=token=fllm_...
 ```
+
+The manifest runs the `ghcr.io/azrtydxb/fastllm-node-agent` image the
+release build pushes on every `v*` tag (the script is baked in — no
+ConfigMap to keep in sync). RBAC also needs `nodes` in the `list` set:
+a hostNetwork pod is addressed by its own node's InternalIP, resolved
+from the Nodes API, with `FASTLLM_ADVERTISE` as the override for
+clusters whose nodes are reached another way.
 
 ## Running it under systemd
 
