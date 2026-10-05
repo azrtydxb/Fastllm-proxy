@@ -34,6 +34,7 @@ fn crate_version() -> String {
 
 /// Files that name the released image or chart, and must all agree.
 const VERSIONED: &[&str] = &[
+    "agent/kubernetes.yaml",
     "charts/fastllm-proxy/Chart.yaml",
     "charts/fastllm-proxy/README.md",
     "deploy/docker-compose.split.yml",

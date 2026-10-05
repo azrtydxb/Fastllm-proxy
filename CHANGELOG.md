@@ -6,6 +6,29 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## 0.3.1 — 2026-10-05
+
+### Fixed
+
+- **The node agent keeps its leases on a cluster.** Discovery probed every
+  candidate in turn — on kw about 330 LoadBalancer and host-network ports,
+  each allowed the full probe timeout — and lease renewal waited for it, so a
+  pass took over a quarter of an hour against a 90-second lease. It only
+  looked healthy because the Sparks' old host agents were renewing the same
+  endpoint. Candidates are now probed concurrently (`--probe-workers`, 32; a
+  pass on kw takes about 35 seconds), and leases are renewed every
+  `--interval` from the last discovery's result while discovery runs on its
+  own clock (`--discover-interval`, 60s).
+- **`agent/kubernetes.yaml` starts.** It passed `--kubernetes` as `command`,
+  which replaces the image's entrypoint, so the container tried to execute
+  the flag; it is `args` now. It also carried NovaNAS's node name and
+  advertise address, and now carries kw's, with the image pinned to the
+  release and held there by the release-consistency test.
+- **The registering-hosts doc describes the steps that work**: where the CA
+  comes from, how to mint the agent's key (a principal's `sk-` key — the proxy
+  token is refused), the `nodes` RBAC, and that the Sparks no longer run the
+  systemd agent.
+
 ## 0.3.0 — 2026-10-05
 
 ### Added

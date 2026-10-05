@@ -796,7 +796,7 @@ spec:
                 - message: 'encryptionKey is immutable: changing it makes every stored upstream credential undecryptable. Re-encrypt with `fastllm-proxy reencrypt-backends` first.'
                   rule: self == oldSelf
               image:
-                default: ghcr.io/azrtydxb/fastllm-proxy:v0.3.0
+                default: ghcr.io/azrtydxb/fastllm-proxy:v0.3.1
                 description: |-
                   The image **both** planes run.
 

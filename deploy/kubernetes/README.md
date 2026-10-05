@@ -68,7 +68,7 @@ One line in `base/kustomization.yaml`, for both planes at once:
 ```yaml
 images:
   - name: ghcr.io/azrtydxb/fastllm-proxy
-    newTag: v0.3.0
+    newTag: v0.3.1
 ```
 
 Never pin them apart. They share a database schema, and a proxy older than its

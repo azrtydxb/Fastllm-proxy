@@ -22,9 +22,11 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 # Every engine worth naming answers this: vLLM, SGLang, llama.cpp's server,
 # TGI, Ollama, Triton's OpenAI frontend, LM Studio, mlx-lm. That is why this
@@ -93,7 +95,7 @@ def node_addresses(args, timeout):
     out = {}
     for node in items:
         name = (node.get("metadata") or {}).get("name")
-        for addr in ((node.get("status") or {}).get("addresses") or []):
+        for addr in (node.get("status") or {}).get("addresses") or []:
             if addr.get("type") == "InternalIP" and addr.get("address"):
                 out[name] = addr["address"]
                 break
@@ -201,7 +203,9 @@ def kube_candidates(args):
         spec = pod.get("spec") or {}
         host_net = bool(spec.get("hostNetwork"))
         # The pod's own node first, --advertise as the override.
-        advertise = node_ips.get((pod.get("spec") or {}).get("nodeName")) or args.advertise
+        advertise = (
+            node_ips.get((pod.get("spec") or {}).get("nodeName")) or args.advertise
+        )
         for c in spec.get("containers") or []:
             ports = [p["hostPort"] for p in (c.get("ports") or []) if p.get("hostPort")]
             # Under host networking every containerPort *is* a node port, so a
@@ -229,28 +233,34 @@ def discover(args):
     not" fall out rather than being a mode. The port probe alone covers a bare
     process started by hand or by a launcher, with no container runtime
     present at all.
+
+    Every candidate is probed at once rather than in turn. A cluster exposes
+    hundreds of ports that are not models — on kw, about 330 between
+    LoadBalancer ports and host-networked pods — and probed one at a time,
+    each costing up to the probe timeout, a pass took over a quarter of an
+    hour. Discovery that slow cannot be what keeps a 90-second lease alive;
+    see `main` for how the two are kept apart.
     """
-    found = []
-    for base in args.api_base:
-        if serves_models(base, args.probe_timeout):
-            found.append(base)
-        else:
-            log(f"configured endpoint {base} did not answer {MODELS_PATH}")
-
+    candidates = list(args.api_base)
     if args.kubernetes:
-        for base in kube_candidates(args):
-            if base not in found and serves_models(base, args.probe_timeout):
-                found.append(base)
+        candidates += kube_candidates(args)
+    # The advertised host, never a loopback or a container address: this is
+    # the address the *proxies* will dial. An agent that discovers a container
+    # on 172.17.0.2 and registers that hands the proxies an address they
+    # cannot reach.
+    candidates += [f"http://{args.advertise}:{port}/v1" for port in args.scan_ports]
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        return []
 
-    for port in args.scan_ports:
-        # The advertised host, never a loopback or a container address: this
-        # is the address the *proxies* will dial. An agent that discovers a
-        # container on 172.17.0.2 and registers that hands the proxies an
-        # address they cannot reach.
-        base = f"http://{args.advertise}:{port}/v1"
-        if base not in found and serves_models(base, args.probe_timeout):
-            found.append(base)
-    return found
+    with ThreadPoolExecutor(max_workers=args.probe_workers) as pool:
+        answers = list(
+            pool.map(lambda base: serves_models(base, args.probe_timeout), candidates)
+        )
+    for base, ok in zip(candidates, answers):
+        if base in args.api_base and not ok:
+            log(f"configured endpoint {base} did not answer {MODELS_PATH}")
+    return [base for base, ok in zip(candidates, answers) if ok]
 
 
 def tls_context(args):
@@ -398,6 +408,20 @@ def main():
         "verification: the token below goes over this "
         "connection",
     )
+    ap.add_argument(
+        "--discover-interval",
+        type=int,
+        default=60,
+        help="how often to look for endpoints again. Independent of "
+        "--interval: leases on what is already known are renewed on "
+        "their own clock, so a slow discovery pass never lets one lapse",
+    )
+    ap.add_argument(
+        "--probe-workers",
+        type=int,
+        default=32,
+        help="candidates probed at once during discovery",
+    )
     ap.add_argument("--probe-timeout", type=float, default=5.0)
     ap.add_argument(
         "--once",
@@ -426,31 +450,73 @@ def main():
         )
 
     log(f"node={args.node} advertising {args.advertise} to {args.control}")
-    while True:
-        endpoints = discover(args)
-        if not endpoints:
-            # Not an error, and deliberately not a reason to exit: a host whose
-            # model is still loading serves nothing for ten minutes or more.
-            # The lease lapsing is the correct signal for that, and the control
-            # plane degrades before it deletes.
-            log("no endpoints serving models on this host yet")
-        for base in endpoints:
+    if args.once:
+        heartbeat(args, discover(args))
+        return 0
+
+    # Two clocks, not one. Renewing a lease is one POST per endpoint and must
+    # happen every --interval without fail; finding endpoints means probing
+    # every candidate the cluster exposes, which takes as long as the slowest
+    # of them. On one loop the slow job set the pace of the urgent one, and a
+    # lease lapsed whenever a pass outran it -- the provider went degraded
+    # between passes while the engine behind it was fine. So discovery runs
+    # on its own thread and hands over what it found, and the heartbeat
+    # renews whatever was last found.
+    known = []
+    lock = threading.Lock()
+    first_pass = threading.Event()
+
+    def discovery_loop():
+        while True:
             try:
-                r = register(args, base)
-                log(
-                    f"registered {base} -> provider {r.get('id')} "
-                    f"{r.get('name')!r} kind={r.get('kind')} "
-                    f"leased={r.get('leased')}"
-                )
-            except urllib.error.HTTPError as e:
-                log(f"registering {base} failed: {e.code} {e.read()[:200]!r}")
+                found = discover(args)
             except Exception as e:
-                # Never fatal. The control plane being briefly unreachable is
-                # exactly when this process must keep running.
-                log(f"registering {base} failed: {e}")
-        if args.once:
-            return 0
+                # Keep renewing what was already found: a failed pass says
+                # nothing about the endpoints, only about this pass.
+                log(f"discovery failed: {e}")
+                found = None
+            if found is not None:
+                with lock:
+                    gone = [b for b in known if b not in found]
+                    known[:] = found
+                for base in gone:
+                    # Its lease now lapses, and the control plane degrades it
+                    # before it deletes -- the designed way for one to leave.
+                    log(f"{base} no longer serves models; letting its lease lapse")
+            first_pass.set()
+            time.sleep(args.discover_interval)
+
+    threading.Thread(target=discovery_loop, daemon=True).start()
+    first_pass.wait()
+    while True:
+        with lock:
+            endpoints = list(known)
+        heartbeat(args, endpoints)
         time.sleep(args.interval)
+
+
+def heartbeat(args, endpoints):
+    """Register every endpoint once, which renews the lease of each."""
+    if not endpoints:
+        # Not an error, and deliberately not a reason to exit: a host whose
+        # model is still loading serves nothing for ten minutes or more.
+        # The lease lapsing is the correct signal for that, and the control
+        # plane degrades before it deletes.
+        log("no endpoints serving models on this host yet")
+    for base in endpoints:
+        try:
+            r = register(args, base)
+            log(
+                f"registered {base} -> provider {r.get('id')} "
+                f"{r.get('name')!r} kind={r.get('kind')} "
+                f"leased={r.get('leased')}"
+            )
+        except urllib.error.HTTPError as e:
+            log(f"registering {base} failed: {e.code} {e.read()[:200]!r}")
+        except Exception as e:
+            # Never fatal. The control plane being briefly unreachable is
+            # exactly when this process must keep running.
+            log(f"registering {base} failed: {e}")
 
 
 if __name__ == "__main__":

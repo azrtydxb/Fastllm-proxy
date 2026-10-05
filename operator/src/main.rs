@@ -900,7 +900,7 @@ mod tests {
         let mut cr = FastllmProxy::new(
             "demo",
             FastllmProxySpec {
-                image: "ghcr.io/azrtydxb/fastllm-proxy:v0.3.0".into(),
+                image: "ghcr.io/azrtydxb/fastllm-proxy:v0.3.1".into(),
                 image_pull_policy: "IfNotPresent".into(),
                 image_pull_secrets: Vec::new(),
                 database: SecretRef {
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn the_gateway_is_held_at_its_old_image_until_the_control_plane_has_rolled() {
         let old = "ghcr.io/azrtydxb/fastllm-proxy:v0.1.0";
-        let new = "ghcr.io/azrtydxb/fastllm-proxy:v0.3.0";
+        let new = "ghcr.io/azrtydxb/fastllm-proxy:v0.3.1";
         assert_eq!(proxy_image(new, false, Some(old)), Some(old), "held");
         assert_eq!(proxy_image(new, true, Some(old)), Some(new), "released");
     }

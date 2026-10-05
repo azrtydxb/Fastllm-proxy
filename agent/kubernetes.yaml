@@ -20,8 +20,11 @@
 # LoadBalancer.
 #
 # It dials out and is never dialled, so the cluster it runs in needs no inbound
-# path from FastLLM — which is the point, since the proxies live in another
-# cluster entirely.
+# path from FastLLM. That is what lets it serve a cluster the proxies live
+# outside of; on kw, where they share one, it costs nothing either way.
+#
+# The secrets it reads, and how to make them, are in
+# docs/operations/registering-hosts.md.
 ---
 apiVersion: v1
 kind: Namespace
@@ -78,21 +81,25 @@ spec:
       containers:
         - name: agent
           # The release build ships this image (agent/Dockerfile): python plus
-          # the script, entrypoint baked in — the container args are the
-          # agent's flags.
-          image: ghcr.io/azrtydxb/fastllm-node-agent:latest
-          command: ["--kubernetes"]
+          # the script, entrypoint baked in. Pinned to the release rather than
+          # `latest`, so what runs is what was tested, and it moves with each
+          # release (tests/release_consistency.rs holds it there).
+          image: ghcr.io/azrtydxb/fastllm-node-agent:v0.3.1
+          # `args`, not `command`: `command` replaces the image's entrypoint,
+          # and the container would try to execute `--kubernetes` itself.
+          args: ["--kubernetes"]
           env:
+            # The control plane runs in this same cluster, so it is reached
+            # by its service name — which is on its certificate.
             - name: FASTLLM_CONTROL_URL
-              value: https://192.168.10.129:4001
+              value: https://fastllm-control.fastllm.svc:4001
             - name: FASTLLM_NODE
-              value: novanas
-            # The address a *proxy* will dial for a NodePort or hostPort. Not
-            # this pod's address and not a ClusterIP: what is registered is a
-            # destination for someone else's traffic, and this agent's own
-            # outbound reachability says nothing about it.
-            - name: FASTLLM_ADVERTISE
-              value: 192.168.10.203
+              value: kw
+            # No FASTLLM_ADVERTISE: a host-network pod is addressed by its own
+            # node's InternalIP from the Nodes API, which is how the engines on
+            # the gx10 nodes register under the addresses the proxies dial. Set
+            # it only for a cluster whose nodes are reached some other way, or
+            # to register NodePorts.
             - name: FASTLLM_CA_CERT
               value: /etc/fastllm/ca.crt
             - name: FASTLLM_AGENT_TOKEN

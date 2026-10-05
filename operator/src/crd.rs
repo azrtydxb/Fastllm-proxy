@@ -684,7 +684,7 @@ pub fn manifest_yaml() -> String {
 }
 
 fn default_image() -> String {
-    "ghcr.io/azrtydxb/fastllm-proxy:v0.3.0".to_string()
+    "ghcr.io/azrtydxb/fastllm-proxy:v0.3.1".to_string()
 }
 fn default_pull_policy() -> String {
     "IfNotPresent".to_string()

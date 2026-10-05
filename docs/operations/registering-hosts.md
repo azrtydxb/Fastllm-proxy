@@ -43,6 +43,8 @@ agent that needs a virtualenv to start is one more thing to be broken at 3am.
 | `--scan-ports`         | Ports to probe on that address. Catches a bare process started by hand or by a launcher, with no container runtime present.                                                                                                                                                                                                                                    |
 | `--api-base`           | Register an endpoint outright, repeatable. Use when the address is not a port on `--advertise`.                                                                                                                                                                                                                                                                |
 | `--ttl` / `--interval` | Lease length and heartbeat. The agent refuses an interval that is not well inside the TTL, since one slow beat would then expire the lease.                                                                                                                                                                                                                    |
+| `--discover-interval`  | How often to look for endpoints again (60s). Separate from `--interval` on purpose: leases on what is already known are renewed on their own clock, so a slow discovery pass never lets one lapse.                                                                                                                                                             |
+| `--probe-workers`      | Candidates probed at once during discovery (32). A cluster exposes hundreds of ports that are not models; probed one at a time, a pass on kw took over a quarter of an hour.                                                                                                                                                                                   |
 | `--provider-name`      | What this host's providers are called in FastLLM. The endpoint's port is appended, so one host's endpoints stay distinguishable — always, not only when a second one appears, since a name that changed shape as a model was started would rename the first one behind you. Defaults to `--node`, and is sent on every heartbeat, so changing it renames them. |
 | `--engine`             | A hint, carried as metadata. Nothing depends on it.                                                                                                                                                                                                                                                                                                            |
 | `--token`              | A principal API key. It authenticates the agent; there is no permission to grant beyond that.                                                                                                                                                                                                                                                                  |
@@ -87,34 +89,58 @@ the pod properly for everything that reads it, not just this agent.
 
 ### What it needs
 
-A ServiceAccount that can `list` services and pods, and nothing else — it never
-writes to the cluster it runs in. A Deployment rather than a DaemonSet: the
-agent reads cluster-wide state, so one copy answers for the cluster, where one
-per node would have every node re-register the same LoadBalancer.
+A ServiceAccount that can `list` services, pods and nodes, and nothing else —
+it never writes to the cluster it runs in. Nodes because a host-network pod is
+addressed by its own node's InternalIP, read from the Nodes API: a cluster runs
+engines on several nodes, and one fixed address would register half of them
+under the wrong host. A Deployment rather than a DaemonSet: the agent reads
+cluster-wide state, so one copy answers for the cluster, where one per node
+would have every node re-register the same LoadBalancer.
 
-`--advertise` still matters, and still means the address a **proxy** will dial —
-used for NodePorts and host ports. It is not this pod's address and not a
-ClusterIP: what is registered is a destination for someone else's traffic, and
-the agent's own outbound reachability says nothing about it.
+`--advertise` is optional here, and when set still means the address a
+**proxy** will dial: for NodePorts, and as an override for a cluster whose
+nodes are reached some other way than their InternalIP. It is not this pod's
+address and not a ClusterIP — what is registered is a destination for someone
+else's traffic, and the agent's own outbound reachability says nothing about
+it.
+
+The manifest runs the `ghcr.io/azrtydxb/fastllm-node-agent` image the release
+build pushes on every `v*` tag, with the script baked in; its flags go in
+`args`, because `command` would replace the image's entrypoint. It is written
+for kw, where the control plane is in the same cluster and reached by its
+service name, which its certificate carries. Two secrets come first:
 
 ```bash
-kubectl apply -f agent/kubernetes.yaml
+# The control plane's CA, copied from its own TLS secret — a pod cannot
+# mount a secret from another namespace.
+kubectl create namespace fastllm-agent
+kubectl -n fastllm get secret fastllm-control-tls -o jsonpath='{.data.ca\.crt}' \
+  | base64 -d > ca.crt
 kubectl -n fastllm-agent create secret generic fastllm-control-ca --from-file=ca.crt
+
+# A key for a principal of the agent's own. Any principal's key authenticates
+# a registration; a dedicated one is what scopes the agent to the providers it
+# registered. The proxy token is not a principal key and is refused with 401.
+curl -sk -b ck -X POST https://192.168.10.129:4001/admin/principals \
+  -H 'content-type: application/json' -d '{"name":"node-agent-kw"}'
+curl -sk -b ck -X POST https://192.168.10.129:4001/admin/keys \
+  -H 'content-type: application/json' \
+  -d '{"principal_id":"<id from above>","name":"node-agent-kw"}'
 kubectl -n fastllm-agent create secret generic fastllm-agent-token \
-  --from-literal=token=fllm_...
+  --from-literal=token=sk-...
+
+kubectl apply -f agent/kubernetes.yaml
 ```
 
-The manifest runs the `ghcr.io/azrtydxb/fastllm-node-agent` image the
-release build pushes on every `v*` tag (the script is baked in — no
-ConfigMap to keep in sync). RBAC also needs `nodes` in the `list` set:
-a hostNetwork pod is addressed by its own node's InternalIP, resolved
-from the Nodes API, with `FASTLLM_ADVERTISE` as the override for
-clusters whose nodes are reached another way.
+Working means a `registered ... leased=True` line for each engine within a
+minute of the pod starting, and one every `--interval` after that.
 
 ## Running it under systemd
 
-`agent/fastllm-node-agent.service` is the unit this project's own DGX Sparks
-run. It expects the script at `/usr/local/bin/fastllm-node-agent` and its
+`agent/fastllm-node-agent.service` is the unit for a host outside any cluster.
+This project's DGX Sparks ran it until they joined kw; it is now disabled on
+both, since the in-cluster agent registers their engines and two agents
+registering one endpoint fight over its name. It expects the script at `/usr/local/bin/fastllm-node-agent` and its
 configuration in `/etc/fastllm/agent.env`:
 
 ```ini
