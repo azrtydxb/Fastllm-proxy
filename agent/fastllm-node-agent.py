@@ -414,7 +414,9 @@ def main():
     if args.scan_ports is None:
         args.scan_ports = [] if args.kubernetes else [8000, 8001, 8080, 8890]
 
-    missing = [n for n in ("control", "token", "advertise") if not getattr(args, n)]
+    # --advertise is optional under --kubernetes: hostNetwork pods are
+    # addressed by their own node's IP, resolved from the Nodes API.
+    missing = [n for n in ("control", "token") if not getattr(args, n)]
     if missing:
         ap.error("missing required: " + ", ".join("--" + m for m in missing))
     if args.interval >= args.ttl:
