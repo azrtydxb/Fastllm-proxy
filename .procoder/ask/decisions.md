@@ -1541,3 +1541,16 @@ The npm `@openai/codex` install in `/opt/homebrew/lib/node_modules` is missing i
 One open issue remains: #29, healthy backends ejected without any ejection log line (11 re-admissions, 7 fleet withdrawals, zero ejection lines over 45 minutes). Mitigation shipped in #31/#32/#33; the cause of the unlogged ejections is the open part. Candidate paths: the stall detector's frozen-engine heuristic, fleet disagreement, or consecutive-timeout fed by slow large-prompt prefills.
 
 **Decided:** investigate now — trace the unlogged ejection path, fix the cause or make it name itself, then close the issue.
+
+## Fastllm node agent on kw: handed back to fastllm (2026-10-05)
+
+The kuvryn-side integration for fastllm is in place: qwen3.5-9b runs as a
+kuvryn deployment on gx10-9c17:8000 (hostNetwork, --port in the command),
+which is exactly the address shape the fastllm node agent registers.
+My hand-rolled node-agent deployment was removed -- it used a guessed
+registration token (the proxy token) and a self-invented manifest, and
+the control plane correctly rejected it (401). FastLLM will deploy the
+node agent by its own process; kuvryn's qwen3.5-9b will then register
+dynamically and become reachable through the fastllm LB. Breeze TTS was
+deleted to free the GPU (spec saved in the session scratchpad as
+breeze-recreate.json); nemotron ASR still serves on 8093.
