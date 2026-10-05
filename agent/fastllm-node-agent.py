@@ -43,12 +43,26 @@ def log(msg):
 
 
 def serves_models(base, timeout):
-    """True when something at `base` answers the one call that matters."""
+    """True when something at `base` answers the one call that matters.
+
+    The model ids it answers with are kept in MODEL_OF: the provider is named
+    after what it serves, and this is the one place that is learned.
+    """
     try:
         req = urllib.request.Request(base.rstrip("/") + MODELS_PATH)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = json.load(r)
-        return isinstance(body.get("data"), list)
+        data = body.get("data")
+        if not isinstance(data, list):
+            return False
+        ids = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+        # Overwritten on every answer: an engine that stops listing a model
+        # must not keep naming its provider after it.
+        if ids:
+            MODEL_OF[base] = ids[0]
+        else:
+            MODEL_OF.pop(base, None)
+        return True
     except Exception:
         return False
 
@@ -156,10 +170,37 @@ def port_from_probes(container):
     return list(dict.fromkeys(out))
 
 
-# Which node or service each Kubernetes candidate belongs to, so two endpoints
-# on the same port in one cluster get different provider names. Written by the
-# discovery thread, read by the heartbeat; each assignment is one dict store.
+# Which node each Kubernetes candidate runs on, and which model each endpoint
+# serves, so every provider name is <cluster>-<node>-<model>-<port>: two
+# endpoints on one port, one node or one model still get different names.
+# Written by the discovery thread, read by the heartbeat; each assignment is
+# one dict store.
 LABEL_OF = {}
+MODEL_OF = {}
+
+
+def service_node(svc, pods):
+    """The node a Service's endpoints run on, from its selector.
+
+    A Service has no node; the pods it selects do. When they all run on one
+    node that node names the provider; spread over several, none is the
+    answer and the name carries no node rather than a misleading one.
+    """
+    selector = (svc.get("spec") or {}).get("selector") or {}
+    namespace = (svc.get("metadata") or {}).get("namespace")
+    if not selector:
+        return None
+    nodes = set()
+    for pod in pods:
+        meta = pod.get("metadata") or {}
+        labels = meta.get("labels") or {}
+        if meta.get("namespace") != namespace:
+            continue
+        if all(labels.get(k) == v for k, v in selector.items()):
+            node = (pod.get("spec") or {}).get("nodeName")
+            if node:
+                nodes.add(node)
+    return nodes.pop() if len(nodes) == 1 else None
 
 
 def kube_candidates(args):
@@ -188,6 +229,13 @@ def kube_candidates(args):
     """
     found = []
 
+    # Pods first: a Service is named after the node its pods run on.
+    try:
+        pods = kube_get("/api/v1/pods", args.probe_timeout).get("items", [])
+    except Exception as e:
+        log(f"could not list pods: {e}")
+        pods = []
+
     try:
         services = kube_get("/api/v1/services", args.probe_timeout).get("items", [])
     except Exception as e:
@@ -200,11 +248,20 @@ def kube_candidates(args):
         # An explicit address wins over anything inferred, for the Service
         # whose reachable address this agent would get wrong.
         override = (meta.get("annotations") or {}).get("fastllm.io/advertise")
+        node = service_node(svc, pods)
         for port in spec.get("ports") or []:
             if override:
-                found.append(
-                    f"http://{override}/v1" if "://" not in override else override
-                )
+                url = f"http://{override}/v1" if "://" not in override else override
+                # Only http(s): urllib also reads file:// paths, and anyone who
+                # can annotate a Service would otherwise choose what the
+                # agent opens.
+                if not url.lower().startswith(("http://", "https://")):
+                    log(
+                        f"ignoring fastllm.io/advertise {override!r}: not an http(s) URL"
+                    )
+                    continue
+                found.append(url)
+                LABEL_OF[url] = node
                 continue
             if kind == "LoadBalancer":
                 for ing in ((svc.get("status") or {}).get("loadBalancer") or {}).get(
@@ -214,18 +271,15 @@ def kube_candidates(args):
                     if addr and port.get("port"):
                         url = f"http://{addr}:{port['port']}/v1"
                         found.append(url)
-                        LABEL_OF[url] = meta.get("name")
+                        LABEL_OF[url] = node or meta.get("name")
             elif kind == "NodePort" and port.get("nodePort") and args.advertise:
-                found.append(f"http://{args.advertise}:{port['nodePort']}/v1")
+                url = f"http://{args.advertise}:{port['nodePort']}/v1"
+                found.append(url)
+                LABEL_OF[url] = node
 
     # A hostPort or host networking bypasses Services entirely and is a normal
     # way to expose a single-node engine, so both would be invisible to a
     # Service-only scan.
-    try:
-        pods = kube_get("/api/v1/pods", args.probe_timeout).get("items", [])
-    except Exception as e:
-        log(f"could not list pods: {e}")
-        pods = []
     node_ips = node_addresses(args, args.probe_timeout)
     for pod in pods:
         spec = pod.get("spec") or {}
@@ -318,28 +372,47 @@ def tls_context(args):
     return ssl.create_default_context()
 
 
+def name_part(value):
+    """One component of a provider name: lowercase, [a-z0-9.] and dashes.
+
+    A model id such as `nvidia/Qwen3.6-35B-A3B-NVFP4` carries a slash and
+    capitals; the name is read on screens and in logs, so it is folded to
+    `nvidia-qwen3.6-35b-a3b-nvfp4` rather than kept verbatim.
+    """
+    out = []
+    for ch in str(value).lower():
+        out.append(ch if ch.isascii() and (ch.isalnum() or ch == ".") else "-")
+    return "-".join(p for p in "".join(out).split("-") if p)
+
+
 def provider_name(args, api_base):
-    """What to call this endpoint in FastLLM.
+    """What to call this endpoint in FastLLM: <cluster>-<node>-<model>-<port>.
 
     The name lives here rather than on the control plane, which only ever sees
-    an address. `dgx-spark-8000` beats `192.168.10.246:8000` on a screen, and
-    an operator who renames the host's agent renames what they are looking at.
+    an address. Each part answers a different question about the endpoint --
+    which agent found it, which machine runs it, what it serves, where it
+    listens -- and together they keep names apart where any one of them
+    repeats: one agent speaks for a whole cluster, several engines share a
+    port, one node serves several models, and one model runs on several
+    nodes. A part this agent cannot know (no node for a bare host's own
+    agent, no model before the first probe answers) is left out rather than
+    guessed.
 
     The port is always appended, never only when a host happens to serve more
     than one endpoint: a name that changes shape as a second model is started
     would rename the first one behind the operator's back.
     """
-    base = args.provider_name or args.node
-    # One agent answers for a whole cluster, so `--node` is the cluster and
-    # every engine on port 8000 would be `kw-8000`: the second to register
-    # kept an address for a name. The node (or Service) it runs on tells them
-    # apart -- `kw-gx10-9c17-8000` -- and says where to look.
-    label = LABEL_OF.get(api_base) if args.kubernetes else None
-    if label:
-        base = f"{base}-{label}"
+    parts = [args.provider_name or args.node]
+    # Under --kubernetes the agent is the cluster, so the node is a separate
+    # part; on a bare host --node already is the machine.
+    if args.kubernetes and LABEL_OF.get(api_base):
+        parts.append(LABEL_OF[api_base])
+    if MODEL_OF.get(api_base):
+        parts.append(MODEL_OF[api_base])
     tail = api_base.split("://", 1)[-1].split("/")[0]
-    port = tail.rsplit(":", 1)[-1] if ":" in tail else ""
-    return f"{base}-{port}" if port else base
+    if ":" in tail:
+        parts.append(tail.rsplit(":", 1)[-1])
+    return "-".join(p for p in (name_part(x) for x in parts) if p)
 
 
 def register(args, api_base):

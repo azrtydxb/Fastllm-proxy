@@ -517,16 +517,24 @@ const DEGRADED_GRACE: chrono::Duration = chrono::Duration::minutes(30);
 pub async fn sweep(pool: &PgPool, client: &Upstream) -> anyhow::Result<SweepReport> {
     let mut report = SweepReport::default();
 
-    let providers: Vec<(Uuid, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT id, name, api_base, lease_expires_at FROM providers ORDER BY id")
-            .fetch_all(pool)
-            .await?;
+    // `kind` comes with the listing rather than from a second read per
+    // provider: a provider deleted between the two (a lapsed lease swept, an
+    // operator's delete) made that read find no row and failed the whole
+    // sweep, for every other provider too.
+    #[allow(clippy::type_complexity)]
+    let providers: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        String,
+    )> = sqlx::query_as(
+        "SELECT id, name, api_base, lease_expires_at, kind FROM providers ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    for (id, name, api_base, lease) in providers {
-        let kind: String = sqlx::query_scalar("SELECT kind FROM providers WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
+    for (id, name, api_base, lease, kind) in providers {
         let registered: Vec<String> = sqlx::query_scalar(
             "SELECT COALESCE(mb.upstream_model, m.name) FROM model_backends mb \
              JOIN provider_models m ON m.id = mb.provider_model_id \
