@@ -42,7 +42,7 @@ metadata:
   name: fastllm-node-agent
 rules:
   - apiGroups: [""]
-    resources: ["services", "pods"]
+    resources: ["services", "pods", "nodes"]
     verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

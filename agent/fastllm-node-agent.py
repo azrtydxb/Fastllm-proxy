@@ -75,6 +75,31 @@ def kube_get(path, timeout):
         return json.load(r)
 
 
+def node_addresses(args, timeout):
+    """Node name -> the address a proxy should dial for pods on that node.
+
+    A hostNetwork pod listens on its *node*, so the honest address carries
+    the node's IP -- and a cluster runs engines on several nodes, where one
+    --advertise would register half of them under the wrong host. The
+    InternalIP is the address everything else on the wire already uses.
+    --advertise stays the override for clusters whose nodes are reached
+    some other way.
+    """
+    try:
+        items = kube_get("/api/v1/nodes", timeout).get("items", [])
+    except Exception as e:
+        log(f"could not list nodes: {e}")
+        return {}
+    out = {}
+    for node in items:
+        name = (node.get("metadata") or {}).get("name")
+        for addr in ((node.get("status") or {}).get("addresses") or []):
+            if addr.get("type") == "InternalIP" and addr.get("address"):
+                out[name] = addr["address"]
+                break
+    return out
+
+
 def port_from_command(container):
     """The port a host-network container says it listens on, from its command.
 
@@ -171,9 +196,12 @@ def kube_candidates(args):
     except Exception as e:
         log(f"could not list pods: {e}")
         pods = []
+    node_ips = node_addresses(args, args.probe_timeout)
     for pod in pods:
         spec = pod.get("spec") or {}
         host_net = bool(spec.get("hostNetwork"))
+        # The pod's own node first, --advertise as the override.
+        advertise = node_ips.get((pod.get("spec") or {}).get("nodeName")) or args.advertise
         for c in spec.get("containers") or []:
             ports = [p["hostPort"] for p in (c.get("ports") or []) if p.get("hostPort")]
             # Under host networking every containerPort *is* a node port, so a
@@ -187,8 +215,8 @@ def kube_candidates(args):
                 if not ports:
                     ports += port_from_command(c)
             for hp in ports:
-                if args.advertise:
-                    found.append(f"http://{args.advertise}:{hp}/v1")
+                if advertise:
+                    found.append(f"http://{advertise}:{hp}/v1")
 
     # Two Services can front the same endpoint; register it once.
     return list(dict.fromkeys(found))
