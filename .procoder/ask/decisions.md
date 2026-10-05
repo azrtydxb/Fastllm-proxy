@@ -1526,7 +1526,7 @@ The live `fastllm` namespace is owned by a `FastllmProxy` CR (`fastllm.fastllm`)
 
 **Decided:** record it here and in the repo docs on the next docs pass; used for this deployment.
 
-**Decided (follow-ups):** fixed in #38 and deployed as `sha-cb75148` — the probe carve-out is gated on the coding-plan Anthropic base *and* the 200-wrapper body, so `zai` and every other provider keep the strict refusal; catalogue entry `zai_coding_anthropic` added (0056); the providers screen edits `extra_headers`. Verified live: the coding base passes the probe (409 clash with the real provider proves acceptance), a bogus general-Z.ai base is still refused, and a throwaway create through the carve-out returned 201 and was deleted. Bonus find: `/v1/models` answers a real list when the key is presented as `x-api-key`; the 200-wrapper only appears for the `Authorization: Bearer` shape the Claude Code door uses.
+**Decided (follow-ups):** fixed in #38 and deployed as `sha-cb75148` — the probe carve-out is gated on the coding-plan Anthropic base _and_ the 200-wrapper body, so `zai` and every other provider keep the strict refusal; catalogue entry `zai_coding_anthropic` added (0056); the providers screen edits `extra_headers`. Verified live: the coding base passes the probe (409 clash with the real provider proves acceptance), a bogus general-Z.ai base is still refused, and a throwaway create through the carve-out returned 201 and was deleted. Bonus find: `/v1/models` answers a real list when the key is presented as `x-api-key`; the 200-wrapper only appears for the `Authorization: Bearer` shape the Claude Code door uses.
 
 **Decided (Codex door):** "do the same for the default Z.ai coding provider" — scoped the same way, shipped as #39 and deployed as `sha-2c4ab3c`. The honest core again: a genuine Codex request is not rewritten at all (frontend model named after the upstream id, `inject_include_usage` no longer touches Responses bodies), so Codex traffic arrives as Codex sent it. Catalogue `zai_coding_responses` for `https://api.z.ai/api/v1`; probe reads `slug`. Verified with the real Codex CLI 0.160.0 through the gateway: reply OK, usage row 8509/3. The general `zai` provider and the Claude Code door are untouched.
 
@@ -1554,3 +1554,27 @@ node agent by its own process; kuvryn's qwen3.5-9b will then register
 dynamically and become reachable through the fastllm LB. Breeze TTS was
 deleted to free the GPU (spec saved in the session scratchpad as
 breeze-recreate.json); nemotron ASR still serves on 8093.
+
+## Node agent on kw: deployed, fixed, and the old host agents retired (2026-10-05)
+
+Deploying the in-cluster agent surfaced three things beyond the deploy itself.
+
+1. **The agent could not keep a lease alone.** Discovery probed ~330 candidates
+   serially (every LoadBalancer port and host-network port on kw), so one pass
+   took ~17 minutes against a 90-second lease. Fixed in v0.3.1: concurrent
+   probes, and lease renewal on its own 30s clock. Measured: pass ~36s.
+2. **The Sparks' systemd agents were still running** (`node-dgx-spark2`
+   renewing `192.168.10.245:8000` every 30s; `dgx-spark`'s registering
+   nothing). Two agents on one endpoint fight over its name.
+3. **`qwen3.5-9b` answered 503** through the gateway although registered: its
+   frontend model's default target was `qwen3.5-9b@192.168.10.245:8001`, the
+   split name from before the move, with no backend.
+
+**Decided:** disabled `fastllm-node-agent` on dgx-spark and dgx-spark2
+(`systemctl disable --now`; reverse with `enable --now`); repointed the
+`qwen3.5-9b` frontend model's default target at the live `qwen3.5-9b`
+provider model and removed the stale default. The stale provider model
+`qwen3.5-9b@192.168.10.245:8001` (no backends) is left in place for the user
+to delete. The nemotron ASR on `.246:8093` answers `/v1/models` but is not
+discovered: its kuvryn pod declares no port and has no `--port` flag — the fix
+is a `containerPort` on that pod, on the kuvryn side.
