@@ -38,7 +38,7 @@
     <span style="width: 7px; height: 8px; background: #8b20ff; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></span>
     <span style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #687897;">bash</span>
   </div>
-  <pre style="margin: 0; padding: 16px 18px; font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.7; color: #f8faff; background: none; border: none; overflow-x: auto;"><span style="color: #00d9f5;">docker run</span> ghcr.io/azrtydxb/fastllm-proxy:<span style="color: #8b20ff;">v0.2.0</span> --help</pre>
+  <pre style="margin: 0; padding: 16px 18px; font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.7; color: #f8faff; background: none; border: none; overflow-x: auto;"><span style="color: #00d9f5;">docker run</span> ghcr.io/azrtydxb/fastllm-proxy:<span style="color: #8b20ff;">v0.3.0</span> --help</pre>
 </div>
 
 <div class="f-metrics" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px;">
@@ -251,5 +251,5 @@ the API, the changelog — is in the sidebar.
   <span style="width: 4px; height: 5px; background: #253a6b; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></span>
   <a href="https://github.com/azrtydxb/Fastllm-proxy">source</a>
   <span style="width: 4px; height: 5px; background: #253a6b; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></span>
-  <a href="https://github.com/azrtydxb/Fastllm-proxy/releases/tag/v0.2.0">v0.2.0</a>
+  <a href="https://github.com/azrtydxb/Fastllm-proxy/releases/tag/v0.3.0">v0.3.0</a>
 </div>

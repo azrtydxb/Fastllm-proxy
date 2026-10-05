@@ -109,7 +109,7 @@ spec:
           # control plane down rather than doing nothing.
           #
           # A released tag rather than a `sha-` build, now that there is one:
-          # `0.2.0` is the same image as `ghcr.io/azrtydxb/fastllm-proxy:v0.2.0`
+          # `0.3.0` is the same image as `ghcr.io/azrtydxb/fastllm-proxy:v0.3.0`
           # (CI strips the `v` for this registry), so what runs here is what
           # anyone else installing this version gets.
           # `deployment.yaml` carries the same tag and must move at the same

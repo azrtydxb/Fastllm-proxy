@@ -18,7 +18,7 @@ metadata:
   name: fastllm
   namespace: fastllm
 spec:
-  image: ghcr.io/azrtydxb/fastllm-proxy:v0.2.0
+  image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.0
   database: { name: fastllm-database, key: uri }
   proxyToken: { name: fastllm-secrets, key: proxy-token }
   encryptionKey: { name: fastllm-secrets, key: encryption-key }
@@ -30,7 +30,7 @@ spec:
 ```console
 $ kubectl -n fastllm get fllm
 NAME      PHASE   GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.2.0   2m
+fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.3.0   2m
 ```
 
 `IMAGE` is what is **actually serving**, not what was asked for. During an
