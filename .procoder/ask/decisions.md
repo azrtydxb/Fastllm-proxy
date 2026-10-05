@@ -1578,3 +1578,27 @@ provider model and removed the stale default. The stale provider model
 to delete. The nemotron ASR on `.246:8093` answers `/v1/models` but is not
 discovered: its kuvryn pod declares no port and has no `--port` flag — the fix
 is a `containerPort` on that pod, on the kuvryn side.
+
+## The kw engines after the redeploy: what was done (2026-10-05)
+
+Asked to "do it all" on the three follow-ups. Found the stack redeployed in
+between — eight kuvryn engines across the two gx10 nodes — which changed each
+one.
+
+- **Reasoning parser:** already fixed on the kuvryn side (qwen3.5-9b now runs
+  with `--reasoning-parser qwen3`); verified through the gateway — content is
+  the answer, reasoning arrives in its own field.
+- **ASR (and the Breeze TTS):** discovered without touching kuvryn. Their pods
+  name the port only in an `httpGet` readiness probe; the agent now reads that
+  after `--port` (v0.3.2). Declaring `containerPort` on kuvryn's side remains
+  the better fix.
+- **Stale `qwen3.5-9b@192.168.10.245:8001`:** deleted (nothing referenced it).
+
+Two more found on the way, both fixed in v0.3.2: a dynamic provider whose
+engine swapped models was degraded instead of re-learned, leaving
+qwen3.5-9b attached to the 35B's endpoint; and two engines on one port on
+different nodes shared a provider name. The stale attachment was removed by
+hand so qwen3.5-9b served correctly before the new control plane was deployed.
+
+**Decided:** fix on FastLLM's side rather than editing kuvryn-managed
+Deployments, which kuvryn would reconcile back.
