@@ -284,16 +284,23 @@ pub mod store {
         /// a proxy still on an older snapshot has nothing useful to say about
         /// a backend it has not heard of yet.
         pub fn verdict(&self, now: Instant) -> super::FleetVerdict {
-            type Tally = (usize, usize, Vec<String>);
+            type Tally = (usize, usize, Vec<String>, usize);
             let mut tally: HashMap<(String, String), Tally> = HashMap::new();
             for report in self.current(now) {
                 for b in report.backends {
                     let e = tally
                         .entry((b.api_base, b.model))
-                        .or_insert((0, 0, Vec::new()));
+                        .or_insert((0, 0, Vec::new(), 0));
                     e.1 += 1;
                     if b.healthy {
                         e.0 += 1;
+                        // `serving` needs the traffic to be *this backend's*,
+                        // not merely a healthy probe: a peer that answers
+                        // /models but sends no requests has no opinion about
+                        // whether the backend behaves under load.
+                        if b.inflight > e.3 {
+                            e.3 = b.inflight;
+                        }
                         if let Some(addr) = &report.advertise {
                             e.2.push(addr.clone());
                         }
@@ -303,13 +310,14 @@ pub mod store {
             let mut backends: Vec<super::BackendVerdict> = tally
                 .into_iter()
                 .map(
-                    |((api_base, model), (healthy, total, mut reachable_from))| {
+                    |((api_base, model), (healthy, total, mut reachable_from, max_inflight))| {
                         reachable_from.sort();
                         super::BackendVerdict {
                             api_base,
                             model,
                             healthy,
                             total,
+                            serving: max_inflight > 0,
                             reachable_from,
                         }
                     },
@@ -336,6 +344,16 @@ pub struct BackendVerdict {
     pub healthy: usize,
     /// Replicas that reported recently at all. `healthy` out of this.
     pub total: usize,
+    /// Whether any healthy peer is actively sending this backend traffic.
+    ///
+    /// This is the part that makes a traffic ejection reconsiderable: peers
+    /// that are merely idle report healthy for an engine drowning under
+    /// someone else's load, so their vote says nothing about how the backend
+    /// behaves. A peer with requests in flight does have that opinion — it is
+    /// watching the backend answer them. Defaulted so a control plane and a
+    /// proxy on either side of this change still understand each other.
+    #[serde(default)]
+    pub serving: bool,
     /// Addresses of the replicas that can reach it, for a replica that cannot
     /// and wants to hand the request to one that can. Only replicas that
     /// advertised an address appear here.
@@ -367,6 +385,16 @@ impl FleetVerdict {
                 let others = b.total.saturating_sub(1);
                 others > 0 && b.healthy * 2 > others
             })
+    }
+
+    /// Whether the fleet's majority is not just reaching the backend but
+    /// sending it requests, which is the only peer evidence that can
+    /// re-examine a *traffic* ejection. See [`BackendVerdict::serving`].
+    pub fn serving_for(&self, api_base: &str, model: &str) -> bool {
+        self.backends
+            .iter()
+            .find(|b| b.api_base == api_base && b.model == model)
+            .is_some_and(|b| b.serving)
     }
 }
 

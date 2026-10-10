@@ -167,6 +167,15 @@ pub struct Backend {
     /// deadlocked vLLM answers `GET /v1/models` just fine, so sharing the
     /// counter would let the probe wipe the stall evidence every sweep.
     consecutive_stalls: AtomicU32,
+    /// Whether any engine token counter was ever seen to move. Counters that
+    /// have never moved carry no stall evidence: an audio engine's text-token
+    /// counters do not advance even while it is synthesising, and a vLLM TTS
+    /// model keeps one request resident in a stage gauge forever, so
+    /// `running > 0` with static counters is that engine's *idle* reading.
+    /// Ejecting on it took such a backend out of rotation every ten seconds,
+    /// on both replicas, forever. Once a counter has moved at least once,
+    /// frozen-with-running means what it always meant: a real wedge.
+    counters_ever_moved: AtomicBool,
     /// Why the backend is out, when it is. `true` means *traffic* put it
     /// there (timeouts, a frozen engine) rather than a failed probe.
     ///
@@ -343,6 +352,7 @@ impl Backend {
             consecutive_failures: AtomicU32::new(0),
             consecutive_timeouts: AtomicU32::new(0),
             consecutive_stalls: AtomicU32::new(0),
+            counters_ever_moved: AtomicBool::new(false),
             ejected_by_traffic: AtomicBool::new(false),
             ejection_streak: AtomicU32::new(0),
             ejected_until_ms: AtomicU64::new(0),
@@ -518,7 +528,17 @@ impl Backend {
         // Any movement — prefill climbing, decode climbing, cache growing —
         // is proof of life, however slow the backend is.
         if !frozen {
+            self.counters_ever_moved.store(true, Ordering::Relaxed);
             self.consecutive_stalls.store(0, Ordering::Relaxed);
+            return false;
+        }
+
+        // Frozen, but against a baseline that never existed. Every sample so
+        // far has been identical, so identical is this engine's normal, not a
+        // wedge. Without this guard the audio engines above are ejected ten
+        // seconds after every re-entry; with it, a frozen sample only counts
+        // once the engine has shown us what moving counters look like.
+        if !self.counters_ever_moved.load(Ordering::Relaxed) {
             return false;
         }
 
@@ -672,13 +692,26 @@ impl Backend {
     /// interval and nothing has been lost. That self-limiting shape is why
     /// this cannot resurrect a dead backend: the fleet only ever buys a
     /// re-examination, never a conclusion.
-    pub fn reconsider(&self) -> bool {
-        // The fleet's "I can reach it" is a statement about reachability, and a
-        // traffic ejection is a statement about how the backend behaves under
-        // *this* replica's load. Peers that are idle or lightly loaded report
-        // healthy for an engine that is drowning for the busy one, so their
-        // vote cannot overturn it; only the timer can.
-        if self.healthy.load(Ordering::Relaxed) || self.ejected_by_traffic.load(Ordering::Relaxed) {
+    ///
+    /// A traffic ejection is withdrawn on the same terms, with one extra
+    /// gate: at least one peer must have requests in flight to the backend.
+    /// Before that gate existed, one replica's traffic ejection stayed
+    /// standing for its whole backoff while every other replica served the
+    /// backend fine — the replicas disagreed about rotation for minutes, and
+    /// which one failed your request depended on which proxy the Service
+    /// picked.
+    pub fn reconsider(&self, peers_serving: bool) -> bool {
+        // The fleet's "I can reach it" is a statement about reachability, and
+        // reachability alone cannot re-examine a traffic ejection: peers that
+        // are idle or lightly loaded report healthy for an engine that is
+        // drowning for the busy one. What can re-examine it is peers actively
+        // sending the backend requests — they are watching it behave under
+        // real traffic, which is exactly the evidence this replica's ejection
+        // was based on. Without a peer in flight, only the timer decides.
+        if self.healthy.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.ejected_by_traffic.load(Ordering::Relaxed) && !peers_serving {
             return false;
         }
         self.consecutive_failures.store(0, Ordering::Relaxed);
@@ -1156,16 +1189,54 @@ model_list:
     fn stall_needs_two_frozen_samples_and_a_previous_scrape() {
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let l = load(2, 100, 50, Some(10));
-        // Nothing scraped yet: comparison has no baseline.
-        assert!(!b.check_stall(&l, 2));
-        b.record_engine_inflight(&l, 1);
+        // The engine first shows what moving counters look like: this is the
+        // baseline without which "frozen" has no meaning.
+        let moving = load(2, 100, 50, Some(10));
+        assert!(!b.check_stall(&moving, 2));
+        b.record_engine_inflight(&moving, 1);
+        let moved = load(2, 200, 90, Some(20));
+        assert!(!b.check_stall(&moved, 2));
+        b.record_engine_inflight(&moved, 2);
+
+        // Now frozen at the moved-to values.
+        let l = load(2, 200, 90, Some(20));
+        b.record_engine_inflight(&l, 3);
         // First frozen sample: below the threshold, still in rotation.
         assert!(!b.check_stall(&l, 2));
         assert!(b.is_healthy());
         // Second: ejected.
         assert!(b.check_stall(&l, 2));
         assert!(!b.is_healthy());
+    }
+
+    /// Counters that have never moved are an engine's normal, not a wedge.
+    /// This is the audio-engine shape: a vLLM TTS model keeps one request
+    /// resident in its stage gauge forever and its text-token counters do not
+    /// advance even while synthesising, so every scrape reads "running but
+    /// frozen" against every other. It used to be ejected ten seconds after
+    /// every re-entry, on both replicas, forever.
+    #[test]
+    fn an_engine_that_has_never_moved_counters_is_never_stalled() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let l = load(1, 0, 0, Some(0));
+        b.record_engine_inflight(&l, 1);
+        // Far past any threshold: still in rotation, because there is no
+        // baseline to be frozen against.
+        for i in 2..40 {
+            assert!(
+                !b.check_stall(&l, 5),
+                "sample {i} ejected a never-moved engine"
+            );
+            b.record_engine_inflight(&l, i);
+        }
+        assert!(b.is_healthy());
+        // And the first real movement both establishes the baseline and
+        // clears the accumulated (never-counted) samples.
+        let m = load(1, 5, 5, Some(1));
+        assert!(!b.check_stall(&m, 5));
+        b.record_engine_inflight(&m, 41);
+        assert!(b.is_healthy());
     }
 
     /// The signal `cache-affinity` never had.
@@ -1263,8 +1334,14 @@ model_list:
         // GET /v1/models, so the probe must not reset the stall counter.
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let l = load(2, 100, 50, Some(10));
-        b.record_engine_inflight(&l, 1);
+        // Baseline: the engine showed movement before it froze.
+        let moving = load(2, 100, 50, Some(10));
+        b.record_engine_inflight(&moving, 1);
+        let moved = load(2, 200, 90, Some(20));
+        assert!(!b.check_stall(&moved, 2));
+        b.record_engine_inflight(&moved, 2);
+        let l = load(2, 200, 90, Some(20));
+        b.record_engine_inflight(&l, 3);
         assert!(!b.check_stall(&l, 2));
         b.mark_probe_ok();
         assert!(b.check_stall(&l, 2));
@@ -1294,8 +1371,25 @@ model_list:
         b.note_timeout(1);
         assert!(!b.is_healthy());
         assert!(!b.mark_probe_ok(), "the probe is not the judge here");
-        assert!(!b.reconsider(), "nor is the fleet's vote");
+        // A majority of peers that cannot say they are serving it changes
+        // nothing: reachability is not behaviour-under-load.
+        assert!(!b.reconsider(false), "nor is an idle fleet's vote");
         assert!(!b.is_healthy());
+
+        // A fleet that is actively serving the backend can withdraw the
+        // ejection before the timer, because peers with requests in flight
+        // hold exactly the evidence this ejection was based on.
+        b.ejected_until_ms.store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            b.reconsider(true),
+            "a serving fleet re-examines the verdict"
+        );
+        assert!(b.is_healthy());
+
+        // A fresh ejection, for the timer flow below.
+        b.ejected_by_traffic.store(true, Ordering::Relaxed);
+        b.healthy.store(false, Ordering::Relaxed);
+        b.ejected_until_ms.store(u64::MAX, Ordering::Relaxed);
 
         // Once the timer has run out a passing probe lets it back, on
         // probation: one more timeout and it is out again, for longer.

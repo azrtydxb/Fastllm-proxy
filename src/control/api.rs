@@ -1356,13 +1356,20 @@ async fn reach_provider(
         Ok(models) => Reachability::Serving(models.len()),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("401") || msg.contains("403") {
-                Reachability::Rejected(msg)
-            } else if msg.contains("404") || msg.contains("405") || msg.contains("no `data` array")
-            {
-                Reachability::NoModelList(msg)
-            } else {
-                Reachability::Unreachable(msg)
+            // Classify on the machine-readable status tail, not on digits
+            // anywhere in the message: URLs, ports and vendor wrappers all
+            // carry numbers, and a mock on :40353 is not a 403. A 200 that
+            // simply has no model list is its own answer, whatever the
+            // wrapper's body claims its code is.
+            let status = msg
+                .rsplit_once("[status ")
+                .and_then(|(_, rest)| rest.trim_end_matches(']').parse::<u16>().ok());
+            match status {
+                Some(401 | 403) => Reachability::Rejected(msg),
+                Some(404 | 405) => Reachability::NoModelList(msg),
+                Some(_) => Reachability::Unreachable(msg),
+                None if msg.contains("[no model list]") => Reachability::NoModelList(msg),
+                None => Reachability::Unreachable(msg),
             }
         }
     }

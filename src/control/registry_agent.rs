@@ -79,7 +79,10 @@ pub async fn served_models_as(
     let status = fetched.status;
     let body = fetched.body;
     if !status.is_success() {
-        anyhow::bail!("{url} answered {status}");
+        // The status is carried in a machine-readable tail so callers can
+        // classify on it. Substring-matching the whole message read digits
+        // from URLs and bodies — a mock on port :40353 classified as a 403.
+        anyhow::bail!("{url} answered {status} [status {}]", status.as_u16());
     }
     let parsed: serde_json::Value = serde_json::from_slice(&body)?;
     // `data` is OpenAI's shape and `models` is Gemini's. Accepting both is
@@ -95,7 +98,9 @@ pub async fn served_models_as(
             // something else entirely. Capped, and it is a probe response, not
             // user content.
             let snippet = String::from_utf8_lossy(&body[..body.len().min(160)]);
-            anyhow::anyhow!("{url} returned no model list (body: {snippet})")
+            // Tagged like the status tail above: the classifier reads the tag,
+            // not digits scattered through the message.
+            anyhow::anyhow!("{url} returned no model list (body: {snippet}) [no model list]")
         })?;
     // `slug` is what a Codex-shaped model descriptor calls its id — the
     // Responses API doors speak this dialect, and without it such a provider
