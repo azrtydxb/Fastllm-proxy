@@ -1642,3 +1642,28 @@ allowlist exists. Options:
 **Decided:** operator allowlist — `FASTLLM_SSRF_ACCEPT` (CIDRs and host
 names, `.`-prefixed for subdomains), set on the control plane; the guard stays
 strict by default.
+
+## How should the stall detector handle always-resident engines?
+
+The TTS backend (:8095) reports `num_requests_running = 1` permanently (a
+resident stage-0 slot) while its text-token counters never move — audio
+tokens are not prompt/gen tokens. `check_stall` reads that as "running but
+frozen" and ejects it ~10s after every re-entry, on both replicas, forever.
+
+Options: baseline + resident-gauge guard; raise the threshold only; leave it.
+
+**Decided:** baseline + resident-gauge guard — counters that have never moved
+since first seen are not evidence of a stall, and a running gauge that never
+returns to 0 is "always busy", not "frozen".
+
+## How should replicas converge when one ejects a backend the others serve?
+
+Traffic ejections are per-replica and exempt from the fleet vote, so replicas
+hold divergent rotation states for minutes (observed live, phase-shifted ~5
+minutes). Options: share traffic ejections via the fleet report; observe-only;
+centralise ejection in the control plane.
+
+**Decided:** share traffic ejections via the fleet health report — a replica
+whose peers all serve a backend it ejected withdraws the verdict within one
+report interval; a genuinely dead backend still re-ejects locally within one
+probe interval.
