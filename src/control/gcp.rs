@@ -417,17 +417,17 @@ mod tests {
     async fn a_token_is_minted_once_and_then_reused() {
         init_minter();
         let (uri, hits) = spawn_token_endpoint(
-            r#"{"access_token":"ya29.minted","expires_in":3600,"token_type":"Bearer"}"#,
+            r#"{"access_token":"test-token.minted","expires_in":3600,"token_type":"Bearer"}"#,
             200,
         )
         .await;
         let sa = key_file_for("reuse", &uri);
 
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.minted");
         assert_eq!(hits.load(Ordering::Relaxed), 1);
 
         // The call a snapshot rebuild makes a second later.
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.minted");
         assert_eq!(
             hits.load(Ordering::Relaxed),
             1,
@@ -441,12 +441,15 @@ mod tests {
     async fn a_token_expiring_within_the_margin_is_replaced() {
         init_minter();
         // 60 seconds, comfortably inside the 5-minute margin.
-        let (uri, hits) =
-            spawn_token_endpoint(r#"{"access_token":"ya29.brief","expires_in":60}"#, 200).await;
+        let (uri, hits) = spawn_token_endpoint(
+            r#"{"access_token":"test-token.brief","expires_in":60}"#,
+            200,
+        )
+        .await;
         let sa = key_file_for("brief", &uri);
 
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.brief");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.brief");
         assert_eq!(
             hits.load(Ordering::Relaxed),
             2,
@@ -494,8 +497,7 @@ mod tests {
 
         let err = |uri: &str| {
             ServiceAccount::validate_token_uri(&key_file_for("tokchk", uri))
-                .err()
-                .expect("should be rejected")
+                .expect_err("should be rejected")
         };
         // The substring bypass the first version of this check had: the
         // allowlisted text appears only in the query string.

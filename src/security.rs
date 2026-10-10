@@ -324,15 +324,11 @@ mod tests {
         // We cannot rely on DNS in tests, so we check the host parsing logic
         // by using hosts that will fail DNS but pass the blocking check.
         // A valid host should not error with a blocking error.
-        let result = validate_with("https://example.com:443/v1", &no_allow());
-        match &result {
-            Err(e) => {
-                assert!(
-                    !e.contains("blocked"),
-                    "example.com should not be blocked: {e}"
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = validate_with("https://example.com:443/v1", &no_allow()) {
+            assert!(
+                !e.contains("blocked"),
+                "example.com should not be blocked: {e}"
+            );
         }
     }
 
@@ -355,15 +351,11 @@ mod tests {
     #[test]
     fn valid_http_host_is_allowed() {
         // "google.com" should not be blocked
-        let result = validate_with("http://google.com/v1", &no_allow());
-        match &result {
-            Err(e) => {
-                assert!(
-                    !e.contains("blocked"),
-                    "google.com should not be blocked: {e}"
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = validate_with("http://google.com/v1", &no_allow()) {
+            assert!(
+                !e.contains("blocked"),
+                "google.com should not be blocked: {e}"
+            );
         }
     }
 

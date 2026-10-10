@@ -3264,7 +3264,7 @@ fn validate_extra_headers(
     let mut out = serde_json::Map::new();
     for (name, value) in map {
         // Block CRLF / LF / CR in header values — prevents header injection.
-        if value.contains(|c: char| c == '\n' || c == '\r') {
+        if value.contains(['\n', '\r']) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 format!(
