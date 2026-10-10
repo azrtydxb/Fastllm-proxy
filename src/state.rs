@@ -197,12 +197,13 @@ impl AppState {
                 continue;
             }
             if verdict.contradicts(&backend.api_base, &backend.upstream_model)
-                && backend.reconsider()
+                && backend
+                    .reconsider(verdict.serving_for(&backend.api_base, &backend.upstream_model))
             {
                 tracing::warn!(
                     backend = %backend.api_base,
                     model = %backend.upstream_model,
-                    "the rest of the fleet can reach this backend; withdrawing our own \
+                    "the rest of the fleet is serving this backend; withdrawing our own \
                      ejection so the next probe decides again"
                 );
             }
