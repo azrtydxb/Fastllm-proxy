@@ -1493,9 +1493,23 @@ async fn post_provider(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "credential_kind gcp_service_account needs upstream_api_key to be the service \
-             account's JSON key file, with `client_email` and `private_key`"
-                .to_string(),
+              account's JSON key file, with `client_email` and `private_key`"
+                 .to_string(),
         ));
+    }
+    // SSRF guard on GCP token_uri. The JSON key file can override the
+    // default token endpoint, and an attacker who supplies a crafted service
+    // account JSON could make the control plane reach internal networks
+    // (cloud metadata, private APIs) through the GCP module's HTTP client.
+    if credential_kind == "gcp_service_account" {
+        if let Some(json_str) = body.upstream_api_key.as_deref() {
+            if let Err(e) = crate::control::gcp::ServiceAccount::validate_token_uri(json_str) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("gcp_service_account token_uri: {e}"),
+                ));
+            }
+        }
     }
     let encrypted = encrypt_upstream_key(&ctx, body.upstream_api_key.as_deref())?;
 
@@ -1920,6 +1934,15 @@ async fn patch_provider(
                  account's JSON key file, with `client_email` and `private_key`"
                     .to_string(),
             ));
+        }
+        // SSRF guard on GCP token_uri.
+        if kind == "gcp_service_account" && !key.trim().is_empty() {
+            if let Err(e) = crate::control::gcp::ServiceAccount::validate_token_uri(key) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("gcp_service_account token_uri: {e}"),
+                ));
+            }
         }
         let encrypted = encrypt_upstream_key(&ctx, Some(key))?;
         sqlx::query("UPDATE providers SET upstream_api_key = $1 WHERE id = $2")
@@ -3498,6 +3521,17 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
             "credential_kind gcp_service_account needs upstream_api_key to be the service              account's JSON key file, with `client_email` and `private_key`"
                 .to_string(),
         ));
+    }
+    // SSRF guard on GCP token_uri.
+    if credential_kind == "gcp_service_account" {
+        if let Some(json_str) = body.upstream_api_key.as_deref() {
+            if let Err(e) = crate::control::gcp::ServiceAccount::validate_token_uri(json_str) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("gcp_service_account token_uri: {e}"),
+                ));
+            }
+        }
     }
     let (default_header, default_scheme) = auth_defaults_for(&protocol);
     let auth_header = body

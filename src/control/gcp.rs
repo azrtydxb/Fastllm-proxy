@@ -79,6 +79,25 @@ impl ServiceAccount {
     pub fn looks_like_one(json: &str) -> bool {
         Self::parse(json).is_ok()
     }
+
+    /// Validate that the token_uri in a service-account JSON does not point
+    /// at an arbitrary host — preventing SSRF via the GCP module.
+    ///
+    /// Only Google's token endpoints are accepted: `oauth2.googleapis.com`
+    /// (the default) and the legacy `accounts.google.com`. Any other host is
+    /// rejected so that a malicious JSON key file cannot make the control
+    /// plane reach internal networks.
+    pub fn validate_token_uri(json: &str) -> Result<(), String> {
+        let sa: ServiceAccount =
+            serde_json::from_str(json).map_err(|e| format!("not valid GCP service-account JSON: {e}"))?;
+        let uri = sa.token_uri;
+        if uri.contains("oauth2.googleapis.com/token") || uri.contains("accounts.google.com/o/oauth2/token") {
+            return Ok(());
+        }
+        Err(format!(
+            "token_uri {uri:?} is not a Google token endpoint — only oauth2.googleapis.com and accounts.google.com are allowed"
+        ))
+    }
 }
 
 #[derive(Debug, Deserialize)]
