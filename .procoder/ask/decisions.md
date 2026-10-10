@@ -657,7 +657,9 @@ Options:
   this repository — and needs whatever ignore mechanism procoder itself reads,
   which `.gitignore` is not.
 
-**Decided:** pending.
+**Decided:** operator allowlist — `FASTLLM_SSRF_ACCEPT` (CIDRs and host
+names, `.`-prefixed for subdomains), set on the control plane; the guard stays
+strict by default.
 
 ## Cleaning up the Kubernetes objects that used the tank ZFS pool
 
@@ -770,7 +772,9 @@ Options:
 - **Leave it.** Omitted is honest. The two models that matter for coding
   traffic already advertise 262144.
 
-**Decided:** pending.
+**Decided:** operator allowlist — `FASTLLM_SSRF_ACCEPT` (CIDRs and host
+names, `.`-prefixed for subdomains), set on the control plane; the guard stays
+strict by default.
 
 ## Making the vLLM service on NovaNAS survive restarts
 
@@ -1617,3 +1621,24 @@ Options:
 - **Leave them unexposed** for now.
 
 **Decided:** expose both — frontend models `nemotron-3.5-asr` and `breeze`.
+
+## How do in-cluster backends stay registrable under the SSRF guard?
+
+The new SSRF guard (44172dd / 8c9ded4) rejects any api_base that resolves to a
+private address. Every provider this deployment auto-registers is an in-cluster
+service (`*.kuvryn-ai-workloads.svc` → 10.43.x.x ClusterIP), so from 0.3.4
+every attach, patch and heartbeat re-learn of a local engine would 400. The
+guard's own error message promises "an explicitly allowed address", but no
+allowlist exists. Options:
+
+- **Operator allowlist env var** (e.g. `FASTLLM_SSRF_ALLOW`): hostnames,
+  suffixes and CIDRs accepted despite being private; kw manifests set it to
+  the cluster ranges. Strict by default.
+- **Implicit in-cluster exemption**: always accept `.svc` /
+  `.svc.cluster.local` names. No config, kube-specific magic.
+- **Narrow the guard** to loopback + link-local only, dropping RFC1918.
+  Keeps LAN URLs working; the guard barely guards.
+
+**Decided:** operator allowlist — `FASTLLM_SSRF_ACCEPT` (CIDRs and host
+names, `.`-prefixed for subdomains), set on the control plane; the guard stays
+strict by default.
