@@ -9169,8 +9169,13 @@ mod tests {
                     crate::security::Allow::Name("localhost".into()),
                     // Fake upstream names the tests register without wanting
                     // them to resolve.
+                    crate::security::Allow::Name("backend".into()),
                     crate::security::Allow::Name("chatgpt".into()),
+                    crate::security::Allow::Name("other".into()),
+                    crate::security::Allow::Name("plain".into()),
                     crate::security::Allow::Name("route-test".into()),
+                    crate::security::Allow::Name("somewhere-else".into()),
+                    crate::security::Allow::Name("x".into()),
                 ]),
             }),
             started_at: std::time::Instant::now(),
