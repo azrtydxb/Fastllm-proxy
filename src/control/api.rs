@@ -1174,12 +1174,25 @@ struct NewProvider {
 
 /// Trim, normalise and check an address the way every writer of `api_base`
 /// here does, so the four of them cannot drift apart.
+///
+/// Also validates that the resolved host does not point at a private or
+/// loopback address — blocking SSRF from an operator account.  The admin API
+/// is the only place `api_base` values enter the system, so one check here
+/// covers every write route.
 fn normalise_api_base(raw: &str) -> Result<String, ApiError> {
     let api_base = raw.trim().trim_end_matches('/').to_string();
     if !(api_base.starts_with("http://") || api_base.starts_with("https://")) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             format!("api_base {api_base:?} must start with http:// or https://"),
+        ));
+    }
+    // SSRF guard: reject private, loopback, and link-local targets so the
+    // proxy cannot be used as an SSRF vector against itself.
+    if let Err(e) = crate::security::validate_api_base(&api_base) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("api_base {api_base:?}: {e}"),
         ));
     }
     Ok(api_base)
@@ -2323,6 +2336,13 @@ async fn post_a2a_agent(
             "name must be alphanumeric with - or _: it is a URL path segment",
         ));
     }
+    // SSRF guard on agent URL.
+    if let Err(e) = crate::security::validate_api_base(&body.url) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("a2a agent URL: {e}"),
+        ));
+    }
     let version = body.protocol_version.unwrap_or_else(|| "0.3".to_string());
     if version != "0.3" && version != "1.0" {
         return Err(api_error(
@@ -2418,6 +2438,15 @@ async fn patch_a2a_agent(
             Some(("agent:invoke", "agent")),
         )
         .await?;
+    }
+    // SSRF guard on URL update.
+    if let Some(url) = body.url.as_deref() {
+        if let Err(e) = crate::security::validate_api_base(url) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("a2a agent URL: {e}"),
+            ));
+        }
     }
     if let Some(v) = body.protocol_version.as_deref() {
         if v != "0.3" && v != "1.0" {
@@ -2567,6 +2596,13 @@ async fn post_mcp_server(
              namespace this server's tools appear under",
         ));
     }
+    // SSRF guard on MCP server URL.
+    if let Err(e) = crate::security::validate_api_base(&body.url) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("MCP server URL: {e}"),
+        ));
+    }
     let transport = body.transport.unwrap_or_else(|| "http".to_string());
     if transport != "http" && transport != "sse" {
         return Err(api_error(
@@ -2655,6 +2691,15 @@ async fn patch_mcp_server(
 ) -> Result<StatusCode, ApiError> {
     if let Some(name) = body.name.as_deref() {
         rename_named_row(&ctx, "mcp_servers", id, name, Some(("mcp:invoke", "mcp"))).await?;
+    }
+    // SSRF guard on URL update.
+    if let Some(url) = body.url.as_deref() {
+        if let Err(e) = crate::security::validate_api_base(url) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("MCP server URL: {e}"),
+            ));
+        }
     }
     let encrypted = match body.upstream_api_key.as_deref().map(str::trim) {
         Some("") => Some(None),
@@ -3183,6 +3228,10 @@ impl NewBackend {
 /// and explains itself only in the control plane's log. The map is ordered
 /// (`BTreeMap`) so the stored JSON is deterministic, which makes the
 /// provider-identity comparison below meaningful.
+///
+/// CR/LF characters are rejected explicitly (before `HeaderValue::from_str`)
+/// to prevent header-injection / CRLF-attack even when the value looks
+/// syntactically valid.
 fn validate_extra_headers(
     headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<serde_json::Value, ApiError> {
@@ -3191,6 +3240,15 @@ fn validate_extra_headers(
     };
     let mut out = serde_json::Map::new();
     for (name, value) in map {
+        // Block CRLF / LF / CR in header values — prevents header injection.
+        if value.contains(|c: char| c == '\n' || c == '\r') {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "extra header {name:?} value contains a line break — CRLF injection is not allowed"
+                ),
+            ));
+        }
         let name = name.trim();
         let header_name = http::HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes())
             .map_err(|_| {

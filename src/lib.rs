@@ -33,6 +33,7 @@ pub mod registry;
 pub mod retry_budget;
 pub mod router;
 pub mod routing;
+pub mod security;
 pub mod snapshot;
 pub mod source;
 pub mod state;

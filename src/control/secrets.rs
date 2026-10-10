@@ -177,12 +177,25 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &str) -> Result<Vec<u8>> {
 /// ciphertext would; under `1` it never carried that protection and still
 /// does not, which is the whole reason `1` is being retired for new writes
 /// rather than kept indefinitely.
+///
+/// When a `V1` blob is decrypted, a warning is logged: V1 encryption is
+/// deprecated (no authenticated version byte) and should be re-encrypted
+/// as `V2` at the next opportunity (provider update, or the
+/// `reencrypt-backends` one-shot command).
 pub fn decrypt(key: &EncryptionKey, blob: &[u8]) -> Result<String> {
     let Some(&version) = blob.first() else {
         bail!("empty ciphertext blob");
     };
     let aad = match version {
-        VERSION_V1 => Aad::from(&[][..]),
+        VERSION_V1 => {
+            tracing::warn!(
+                "encryption format version 1 detected during decryption — V1 is deprecated \
+                 (version byte not authenticated as AEAD associated data); the credential \
+                 should be re-encrypted as V2 at the next provider update or via the \
+                 reencrypt-backends command"
+            );
+            Aad::from(&[][..])
+        }
         VERSION_V2 => Aad::from(&[VERSION_V2][..]),
         other => bail!(
             "unrecognised encryption format version byte {other}; this build only understands \
