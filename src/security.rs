@@ -23,7 +23,10 @@
 //! in `FASTLLM_SSRF_ACCEPT` rather than weakening the block. The variable is
 //! a comma-separated list of CIDRs (`10.43.0.0/16`) and hostnames, where a
 //! leading dot means "any subdomain" (`.tools.internal`); a bare name matches
-//! exactly.
+//! exactly. It is parsed once at startup into `Deployment` (which is what
+//! `/admin/config` shows and what every validator here receives), because
+//! config that gates what may be *stored* changes only with a restart, like
+//! the encryption key.
 //!
 //! # Known limit
 //!
@@ -34,11 +37,10 @@
 //! control; today every listed name is the operator's own infrastructure.
 
 use std::net::{IpAddr, ToSocketAddrs};
-use std::sync::OnceLock;
 
 /// Operator-configured exceptions to the private-address block.
-#[derive(Debug)]
-enum Allow {
+#[derive(Debug, Clone)]
+pub enum Allow {
     /// An address inside the range is accepted despite being private.
     Cidr(IpAddr, u8),
     /// A hostname: `.`-prefixed entries match any subdomain, bare names
@@ -46,11 +48,28 @@ enum Allow {
     Name(String),
 }
 
+impl std::fmt::Display for Allow {
+    /// Round-trips the accepted syntax: what `/admin/config` shows is what
+    /// the operator could have written back into `FASTLLM_SSRF_ACCEPT`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Allow::Cidr(net, len) => write!(f, "{net}/{len}"),
+            Allow::Name(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+impl serde::Serialize for Allow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
 /// Parse `FASTLLM_SSRF_ACCEPT`. Entries that do not parse are dropped with a
 /// warning rather than failing startup: a typo taking the control plane down
 /// would be worse than one dead allowlist entry, and the warning is where the
 /// operator is told.
-fn parse_allow(spec: &str) -> Vec<Allow> {
+pub fn parse_allow(spec: &str) -> Vec<Allow> {
     let mut out = Vec::new();
     for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
         if let Some((ip, len)) = entry.split_once('/') {
@@ -73,24 +92,6 @@ fn parse_allow(spec: &str) -> Vec<Allow> {
         }
     }
     out
-}
-
-/// The allowlist, read once per process. Config that gates what may be
-/// *stored* has no reason to change while running: changing it means a
-/// restart, like the encryption key.
-fn allow() -> &'static [Allow] {
-    static ALLOW: OnceLock<Vec<Allow>> = OnceLock::new();
-    ALLOW.get_or_init(|| {
-        let raw = std::env::var("FASTLLM_SSRF_ACCEPT").unwrap_or_default();
-        let parsed = parse_allow(&raw);
-        if !parsed.is_empty() {
-            tracing::info!(
-                entries = parsed.len(),
-                "SSRF private-address allowlist loaded"
-            );
-        }
-        parsed
-    })
 }
 
 fn cidr_contains(addr: IpAddr, net: IpAddr, len: u8) -> bool {
@@ -227,15 +228,11 @@ pub fn host_of_url(url: &str) -> Result<String, String> {
 }
 
 /// Check whether an api_base host resolves into a blocked range, honouring
-/// the operator allowlist.
+/// the allowlist the caller was started with.
 ///
 /// Accepts only absolute HTTP(S) URIs; a non-absolute URI is rejected before
 /// DNS is even touched.
-pub fn validate_api_base(api_base: &str) -> Result<(), String> {
-    validate_with(api_base, allow())
-}
-
-fn validate_with(api_base: &str, allow: &[Allow]) -> Result<(), String> {
+pub fn validate_api_base(api_base: &str, allow: &[Allow]) -> Result<(), String> {
     let host = host_of_url(api_base)?;
 
     // A name on the allowlist is accepted without resolving it: the operator
@@ -297,28 +294,30 @@ mod tests {
 
     #[test]
     fn loopback_is_blocked() {
-        assert!(validate_with("http://127.0.0.1:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://localhost:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://[::1]:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://127.0.0.1:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://localhost:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://[::1]:8000/v1", &no_allow()).is_err());
     }
 
     #[test]
     fn cloud_metadata_is_blocked() {
-        assert!(validate_with("http://169.254.169.254/latest/meta-data/", &no_allow()).is_err());
+        assert!(
+            validate_api_base("http://169.254.169.254/latest/meta-data/", &no_allow()).is_err()
+        );
     }
 
     #[test]
     fn private_ranges_are_blocked() {
-        assert!(validate_with("http://10.0.0.1:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://192.168.1.1:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://172.16.0.1:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://172.31.255.255:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://10.0.0.1:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://192.168.1.1:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://172.16.0.1:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://172.31.255.255:8000/v1", &no_allow()).is_err());
     }
 
     #[test]
     fn zero_slash_eight_is_blocked() {
-        assert!(validate_with("http://0.0.0.0:8000/v1", &no_allow()).is_err());
-        assert!(validate_with("http://0.1.2.3:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://0.0.0.0:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://0.1.2.3:8000/v1", &no_allow()).is_err());
     }
 
     #[test]
@@ -326,7 +325,7 @@ mod tests {
         // We cannot rely on DNS in tests, so we check the host parsing logic
         // by using hosts that will fail DNS but pass the blocking check.
         // A valid host should not error with a blocking error.
-        if let Err(e) = validate_with("https://example.com:443/v1", &no_allow()) {
+        if let Err(e) = validate_api_base("https://example.com:443/v1", &no_allow()) {
             assert!(
                 !e.contains("blocked"),
                 "example.com should not be blocked: {e}"
@@ -336,24 +335,24 @@ mod tests {
 
     #[test]
     fn invalid_scheme_is_rejected() {
-        assert!(validate_with("ftp://example.com/v1", &no_allow()).is_err());
-        assert!(validate_with("file:///etc/passwd", &no_allow()).is_err());
+        assert!(validate_api_base("ftp://example.com/v1", &no_allow()).is_err());
+        assert!(validate_api_base("file:///etc/passwd", &no_allow()).is_err());
     }
 
     #[test]
     fn invalid_ip_is_rejected() {
-        assert!(validate_with("http://999.999.999.999:8000/v1", &no_allow()).is_err());
+        assert!(validate_api_base("http://999.999.999.999:8000/v1", &no_allow()).is_err());
     }
 
     #[test]
     fn empty_host_is_rejected() {
-        assert!(validate_with("http:///v1", &no_allow()).is_err());
+        assert!(validate_api_base("http:///v1", &no_allow()).is_err());
     }
 
     #[test]
     fn valid_http_host_is_allowed() {
         // "google.com" should not be blocked
-        if let Err(e) = validate_with("http://google.com/v1", &no_allow()) {
+        if let Err(e) = validate_api_base("http://google.com/v1", &no_allow()) {
             assert!(
                 !e.contains("blocked"),
                 "google.com should not be blocked: {e}"
@@ -364,9 +363,9 @@ mod tests {
     #[test]
     fn cidr_allow_admits_private_range() {
         let allow = [Allow::Cidr("10.43.0.0".parse().unwrap(), 16)];
-        assert!(validate_with("http://10.43.220.41:8000/v1", &allow).is_ok());
-        assert!(validate_with("http://10.44.0.1:8000/v1", &allow).is_err());
-        assert!(validate_with("http://192.168.1.1:8000/v1", &allow).is_err());
+        assert!(validate_api_base("http://10.43.220.41:8000/v1", &allow).is_ok());
+        assert!(validate_api_base("http://10.44.0.1:8000/v1", &allow).is_err());
+        assert!(validate_api_base("http://192.168.1.1:8000/v1", &allow).is_err());
     }
 
     #[test]
@@ -386,26 +385,26 @@ mod tests {
     #[test]
     fn suffix_allow_admits_private_names() {
         let allow = [Allow::Name(".kuvryn-ai-workloads.svc".to_string())];
-        assert!(validate_with(
+        assert!(validate_api_base(
             "http://kuvryn-1234-a46ea12d.kuvryn-ai-workloads.svc:8000/v1",
             &allow
         )
         .is_ok());
         // Upper case in the URL still matches the lower-cased entry.
-        assert!(validate_with(
+        assert!(validate_api_base(
             "http://Kuvryn-1234-a46ea12d.KUVRYN-AI-WORKLOADS.SVC:8000/v1",
             &allow
         )
         .is_ok());
         // A lookalike domain does not.
-        assert!(validate_with("http://evil.com/?x=.kuvryn-ai-workloads.svc", &allow).is_err());
+        assert!(validate_api_base("http://evil.com/?x=.kuvryn-ai-workloads.svc", &allow).is_err());
     }
 
     #[test]
     fn exact_name_allow_does_not_match_subdomains() {
         let allow = [Allow::Name("vllm.internal".to_string())];
-        assert!(validate_with("http://vllm.internal:8000/v1", &allow).is_ok());
-        assert!(validate_with("http://other.vllm.internal:8000/v1", &allow).is_err());
+        assert!(validate_api_base("http://vllm.internal:8000/v1", &allow).is_ok());
+        assert!(validate_api_base("http://other.vllm.internal:8000/v1", &allow).is_err());
     }
 
     #[test]

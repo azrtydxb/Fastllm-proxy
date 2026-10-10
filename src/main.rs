@@ -625,6 +625,12 @@ fn webhook_sender(
 fn deployment_facts(cli: &Cli, role: &str) -> fastllm_proxy::control::api::Deployment {
     fastllm_proxy::control::api::Deployment {
         role: role.to_string(),
+        // Parsed here rather than inside the guard so startup is where a bad
+        // entry warns (the guard itself stays a pure function of its input).
+        ssrf_accept: fastllm_proxy::security::parse_allow(
+            &std::env::var("FASTLLM_SSRF_ACCEPT").unwrap_or_default(),
+        )
+        .into(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         config_poll_seconds: cli.config_poll,
         health_report_interval_seconds: cli.health_report_interval,
