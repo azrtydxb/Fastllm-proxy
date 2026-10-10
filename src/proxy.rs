@@ -2518,14 +2518,12 @@ async fn agent_rpc(
     // token or request quotas.
     if let Some(principal) = principal {
         if let Some(limits) = &principal.limits {
-            let token_cost = crate::routing::estimate_prompt_tokens(bytes.len())
-                .min(u32::MAX as u64) as u32;
-            match state.limiter.check(
-                principal.id,
-                limits,
-                token_cost,
-                std::time::Instant::now(),
-            ) {
+            let token_cost =
+                crate::routing::estimate_prompt_tokens(bytes.len()).min(u32::MAX as u64) as u32;
+            match state
+                .limiter
+                .check(principal.id, limits, token_cost, std::time::Instant::now())
+            {
                 crate::limiter::Decision::Admitted(_) => {}
                 crate::limiter::Decision::Exceeded { retry_after } => {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);
@@ -2663,14 +2661,12 @@ async fn mcp_tools_call(
     // unbounded attacker with a valid key would be free to exhaust them.
     if let Some(principal) = principal {
         if let Some(limits) = &principal.limits {
-            let token_cost = crate::routing::estimate_prompt_tokens(bytes.len())
-                .min(u32::MAX as u64) as u32;
-            match state.limiter.check(
-                principal.id,
-                limits,
-                token_cost,
-                std::time::Instant::now(),
-            ) {
+            let token_cost =
+                crate::routing::estimate_prompt_tokens(bytes.len()).min(u32::MAX as u64) as u32;
+            match state
+                .limiter
+                .check(principal.id, limits, token_cost, std::time::Instant::now())
+            {
                 crate::limiter::Decision::Admitted(_) => {}
                 crate::limiter::Decision::Exceeded { retry_after } => {
                     state.requests_failed.fetch_add(1, Ordering::Relaxed);

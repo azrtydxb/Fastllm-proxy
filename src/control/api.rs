@@ -1494,7 +1494,7 @@ async fn post_provider(
             StatusCode::BAD_REQUEST,
             "credential_kind gcp_service_account needs upstream_api_key to be the service \
               account's JSON key file, with `client_email` and `private_key`"
-                 .to_string(),
+                .to_string(),
         ));
     }
     // SSRF guard on GCP token_uri. The JSON key file can override the
