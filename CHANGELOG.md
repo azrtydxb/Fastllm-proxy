@@ -6,6 +6,38 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## 0.3.5 — 2026-10-10
+
+### Fixed
+
+- **The stall detector needs a baseline.** Counters that have never moved are
+  an engine's normal, not a wedge: an audio model's text-token counters do not
+  advance while it synthesises, and a vLLM TTS model keeps one request
+  resident in its stage gauge forever, so every scrape read
+  running-but-frozen. That backend was ejected ten seconds after every
+  re-entry, on both replicas, forever; kw's `qwen3-tts-base` had been flapping
+  on a five-minute cycle all day. A frozen sample now only counts once the
+  engine has shown moving counters.
+- **A traffic ejection is re-examined when the fleet is actively serving the
+  backend.** Ejections stay per-replica — fast, local — but the fleet verdict
+  now carries whether a peer has requests in flight, and that evidence, not
+  mere reachability, can withdraw the verdict before the backoff runs out.
+  Idle peers still cannot overrule a busy replica, and a genuinely dead
+  backend re-ejects within one probe interval. This was the "different workers
+  see different backends" instability: replicas held phase-shifted ejections
+  for minutes, and which one failed a request depended on which proxy the
+  Service picked.
+- **Provider reachability classifies on a status tail, not digits in the
+  message.** The old substring match read ports and body text — a mock on
+  port :40353 classified as a 403, flaking the suite.
+
+### Changed
+
+- `src/registry.rs` gained the baseline guard and the serving-gated
+  reconsider; `health_report.rs` carries the `serving` bit (serde-defaulted,
+  so mixed versions still understand each other). Tests cover the audio-engine
+  shape and the serving-fleet withdrawal.
+
 ## 0.3.4 — 2026-10-10
 
 ### Security

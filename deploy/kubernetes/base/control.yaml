@@ -30,7 +30,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control
-          image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.4
+          image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.5
           args:
             - --role=control
             - --admin-port=4001

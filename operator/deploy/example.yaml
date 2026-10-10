@@ -17,7 +17,7 @@ metadata:
   name: fastllm
   namespace: fastllm
 spec:
-  image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.4
+  image: ghcr.io/azrtydxb/fastllm-proxy:v0.3.5
 
   database:
     name: fastllm-database
