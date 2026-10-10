@@ -50,12 +50,12 @@ password cracking cheap. Do not unify them.
 A valid session establishes _who_ is calling. Every `/admin/*` handler then
 checks _what_ that principal may do:
 
-| permission                  |                                                             |
-| --------------------------- | ----------------------------------------------------------- |
+| permission                  |                                                              |
+| --------------------------- | ------------------------------------------------------------ |
 | `config:write`              | Models, backends, frontend models, principals, roles, limits |
-| `key:create` / `key:revoke` | API keys                                                    |
-| `usage:read`                | Usage, spend, audit, metrics                                |
-| `model:invoke`              | Per model, and the only one the data plane checks           |
+| `key:create` / `key:revoke` | API keys                                                     |
+| `usage:read`                | Usage, spend, audit, metrics                                 |
+| `model:invoke`              | Per model, and the only one the data plane checks            |
 
 A principal that can log in is not, by that fact, an administrator. This
 closed a real gap: any principal a password had ever been set for used to be a
@@ -75,7 +75,7 @@ themselves any model outright — so it is not a route to anything they could no
 take directly.
 
 The rule it replaced required a grant on the resolved provider model. That
-pinned every grant to a provider model's *name*, so renaming one revoked access
+pinned every grant to a provider model's _name_, so renaming one revoked access
 with nothing reporting it — which migration 0029 did on the dev cluster, to two
 live roles. Provider models are not client-facing names at all now, so a
 frontend model cannot be bypassed by naming what it routes to.
@@ -124,6 +124,37 @@ a session-authenticated admin API, TLS, and a private network. Take away any
 one and it should go back to ClusterIP. The manifests in `deploy/` say so
 where the decision is made, rather than here where nobody applying them would
 read it.
+
+## Outbound URLs are checked, not trusted
+
+Every outbound URL the operator configures — a provider's `api_base`, an MCP
+server, an A2A agent, a GCP service account's `token_uri` — is validated when
+it is stored. Hosts that resolve to private, loopback or link-local addresses
+(RFC 1918, cloud metadata `169.254.169.254`, `0.0.0.0/8`, IPv6 ULA and
+link-local) are rejected, so a stolen admin session cannot quietly point the
+control plane at its own cloud metadata endpoint or another tenant's network.
+
+A deployment whose upstreams are genuinely private says so through
+`FASTLLM_SSRF_ACCEPT`: a comma-separated list of CIDRs and hostnames, where a
+leading dot means any subdomain (`.tools.internal`) and a bare name matches
+exactly. Entries are matched after the block: a listed name is accepted
+whatever it resolves to; a CIDR admits the private addresses it covers. A
+typo drops that entry with a warning at startup rather than failing to start —
+a dead allowlist entry is recoverable, a control plane that refuses to boot is
+not, and the warning is what tells the operator their entry never applied.
+
+The guard's honest limit: the host is resolved once, when the URL is stored,
+and the proxy resolves again on every request. DNS rebinding between the two
+beats the check. That limit is acceptable because everything on the allowlist
+is the operator's own infrastructure — if a deployment ever allowlists a name
+it does not control, that is the day to pin resolved addresses instead.
+
+The GCP token check is stricter than the URL guard, on purpose: a service
+account's `token_uri` must be exactly `oauth2.googleapis.com` or
+`accounts.google.com` over https — host compared, never a substring, since
+`https://evil.com/?x=oauth2.googleapis.com/token` contains the right words.
+The comparison is on the host because the token exchange posts an RSA client
+assertion, which is a bearer credential; http would publish it.
 
 ## Every change is recorded
 

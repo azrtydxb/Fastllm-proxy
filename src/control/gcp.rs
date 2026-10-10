@@ -83,19 +83,32 @@ impl ServiceAccount {
     /// Validate that the token_uri in a service-account JSON does not point
     /// at an arbitrary host — preventing SSRF via the GCP module.
     ///
-    /// Only Google's token endpoints are accepted: `oauth2.googleapis.com`
-    /// (the default) and the legacy `accounts.google.com`. Any other host is
-    /// rejected so that a malicious JSON key file cannot make the control
-    /// plane reach internal networks.
+    /// Only Google's token hosts are accepted: `oauth2.googleapis.com`
+    /// (the default) and the legacy `accounts.google.com`. The comparison is
+    /// on the URL's host exactly, never on a substring — a substring check
+    /// would admit `https://evil.com/?x=oauth2.googleapis.com/token`.
+    /// Anything else is rejected so that a malicious JSON key file cannot
+    /// make the control plane reach internal networks.
     pub fn validate_token_uri(json: &str) -> Result<(), String> {
-        let sa: ServiceAccount =
-            serde_json::from_str(json).map_err(|e| format!("not valid GCP service-account JSON: {e}"))?;
-        let uri = sa.token_uri;
-        if uri.contains("oauth2.googleapis.com/token") || uri.contains("accounts.google.com/o/oauth2/token") {
+        let sa: ServiceAccount = serde_json::from_str(json)
+            .map_err(|e| format!("not valid GCP service-account JSON: {e}"))?;
+        if !sa.token_uri.starts_with("https://") {
+            return Err(format!(
+                "token_uri {:?} must use https — the client assertion is a bearer credential",
+                sa.token_uri
+            ));
+        }
+        let host = crate::security::host_of_url(&sa.token_uri)
+            .map_err(|e| format!("token_uri {:?}: {e}", sa.token_uri))?;
+        if matches!(
+            host.as_str(),
+            "oauth2.googleapis.com" | "accounts.google.com"
+        ) {
             return Ok(());
         }
         Err(format!(
-            "token_uri {uri:?} is not a Google token endpoint — only oauth2.googleapis.com and accounts.google.com are allowed"
+            "token_uri {:?} is not a Google token endpoint — only oauth2.googleapis.com and accounts.google.com are allowed",
+            sa.token_uri
         ))
     }
 }
@@ -404,17 +417,17 @@ mod tests {
     async fn a_token_is_minted_once_and_then_reused() {
         init_minter();
         let (uri, hits) = spawn_token_endpoint(
-            r#"{"access_token":"ya29.minted","expires_in":3600,"token_type":"Bearer"}"#,
+            r#"{"access_token":"test-token.minted","expires_in":3600,"token_type":"Bearer"}"#,
             200,
         )
         .await;
         let sa = key_file_for("reuse", &uri);
 
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.minted");
         assert_eq!(hits.load(Ordering::Relaxed), 1);
 
         // The call a snapshot rebuild makes a second later.
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.minted");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.minted");
         assert_eq!(
             hits.load(Ordering::Relaxed),
             1,
@@ -428,12 +441,15 @@ mod tests {
     async fn a_token_expiring_within_the_margin_is_replaced() {
         init_minter();
         // 60 seconds, comfortably inside the 5-minute margin.
-        let (uri, hits) =
-            spawn_token_endpoint(r#"{"access_token":"ya29.brief","expires_in":60}"#, 200).await;
+        let (uri, hits) = spawn_token_endpoint(
+            r#"{"access_token":"test-token.brief","expires_in":60}"#,
+            200,
+        )
+        .await;
         let sa = key_file_for("brief", &uri);
 
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
-        assert_eq!(access_token(&sa).await.unwrap(), "ya29.brief");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.brief");
+        assert_eq!(access_token(&sa).await.unwrap(), "test-token.brief");
         assert_eq!(
             hits.load(Ordering::Relaxed),
             2,
@@ -458,6 +474,40 @@ mod tests {
             .to_string();
         assert!(err.contains("invalid_grant"), "{err}");
         assert!(err.contains("Invalid JWT"), "{err}");
+    }
+
+    /// The token endpoint check is a security control: its bypasses are the
+    /// thing being tested, not an afterthought.
+    #[test]
+    fn token_uri_allows_only_google_over_https() {
+        let ok =
+            |uri: &str| ServiceAccount::validate_token_uri(&key_file_for("tokchk", uri)).is_ok();
+        assert!(ok("https://oauth2.googleapis.com/token"));
+        assert!(ok("https://accounts.google.com/o/oauth2/token"));
+        // The field is absent: the default is Google's endpoint.
+        assert!(ServiceAccount::validate_token_uri(
+            &serde_json::json!({
+                "type": "service_account",
+                "client_email": "tokchk@example.iam.gserviceaccount.com",
+                "private_key": TEST_KEY,
+            })
+            .to_string()
+        )
+        .is_ok());
+
+        let err = |uri: &str| {
+            ServiceAccount::validate_token_uri(&key_file_for("tokchk", uri))
+                .expect_err("should be rejected")
+        };
+        // The substring bypass the first version of this check had: the
+        // allowlisted text appears only in the query string.
+        assert!(err("https://evil.com/?x=oauth2.googleapis.com/token")
+            .contains("not a Google token endpoint"));
+        // The allowlisted host as a subdomain of an attacker's domain.
+        assert!(err("https://oauth2.googleapis.com.token.evil.com/token")
+            .contains("not a Google token endpoint"));
+        // Plain http would carry the RSA client assertion in the clear.
+        assert!(err("http://oauth2.googleapis.com/token").contains("must use https"));
     }
 
     /// The assertion is what Google validates, so its claims are asserted

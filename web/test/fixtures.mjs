@@ -22,6 +22,7 @@ const FIXTURES = {
     policy: "cache-affinity",
     webhook_configured: true,
     webhook_signed: true,
+    ssrf_accept: [".kuvryn-ai-workloads.svc", "10.42.0.0/16", "10.43.0.0/16"],
     classifier_tier1: true,
     classifier_tier2: false,
     session_ttl_hours: 12,

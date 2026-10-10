@@ -203,6 +203,16 @@ export function Settings({ onUnauthorised, config }) {
                 : "quiet"
             }
           />
+          <Setting
+            label="Private upstream allowlist"
+            hint="FASTLLM_SSRF_ACCEPT — private addresses the outbound-URL guard admits anyway, because these are the deployment's own in-cluster backends. Everything else private is rejected at write time"
+            value={
+              c.ssrf_accept && c.ssrf_accept.length
+                ? c.ssrf_accept.join(", ")
+                : "none — public upstreams only"
+            }
+            tone={c.ssrf_accept && c.ssrf_accept.length ? "neutral" : "quiet"}
+          />
         </Card>
 
         <Card title="Response cache">

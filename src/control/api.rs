@@ -1179,7 +1179,10 @@ struct NewProvider {
 /// loopback address — blocking SSRF from an operator account.  The admin API
 /// is the only place `api_base` values enter the system, so one check here
 /// covers every write route.
-fn normalise_api_base(raw: &str) -> Result<String, ApiError> {
+fn normalise_api_base(
+    raw: &str,
+    ssrf_accept: &[crate::security::Allow],
+) -> Result<String, ApiError> {
     let api_base = raw.trim().trim_end_matches('/').to_string();
     if !(api_base.starts_with("http://") || api_base.starts_with("https://")) {
         return Err(api_error(
@@ -1188,12 +1191,17 @@ fn normalise_api_base(raw: &str) -> Result<String, ApiError> {
         ));
     }
     // SSRF guard: reject private, loopback, and link-local targets so the
-    // proxy cannot be used as an SSRF vector against itself.
-    if let Err(e) = crate::security::validate_api_base(&api_base) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            format!("api_base {api_base:?}: {e}"),
-        ));
+    // proxy cannot be used as an SSRF vector against itself. Skipped while a
+    // catalogue `<placeholder>` is still in the URL — that is not an address,
+    // and the caller's placeholder error names the actual mistake where a
+    // DNS error would only report it as a network fault.
+    if !api_base.contains('<') {
+        if let Err(e) = crate::security::validate_api_base(&api_base, ssrf_accept) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("api_base {api_base:?}: {e}"),
+            ));
+        }
     }
     Ok(api_base)
 }
@@ -1415,7 +1423,7 @@ async fn post_provider(
             "api_base is required, or a catalogue_key that supplies one".to_string(),
         ));
     };
-    let api_base = normalise_api_base(&raw_base)?;
+    let api_base = normalise_api_base(&raw_base, &ctx.deployment.ssrf_accept)?;
     // A catalogue base_url with a `<region>` still in it is not an address.
     // Storing it would produce a provider that resolves nowhere and reports
     // itself as unreachable, which describes the operator's typo as a fault of
@@ -1494,7 +1502,7 @@ async fn post_provider(
             StatusCode::BAD_REQUEST,
             "credential_kind gcp_service_account needs upstream_api_key to be the service \
               account's JSON key file, with `client_email` and `private_key`"
-                 .to_string(),
+                .to_string(),
         ));
     }
     // SSRF guard on GCP token_uri. The JSON key file can override the
@@ -1803,7 +1811,7 @@ async fn patch_provider(
         .map_err(|e| db_error("changing a provider's kind", &e))?;
     }
     if let Some(base) = body.api_base.as_deref() {
-        let api_base = normalise_api_base(base)?;
+        let api_base = normalise_api_base(base, &ctx.deployment.ssrf_accept)?;
         if api_base.contains('<') {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
@@ -2360,7 +2368,7 @@ async fn post_a2a_agent(
         ));
     }
     // SSRF guard on agent URL.
-    if let Err(e) = crate::security::validate_api_base(&body.url) {
+    if let Err(e) = crate::security::validate_api_base(&body.url, &ctx.deployment.ssrf_accept) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             format!("a2a agent URL: {e}"),
@@ -2464,7 +2472,7 @@ async fn patch_a2a_agent(
     }
     // SSRF guard on URL update.
     if let Some(url) = body.url.as_deref() {
-        if let Err(e) = crate::security::validate_api_base(url) {
+        if let Err(e) = crate::security::validate_api_base(url, &ctx.deployment.ssrf_accept) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 format!("a2a agent URL: {e}"),
@@ -2620,7 +2628,7 @@ async fn post_mcp_server(
         ));
     }
     // SSRF guard on MCP server URL.
-    if let Err(e) = crate::security::validate_api_base(&body.url) {
+    if let Err(e) = crate::security::validate_api_base(&body.url, &ctx.deployment.ssrf_accept) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             format!("MCP server URL: {e}"),
@@ -2717,7 +2725,7 @@ async fn patch_mcp_server(
     }
     // SSRF guard on URL update.
     if let Some(url) = body.url.as_deref() {
-        if let Err(e) = crate::security::validate_api_base(url) {
+        if let Err(e) = crate::security::validate_api_base(url, &ctx.deployment.ssrf_accept) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 format!("MCP server URL: {e}"),
@@ -3264,7 +3272,7 @@ fn validate_extra_headers(
     let mut out = serde_json::Map::new();
     for (name, value) in map {
         // Block CRLF / LF / CR in header values — prevents header injection.
-        if value.contains(|c: char| c == '\n' || c == '\r') {
+        if value.contains(['\n', '\r']) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -3478,7 +3486,7 @@ async fn attach_by_address(ctx: &Ctx, body: &NewBackend) -> Result<AttachedProvi
     // Same rule `FileConfig::validate` applies, and for the same reason:
     // accepting the URL and then failing every request against it is the
     // worst of both.
-    let api_base = normalise_api_base(raw)?;
+    let api_base = normalise_api_base(raw, &ctx.deployment.ssrf_accept)?;
 
     let encrypted = encrypt_upstream_key(ctx, body.upstream_api_key.as_deref())?;
 
@@ -8106,6 +8114,9 @@ async fn get_config(
         "policy": d.policy,
         "webhook_configured": d.webhook_configured,
         "webhook_signed": d.webhook_signed,
+        // The outbound-URL guard's exceptions, as the operator could have
+        // written them into FASTLLM_SSRF_ACCEPT.
+        "ssrf_accept": d.ssrf_accept,
         "classifier_tier1": d.classifier_tier1,
         "classifier_tier2": d.classifier_tier2,
         "session_ttl_hours": crate::control::auth::SESSION_TTL_HOURS,
@@ -8448,6 +8459,10 @@ pub struct Deployment {
     /// anyone who learns it can post to the receiver.
     pub webhook_configured: bool,
     pub webhook_signed: bool,
+    /// Parsed `FASTLLM_SSRF_ACCEPT`: the outbound-URL guard's exceptions.
+    /// Shown here so an operator can see why a private address was admitted
+    /// without reading the pod's env. See `security::validate_api_base`.
+    pub ssrf_accept: Arc<[crate::security::Allow]>,
 }
 
 /// Eight parameters, which clippy dislikes. Each is a distinct dependency
@@ -9147,6 +9162,21 @@ mod tests {
                 policy: "cache-affinity".into(),
                 webhook_configured: false,
                 webhook_signed: false,
+                // The tests' upstreams are 127.0.0.1 servers; production
+                // gets its list from FASTLLM_SSRF_ACCEPT in main.rs.
+                ssrf_accept: Arc::new([
+                    crate::security::Allow::Name("127.0.0.1".into()),
+                    crate::security::Allow::Name("localhost".into()),
+                    // Fake upstream names the tests register without wanting
+                    // them to resolve.
+                    crate::security::Allow::Name("backend".into()),
+                    crate::security::Allow::Name("chatgpt".into()),
+                    crate::security::Allow::Name("other".into()),
+                    crate::security::Allow::Name("plain".into()),
+                    crate::security::Allow::Name("route-test".into()),
+                    crate::security::Allow::Name("somewhere-else".into()),
+                    crate::security::Allow::Name("x".into()),
+                ]),
             }),
             started_at: std::time::Instant::now(),
             webhook: Arc::new(crate::webhook::WebhookSender::disabled()),

@@ -51,6 +51,14 @@ spec:
             - name: FASTLLM_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef: { name: fastllm-secrets, key: encryption-key }
+            # The SSRF guard on operator-configured URLs rejects hosts that
+            # resolve to private addresses — which on this deployment is every
+            # in-cluster engine (`*.kuvryn-ai-workloads.svc` → 10.43.x.x).
+            # Without the allowlist, every engine attach and heartbeat
+            # re-learn 400s. Names win over resolution; CIDRs match what
+            # allowed names resolve to.
+            - name: FASTLLM_SSRF_ACCEPT
+              value: ".kuvryn-ai-workloads.svc,10.42.0.0/16,10.43.0.0/16"
             - name: FASTLLM_LOG
               value: info
           readinessProbe:
