@@ -62,7 +62,7 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Nothing in this job round-trips to GitHub any more: dependency sources
       # come from the Nexus cargo proxy and compiled artifacts from sccache,
       # both on the LAN. Both need to trust the cluster CA.
@@ -241,7 +241,7 @@ jobs:
     container:
       image: node:22-bookworm-slim
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This job had no dependency caching at all, so every run pulled the
       # whole tree from registry.npmjs.org. The proxy serves it from the LAN
       # and, unlike actions/cache, uploads nothing.
@@ -275,7 +275,7 @@ jobs:
     runs-on: arc-azrtydxb-publish
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -407,7 +407,7 @@ jobs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -439,7 +439,7 @@ jobs:
   agent:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -451,7 +451,7 @@ jobs:
     timeout-minutes: 30
     permissions: { contents: read, packages: write }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -480,7 +480,7 @@ jobs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
