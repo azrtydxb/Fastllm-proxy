@@ -2512,6 +2512,32 @@ async fn agent_rpc(
         );
     }
 
+    // Rate limiting: A2A agents execute arbitrary actions (sending messages,
+    // running code, etc.). An attacker with a valid key must not be able to
+    // fire unlimited actions at the upstream without hitting the caller's
+    // token or request quotas.
+    if let Some(principal) = principal {
+        if let Some(limits) = &principal.limits {
+            let token_cost = crate::routing::estimate_prompt_tokens(bytes.len())
+                .min(u32::MAX as u64) as u32;
+            match state.limiter.check(
+                principal.id,
+                limits,
+                token_cost,
+                std::time::Instant::now(),
+            ) {
+                crate::limiter::Decision::Admitted(_) => {}
+                crate::limiter::Decision::Exceeded { retry_after } => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .record_rejection(crate::telemetry::Rejection::RateLimited);
+                    return rate_limited_response(retry_after);
+                }
+            }
+        }
+    }
+
     let mut builder = Request::builder()
         .method(Method::POST)
         .uri(&agent.url)
@@ -2630,6 +2656,32 @@ async fn mcp_tools_call(
         .get("arguments")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+
+    // Rate limiting: apply the same limiter check that protects model
+    // completion endpoints. MCP tool calls can trigger expensive side-effectful
+    // operations upstream (file writes, HTTP calls, shell commands), so an
+    // unbounded attacker with a valid key would be free to exhaust them.
+    if let Some(principal) = principal {
+        if let Some(limits) = &principal.limits {
+            let token_cost = crate::routing::estimate_prompt_tokens(bytes.len())
+                .min(u32::MAX as u64) as u32;
+            match state.limiter.check(
+                principal.id,
+                limits,
+                token_cost,
+                std::time::Instant::now(),
+            ) {
+                crate::limiter::Decision::Admitted(_) => {}
+                crate::limiter::Decision::Exceeded { retry_after } => {
+                    state.requests_failed.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .record_rejection(crate::telemetry::Rejection::RateLimited);
+                    return rate_limited_response(retry_after);
+                }
+            }
+        }
+    }
 
     let (server, tool) = match crate::mcp::route(snapshot, principal, name) {
         Ok(pair) => pair,
