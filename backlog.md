@@ -937,3 +937,30 @@ Three GitHub issues, one change.
   whose every backend is out, with nothing further in its chain, now tries them
   anyway. Root cause of the probes failing was not established from the issue's
   logs; if it recurs, the `backend out of rotation` line says which route.
+
+## Security hardening: outbound URLs checked where they are stored — done (2026-10-10)
+
+From the same audit pass that produced the stability fixes, the write-side
+findings. `src/security.rs` validates every operator-configured outbound URL
+at write time — provider `api_base`, MCP servers, A2A agents — and rejects
+hosts resolving into private, loopback, link-local or `0.0.0.0/8` ranges, so a
+stolen admin session cannot point the control plane at cloud metadata or
+another private network. Upstreams that are legitimately private name
+themselves in `FASTLLM_SSRF_ACCEPT` (CIDRs and hostnames, `.`-prefixed for
+subdomains); on kw that is the in-cluster engines, set through the CR's
+`spec.control.pod.extraEnv` — the base manifests are the manual-install path
+and the operator ignores them.
+
+Also in this pass: the GCP `token_uri` must be exactly Google's two token
+hosts over https (host compared, never a substring — the substring version
+admitted `https://evil.com/?x=oauth2.googleapis.com/token`); MCP tool calls
+and A2A agent RPC consume the caller's rate limits instead of being exempt;
+CRLF is rejected in provider extra headers; decrypting a legacy V1 credential
+logs a warning naming the re-encrypt path. The allowlist rides `Deployment`
+so `/admin/config` and the Settings screen show what was admitted and the
+database tests can inject their loopback upstreams.
+
+Known limit, recorded in the module doc: the host is resolved once at write
+time and the proxy resolves again per request, so DNS rebinding beats the
+check for any name the operator does not itself control. Revisit the day an
+allowlist entry stops being the operator's own infrastructure.
