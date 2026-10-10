@@ -13,7 +13,7 @@
     "screenshots": "node test/screenshots.mjs"
   },
   "dependencies": {
-    "react": "^18.3.1",
+    "react": "^19.3.0",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
