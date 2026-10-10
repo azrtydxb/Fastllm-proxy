@@ -238,6 +238,15 @@ pub fn validate_api_base(api_base: &str) -> Result<(), String> {
 fn validate_with(api_base: &str, allow: &[Allow]) -> Result<(), String> {
     let host = host_of_url(api_base)?;
 
+    // A name on the allowlist is accepted without resolving it: the operator
+    // allowed that name, and several of the names a deployment lists —
+    // in-cluster service DNS is the normal case — resolve only where the
+    // control plane runs. Pinning them to today's addresses would also break
+    // legitimately re-homed services.
+    if name_allowed(&host, allow) {
+        return Ok(());
+    }
+
     // If it looks like a hostname (contains '.' or ':'), try DNS resolution.
     // If it looks like an IP literal (no dots, or IPv6), parse directly.
     let addrs: Vec<std::net::IpAddr> = if host.contains(':') {
@@ -260,13 +269,6 @@ fn validate_with(api_base: &str, allow: &[Allow]) -> Result<(), String> {
 
     if addrs.is_empty() {
         return Err(format!("{host}: host resolved to no addresses"));
-    }
-
-    // A name on the allowlist is accepted whatever it resolves to: the
-    // operator allowed that name, and pinning it to today's addresses would
-    // break legitimately re-homed services.
-    if name_allowed(&host, allow) {
-        return Ok(());
     }
 
     for addr in &addrs {
