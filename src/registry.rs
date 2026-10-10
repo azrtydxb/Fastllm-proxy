@@ -1200,8 +1200,6 @@ model_list:
 
         // Now frozen at the moved-to values.
         let l = load(2, 200, 90, Some(20));
-        // Nothing scraped yet: comparison has no baseline.
-        assert!(!b.check_stall(&l, 2));
         b.record_engine_inflight(&l, 3);
         // First frozen sample: below the threshold, still in rotation.
         assert!(!b.check_stall(&l, 2));
@@ -1336,8 +1334,14 @@ model_list:
         // GET /v1/models, so the probe must not reset the stall counter.
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let l = load(2, 100, 50, Some(10));
-        b.record_engine_inflight(&l, 1);
+        // Baseline: the engine showed movement before it froze.
+        let moving = load(2, 100, 50, Some(10));
+        b.record_engine_inflight(&moving, 1);
+        let moved = load(2, 200, 90, Some(20));
+        assert!(!b.check_stall(&moved, 2));
+        b.record_engine_inflight(&moved, 2);
+        let l = load(2, 200, 90, Some(20));
+        b.record_engine_inflight(&l, 3);
         assert!(!b.check_stall(&l, 2));
         b.mark_probe_ok();
         assert!(b.check_stall(&l, 2));
@@ -1381,6 +1385,11 @@ model_list:
             "a serving fleet re-examines the verdict"
         );
         assert!(b.is_healthy());
+
+        // A fresh ejection, for the timer flow below.
+        b.ejected_by_traffic.store(true, Ordering::Relaxed);
+        b.healthy.store(false, Ordering::Relaxed);
+        b.ejected_until_ms.store(u64::MAX, Ordering::Relaxed);
 
         // Once the timer has run out a passing probe lets it back, on
         // probation: one more timeout and it is out again, for longer.
