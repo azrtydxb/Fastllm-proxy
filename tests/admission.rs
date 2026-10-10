@@ -188,6 +188,9 @@ fn start_all(port: u16, admin_port: u16, database_url: &str) -> Proc {
         .env("FASTLLM_PROXY_TOKEN", PROXY_TOKEN)
         .env("FASTLLM_ENCRYPTION_KEY", "ad".repeat(32))
         .env("FASTLLM_DATABASE_MAX_CONNECTIONS", "2")
+        // The test's upstream engine is a loopback server; a deployment that
+        // proxies to private backends says so exactly this way.
+        .env("FASTLLM_SSRF_ACCEPT", "127.0.0.1,localhost")
         .spawn()
         .expect("failed to spawn fastllm-proxy --role all");
     let proc = Proc(child);
