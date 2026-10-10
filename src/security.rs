@@ -244,24 +244,17 @@ pub fn validate_api_base(api_base: &str, allow: &[Allow]) -> Result<(), String> 
         return Ok(());
     }
 
-    // If it looks like a hostname (contains '.' or ':'), try DNS resolution.
-    // If it looks like an IP literal (no dots, or IPv6), parse directly.
-    let addrs: Vec<std::net::IpAddr> = if host.contains(':') {
-        // Could be an IPv6 address like "::1" or "2001:db8::1"
-        host.parse::<std::net::IpAddr>()
-            .map(|ip| vec![ip])
-            .map_err(|_| format!("{host}: not a valid IPv6 address"))?
-    } else if host.contains('.') {
-        // Looks like a hostname; try to resolve it
+    // An IP literal — v4, or v6 once brackets and ports are stripped — needs
+    // no resolution. Anything else is a hostname, single-label ones included:
+    // docker-compose and in-cluster service names have no dots, and the
+    // operator's DNS decides where they go, same as any dotted name.
+    let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![ip]
+    } else {
         format!("{host}:443")
             .to_socket_addrs()
             .map(|iter| iter.map(|sa| sa.ip()).collect())
             .map_err(|e| format!("{host}: DNS resolution failed: {e}"))?
-    } else {
-        // Looks like an IPv4 address
-        host.parse::<std::net::IpAddr>()
-            .map(|ip| vec![ip])
-            .map_err(|_| format!("{host}: not a valid IP address or hostname"))?
     };
 
     if addrs.is_empty() {

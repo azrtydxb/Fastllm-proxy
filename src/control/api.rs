@@ -1191,12 +1191,17 @@ fn normalise_api_base(
         ));
     }
     // SSRF guard: reject private, loopback, and link-local targets so the
-    // proxy cannot be used as an SSRF vector against itself.
-    if let Err(e) = crate::security::validate_api_base(&api_base, ssrf_accept) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            format!("api_base {api_base:?}: {e}"),
-        ));
+    // proxy cannot be used as an SSRF vector against itself. Skipped while a
+    // catalogue `<placeholder>` is still in the URL — that is not an address,
+    // and the caller's placeholder error names the actual mistake where a
+    // DNS error would only report it as a network fault.
+    if !api_base.contains('<') {
+        if let Err(e) = crate::security::validate_api_base(&api_base, ssrf_accept) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("api_base {api_base:?}: {e}"),
+            ));
+        }
     }
     Ok(api_base)
 }
@@ -9162,6 +9167,10 @@ mod tests {
                 ssrf_accept: Arc::new([
                     crate::security::Allow::Name("127.0.0.1".into()),
                     crate::security::Allow::Name("localhost".into()),
+                    // Fake upstream names the tests register without wanting
+                    // them to resolve.
+                    crate::security::Allow::Name("chatgpt".into()),
+                    crate::security::Allow::Name("route-test".into()),
                 ]),
             }),
             started_at: std::time::Instant::now(),
