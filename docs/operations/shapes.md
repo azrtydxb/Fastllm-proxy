@@ -85,7 +85,7 @@ docker run -d --name fastllm \
   -e FASTLLM_ROLE=all \
   -e FASTLLM_DATABASE_URL=postgres://fastllm@db/fastllm \
   -e FASTLLM_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  ghcr.io/azrtydxb/fastllm-proxy:v0.3.3
+  ghcr.io/azrtydxb/fastllm-proxy:v0.3.4
 ```
 
 Note the asymmetry in the port mappings: `:4000` is published, `:4001` is
@@ -233,7 +233,7 @@ reason to run a controller:
 ```console
 $ kubectl -n fastllm get fllm
 NAME      PHASE   GATEWAY   CONTROL   IMAGE                                   AGE
-fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.3.3   2m
+fastllm   Ready   3/3       true      ghcr.io/azrtydxb/fastllm-proxy:v0.3.4   2m
 ```
 
 `IMAGE` is what is actually serving, not what was asked for — during an
@@ -247,11 +247,11 @@ exposes a replica count for it.
 
 What changes as the data plane grows:
 
-|                                  |                                                                                                                                                                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Prefix affinity dilutes**      | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct                                   |
-| **Health is per replica**        | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom                       |
-| **Rate limits are per replica**  | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property |
+|                                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Prefix affinity dilutes**      | Affinity is per process, so N replicas can hold N copies of a prefix. Fewer, larger replicas cache better than many small ones — the opposite of the usual instinct                                                                                                                                                                                                                                                                                                                  |
+| **Health is per replica**        | Each reports its own view. The **Fleet** screen never merges them: one replica seeing a backend down while others do not is a partition, and averaging deletes the only symptom                                                                                                                                                                                                                                                                                                      |
+| **Rate limits are per replica**  | Counters are in memory, reconciled against the database periodically. A 60/min limit across 6 replicas is approximately 60/min, not exactly. Budgets, which are cumulative, do not have this property                                                                                                                                                                                                                                                                                |
 | **Snapshot versions can differ** | A replica on an older snapshot answers `/health` with `ok` and misbehaves only on whatever changed — usually a key it has never seen. The Fleet screen's version column is where that shows. Expect spread after every change: poll and report are separate timers. Judge it by how long the newest snapshot has been published, not by the gap between version numbers — versions are stamped when the content last changed, so the gap measures edit history rather than staleness |
 
 For the request path itself, `--workers` and `--pool-max-idle` are the knobs

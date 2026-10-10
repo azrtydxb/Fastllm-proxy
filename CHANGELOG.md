@@ -6,6 +6,40 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## 0.3.4 — 2026-10-10
+
+### Security
+
+- **Outbound URLs are validated where they are stored.** A provider's
+  `api_base`, an MCP server's URL, an A2A agent's URL and a GCP service
+  account's `token_uri` are checked when written: a host resolving into a
+  private, loopback, link-local or `0.0.0.0/8` range is rejected, so a stolen
+  admin session cannot point the control plane at cloud metadata or another
+  private network. Upstreams that are legitimately private — a proxy in front
+  of its own cluster's engines is the normal case — are named in
+  `FASTLLM_SSRF_ACCEPT` (CIDRs, or hostnames with `.`-prefix for subdomains);
+  the kw manifest sets it for the cluster ranges. A bad entry is dropped with
+  a warning rather than stopping startup.
+- **The GCP `token_uri` check compares the URL host exactly and requires
+  https.** The substring comparison it replaced admitted
+  `https://evil.com/?x=oauth2.googleapis.com/token`, and plain http would have
+  carried the RSA client assertion — a bearer credential — in the clear.
+- **MCP tool calls and A2A agent RPC are rate limited.** They were exempt
+  from the limiter, so a valid key could fire unlimited side-effectful
+  operations upstream; both now consume the same token/request quotas as
+  model traffic and answer 429 like it.
+- **Line breaks are rejected in provider extra headers**, closing header
+  injection through `HeaderValue::from_str`'s leniency.
+- **A warning is logged whenever a legacy V1-encrypted credential is
+  decrypted.** V1's version byte is not AEAD-authenticated; V2 is current,
+  and the warning names the re-encrypt path.
+
+### Changed
+
+- `src/security.rs` is the new module; `normalise_api_base` and the MCP/A2A
+  write routes call it. Tests cover the bypass shapes (substring hosts,
+  lookalike domains, `0.1.2.3`-style `0/8`) and the allowlist matcher.
+
 ## 0.3.3 — 2026-10-05
 
 ### Changed
