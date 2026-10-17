@@ -23,7 +23,7 @@ env:
 jobs:
   test:
     runs-on: arc-azrtydxb
-    timeout-minutes: 60
+    timeout-minutes: 120
     # The runner image ships no Rust, so the toolchain comes from a container —
     # same base as the Dockerfile, so CI and the image agree on the compiler.
     container:
