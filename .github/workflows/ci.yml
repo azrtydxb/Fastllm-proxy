@@ -361,7 +361,7 @@ jobs:
           password: ${{ secrets.NEXUS_PASSWORD }}
 
       - name: Build & push (arm64 → zot)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           # arm64 only: every node in kw is arm64, and a Rust release build
@@ -376,7 +376,7 @@ jobs:
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
       - name: Build & push the operator (arm64 → zot)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: operator/Dockerfile
@@ -420,7 +420,7 @@ jobs:
           docker buildx inspect --bootstrap local-arm64
       - name: Proxy (arm64, digest only)
         id: proxy
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           builder: local-arm64
@@ -428,7 +428,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (arm64, digest only)
         id: operator
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: operator/Dockerfile
@@ -460,7 +460,7 @@ jobs:
       # Pure python, both platforms from one builder: COPY needs no emulation,
       # so the amd64 layers build from the arm64 runner without a cross node.
       - name: Node agent (multiarch)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: agent/Dockerfile
@@ -498,7 +498,7 @@ jobs:
           docker buildx inspect --bootstrap local-amd64
       - name: Proxy (amd64, digest only)
         id: proxy
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           builder: local-amd64
@@ -506,7 +506,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (amd64, digest only)
         id: operator
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: operator/Dockerfile
