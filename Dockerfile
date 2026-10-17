@@ -12,7 +12,7 @@
 # `web/dist/`, which the `build` stage below copies in before compiling —
 # `rust-embed` reads whatever is on disk under `web/dist/` at that point,
 # nothing more.
-FROM node:22-bookworm-slim AS web
+FROM node:25-bookworm-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
