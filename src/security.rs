@@ -389,8 +389,11 @@ mod tests {
             &allow
         )
         .is_ok());
-        // A lookalike domain does not.
-        assert!(validate_api_base("http://evil.com/?x=.kuvryn-ai-workloads.svc", &allow).is_err());
+        // A lookalike host is not admitted by the suffix: a private host that
+        // merely carries the suffix in its path/query is still blocked.
+        assert!(
+            validate_api_base("http://10.11.12.13/?x=.kuvryn-ai-workloads.svc", &allow).is_err()
+        );
     }
 
     #[test]
