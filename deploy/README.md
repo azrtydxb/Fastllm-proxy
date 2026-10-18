@@ -29,7 +29,7 @@ walks through all five shapes from a bare binary up to this one.
 > | `control.yaml`, `deployment.yaml`   | `image:` — registry host and pinned digest                                           |
 > | `service.yaml`, `fastllmproxy.yaml` | `lbipam.cilium.io/ips` and `loadBalancerClass` — or drop them and let your LB assign |
 > | `control.yaml`                      | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                            |
-> | `control.yaml`                      | the CNPG `Cluster` — or point `FASTLLM_DATABASE_URL` at your own Postgres            |
+> | `control.yaml`                      | the `fastllm-db-shared` Secret's `uri` — or point `FASTLLM_DATABASE_URL` at your own Postgres |
 
 ## The gateway's two addresses
 
@@ -134,7 +134,7 @@ runs long should stream; there is no setting here that helps.
 
 Two Deployments, one Postgres, since Task 12:
 
-- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (a CloudNativePG `Cluster`, `fastllm-pg`), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table), `/snapshot` and `/usage`. A `LoadBalancer` Service on port 4001, pinned to `192.168.10.129` — its own VIP, deliberately not the gateway's. See "The admin API and UI are on their own VIP" below.
+- **`fastllm-control`** (`control.yaml`) — `--role=control`. Database (the cluster's shared Postgres, reached through the `fastllm-db-shared` Secret's `uri`; the standalone `fastllm-pg` CNPG `Cluster` was retired in favour of the shared instance), the admin API (`/admin/*` — keys, principals, roles, models, backends; see README.md for the full route table), `/snapshot` and `/usage`. A `LoadBalancer` Service on port 4001, pinned to `192.168.10.129` — its own VIP, deliberately not the gateway's. See "The admin API and UI are on their own VIP" below.
 - **`fastllm-proxy`** (`deployment.yaml`) — `--role=proxy`. Polls `fastllm-control`'s `/snapshot` over `FASTLLM_CONTROL_URL`, authenticating with `FASTLLM_PROXY_TOKEN`. Caches the last snapshot it received to an `emptyDir` at `/var/lib/fastllm`, so a pod restart while the control plane is down still comes up serving the last-known model/key set instead of crash-looping or refusing traffic.
 
 ### TLS on `/snapshot` and `/usage`
@@ -254,8 +254,11 @@ The cutover that keeps the gateway serving throughout:
 
 ```bash
 # 1. Back up what cannot be regenerated: the database, and the manifests as
-#    they stand.
-kubectl -n fastllm exec fastllm-pg-1 -- pg_dump -U postgres -d fastllm --no-owner > fastllm.sql
+#    they stand. The database is the cluster's shared Postgres now (the
+#    `fastllm-db-shared` Secret's `uri`), so dump it through that URL rather
+#    than exec-ing into a per-app CNPG pod — there no longer is one.
+DB_URL=$(kubectl -n fastllm get secret fastllm-db-shared -o jsonpath='{.data.uri}' | base64 -d)
+pg_dump "$DB_URL" --no-owner > fastllm.sql
 kubectl -n fastllm get deploy,svc,cm,pdb -o yaml > fastllm-manifests.yaml
 
 # 2. Note the ReplicaSets that are about to be orphaned, by name. Orphaning a
@@ -412,7 +415,7 @@ key. Both expose backend addresses, so keep the VIP on the trusted network.
 
 ## Changing the model set
 
-Models and backends now live in `fastllm-pg`, not the ConfigMap — `configmap.yaml`
+Models and backends now live in the database, not the ConfigMap — `configmap.yaml`
 only carries the `fastllm:` tuning block since the control/proxy split.
 `fastllm-proxy import` is the supported way to seed or update them from a
 LiteLLM-format file, and it is idempotent:

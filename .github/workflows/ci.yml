@@ -40,6 +40,10 @@ jobs:
       # come from the Nexus cargo proxy and compiled artifacts from sccache,
       # both on the LAN. The `cargo` binary itself stays on PATH from the image.
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      # Cargo's default is 3 retries. The Nexus mirror has gone away mid-build
+      # before; more retries ride out a restart that the reachability probe in
+      # `Point cargo at the local proxy` happened to miss.
+      CARGO_NET_RETRY: "10"
       # sccache config. Set at job level rather than written into $GITHUB_ENV so
       # the password is not persisted to a file on the runner.
       RUSTC_WRAPPER: /usr/local/bin/sccache
@@ -57,7 +61,8 @@ jobs:
       SECRET_LEN_TEST: ${{ secrets.SECRET_LEN_TEST }}
     # A sibling service container, reachable by its service name — not
     # localhost, which is the `test` container's own loopback, not the
-    # runner's. Same Postgres major version CNPG runs in deploy/control.yaml.
+    # runner's. Same Postgres major version the shared cluster runs in
+    # production (deploy/control.yaml points at it via `fastllm-db-shared`).
     services:
       postgres:
         image: postgres:17
@@ -77,26 +82,84 @@ jobs:
       # because those only cover tools that read them: sccache is a Rust binary
       # whose TLS backend may ignore SSL_CERT_FILE, and it fails soft — a trust
       # error there would silently disable caching instead of failing the build.
-      # One insecure fetch, and everything after it verifies.
+      #
+      # The CA is pinned in-repo (.github/ca/cluster-ca.crt), so the normal path
+      # needs no network at all and cannot flake. The live fetch is only a
+      # fallback for when the pinned file is gone, and it retries with backoff:
+      # the one failure this step has actually had was a single curl against an
+      # unreachable Nexus (exit 7). If neither works, the CA is not worth
+      # failing the job over — it only secures the Nexus mirror — so the mirror
+      # is skipped with a warning and the build falls back to the default
+      # registry. See the `Point cargo at the local proxy` step for the other
+      # half of that degradation.
       - name: Trust the cluster CA
+        id: ca
         run: |
-          curl -sk -o /usr/local/share/ca-certificates/cluster-ca.crt \
-            https://192.168.10.131:8443/repository/public/cluster-ca.crt
-          update-ca-certificates
-          echo "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
+          set -u
+          CA_DEST=/usr/local/share/ca-certificates/cluster-ca.crt
+          CA_URL=https://192.168.10.131:8443/repository/public/cluster-ca.crt
+          PINNED="$GITHUB_WORKSPACE/.github/ca/cluster-ca.crt"
+
+          trust() {
+            install -m644 "$1" "$CA_DEST"
+            update-ca-certificates >/dev/null
+            echo "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
+          }
+
+          if [ -s "$PINNED" ] && grep -q 'BEGIN CERTIFICATE' "$PINNED"; then
+            echo "Trusting the pinned cluster CA at $PINNED"
+            trust "$PINNED"
+            echo "status=pinned" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # -f turns an HTTP error into a failure instead of an error page
+          # written into the trust store, and the grep refuses anything that is
+          # not a PEM certificate before it is installed.
+          for attempt in 1 2 3 4 5; do
+            if curl -skf --connect-timeout 10 --max-time 30 -o /tmp/cluster-ca.crt "$CA_URL" \
+               && grep -q 'BEGIN CERTIFICATE' /tmp/cluster-ca.crt; then
+              echo "Fetched the cluster CA on attempt $attempt"
+              trust /tmp/cluster-ca.crt
+              echo "status=fetched" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            backoff=$(( attempt * 5 ))
+            echo "::warning::cluster CA fetch attempt $attempt failed; retrying in ${backoff}s"
+            sleep "$backoff"
+          done
+
+          echo "::warning::cluster CA unreachable at $CA_URL after 5 attempts; continuing without it. The Nexus mirror will be skipped."
+          echo "status=missing" >> "$GITHUB_OUTPUT"
       # The remote behind this proxy is index.crates.io, not crates.io — a
       # proxy pointed at the latter serves the web API but no sparse index,
       # and cargo cannot use it at all.
+      #
+      # Skipped when the CA is missing (the mirror's TLS would fail anyway), and
+      # gated on a reachability probe when it is trusted: a trusted CA says
+      # nothing about the mirror being up. One run trusted the CA fine and then
+      # died an hour later when cargo could not reach the same host — "spurious
+      # network error [7] ... 192.168.10.131:8443" — which the log reports as a
+      # clippy failure. Falling back to crates.io (the runner has public
+      # internet; Cargo.lock names crates.io, not the mirror) turns that outage
+      # into a slower step instead of a red job.
       - name: Point cargo at the local proxy
+        if: steps.ca.outputs.status != 'missing'
         run: |
           mkdir -p "$CARGO_HOME"
-          cat >> "$CARGO_HOME/config.toml" <<'EOF'
+          if curl -sf --connect-timeout 5 --max-time 15 \
+               -o /dev/null https://192.168.10.131:8443/repository/cargo/config.json; then
+            cat >> "$CARGO_HOME/config.toml" <<'EOF'
           [source.crates-io]
           replace-with = "nexus"
 
           [source.nexus]
           registry = "sparse+https://192.168.10.131:8443/repository/cargo/"
           EOF
+            echo "cargo is pointed at the Nexus mirror"
+          else
+            echo "::warning::Nexus cargo mirror unreachable; falling back to the default registry (crates.io)"
+          fi
       # sccache instead of actions/cache. The problem with actions/cache here was
       # not the upload alone, it is that the cache is remote at all: on the last
       # run it restored nothing (2s miss), compiled everything from scratch, and
@@ -265,10 +328,17 @@ jobs:
           path: lcov.info
           if-no-files-found: ignore
       # Prints hits, misses and cache size. Without this the cache is invisible
-      # and there is no way to tell whether it is earning its keep.
+      # and there is no way to tell whether it is earning its keep. Guarded so a
+      # run that never reached `Install sccache` (an earlier step failed) does
+      # not turn into a second red, `sccache: command not found` (exit 127).
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          else
+            echo "sccache is not installed; nothing to report"
+          fi
 
   # A separate job with its own container, so the Rust job stays Node-free —
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
@@ -283,13 +353,42 @@ jobs:
       # This job had no dependency caching at all, so every run pulled the
       # whole tree from registry.npmjs.org. The proxy serves it from the LAN
       # and, unlike actions/cache, uploads nothing.
+      #
+      # Same CA strategy as the Rust job: a pinned CA committed in-repo needs no
+      # network, a live fetch retries with backoff, and if neither works the
+      # mirror is skipped rather than failing the job — npm then falls back to
+      # its default registry.
       - name: Trust the cluster CA and use the local npm proxy
         run: |
+          set -u
           apt-get update -qq && apt-get install -y -qq curl ca-certificates
-          curl -sk -o /tmp/cluster-ca.crt \
-            https://192.168.10.131:8443/repository/public/cluster-ca.crt
-          npm config set registry https://192.168.10.131:8443/repository/npmjs/
-          npm config set cafile /tmp/cluster-ca.crt
+          CA_URL=https://192.168.10.131:8443/repository/public/cluster-ca.crt
+          PINNED="$GITHUB_WORKSPACE/.github/ca/cluster-ca.crt"
+
+          ca=""
+          if [ -s "$PINNED" ] && grep -q 'BEGIN CERTIFICATE' "$PINNED"; then
+            echo "Using the pinned cluster CA at $PINNED"
+            ca="$PINNED"
+          else
+            for attempt in 1 2 3 4 5; do
+              if curl -skf --connect-timeout 10 --max-time 30 -o /tmp/cluster-ca.crt "$CA_URL" \
+                 && grep -q 'BEGIN CERTIFICATE' /tmp/cluster-ca.crt; then
+                echo "Fetched the cluster CA on attempt $attempt"
+                ca=/tmp/cluster-ca.crt
+                break
+              fi
+              backoff=$(( attempt * 5 ))
+              echo "::warning::cluster CA fetch attempt $attempt failed; retrying in ${backoff}s"
+              sleep "$backoff"
+            done
+          fi
+
+          if [ -n "$ca" ]; then
+            npm config set registry https://192.168.10.131:8443/repository/npmjs/
+            npm config set cafile "$ca"
+          else
+            echo "::warning::cluster CA unreachable; using the default npm registry instead of the Nexus mirror"
+          fi
       - name: Install
         working-directory: web
         run: npm install
