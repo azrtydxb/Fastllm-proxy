@@ -9,7 +9,7 @@ description: Operate and diagnose the FastLLM deployment on the kw Kubernetes cl
 
 | | |
 |---|---|
-| Namespace | `fastllm` (control plane, proxy, CNPG Postgres) |
+| Namespace | `fastllm` (control plane, proxy) |
 | Operator | `fastllm-system` |
 | Gateway VIP | `192.168.10.125`, alt `192.168.10.126` |
 | Admin VIP | `192.168.10.129:4001` (HTTPS, self-signed — use `-k`) |
@@ -32,12 +32,14 @@ Work down. Each step is worthless until the one above it passes.
 3. **Registry up** — the image lives in-cluster. If `nexus/nexus` is scaled to
    0, everything else is `ImagePullBackOff` for a reason that has nothing to do
    with the workload.
-4. **Postgres present** — a CNPG cluster can report `Cluster in healthy state`
-   with **no pods at all** when hibernated. Check
-   `kubectl -n fastllm get cluster fastllm-pg -o jsonpath='{.metadata.annotations}'`
-   for `cnpg.io/hibernation: on`; clear it with
-   `kubectl -n fastllm annotate cluster fastllm-pg cnpg.io/hibernation=off --overwrite`.
-   Nothing in `describe` or the operator log points at this.
+4. **Postgres present** — the control plane reads its database URL from the
+   `fastllm-db-shared` Secret (`uri`); the standalone `fastllm-pg` CNPG cluster
+   it used to run is retired. The database is now the cluster's shared
+   Postgres, so a missing Postgres pod is a shared-infrastructure problem
+   rather than a `fastllm` one. A CNPG cluster can still report
+   `Cluster in healthy state` with **no pods at all** when hibernated — check
+   the shared cluster's `cnpg.io/hibernation` annotation; nothing in `describe`
+   or the operator log points at it.
 5. **Image matches the schema** — `migration N was previously applied but is
    missing in the resolved migrations` means the deployed image is *older* than
    the database. Compare the manifest's tag against `migrations/`.

@@ -155,14 +155,14 @@ flowchart LR
     LB --> P2["proxy"]
     P1 -. " " .-> K["control × 1<br/>ClusterIP :4001"]
     P2 -. "snapshot poll" .-> K
-    K --> db[("CloudNativePG")]
+    K --> db[("Postgres<br/>(shared)")]
 ```
 
 `deploy/` holds the manifests for one real cluster, and they are worth reading
 before the chart because they are concrete:
 
 ```bash
-kubectl apply -f deploy/control.yaml      # Postgres + --role control
+kubectl apply -f deploy/control.yaml      # --role control (shared Postgres)
 kubectl apply -f deploy/configmap.yaml    # the proxy's tuning knobs
 kubectl apply -f deploy/deployment.yaml   # --role proxy, 2 replicas
 kubectl apply -f deploy/service.yaml      # the gateway's LoadBalancer
@@ -176,7 +176,7 @@ Two Deployments, and the shape of each follows from what it does:
 | Holds    | database URL, encryption key, proxy token | proxy token, control URL     |
 | Serves   | :4001 admin                               | :4000 gateway                |
 | Service  | ClusterIP by default                      | LoadBalancer                 |
-| Storage  | the Postgres cluster                      | an `emptyDir` snapshot cache |
+| Storage  | the shared Postgres cluster               | an `emptyDir` snapshot cache |
 
 The control plane is one replica deliberately: it is not on the request path,
 and a second would race the first rebuilding snapshots for no gain.
@@ -210,7 +210,7 @@ kubectl apply -k deploy/kubernetes/base/
 # Helm
 helm install fastllm charts/fastllm-proxy \
   --set proxy.replicas=6 \
-  --set database.existingSecret=fastllm-pg-app \
+  --set database.existingSecret=fastllm-db-shared \
   --set secrets.existingSecret=fastllm-secrets
 
 # Operator

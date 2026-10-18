@@ -6,6 +6,18 @@ Notable changes, newest first. Format follows
 Commit bodies carry the reasoning and the measurements and remain the better
 source for _why_ anything is the way it is; this file is the summary.
 
+## Unreleased
+
+### Changed
+
+- **The control plane's database moved onto the cluster's shared Postgres.**
+  `fastllm-control` now reads `FASTLLM_DATABASE_URL` from the
+  `fastllm-db-shared` Secret (`uri`) instead of a dedicated `fastllm-pg` CNPG
+  `Cluster`, which is retired. Data was migrated with `pg_dump`. The shared
+  instance runs Postgres 17.6 where the per-app cluster ran 18, so a schema
+  re-check after upgrading is worth the minute; nothing in the application
+  depends on an 18-only feature.
+
 ## 0.3.5 — 2026-10-10
 
 ### Fixed
