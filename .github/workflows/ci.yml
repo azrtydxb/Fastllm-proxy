@@ -26,6 +26,8 @@ env:
   REGISTRY: 192.168.10.131:5000
   IMAGE: 192.168.10.131:5000/azrtydxb/fastllm-proxy/proxy
 
+permissions: write-all
+
 jobs:
   test:
     runs-on: arc-azrtydxb
@@ -74,6 +76,7 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
       # Nothing in this job round-trips to GitHub any more: dependency sources
       # come from the Nexus cargo proxy and compiled artifacts from sccache,
       # both on the LAN. Both need to trust the cluster CA.
@@ -83,21 +86,14 @@ jobs:
       # whose TLS backend may ignore SSL_CERT_FILE, and it fails soft — a trust
       # error there would silently disable caching instead of failing the build.
       #
-      # The CA is pinned in-repo (.github/ca/cluster-ca.crt), so the normal path
-      # needs no network at all and cannot flake. The live fetch is only a
-      # fallback for when the pinned file is gone, and it retries with backoff:
-      # the one failure this step has actually had was a single curl against an
-      # unreachable Nexus (exit 7). If neither works, the CA is not worth
-      # failing the job over — it only secures the Nexus mirror — so the mirror
-      # is skipped with a warning and the build falls back to the default
-      # registry. See the `Point cargo at the local proxy` step for the other
-      # half of that degradation.
+      # The CA is pinned in-repo (.github/ca/cluster-ca.crt), so this needs no
+      # network. Crates come from Kuvryn Ant (azrtydxb/ant-setup-action, which
+      # replaces crates.io with the Ant sparse feed via GitHub OIDC).
       - name: Trust the cluster CA
         id: ca
         run: |
           set -u
           CA_DEST=/usr/local/share/ca-certificates/cluster-ca.crt
-          CA_URL=https://192.168.10.131:8443/repository/public/cluster-ca.crt
           PINNED="$GITHUB_WORKSPACE/.github/ca/cluster-ca.crt"
 
           trust() {
@@ -113,53 +109,8 @@ jobs:
             exit 0
           fi
 
-          # -f turns an HTTP error into a failure instead of an error page
-          # written into the trust store, and the grep refuses anything that is
-          # not a PEM certificate before it is installed.
-          for attempt in 1 2 3 4 5; do
-            if curl -skf --connect-timeout 10 --max-time 30 -o /tmp/cluster-ca.crt "$CA_URL" \
-               && grep -q 'BEGIN CERTIFICATE' /tmp/cluster-ca.crt; then
-              echo "Fetched the cluster CA on attempt $attempt"
-              trust /tmp/cluster-ca.crt
-              echo "status=fetched" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            backoff=$(( attempt * 5 ))
-            echo "::warning::cluster CA fetch attempt $attempt failed; retrying in ${backoff}s"
-            sleep "$backoff"
-          done
-
-          echo "::warning::cluster CA unreachable at $CA_URL after 5 attempts; continuing without it. The Nexus mirror will be skipped."
+          echo "::warning::pinned cluster CA missing at $PINNED; continuing without it."
           echo "status=missing" >> "$GITHUB_OUTPUT"
-      # The remote behind this proxy is index.crates.io, not crates.io — a
-      # proxy pointed at the latter serves the web API but no sparse index,
-      # and cargo cannot use it at all.
-      #
-      # Skipped when the CA is missing (the mirror's TLS would fail anyway), and
-      # gated on a reachability probe when it is trusted: a trusted CA says
-      # nothing about the mirror being up. One run trusted the CA fine and then
-      # died an hour later when cargo could not reach the same host — "spurious
-      # network error [7] ... 192.168.10.131:8443" — which the log reports as a
-      # clippy failure. Falling back to crates.io (the runner has public
-      # internet; Cargo.lock names crates.io, not the mirror) turns that outage
-      # into a slower step instead of a red job.
-      - name: Point cargo at the local proxy
-        if: steps.ca.outputs.status != 'missing'
-        run: |
-          mkdir -p "$CARGO_HOME"
-          if curl -sf --connect-timeout 5 --max-time 15 \
-               -o /dev/null https://192.168.10.131:8443/repository/cargo/config.json; then
-            cat >> "$CARGO_HOME/config.toml" <<'EOF'
-          [source.crates-io]
-          replace-with = "nexus"
-
-          [source.nexus]
-          registry = "sparse+https://192.168.10.131:8443/repository/cargo/"
-          EOF
-            echo "cargo is pointed at the Nexus mirror"
-          else
-            echo "::warning::Nexus cargo mirror unreachable; falling back to the default registry (crates.io)"
-          fi
       # sccache instead of actions/cache. The problem with actions/cache here was
       # not the upload alone, it is that the cache is remote at all: on the last
       # run it restored nothing (2s miss), compiled everything from scratch, and
@@ -350,45 +301,8 @@ jobs:
       image: node:22-bookworm-slim
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # This job had no dependency caching at all, so every run pulled the
-      # whole tree from registry.npmjs.org. The proxy serves it from the LAN
-      # and, unlike actions/cache, uploads nothing.
-      #
-      # Same CA strategy as the Rust job: a pinned CA committed in-repo needs no
-      # network, a live fetch retries with backoff, and if neither works the
-      # mirror is skipped rather than failing the job — npm then falls back to
-      # its default registry.
-      - name: Trust the cluster CA and use the local npm proxy
-        run: |
-          set -u
-          apt-get update -qq && apt-get install -y -qq curl ca-certificates
-          CA_URL=https://192.168.10.131:8443/repository/public/cluster-ca.crt
-          PINNED="$GITHUB_WORKSPACE/.github/ca/cluster-ca.crt"
-
-          ca=""
-          if [ -s "$PINNED" ] && grep -q 'BEGIN CERTIFICATE' "$PINNED"; then
-            echo "Using the pinned cluster CA at $PINNED"
-            ca="$PINNED"
-          else
-            for attempt in 1 2 3 4 5; do
-              if curl -skf --connect-timeout 10 --max-time 30 -o /tmp/cluster-ca.crt "$CA_URL" \
-                 && grep -q 'BEGIN CERTIFICATE' /tmp/cluster-ca.crt; then
-                echo "Fetched the cluster CA on attempt $attempt"
-                ca=/tmp/cluster-ca.crt
-                break
-              fi
-              backoff=$(( attempt * 5 ))
-              echo "::warning::cluster CA fetch attempt $attempt failed; retrying in ${backoff}s"
-              sleep "$backoff"
-            done
-          fi
-
-          if [ -n "$ca" ]; then
-            npm config set registry https://192.168.10.131:8443/repository/npmjs/
-            npm config set cafile "$ca"
-          else
-            echo "::warning::cluster CA unreachable; using the default npm registry instead of the Nexus mirror"
-          fi
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
+      # npm resolves through Kuvryn Ant (azrtydxb/ant-setup-action below).
       - name: Install
         working-directory: web
         run: npm install
@@ -413,6 +327,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -539,12 +454,13 @@ jobs:
     needs: [test, ui]
     runs-on: arc-azrtydxb
     timeout-minutes: 60
-    permissions: { contents: read, packages: write }
+    permissions: {contents: read, packages: write, id-token: write}
     outputs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -577,6 +493,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -586,9 +503,10 @@ jobs:
     needs: [test, ui, agent]
     runs-on: arc-azrtydxb
     timeout-minutes: 30
-    permissions: { contents: read, packages: write }
+    permissions: {contents: read, packages: write, id-token: write}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -612,12 +530,13 @@ jobs:
     needs: [test, ui]
     runs-on: arc-azrtydxb-amd64
     timeout-minutes: 60
-    permissions: { contents: read, packages: write }
+    permissions: {contents: read, packages: write, id-token: write}
     outputs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azrtydxb/ant-setup-action@a0009593481e175e73d029e92a167609da1b386c # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -656,7 +575,7 @@ jobs:
     needs: [release-arm64, release-amd64]
     runs-on: arc-azrtydxb
     timeout-minutes: 15
-    permissions: { contents: read, packages: write }
+    permissions: {contents: read, packages: write, id-token: write}
     steps:
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
