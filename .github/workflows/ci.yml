@@ -1,10 +1,16 @@
 name: CI
 
+# Three-tier test model (azrtydxb CI standard §Test tiers):
+#   unit        = pull_request (fmt/clippy + hermetic unit subset) and main
+#   integration = nightly cron + manual (service-backed / Postgres + classifier tests)
+#   full        = v* release tags (all features, ignored tests, coverage)
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 2 * * *"
   workflow_dispatch:
 
 # A newer push supersedes an older run of the same ref — but only for PRs.
@@ -167,6 +173,8 @@ jobs:
       # `cargo build --no-default-features`). Here, with a real Postgres
       # alongside, `--include-ignored` actually runs them.
       - name: Test (with database)
+        # Service-backed (Postgres) integration tier: nightly/manual only, never on PR.
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
           # Every process that talks to Postgres takes a whole *pool*, not a
@@ -188,6 +196,8 @@ jobs:
       # inside the semantic-routing test's health window and the test dies
       # waiting. HF_HOME pins the cache somewhere actions/cache can see.
       - name: Cache the classifier model
+        # Integration (nightly/manual) and full (release tag) tiers only; never on PR.
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .hf-cache
@@ -201,6 +211,7 @@ jobs:
       # five-minute test failure that looks like a flake. A warm cache makes
       # this a no-op.
       - name: Fetch the classifier model
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
         env:
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: |
@@ -219,13 +230,40 @@ jobs:
           print(f"classifier model ready at {p}")
           PY
       - name: Clippy (classifier)
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: cargo clippy --all-targets --features "control classifier-tier2" -- -D warnings
       - name: Test (classifier)
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
           DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: cargo test --features "control classifier" --locked -- --include-ignored
+      # Full tier (v* release tags): the whole feature matrix including the
+      # `#[ignore]`d service-backed tests, under coverage instrumentation.
+      # The test run is the gate; coverage reporting is best-effort.
+      - name: Full suite + coverage (release tags)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
+          HF_HOME: ${{ github.workspace }}/.hf-cache
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked 2>/dev/null || true
+          if command -v cargo-llvm-cov >/dev/null 2>&1; then
+            cargo llvm-cov --all-features --locked --lcov --output-path lcov.info -- --include-ignored
+          else
+            echo "::warning::cargo-llvm-cov unavailable; running the full suite without a coverage report"
+            cargo test --all-features --locked -- --include-ignored
+          fi
+      - name: Upload coverage (release tags)
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: lcov.info
+          if-no-files-found: ignore
       # Prints hits, misses and cache size. Without this the cache is invisible
       # and there is no way to tell whether it is earning its keep.
       - name: sccache stats
