@@ -76,7 +76,7 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       # Nothing in this job round-trips to GitHub any more: dependency sources
       # come from the Nexus cargo proxy and compiled artifacts from sccache,
       # both on the LAN. Both need to trust the cluster CA.
@@ -301,7 +301,7 @@ jobs:
       image: node:22-bookworm-slim
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       # npm resolves through Kuvryn Ant (azrtydxb/ant-setup-action below).
       - name: Install
         working-directory: web
@@ -327,7 +327,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -460,7 +460,7 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -493,7 +493,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -506,7 +506,7 @@ jobs:
     permissions: {contents: read, packages: write, id-token: write}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -536,7 +536,7 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@00d5db396182b24877189b3aa9bb0231877ef299 # v1
+      - uses: azrtydxb/ant-setup-action@543d780ae8e4ff1fe0473a4778f18edceb995768 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
