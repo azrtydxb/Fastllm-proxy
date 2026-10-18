@@ -46,7 +46,7 @@ spec:
   imagePullPolicy: Always
 
   database:
-    name: fastllm-pg-app
+    name: fastllm-db-shared
     key: uri
   proxyToken:
     name: fastllm-proxy-token
