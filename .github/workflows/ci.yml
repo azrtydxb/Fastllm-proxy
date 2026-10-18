@@ -409,7 +409,7 @@ jobs:
     # Only what lands on main or a tag becomes an image; a PR just gets tested.
     if: github.event_name != 'pull_request'
     needs: [test, ui]
-    runs-on: arc-azrtydxb-publish
+    runs-on: arc-azrtydxb
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -457,7 +457,7 @@ jobs:
             # Base images come through the Nexus pull-through cache rather than
             # hitting Docker Hub anonymously and collecting 429s.
             [registry."docker.io"]
-              mirrors = ["192.168.10.131"]
+              mirrors = ["ant.azrty.com"]
 
       # GHCR as well as the private registry, but only for a tagged release.
       # Every commit to main pushes to zot because this cluster deploys from
@@ -537,7 +537,7 @@ jobs:
   release-arm64:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
-    runs-on: arc-azrtydxb-publish
+    runs-on: arc-azrtydxb
     timeout-minutes: 60
     permissions: { contents: read, packages: write }
     outputs:
@@ -584,7 +584,7 @@ jobs:
   release-agent:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui, agent]
-    runs-on: arc-azrtydxb-publish
+    runs-on: arc-azrtydxb
     timeout-minutes: 30
     permissions: { contents: read, packages: write }
     steps:
@@ -610,7 +610,7 @@ jobs:
   release-amd64:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
-    runs-on: arc-azrtydxb-amd64-publish
+    runs-on: arc-azrtydxb-amd64
     timeout-minutes: 60
     permissions: { contents: read, packages: write }
     outputs:
@@ -654,7 +654,7 @@ jobs:
   release-manifest:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-arm64, release-amd64]
-    runs-on: arc-azrtydxb-publish
+    runs-on: arc-azrtydxb
     timeout-minutes: 15
     permissions: { contents: read, packages: write }
     steps:

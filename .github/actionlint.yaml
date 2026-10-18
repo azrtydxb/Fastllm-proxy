@@ -3,5 +3,4 @@
 self-hosted-runner:
   labels:
     - arc-azrtydxb
-    - arc-azrtydxb-publish
-    - arc-azrtydxb-amd64-publish
+    - arc-azrtydxb-amd64
