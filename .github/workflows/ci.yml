@@ -408,7 +408,28 @@ jobs:
           cargo: "false"
           pip: "false"
 
+      # sha- tags are immutable in Ant, and a rebuild of the same commit is not
+      # byte-identical, so the nightly schedule (or a re-run) pushing a sha that
+      # is already published was refused with "immutable content conflicts".
+      # Skip the images that already exist for this commit.
+      - name: Already published?
+        id: published
+        if: github.ref_type != 'tag'
+        env:
+          SHORT: ${{ steps.meta.outputs.short }}
+          PROXY: ${{ env.IMAGE }}
+          OPERATOR: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator
+        run: |
+          for pair in "proxy=$PROXY" "operator=$OPERATOR"; do
+            ref="${pair#*=}:$SHORT"
+            if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+              echo "${pair%%=*}=true" >> "$GITHUB_OUTPUT"
+              echo "$ref is already published; not rebuilding it"
+            fi
+          done
+
       - name: Build & push (arm64 → Kuvryn Ant)
+        if: steps.published.outputs.proxy != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -424,6 +445,7 @@ jobs:
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
       - name: Build & push the operator (arm64 → Kuvryn Ant)
+        if: steps.published.outputs.operator != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
