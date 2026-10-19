@@ -46,20 +46,9 @@ jobs:
       # before; more retries ride out a restart that the reachability probe in
       # `Point cargo at the local proxy` happened to miss.
       CARGO_NET_RETRY: "10"
-      # sccache config. Set at job level rather than written into $GITHUB_ENV so
-      # the password is not persisted to a file on the runner.
-      RUSTC_WRAPPER: /usr/local/bin/sccache
-      # S3 against MinIO, not WebDAV against Nexus. The WebDAV backend cannot
-      # work here: opendal issues MKCOL to create the parent collection and a
-      # Nexus raw repo answers 405, having no notion of collections. One run
-      # proved it server-side — 241 GET/404, 1 MKCOL/405, and 3 PUT/201 out of
-      # 919 attempted writes, with `Cache write errors 919` in the stats.
-      SCCACHE_BUCKET: sccache
-      SCCACHE_ENDPOINT: http://192.168.10.134:9000
-      SCCACHE_S3_USE_SSL: "false"
-      SCCACHE_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
+      # sccache comes from azrtydxb/ant-setup-action (build-cache: true): it installs
+      # the binary, sets RUSTC_WRAPPER and points SCCACHE_WEBDAV_* at the Kuvryn Ant
+      # sccache feed with the job's short-lived OIDC token.
       SECRET_LEN_TEST: ${{ secrets.SECRET_LEN_TEST }}
     # A sibling service container, reachable by its service name — not
     # localhost, which is the `test` container's own loopback, not the
@@ -76,7 +65,11 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - id: ant
+        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        with:
+          build-cache: "true"
+          sccache: "true"
       # Nothing in this job round-trips to GitHub any more: dependency sources
       # come from the Nexus cargo proxy and compiled artifacts from sccache,
       # both on the LAN. Both need to trust the cluster CA.
@@ -111,49 +104,11 @@ jobs:
 
           echo "::warning::pinned cluster CA missing at $PINNED; continuing without it."
           echo "status=missing" >> "$GITHUB_OUTPUT"
-      # sccache instead of actions/cache. The problem with actions/cache here was
-      # not the upload alone, it is that the cache is remote at all: on the last
-      # run it restored nothing (2s miss), compiled everything from scratch, and
-      # then spent 417s uploading to GitHub — a net loss of about seven minutes.
-      # Even a hit means dragging ~2 GB back across a 100 Mbit link.
-      #
-      # sccache keeps compilation units in a Nexus raw repo on the LAN, so hits
-      # are cheap in both directions. Installed before any cargo command so
-      # every invocation below is wrapped.
-      # Preflight. sccache fails with an opaque "Server startup failed" and a
-      # bare status code, which does not distinguish a wrong secret from an
-      # empty one from a missing bucket — and it kills the build at the first
-      # cargo invocation, so it reads as a compiler problem. This says which,
-      # printing only the lengths of the values rather than the values.
-      #
-      # It has already earned its keep once: it caught a password stored 10
-      # characters long instead of 11, because a shell ate the trailing "!".
-      - name: Check object store credentials
-        run: |
-          echo "key length=${#AWS_ACCESS_KEY_ID}  secret length=${#AWS_SECRET_ACCESS_KEY}"
-          # Temporary control: a known 11-character org secret. If this also
-          # reports 1, the fault is in how the value is read here, not in how
-          # the secret was set. Remove once the cause is established.
-          echo "control secret length=${#SECRET_LEN_TEST} (expect 11)"
-          code=$(curl -s -o /dev/null -w '%{http_code}' "${SCCACHE_ENDPOINT}/minio/health/live")
-          echo "MinIO health -> $code"
-          [ "$code" = "200" ] || { echo "::error::MinIO unreachable at ${SCCACHE_ENDPOINT}"; exit 1; }
-          # Length, not merely non-empty. Every credential mishap here so far has
-          # been a truncation rather than an absence: a password stored as 10
-          # characters instead of 11 when a shell ate a trailing "!", and a
-          # secret stored as 1 character when a prompt did not capture. MinIO
-          # itself refuses anything under 8, so this can never be a false alarm.
-          [ ${#AWS_ACCESS_KEY_ID} -ge 3 ] \
-            || { echo "::error::SCCACHE_S3_KEY looks wrong (length ${#AWS_ACCESS_KEY_ID})"; exit 1; }
-          [ ${#AWS_SECRET_ACCESS_KEY} -ge 8 ] \
-            || { echo "::error::SCCACHE_S3_SECRET is ${#AWS_SECRET_ACCESS_KEY} characters; MinIO requires at least 8. The secret was probably truncated when it was set."; exit 1; }
-      - name: Install sccache
-        run: |
-          SCCACHE_VERSION=0.17.0
-          curl -sL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz" \
-            | tar xz -C /tmp --strip-components=1 --wildcards '*/sccache'
-          install -m755 /tmp/sccache /usr/local/bin/sccache
-          sccache --version
+      # sccache instead of actions/cache: the problem with actions/cache here was
+      # that the cache is remote at all (a miss still paid a 417s upload to GitHub).
+      # The sccache feed on Kuvryn Ant is on OKE and the compiled units are small, so
+      # hits are cheap. ant-setup-action (above) installs and configures sccache; it
+      # fails soft, so the stats step at the end is what shows whether it works.
       - name: Toolchain
         run: rustup component add rustfmt clippy
       - name: Format
@@ -278,18 +233,11 @@ jobs:
           name: coverage
           path: lcov.info
           if-no-files-found: ignore
-      # Prints hits, misses and cache size. Without this the cache is invisible
-      # and there is no way to tell whether it is earning its keep. Guarded so a
-      # run that never reached `Install sccache` (an earlier step failed) does
-      # not turn into a second red, `sccache: command not found` (exit 127).
+      # Prints hits and misses; without this the cache is invisible and there is no way
+      # to tell whether it is earning its keep.
       - name: sccache stats
         if: always()
-        run: |
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          else
-            echo "sccache is not installed; nothing to report"
-          fi
+        uses: azrtydxb/ant-setup-action/cache-stats@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
 
   # A separate job with its own container, so the Rust job stays Node-free —
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
@@ -301,7 +249,7 @@ jobs:
       image: node:22-bookworm-slim
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
       # npm resolves through Kuvryn Ant (azrtydxb/ant-setup-action below).
       - name: Install
         working-directory: web
@@ -327,7 +275,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -400,7 +348,7 @@ jobs:
       # went away. v7 tolerates it, which is what novamem does against an
       # identically missing cache.
       - name: Log in to Kuvryn Ant (GitHub OIDC)
-        uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
         with:
           docker-login: "true"
           required: "true"
@@ -428,6 +376,16 @@ jobs:
             fi
           done
 
+      - id: ant-cache-1
+        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        with:
+          build-cache: "true"
+          cache-name: proxy
+          sccache: "false"
+          go: "false"
+          npm: "false"
+          cargo: "false"
+          pip: "false"
       - name: Build & push (arm64 → Kuvryn Ant)
         if: steps.published.outputs.proxy != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -438,9 +396,19 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-proxy:arm64,mode=max,image-manifest=true,ignore-error=true
+          cache-from: ${{ steps.ant-cache-1.outputs.cache-from }}
+          cache-to: ${{ steps.ant-cache-1.outputs.cache-to }}
 
+      - id: ant-cache-2
+        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        with:
+          build-cache: "true"
+          cache-name: operator
+          sccache: "false"
+          go: "false"
+          npm: "false"
+          cargo: "false"
+          pip: "false"
       # The operator is a second image on the same release cycle. Small and
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
@@ -453,8 +421,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator:${{ steps.meta.outputs.short }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/buildcache/fastllm-operator:arm64,mode=max,image-manifest=true,ignore-error=true
+          cache-from: ${{ steps.ant-cache-2.outputs.cache-from }}
+          cache-to: ${{ steps.ant-cache-2.outputs.cache-to }}
 
   # ---------------------------------------------------------------- release
   #
@@ -478,7 +446,7 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -511,7 +479,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -524,7 +492,7 @@ jobs:
     permissions: {contents: read, packages: write, id-token: write}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -554,7 +522,7 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@7c6f1b8ca34a0a127b43040f4e16bbafdbd83791 # v1
+      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
