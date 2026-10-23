@@ -57,6 +57,14 @@ ticked attachments and the pool's policy. That is what makes the subset mean
 anything at dispatch, and it leaves the model itself untouched: it still
 carries every provider, so everything else routing through it is unaffected.
 
+A ticked provider stays in the pool while its host is away. When a Spark
+reboots, discovery drops its attachment and the pool shows that member as
+**waiting for host**. The member routes nowhere in the meantime, and the pool
+does not widen onto a provider nobody ticked. When the host serves the model
+again, the member re-attaches on its own, with nothing to re-add. The member
+is bound to the provider's name, so a provider renamed while its host is down
+is not found again.
+
 Frontend model rules choose a pool the same way they choose a single model, and
 the same model can sit in several pools under different policies.
 

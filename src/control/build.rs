@@ -686,12 +686,18 @@ pub async fn build_snapshot_with(
     // These never reach a client. `/v1/models` lists frontend models, and
     // authorisation is checked against the name the caller asked for, so a
     // pool model is reachable only by a rule that points at it.
-    type PoolBackendRow = (String, Option<String>, Uuid);
+    //
+    // A member is backend-grain by its provider name, not by its id. The id is
+    // NULL while that provider is not serving the model (migration 0058), and
+    // such a member contributes nothing here — it is not read as the model
+    // itself, which would quietly widen a pool of two chosen hosts to every
+    // host serving the model.
+    type PoolBackendRow = (String, Option<String>, Option<Uuid>);
     let pool_backend_rows: Vec<PoolBackendRow> = sqlx::query_as(
         "SELECT p.name, p.policy, mpm.model_backend_id
            FROM model_pools p
            JOIN model_pool_members mpm ON mpm.pool_id = p.id
-          WHERE mpm.model_backend_id IS NOT NULL
+          WHERE mpm.backend_provider_name IS NOT NULL
           ORDER BY p.name, mpm.position",
     )
     .fetch_all(pool)
@@ -705,7 +711,7 @@ pub async fn build_snapshot_with(
         let wanted: Vec<Uuid> = pool_backend_rows
             .iter()
             .filter(|(n, ..)| n == pool_name)
-            .map(|(.., backend_id)| *backend_id)
+            .filter_map(|(.., backend_id)| *backend_id)
             .collect();
         let backends: Vec<BackendDef> = models
             .iter()
@@ -714,8 +720,8 @@ pub async fn build_snapshot_with(
             .cloned()
             .collect();
         if backends.is_empty() {
-            // Every ticked attachment has since been deleted, or none was
-            // routable. Publishing an empty pool would give a rule a target
+            // Every ticked attachment is gone for now (its host is down and
+            // the member is waiting for it), or none was routable. Publishing an empty pool would give a rule a target
             // that resolves to nothing at all; leaving it out lets the chain
             // fall through to whatever comes next, which is the same thing
             // that happens to any other unroutable target.
@@ -1148,9 +1154,12 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // Every pool's members, flattened once rather than per target: a pool is
     // typically pointed at from several rules, and re-reading it for each
     // would be the same rows over again.
-    type PoolMemberRow = (Uuid, String, i32, Option<Uuid>);
+    // The last column is grain: whether the member names one provider. Read
+    // off the name, never the id, for the reason given at
+    // `pool_backend_rows`.
+    type PoolMemberRow = (Uuid, String, i32, bool);
     let pool_member_rows: Vec<PoolMemberRow> = sqlx::query_as(
-        "SELECT mpm.pool_id, pm.name, mpm.weight, mpm.model_backend_id
+        "SELECT mpm.pool_id, pm.name, mpm.weight, mpm.backend_provider_name IS NOT NULL
          FROM model_pool_members mpm
          JOIN provider_models pm ON pm.id = mpm.provider_model_id
          ORDER BY mpm.pool_id, mpm.position",
@@ -1169,7 +1178,7 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
     // and no policy here, and `expand_pool` never sees it.
     let backend_scoped: std::collections::HashSet<Uuid> = pool_member_rows
         .iter()
-        .filter(|(.., backend)| backend.is_some())
+        .filter(|(.., backend_grain)| *backend_grain)
         .map(|(pool_id, ..)| *pool_id)
         .collect();
 
@@ -1718,16 +1727,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, \
-             position) VALUES ($1, $2, $3, 0)",
-        )
-        .bind(pool_id)
-        .bind(model_id)
-        .bind(ticked)
-        .execute(&pool)
-        .await
-        .unwrap();
+        add_backend_member(&pool, pool_id, model_id, ticked, 0).await;
 
         let snapshot = build_snapshot(&pool, &key).await.unwrap();
         let published = snapshot
@@ -1771,6 +1771,174 @@ mod tests {
             source.backends.len(),
             2,
             "the model keeps every provider serving it"
+        );
+    }
+
+    /// A backend member as `post_pool_member` writes one: the attachment's id
+    /// and the name of the provider it lives on, which is what the member is
+    /// actually bound to.
+    async fn add_backend_member(
+        pool: &PgPool,
+        pool_id: Uuid,
+        model_id: Uuid,
+        backend_id: Uuid,
+        position: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, \
+             backend_provider_name, position) \
+             SELECT $1, $2, mb.id, p.name, $4 FROM model_backends mb \
+             JOIN providers p ON p.id = mb.provider_id WHERE mb.id = $3",
+        )
+        .bind(pool_id)
+        .bind(model_id)
+        .bind(backend_id)
+        .bind(position)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A host that reboots must come back into the pools that balanced
+    /// across it.
+    ///
+    /// The bug this pins: the registrar deletes an attachment when its host
+    /// stops serving the model and creates a fresh one when it returns, and a
+    /// pool member pointing at the old attachment was cascade-deleted with
+    /// it. The host came back as a model backend and never came back into the
+    /// pool — nor into any frontend model routing through the pool. Played
+    /// through `reconcile_models` and `relink_targets`, the two functions the
+    /// sweep actually runs, rather than with hand-written deletes.
+    ///
+    /// The third provider is never ticked, and is there to catch the other way
+    /// to get this wrong: a member waiting for its host being read as "the
+    /// whole model", which would widen the pool onto a machine nobody chose.
+    #[tokio::test]
+    #[ignore = "requires postgres"]
+    async fn a_rebooted_backend_rejoins_the_pools_that_named_it() {
+        use crate::control::registry_agent::{reconcile_models, relink_targets};
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = crate::control::db::connect(&url).await.unwrap();
+        let key = crate::control::secrets::test_key();
+        let _cleanup = TestCleanup::new()
+            .track_prefix("provider_models", "name", "reboot-model")
+            .track_prefix("providers", "name", "reboot-provider")
+            .track_prefix("model_pools", "name", "reboot-pool");
+
+        let model_name = unique_name("reboot-model");
+        let pool_name = unique_name("reboot-pool");
+        let model_id: Uuid =
+            sqlx::query_scalar("INSERT INTO provider_models (name) VALUES ($1) RETURNING id")
+                .bind(&model_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // Dynamic, as the Sparks are: `reconcile_models` only grafts a host
+        // onto a model whose every attachment is on a dynamic provider.
+        let mut providers = Vec::new();
+        for host in ["reboot-a", "reboot-b", "reboot-c"] {
+            let name = unique_name("reboot-provider");
+            let provider_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO providers (name, kind, api_base, lease_expires_at) \
+                 VALUES ($1, 'dynamic', $2, now() + interval '1 hour') RETURNING id",
+            )
+            .bind(&name)
+            .bind(format!("http://{host}:8000/v1"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            reconcile_models(&pool, provider_id, &name, std::slice::from_ref(&model_name))
+                .await
+                .unwrap();
+            providers.push((provider_id, name, format!("http://{host}:8000/v1")));
+        }
+        let backend_on = |provider_id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM model_backends WHERE provider_model_id = $1 \
+                     AND provider_id = $2",
+                )
+                .bind(model_id)
+                .bind(provider_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        let pool_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO model_pools (name, policy) VALUES ($1, 'least-loaded') RETURNING id",
+        )
+        .bind(&pool_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // C, `providers[2]`, serves the model and is in no pool.
+        let (a, b) = (&providers[0], &providers[1]);
+        add_backend_member(&pool, pool_id, model_id, backend_on(a.0).await, 0).await;
+        add_backend_member(&pool, pool_id, model_id, backend_on(b.0).await, 1).await;
+
+        let pool_hosts = |snapshot: &Snapshot| -> Option<Vec<String>> {
+            let mut hosts: Vec<String> = snapshot
+                .models
+                .iter()
+                .find(|m| m.name == pool_name)?
+                .backends
+                .iter()
+                .map(|b| b.api_base.clone())
+                .collect();
+            hosts.sort();
+            Some(hosts)
+        };
+        let both = Some(vec![a.2.clone(), b.2.clone()]);
+        assert_eq!(
+            pool_hosts(&build_snapshot(&pool, &key).await.unwrap()),
+            both,
+            "before the reboot the pool balances across the two ticked hosts"
+        );
+
+        // B reboots: it answers, but no longer lists the model.
+        reconcile_models(&pool, b.0, &b.1, &[]).await.unwrap();
+        relink_targets(&pool).await.unwrap();
+        let members: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM model_pool_members WHERE pool_id = $1")
+                .bind(pool_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            members, 2,
+            "B's member waits for it rather than being deleted"
+        );
+        assert_eq!(
+            pool_hosts(&build_snapshot(&pool, &key).await.unwrap()),
+            Some(vec![a.2.clone()]),
+            "while B is away the pool has A only — not C, which nobody ticked"
+        );
+
+        // A goes too. Both members waiting must not collide on the uniqueness
+        // index, and a pool with nothing routable is left out, not widened.
+        reconcile_models(&pool, a.0, &a.1, &[]).await.unwrap();
+        assert_eq!(
+            pool_hosts(&build_snapshot(&pool, &key).await.unwrap()),
+            None,
+            "a pool whose every ticked host is away is not published"
+        );
+
+        // Both come back, as new attachments with new ids.
+        reconcile_models(&pool, a.0, &a.1, std::slice::from_ref(&model_name))
+            .await
+            .unwrap();
+        reconcile_models(&pool, b.0, &b.1, std::slice::from_ref(&model_name))
+            .await
+            .unwrap();
+        relink_targets(&pool).await.unwrap();
+        assert_eq!(
+            pool_hosts(&build_snapshot(&pool, &key).await.unwrap()),
+            both,
+            "once the hosts are back the pool balances across both again"
         );
     }
 

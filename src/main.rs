@@ -1640,7 +1640,7 @@ fn spawn_health_reports(
                     .map(|b| fastllm_proxy::health_report::BackendHealth {
                         api_base: b.api_base.clone(),
                         model: b.upstream_model.clone(),
-                        healthy: b.is_healthy(),
+                        healthy: b.reports_healthy(),
                         inflight: b.inflight(),
                         requests_total: b.requests_total(),
                         errors_total: b.errors_total(),

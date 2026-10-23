@@ -4624,6 +4624,13 @@ struct PoolMemberView {
     /// That attachment's endpoint, so the member reads as somewhere rather
     /// than as an id.
     api_base: Option<String>,
+    /// The provider a backend member is bound to. Survives the attachment
+    /// going away, which `model_backend_id` does not.
+    provider_name: Option<String>,
+    /// A backend member whose provider does not serve the model right now — a
+    /// host rebooting, a model reloading. It routes nowhere until the
+    /// provider is back, and is re-attached then without anyone touching it.
+    waiting: bool,
 }
 
 #[derive(Serialize)]
@@ -4658,10 +4665,11 @@ async fn list_pools(
         i32,
         Option<Uuid>,
         Option<String>,
+        Option<String>,
     );
     let members: Vec<MemberRow> = sqlx::query_as(
         "SELECT mpm.pool_id, mpm.id, pm.id, pm.name, mpm.weight, mpm.position,
-                mpm.model_backend_id, p.api_base
+                mpm.model_backend_id, p.api_base, mpm.backend_provider_name
          FROM model_pool_members mpm
          JOIN provider_models pm ON pm.id = mpm.provider_model_id
          LEFT JOIN model_backends mb ON mb.id = mpm.model_backend_id
@@ -4684,7 +4692,17 @@ async fn list_pools(
                     .iter()
                     .filter(|(pool_id, ..)| *pool_id == id)
                     .map(
-                        |(_, mid, pmid, model, weight, position, backend_id, api_base)| {
+                        |(
+                            _,
+                            mid,
+                            pmid,
+                            model,
+                            weight,
+                            position,
+                            backend_id,
+                            api_base,
+                            provider_name,
+                        )| {
                             PoolMemberView {
                                 id: *mid,
                                 provider_model_id: *pmid,
@@ -4693,6 +4711,8 @@ async fn list_pools(
                                 position: *position,
                                 model_backend_id: *backend_id,
                                 api_base: api_base.clone(),
+                                provider_name: provider_name.clone(),
+                                waiting: provider_name.is_some() && backend_id.is_none(),
                             }
                         },
                     )
@@ -4907,13 +4927,25 @@ async fn post_pool_member(
     // A backend that belongs to a different model would route this member
     // somewhere the pool never named. The foreign key cannot catch it — both
     // ids are valid rows — so it is checked here, before the insert.
+    //
+    // The provider's name comes back with it because that, not the id, is what
+    // the member is bound to (migration 0058): the registrar deletes and
+    // recreates an attachment whenever its host restarts, and the member has
+    // to find the new one.
+    let mut backend_provider_name: Option<String> = None;
     if let Some(backend_id) = body.model_backend_id {
-        let owner: Option<Uuid> =
-            sqlx::query_scalar("SELECT provider_model_id FROM model_backends WHERE id = $1")
-                .bind(backend_id)
-                .fetch_optional(&ctx.pool)
-                .await
-                .map_err(|e| db_error("checking the backend's model", &e))?;
+        let owner: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT mb.provider_model_id, p.name FROM model_backends mb \
+             JOIN providers p ON p.id = mb.provider_id WHERE mb.id = $1",
+        )
+        .bind(backend_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| db_error("checking the backend's model", &e))?;
+        let owner = owner.map(|(model, provider)| {
+            backend_provider_name = Some(provider);
+            model
+        });
         match owner {
             None => {
                 return Err(api_error(
@@ -4934,13 +4966,14 @@ async fn post_pool_member(
     }
 
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, weight, \
-         position)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO model_pool_members (pool_id, provider_model_id, model_backend_id, \
+         backend_provider_name, weight, position)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(pool_id)
     .bind(body.provider_model_id)
     .bind(body.model_backend_id)
+    .bind(&backend_provider_name)
     .bind(body.weight)
     .bind(body.position)
     .fetch_one(&ctx.pool)
@@ -7046,12 +7079,16 @@ pub fn spawn_provider_sweep(
             let Some(leader) = try_leader(&pool, LOCK_PROVIDER_SWEEP).await else {
                 continue;
             };
+            let swept = crate::control::registry_agent::sweep(&pool, &client).await;
             // The registrar is the other thing that creates models, and the
-            // one that deletes them in the first place.
+            // one that deletes them in the first place. After the sweep, not
+            // before: the sweep is what re-adds a rebooted host's attachments,
+            // and relinking first left its pool members waiting a whole extra
+            // tick for the next one.
             if let Err(e) = crate::control::registry_agent::relink_targets(&pool).await {
                 tracing::warn!(error = %e, "re-attaching targets to their models failed");
             }
-            match crate::control::registry_agent::sweep(&pool, &client).await {
+            match swept {
                 Ok(r) => {
                     if !r.mismatched.is_empty() {
                         // Loudest of the three, because it is the one an

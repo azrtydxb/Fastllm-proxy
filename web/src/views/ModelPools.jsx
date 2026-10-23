@@ -158,15 +158,19 @@ export function ModelPools({ onUnauthorised }) {
         // model: with no member there is no model to narrow by, and a pool
         // that had lost its last member must not become impossible to refill —
         // which is precisely the trap the previous same-name filter fell into.
-        const heldBackends = new Set(
-          p.members.map((m) => m.model_backend_id).filter(Boolean),
+        // Held by provider, not by attachment id: a member whose host is
+        // rebooting has no attachment id but is still this pool's, and it is
+        // re-attached by itself when the host returns. Offering that host
+        // again would only add a duplicate the server refuses.
+        const heldProviders = new Set(
+          p.members.map((m) => m.provider_name).filter(Boolean),
         );
         const poolModel = data.models.find(
           (x) => x.id === p.members[0]?.provider_model_id,
         );
         const available = (poolModel ? [poolModel] : data.models).flatMap((m) =>
           (m.backends || [])
-            .filter((b) => !heldBackends.has(b.id))
+            .filter((b) => !heldProviders.has(b.provider_name))
             .map((b) => ({
               id: b.id,
               provider_model_id: m.id,
@@ -252,15 +256,19 @@ export function ModelPools({ onUnauthorised }) {
                     {/* The one machine this member routes to. A member that
                         names no attachment predates that being possible and
                         still carries every provider serving its model, so it
-                        says so rather than showing a blank. */}
+                        says so rather than showing a blank. A member whose
+                        machine is away says that instead: it routes nowhere
+                        until the host serves the model again. */}
                     <Muted style={{ font: "400 10px var(--mono)" }}>
-                      {m.api_base
-                        ? hostOf(m.api_base)
-                        : where(
-                            data.models.find(
-                              (x) => x.id === m.provider_model_id,
-                            ),
-                          )}
+                      {m.waiting
+                        ? `${m.provider_name} · waiting for host`
+                        : m.api_base
+                          ? hostOf(m.api_base)
+                          : where(
+                              data.models.find(
+                                (x) => x.id === m.provider_model_id,
+                              ),
+                            )}
                     </Muted>
                     {/* Weight only bites on the weighted split; the other
                         policies read load, latency or price instead. */}
