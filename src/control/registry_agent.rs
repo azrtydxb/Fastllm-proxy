@@ -187,6 +187,13 @@ pub async fn probe(client: &Upstream, api_base: &str, registered: &[String]) -> 
 /// with two attachments rather than two rows a name could not tell apart. The
 /// provider name this used to also match on existed only for that ambiguity
 /// and no longer exists.
+///
+/// Pool members that name one backend get the same treatment one level down.
+/// Here it is not just tidiness: such a member *routes* by its backend id, so
+/// before migration 0058 the registrar dropping an attachment deleted the
+/// member, and a host that rebooted never came back into the pools that
+/// balanced across it. The member now waits under its provider's name and is
+/// re-attached here when that provider serves the model again.
 pub async fn relink_targets(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut relinked = 0;
     for table in ["frontend_model_defaults", "rule_targets"] {
@@ -200,6 +207,33 @@ pub async fn relink_targets(pool: &PgPool) -> Result<u64, sqlx::Error> {
         .await?
         .rows_affected();
     }
+    // Carry a rename first, while the member is still attached: the name is
+    // what it will wait under if the attachment goes, and waiting under a name
+    // the provider no longer has is waiting forever. Skipped where another
+    // member of the pool already holds the new name, so one odd rename cannot
+    // fail every relink after it.
+    sqlx::query(
+        "UPDATE model_pool_members m SET backend_provider_name = p.name
+           FROM model_backends mb JOIN providers p ON p.id = mb.provider_id
+          WHERE mb.id = m.model_backend_id
+            AND m.backend_provider_name IS DISTINCT FROM p.name
+            AND NOT EXISTS (SELECT 1 FROM model_pool_members o
+                             WHERE o.pool_id = m.pool_id
+                               AND o.provider_model_id = m.provider_model_id
+                               AND o.backend_provider_name = p.name)",
+    )
+    .execute(pool)
+    .await?;
+    relinked += sqlx::query(
+        "UPDATE model_pool_members m SET model_backend_id = mb.id
+           FROM model_backends mb JOIN providers p ON p.id = mb.provider_id
+          WHERE m.model_backend_id IS NULL
+            AND m.backend_provider_name = p.name
+            AND mb.provider_model_id = m.provider_model_id",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(relinked)
 }
 
@@ -473,9 +507,10 @@ pub async fn reconcile_models(
 
     // Gone from the provider means gone from the registry -- but only its own
     // models, and only for a provider whose whole point is that it is
-    // maintained automatically. Usage rows survive this (migration 0031) and a
-    // frontend model pointing at it keeps its target by name (0036), so the
-    // delete is recoverable in every way that matters.
+    // maintained automatically. Usage rows survive this (migration 0031), a
+    // frontend model pointing at it keeps its target by name (0036), and a
+    // pool member naming this attachment keeps it by provider name (0058), so
+    // the delete is recoverable in every way that matters.
     //
     // The *attachment* goes, not the model. Since migration 0045 a model can be
     // served by several providers, so one host dropping it says nothing about

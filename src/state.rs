@@ -133,21 +133,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The *only* way `self.snapshot` may change. Stores the new snapshot and
-    /// rebuilds the routing `Registry` from it in the same call, so the two
-    /// can never observably disagree — no caller can update one without the
-    /// other, because there is no other entry point that writes `snapshot`.
-    ///
-    /// Every writer goes through this: `source::spawn_poller` (`File`/`Http`
-    /// modes), `reload()` below (SIGHUP, `File` mode), and, for `--role all`,
-    /// the admin API's `refresh()` — by way of the `control::api::SnapshotSink`
-    /// impl on `AppState` a few lines down, which just calls this. A previous
-    /// version of this comment claimed that guarantee while `refresh()` still
-    /// called `self.snapshot.store(...)` directly and skipped the rebuild
-    /// entirely; that bug — a model added through the admin API updated
-    /// authorisation but never reached routing, so requests for it 404'd
-    /// until a restart — is what this single-entry-point design exists to
-    /// make structurally impossible to reintroduce.
     /// Act on the fleet's answer to our last health report.
     ///
     /// Only ever clears a local ejection the rest of the fleet contradicts;
@@ -210,6 +195,21 @@ impl AppState {
         }
     }
 
+    /// The *only* way `self.snapshot` may change. Stores the new snapshot and
+    /// rebuilds the routing `Registry` from it in the same call, so the two
+    /// can never observably disagree — no caller can update one without the
+    /// other, because there is no other entry point that writes `snapshot`.
+    ///
+    /// Every writer goes through this: `source::spawn_poller` (`File`/`Http`
+    /// modes), `reload()` below (SIGHUP, `File` mode), and, for `--role all`,
+    /// the admin API's `refresh()` — by way of the `control::api::SnapshotSink`
+    /// impl on `AppState` a few lines down, which just calls this. A previous
+    /// version of this comment claimed that guarantee while `refresh()` still
+    /// called `self.snapshot.store(...)` directly and skipped the rebuild
+    /// entirely; that bug — a model added through the admin API updated
+    /// authorisation but never reached routing, so requests for it 404'd
+    /// until a restart — is what this single-entry-point design exists to
+    /// make structurally impossible to reintroduce.
     pub fn apply_snapshot(&self, snap: Snapshot) -> anyhow::Result<usize> {
         // The same policy under a new version is not news: two control-plane
         // builds of identical rows carry different clock-derived versions, and

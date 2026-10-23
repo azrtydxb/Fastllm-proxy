@@ -1667,3 +1667,19 @@ centralise ejection in the control plane.
 whose peers all serve a backend it ejected withdraws the verdict within one
 report interval; a genuinely dead backend still re-ejects locally within one
 probe interval.
+
+## Deploy the pool-member reboot fix (migration 0058) to kw now?
+
+- Deploy now and verify: build image, patch spec.image on the FastllmProxy CR, stop a model on 48f4 and watch the pool member wait then reattach
+- Commit first, deploy after review
+- Hold: neither deploy nor commit yet
+
+**Decided:** deploy and verify on kw now; no commit yet.
+
+## How to get a 48f4 member to test reattach with (no admin login available to Claude)
+
+- User re-adds kw-gx10-48f4-bge-m3-8890 to cacheaffinity-bge-m3 in the UI; Claude then stops bge-m3 on 48f4 and watches
+- Claude inserts that member directly in Postgres (no audit row), then runs the bge-m3 test
+- Test on the existing 48f4 Qwen3.6-35B member instead (scale its engine to 0 and back; 9c17 keeps serving, 35B reload takes minutes)
+
+**Decided:** user re-added the 48f4 bge-m3 member in the UI.

@@ -187,6 +187,17 @@ pub struct Backend {
     /// ejection is instead timed (see [`Backend::eject`]) and a probe may only
     /// lift it once that time has passed.
     ejected_by_traffic: AtomicBool,
+    /// In rotation on the fleet's word alone: `reconsider` withdrew our
+    /// ejection and no probe of our own has passed since.
+    ///
+    /// Such a backend serves traffic, but it must not *vote* healthy in our
+    /// health report. A withdrawal is a request for a second look, not an
+    /// observation, and counting it as one let two replicas talk each other
+    /// out of a dead backend forever: each ejected it, saw the other's
+    /// freshly withdrawn verdict reported as healthy, withdrew its own, and
+    /// was in turn read as healthy by the other — a 20-second flap on a
+    /// stopped engine, with neither replica ever having reached it.
+    unconfirmed: AtomicBool,
     /// Consecutive traffic ejections; sets how long the next one lasts.
     ejection_streak: AtomicU32,
     /// When the current traffic ejection may be lifted, unix milliseconds.
@@ -354,6 +365,7 @@ impl Backend {
             consecutive_stalls: AtomicU32::new(0),
             counters_ever_moved: AtomicBool::new(false),
             ejected_by_traffic: AtomicBool::new(false),
+            unconfirmed: AtomicBool::new(false),
             ejection_streak: AtomicU32::new(0),
             ejected_until_ms: AtomicU64::new(0),
             last_ejected_ms: AtomicU64::new(0),
@@ -380,6 +392,12 @@ impl Backend {
     #[inline]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// What this replica tells the fleet about the backend: healthy only if
+    /// it is in rotation on its own evidence. See [`Backend::unconfirmed`].
+    pub fn reports_healthy(&self) -> bool {
+        self.is_healthy() && !self.unconfirmed.load(Ordering::Relaxed)
     }
 
     /// What this backend charges per million tokens, in and out together.
@@ -717,6 +735,7 @@ impl Backend {
         self.consecutive_failures.store(0, Ordering::Relaxed);
         self.consecutive_timeouts.store(0, Ordering::Relaxed);
         self.consecutive_stalls.store(0, Ordering::Relaxed);
+        self.unconfirmed.store(true, Ordering::Relaxed);
         self.healthy.store(true, Ordering::Relaxed);
         true
     }
@@ -785,6 +804,8 @@ impl Backend {
     /// the probe -- see [`Backend::ejected_by_traffic`].
     pub fn mark_probe_ok(&self) -> bool {
         self.consecutive_failures.store(0, Ordering::Relaxed);
+        // Our own probe reached it, so whatever the fleet said, we now know.
+        self.unconfirmed.store(false, Ordering::Relaxed);
         if self.ejected_by_traffic.load(Ordering::Relaxed) {
             if now_ms() < self.ejected_until_ms.load(Ordering::Relaxed) {
                 return false;
@@ -1326,6 +1347,31 @@ model_list:
                                                                  // A later hang restarts from a clean counter.
         assert!(!b.check_stall(&busy, 2));
         assert!(b.is_healthy());
+    }
+
+    #[test]
+    fn a_withdrawn_ejection_does_not_vote_healthy_until_a_probe_passes() {
+        // Two replicas, one stopped engine: each withdrew its ejection on the
+        // other's report of a withdrawal, and the backend flapped in and out
+        // of rotation every 20s with nobody ever reaching it.
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        assert!(b.mark_probe_failed(1));
+        assert!(!b.reports_healthy());
+
+        assert!(b.reconsider(false));
+        assert!(b.is_healthy(), "it serves again, so the next probe decides");
+        assert!(
+            !b.reports_healthy(),
+            "but the fleet's word is not evidence to pass back to the fleet"
+        );
+
+        // Still unconfirmed after a failure below the threshold.
+        assert!(!b.mark_probe_failed(2));
+        assert!(!b.reports_healthy());
+
+        b.mark_probe_ok();
+        assert!(b.reports_healthy(), "our own probe is");
     }
 
     #[test]

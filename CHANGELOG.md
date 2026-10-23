@@ -8,6 +8,26 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Fixed
+
+- **A rebooted host comes back into its pools.** Discovery drops a host's
+  attachment while the host is down and creates a new one when it returns.
+  Before this fix, a pool member that named that attachment was deleted
+  along with it and never recreated. After one reboot, a pool balancing
+  across two Sparks used only one, and so did every frontend model routing
+  through that pool. Now the member is bound to its provider's name
+  (migration 0058). It waits while the host is down, routing nowhere and not
+  widening onto other providers, and re-attaches once the host serves the
+  model again. Members lost before this release are not restored and need
+  re-adding once.
+- **Two proxies no longer talk each other out of a dead backend.** A replica
+  that withdrew its ejection because the fleet disagreed reported the backend
+  healthy in its next health report, though it had not reached it. With two
+  replicas, each took the other's withdrawal as evidence. A stopped engine
+  went in and out of rotation every 20 seconds, and requests landing in the
+  "in" half failed. A withdrawn ejection now reports unhealthy until the
+  replica's own probe passes.
+
 ### Changed
 
 - **The control plane's database moved onto the cluster's shared Postgres.**
