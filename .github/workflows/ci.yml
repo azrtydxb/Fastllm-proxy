@@ -323,7 +323,7 @@ jobs:
       # builder gave.
       - name: Set up the BuildKit sidecar builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@d021f2ca9fa3d6682085a7d069b7c8b1dc7b9b80 # main
+        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
 
       # GHCR as well as the private registry, but only for a tagged release.
       # Every commit to main pushes to zot because this cluster deploys from
@@ -463,7 +463,7 @@ jobs:
       # The runner pod's own BuildKit sidecar (linux/arm64).
       - name: Local arm64 builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@d021f2ca9fa3d6682085a7d069b7c8b1dc7b9b80 # main
+        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
       - name: Proxy (arm64, digest only)
         id: proxy
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -517,7 +517,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: builder
-        uses: azrtydxb/.github/actions/setup-builder@d021f2ca9fa3d6682085a7d069b7c8b1dc7b9b80 # main
+        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
       - name: Node agent (${{ matrix.arch }}, digest only)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -598,7 +598,7 @@ jobs:
       # amd64 itself, so there is nothing to reach out to.
       - name: Local amd64 builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@d021f2ca9fa3d6682085a7d069b7c8b1dc7b9b80 # main
+        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
       - name: Proxy (amd64, digest only)
         id: proxy
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
