@@ -24,11 +24,11 @@ walks through all five shapes from a bare binary up to this one.
 > which takes all of the above as values. If you would rather adapt these
 > directly, the cluster-specific values are:
 >
-> | where                               | what to change                                                                       |
-> | ----------------------------------- | ------------------------------------------------------------------------------------ |
-> | `control.yaml`, `deployment.yaml`   | `image:` — registry host and pinned digest                                           |
-> | `service.yaml`, `fastllmproxy.yaml` | `lbipam.cilium.io/ips` and `loadBalancerClass` — or drop them and let your LB assign |
-> | `control.yaml`                      | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                            |
+> | where                               | what to change                                                                                |
+> | ----------------------------------- | --------------------------------------------------------------------------------------------- |
+> | `control.yaml`, `deployment.yaml`   | `image:` — registry host and pinned digest                                                    |
+> | `service.yaml`, `fastllmproxy.yaml` | `lbipam.cilium.io/ips` and `loadBalancerClass` — or drop them and let your LB assign          |
+> | `control.yaml`                      | the `Certificate`'s `issuerRef` and its `ipAddresses` SAN                                     |
 > | `control.yaml`                      | the `fastllm-db-shared` Secret's `uri` — or point `FASTLLM_DATABASE_URL` at your own Postgres |
 
 ## The gateway's two addresses
