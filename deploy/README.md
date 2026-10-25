@@ -9,12 +9,12 @@ walks through all five shapes from a bare binary up to this one.
 |           |                                                                                                             |
 | --------- | ----------------------------------------------------------------------------------------------------------- |
 | Namespace | `fastllm`                                                                                                   |
-| Image     | `192.168.10.131/azrtydxb/fastllm-proxy/proxy:main` (Nexus, anonymous pull)                                  |
+| Image     | `ant.kw.watteel.lab/oci-hosted/azrtydxb/fastllm-proxy/proxy:sha-<commit>` (kw Ant, node credentials)        |
 | VIP       | `192.168.10.126` via Cilium L2 — proxy traffic only, see below                                              |
 | Backends  | spark1 `192.168.10.246:40013/v1` and spark2 `192.168.10.245:40045/v1`, both serving `qwen3-6-35b-a3b-nvfp4` |
 
 > **These are one cluster's manifests, not a template.** They carry concrete
-> values for the cluster they run on — a private registry at `192.168.10.131`,
+> values for the cluster they run on — a private registry at `ant.kw.watteel.lab`,
 > Cilium L2 VIPs at `.125`/`.126` (gateway) and `.129` (admin), and a
 > `cluster-ca` ClusterIssuer. They are kept concrete on purpose: a manifest
 > full of `<PLACEHOLDER>` cannot be applied, so it silently stops being tested,
@@ -235,11 +235,11 @@ node drain does not leave the cluster without a controller, with its own
 ```bash
 kubectl apply -f operator/deploy/crd.yaml -f operator/deploy/rbac.yaml -f operator/deploy/operator.yaml
 kubectl -n fastllm-system set image deploy/fastllm-operator \
-  operator=192.168.10.131/azrtydxb/fastllm-proxy/operator:sha-<commit>
+  operator=ant.kw.watteel.lab/oci-hosted/azrtydxb/fastllm-proxy/operator:sha-<commit>
 ```
 
 (The manifest ships the public `ghcr.io` tag; this cluster pulls the sha build
-from its own registry, same as the proxy.)
+from its own registry, the kw Kuvryn Ant (`ant.kw.watteel.lab/oci-hosted`), same as the proxy.)
 
 ### Adopting it (what was actually done)
 
