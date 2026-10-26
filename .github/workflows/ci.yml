@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: ant
-        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
         with:
           build-cache: "true"
           sccache: "true"
@@ -256,7 +256,7 @@ jobs:
       # to tell whether it is earning its keep.
       - name: sccache stats
         if: always()
-        uses: azrtydxb/ant-setup-action/cache-stats@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        uses: azrtydxb/ant-setup-action/cache-stats@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
 
   # A separate job with its own container, so the Rust job stays Node-free —
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
@@ -268,7 +268,7 @@ jobs:
       image: node:22-bookworm-slim
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
       # npm resolves through Kuvryn Ant (azrtydxb/ant-setup-action below).
       - name: Install
         working-directory: web
@@ -294,7 +294,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
 
       # Every build gets an immutable sha- tag. The moving `main` tag and a
       # semver tag are only added when the ref actually warrants them, so a
@@ -333,7 +333,7 @@ jobs:
 
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -352,7 +352,7 @@ jobs:
       # went away. v7 tolerates it, which is what novamem does against an
       # identically missing cache.
       - name: Log in to Kuvryn Ant (GitHub OIDC)
-        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
         with:
           docker-login: "true"
           required: "true"
@@ -381,7 +381,7 @@ jobs:
           done
 
       - id: ant-cache-1
-        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
         with:
           build-cache: "true"
           cache-name: proxy
@@ -406,7 +406,7 @@ jobs:
           cache-to: ${{ steps.ant-cache-1.outputs.cache-to }}
 
       - id: ant-cache-2
-        uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
         with:
           build-cache: "true"
           cache-name: operator
@@ -454,8 +454,8 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -486,7 +486,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -510,8 +510,8 @@ jobs:
     permissions: { contents: read, packages: write, id-token: write }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -551,12 +551,12 @@ jobs:
     timeout-minutes: 15
     permissions: { contents: read, packages: write, id-token: write }
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: agent-digest-*
           merge-multiple: true
           path: ${{ runner.temp }}/agent-digest
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -588,8 +588,8 @@ jobs:
       operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -624,7 +624,7 @@ jobs:
     timeout-minutes: 15
     permissions: { contents: read, packages: write, id-token: write }
     steps:
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
