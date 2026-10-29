@@ -684,6 +684,13 @@ async fn a_detected_engine_is_gated_by_default() {
     // No PATCH: the only thing that turns this on is the engine scrape seeing
     // the `vllm:` families and installing the gate. Deleting a run through the
     // admin API cannot reproduce this, which is the point.
+    //
+    // The engine reports 50 waiting on every scrape, and a queue past high
+    // water halves the ceiling on each sample, so the automatic ceiling keeps
+    // halving from its default of 8 until it pins at the floor of 1. Wait for
+    // that settled value rather than sampling an intermediate one: how many
+    // halvings have happened by the time the gate first appears is a race
+    // against the scraper's interval, not something this test can fix.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let text = fx.metrics(port);
@@ -691,24 +698,28 @@ async fn a_detected_engine_is_gated_by_default() {
             .lines()
             .filter(|l| l.contains("127.0.0.1:14873/v1") && l.starts_with("fastllm_admission_"))
             .collect();
-        if series
+        let saw_gate = series
             .iter()
-            .any(|l| l.starts_with("fastllm_admission_max_concurrent{"))
-        {
-            // The engine reports 50 waiting, past high water, so the automatic
-            // ceiling has already halved from its default of 8.
+            .any(|l| l.starts_with("fastllm_admission_max_concurrent{"));
+        let pinned = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 1"));
+        if saw_gate {
             assert!(
                 series
                     .iter()
-                    .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 4")),
-                "the auto gate should have shrunk to 4 under a 50-deep queue:\n{}",
+                    .any(|l| l.starts_with("fastllm_admission_max_concurrent{")
+                        && l.ends_with(" 8")),
+                "detection should install the default ceiling of 8:\n{}",
                 series.join("\n")
             );
+        }
+        if saw_gate && pinned {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "a detected engine was never automatically gated; /metrics:\n{}",
+            "a detected engine was never gated down to the floor; /metrics:\n{}",
             text.lines()
                 .filter(|l| l.contains("admission"))
                 .collect::<Vec<_>>()
@@ -717,15 +728,18 @@ async fn a_detected_engine_is_gated_by_default() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // And it actually holds the engine back.
+    // And it actually holds the engine back: the automatic ceiling has pinned
+    // at the floor, so the engine sees far fewer concurrent requests than the
+    // burst sent. A one-request allowance keeps this off the exact figure the
+    // gate is only converging on, the same slack the sibling test leaves.
     engine.peak.store(0, Ordering::SeqCst);
     let (key, model) = (fx.key.clone(), fx.model.clone());
     let results = tokio::task::spawn_blocking(move || burst(port, &key, &model, 6))
         .await
         .unwrap();
     assert!(
-        engine.peak.load(Ordering::SeqCst) <= 4,
-        "the automatic gate should hold a drowning engine to its ceiling"
+        engine.peak.load(Ordering::SeqCst) <= 2,
+        "the automatic gate should hold a drowning engine to its pinned ceiling"
     );
     assert!(
         results.iter().any(|(s, ..)| *s == 503),
