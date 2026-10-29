@@ -28,7 +28,7 @@ Clients point at `:4000`; the management UI is at `https://localhost:4001/`.
 
 **Cache-affinity routing.** vLLM and SGLang keep a radix/prefix KV cache, so two requests sharing a system prompt are far cheaper on the _same_ node. Round-robin alternates them by construction — nodes look evenly loaded while aggregate throughput drops. A shared prefix goes back to the node already holding its cache, unless that node is meaningfully hotter than the least-loaded one.
 
-**Highly available on purpose.** A proxy that loses its control plane keeps serving from its last snapshot. Failover is part of routing, health is tracked per replica and never merged, and `SIGHUP` swaps the routing table without dropping a stream.
+**Highly available on purpose.** A proxy that loses its control plane keeps serving from its last snapshot. Failover is part of routing, health is tracked per replica and never merged, and `SIGHUP` swaps the routing table without dropping a stream. Engine stall detection checks scheduler progress as well as token and KV-cache metrics, so long prefills do not look like dead engines.
 
 ## What it does
 

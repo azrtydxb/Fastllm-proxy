@@ -247,7 +247,12 @@ pub struct Backend {
     engine_last_ts: AtomicU64,
     engine_last_prompt: AtomicU64,
     engine_last_gen: AtomicU64,
-    engine_last_kv_tokens: AtomicU32,
+    /// The percentage gauge's exact bits; `u32::MAX` means unavailable.
+    engine_last_kv_cache_bits: AtomicU32,
+    /// `u64::MAX` means the engine does not expose a step counter.
+    engine_last_steps: AtomicU64,
+    /// Start of the current uninterrupted run of frozen samples.
+    stall_started_ms: AtomicU64,
     /// Requests the engine has accepted and not started, as of the last
     /// scrape. Kept apart from `engine_inflight`, which folds it together
     /// with `running`: a ceiling wants the total, but admission control wants
@@ -378,7 +383,9 @@ impl Backend {
             engine_last_ts: AtomicU64::new(0),
             engine_last_prompt: AtomicU64::new(0),
             engine_last_gen: AtomicU64::new(0),
-            engine_last_kv_tokens: AtomicU32::new(0),
+            engine_last_kv_cache_bits: AtomicU32::new(u32::MAX),
+            engine_last_steps: AtomicU64::new(u64::MAX),
+            stall_started_ms: AtomicU64::new(0),
             engine_waiting: AtomicU32::new(0),
             admission: def.admission.map(crate::admission::Admission::new),
             requests_total: AtomicU64::new(0),
@@ -506,18 +513,26 @@ impl Backend {
             .store(load.prompt_tokens_total, Ordering::Relaxed);
         self.engine_last_gen
             .store(load.generation_tokens_total, Ordering::Relaxed);
-        self.engine_last_kv_tokens
-            .store(load.kv_cache_tokens.unwrap_or(0), Ordering::Relaxed);
+        self.engine_last_kv_cache_bits.store(
+            load.kv_cache.map(f32::to_bits).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
+        self.engine_last_steps.store(
+            load.engine_steps_total.unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         self.record_prefix_cache(load);
     }
 
     /// Check whether the engine has stalled since the last metrics scrape.
     ///
     /// A stall is one where the engine reports `running > 0` (has work) but
-    /// nothing has progressed: both token counters and KV cache tokens are
-    /// identical to the last reading. Two consecutive stall samples mark the
-    /// backend unhealthy through the same path as a dead health probe, so
-    /// that the failover loop discovers it and stops burning requests on it.
+    /// every available progress counter is unchanged. Token counters alone
+    /// are not enough: prefill can take many seconds without producing output
+    /// tokens, while vLLM's engine-step histogram advances on scheduler steps,
+    /// including chunked prefill and speculative decoding. The consecutive
+    /// sample window still removes a genuinely wedged engine, and the prior
+    /// movement guard avoids ejecting engines with naturally static counters.
     ///
     /// Returns `true` if this sample transitioned the backend out of rotation.
     ///
@@ -535,19 +550,29 @@ impl Backend {
         // so a later hang starts from a clean counter.
         if load.running == 0 {
             self.consecutive_stalls.store(0, Ordering::Relaxed);
+            self.stall_started_ms.store(0, Ordering::Relaxed);
             return false;
         }
 
-        let frozen = self.engine_last_prompt.load(Ordering::Relaxed) == load.prompt_tokens_total
-            && self.engine_last_gen.load(Ordering::Relaxed) == load.generation_tokens_total
-            && self.engine_last_kv_tokens.load(Ordering::Relaxed)
-                == load.kv_cache_tokens.unwrap_or(0);
+        let prompt_frozen =
+            self.engine_last_prompt.load(Ordering::Relaxed) == load.prompt_tokens_total;
+        let generation_frozen =
+            self.engine_last_gen.load(Ordering::Relaxed) == load.generation_tokens_total;
+        let previous_kv = self.engine_last_kv_cache_bits.load(Ordering::Relaxed);
+        let kv_bits = load.kv_cache.map(f32::to_bits);
+        let kv_frozen = kv_bits.is_none_or(|bits| previous_kv == bits);
+        let previous_steps = self.engine_last_steps.load(Ordering::Relaxed);
+        let steps_frozen = load
+            .engine_steps_total
+            .is_none_or(|steps| previous_steps == u64::MAX || previous_steps == steps);
+        let frozen = prompt_frozen && generation_frozen && kv_frozen && steps_frozen;
 
         // Any movement — prefill climbing, decode climbing, cache growing —
         // is proof of life, however slow the backend is.
         if !frozen {
             self.counters_ever_moved.store(true, Ordering::Relaxed);
             self.consecutive_stalls.store(0, Ordering::Relaxed);
+            self.stall_started_ms.store(0, Ordering::Relaxed);
             return false;
         }
 
@@ -560,9 +585,31 @@ impl Backend {
             return false;
         }
 
+        let now = now_ms();
+        self.stall_started_ms
+            .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
         let stalled = self.consecutive_stalls.fetch_add(1, Ordering::Relaxed) + 1 >= threshold;
         if stalled {
-            self.eject_for_traffic("engine counters frozen while requests were running");
+            let mut signals = Vec::new();
+            if prompt_frozen {
+                signals.push("prompt_tokens_total");
+            }
+            if generation_frozen {
+                signals.push("generation_tokens_total");
+            }
+            if load.kv_cache.is_some() && kv_frozen {
+                signals.push("kv_cache_usage_perc");
+            }
+            if load.engine_steps_total.is_some() && steps_frozen {
+                signals.push("iteration_tokens_total_count");
+            }
+            let elapsed_ms = now.saturating_sub(self.stall_started_ms.load(Ordering::Relaxed));
+            self.eject_for_traffic(&format!(
+                "engine progress frozen while requests were running: signals=[{}], duration={}ms",
+                signals.join(","),
+                elapsed_ms
+            ));
         }
         stalled
     }
@@ -1188,12 +1235,7 @@ model_list:
         assert_eq!(reg.pool("Qwen/Qwen3-1.7B").unwrap().len(), 2);
     }
 
-    fn load(
-        running: u32,
-        prompt: u64,
-        gen: u64,
-        kv: Option<u32>,
-    ) -> crate::engine_metrics::EngineLoad {
+    fn load(running: u32, prompt: u64, gen: u64) -> crate::engine_metrics::EngineLoad {
         crate::engine_metrics::EngineLoad {
             prefix_cache_queries_total: None,
             prefix_cache_hits_total: None,
@@ -1202,8 +1244,31 @@ model_list:
             kv_cache: None,
             prompt_tokens_total: prompt,
             generation_tokens_total: gen,
-            kv_cache_tokens: kv,
+            engine_steps_total: None,
         }
+    }
+
+    #[test]
+    fn long_prefill_steps_are_progress_even_when_token_counters_pause() {
+        let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
+        let b = Arc::clone(&reg.backends()[0]);
+        let mut baseline = load(1, 100, 50);
+        baseline.engine_steps_total = Some(100);
+        b.record_engine_inflight(&baseline, 1);
+        let mut established = load(1, 200, 80);
+        established.engine_steps_total = Some(101);
+        assert!(!b.check_stall(&established, 2));
+        b.record_engine_inflight(&established, 2);
+
+        // A long prefill can leave completed token totals unchanged between
+        // scrapes even as the scheduler completes further engine steps.
+        let mut prefill = load(1, 200, 80);
+        prefill.engine_steps_total = Some(102);
+        assert!(!b.check_stall(&prefill, 2));
+        b.record_engine_inflight(&prefill, 3);
+        prefill.engine_steps_total = Some(103);
+        assert!(!b.check_stall(&prefill, 2));
+        assert!(b.is_healthy());
     }
 
     #[test]
@@ -1212,15 +1277,21 @@ model_list:
         let b = Arc::clone(&reg.backends()[0]);
         // The engine first shows what moving counters look like: this is the
         // baseline without which "frozen" has no meaning.
-        let moving = load(2, 100, 50, Some(10));
+        let mut moving = load(2, 100, 50);
+        moving.kv_cache = Some(0.1);
+        moving.engine_steps_total = Some(10);
         assert!(!b.check_stall(&moving, 2));
         b.record_engine_inflight(&moving, 1);
-        let moved = load(2, 200, 90, Some(20));
+        let mut moved = load(2, 200, 90);
+        moved.kv_cache = Some(0.2);
+        moved.engine_steps_total = Some(20);
         assert!(!b.check_stall(&moved, 2));
         b.record_engine_inflight(&moved, 2);
 
         // Now frozen at the moved-to values.
-        let l = load(2, 200, 90, Some(20));
+        let mut l = load(2, 200, 90);
+        l.kv_cache = Some(0.2);
+        l.engine_steps_total = Some(20);
         b.record_engine_inflight(&l, 3);
         // First frozen sample: below the threshold, still in rotation.
         assert!(!b.check_stall(&l, 2));
@@ -1240,7 +1311,7 @@ model_list:
     fn an_engine_that_has_never_moved_counters_is_never_stalled() {
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let l = load(1, 0, 0, Some(0));
+        let l = load(1, 0, 0);
         b.record_engine_inflight(&l, 1);
         // Far past any threshold: still in rotation, because there is no
         // baseline to be frozen against.
@@ -1254,7 +1325,7 @@ model_list:
         assert!(b.is_healthy());
         // And the first real movement both establishes the baseline and
         // clears the accumulated (never-counted) samples.
-        let m = load(1, 5, 5, Some(1));
+        let m = load(1, 5, 5);
         assert!(!b.check_stall(&m, 5));
         b.record_engine_inflight(&m, 41);
         assert!(b.is_healthy());
@@ -1273,7 +1344,7 @@ model_list:
         let b = Arc::clone(&reg.backends()[0]);
 
         // Nothing reported: unknown, not zero.
-        let mut load = load(0, 0, 0, None);
+        let mut load = load(0, 0, 0);
         b.record_engine_inflight(&load, 1);
         assert_eq!(b.prefix_cache_hit_rate(), None, "no counters means unknown");
 
@@ -1312,7 +1383,7 @@ model_list:
     fn no_lookups_is_unknown_rather_than_zero_percent() {
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let mut load = load(0, 0, 0, None);
+        let mut load = load(0, 0, 0);
         load.prefix_cache_queries_total = Some(0);
         load.prefix_cache_hits_total = Some(0);
         b.record_engine_inflight(&load, 1);
@@ -1323,12 +1394,12 @@ model_list:
     fn any_counter_movement_is_proof_of_life() {
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let a = load(2, 100, 50, Some(10));
+        let a = load(2, 100, 50);
         b.record_engine_inflight(&a, 1);
         assert!(!b.check_stall(&a, 2)); // one frozen sample banked
                                         // Prefill advanced: the check itself must see the movement and
                                         // wipe the banked evidence — production order is check, then record.
-        let moved = load(2, 140, 50, Some(10));
+        let moved = load(2, 140, 50);
         assert!(!b.check_stall(&moved, 2));
         b.record_engine_inflight(&moved, 2);
         // Frozen again, but the banked sample was wiped by the movement.
@@ -1340,11 +1411,11 @@ model_list:
     fn idle_engine_is_not_stalled() {
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
-        let busy = load(2, 100, 50, Some(10));
+        let busy = load(2, 100, 50);
         b.record_engine_inflight(&busy, 1);
         assert!(!b.check_stall(&busy, 2)); // one sample banked
-        assert!(!b.check_stall(&load(0, 100, 50, Some(10)), 2)); // drained: evidence cleared
-                                                                 // A later hang restarts from a clean counter.
+        assert!(!b.check_stall(&load(0, 100, 50), 2)); // drained: evidence cleared
+                                                       // A later hang restarts from a clean counter.
         assert!(!b.check_stall(&busy, 2));
         assert!(b.is_healthy());
     }
@@ -1381,12 +1452,12 @@ model_list:
         let reg = Registry::build(&config(TWO_REPLICAS), &Interner::default(), None).unwrap();
         let b = Arc::clone(&reg.backends()[0]);
         // Baseline: the engine showed movement before it froze.
-        let moving = load(2, 100, 50, Some(10));
+        let moving = load(2, 100, 50);
         b.record_engine_inflight(&moving, 1);
-        let moved = load(2, 200, 90, Some(20));
+        let moved = load(2, 200, 90);
         assert!(!b.check_stall(&moved, 2));
         b.record_engine_inflight(&moved, 2);
-        let l = load(2, 200, 90, Some(20));
+        let l = load(2, 200, 90);
         b.record_engine_inflight(&l, 3);
         assert!(!b.check_stall(&l, 2));
         b.mark_probe_ok();
