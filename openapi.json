@@ -202,7 +202,12 @@
                   "admission_max_concurrent": {
                     "type": ["integer", "null"],
                     "minimum": 1,
-                    "description": "Turns on flow control: at most this many concurrent requests per proxy replica, the rest held at the proxy. The ceiling halves while the engine reports admission_high_water or more requests waiting and grows back as its queue drains. Null turns it off"
+                    "description": "Per proxy replica, at most this many concurrent requests to the engine; the rest held at the proxy. Required when admission_mode is explicit; ignored otherwise. The ceiling halves while the engine reports admission_high_water or more requests waiting and grows back as its queue drains. Legacy: a number without admission_mode is read as explicit, a null as off"
+                  },
+                  "admission_mode": {
+                    "type": "string",
+                    "enum": ["auto", "explicit", "off"],
+                    "description": "auto (default) gates a backend the moment the engine scraper detects a self-hosted vLLM/SGLang engine from /metrics and never gates a hosted provider; explicit uses admission_max_concurrent; off disables the gate. Sending this is the only way to tell automatic from off on a backend with no ceiling"
                   },
                   "admission_high_water": {
                     "type": "integer",

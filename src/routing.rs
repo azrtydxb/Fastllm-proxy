@@ -631,8 +631,8 @@ impl CostMatch {
         let Some(cost) = estimated else {
             return false;
         };
-        !self.min_micros.is_some_and(|min| cost < min)
-            && !self.max_micros.is_some_and(|max| cost > max)
+        self.min_micros.is_none_or(|min| cost >= min)
+            && self.max_micros.is_none_or(|max| cost <= max)
     }
 }
 

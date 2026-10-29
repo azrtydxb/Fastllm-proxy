@@ -159,18 +159,39 @@ running, until first-byte latency crosses the upstream timeout and the timeout
 path ejects a backend that was working. Flow control moves that queue into the
 proxy, where it is bounded and a caller can be told "not now" at once.
 
-It is set **per backend**, on the Models page (the FLOW CONTROL cell of each
-backend row) or with `PATCH /admin/backends/{id}` -- never in a config file,
-because the right numbers are a property of the engine, and changing them must
-not need a redeploy. `File` mode has no gates.
+It is **on by default**. Each backend has an `admission_mode`, set on the Models
+page (the FLOW CONTROL cell of each backend row) or with
+`PATCH /admin/backends/{id}` -- never in a config file, because the right numbers
+are a property of the engine, and changing them must not need a redeploy.
+
+| `admission_mode` | Meaning |
+|---|---|
+| `auto` (default) | The gate turns itself on, with the tuning below, the moment the engine scraper detects a self-hosted vLLM/SGLang engine from `/metrics`. A hosted provider (OpenRouter, Anthropic, …) never answers with those metric families, so `auto` never gates one; a backend not yet detected simply has no gate until it is. |
+| `explicit` | The gate is on now, with `admission_max_concurrent` and the tuning below. The numbers are yours, not derived. |
+| `off` | No gate, whatever the scrape finds. vLLM queues the surplus itself. |
+
+The automatic ceiling, `auto` only, is the smaller of the measured per-box
+session limit divided across proxy replicas (16 / 2 = **8** for the two DGX
+Sparks serving Qwen3.6-35B) and the engine's own reported capacity
+(`vllm:cache_config_info{max_num_seqs=…}`, `sglang:…{max_running_requests=…}`)
+divided across replicas. The engine figure is a *batching* ceiling -- vLLM's
+stock default is 256 -- so it is only ever allowed to **lower** the ceiling,
+never to raise it past the measured limit; advertising the stock batch leaves
+the ceiling at 8.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `admission_max_concurrent` | off (`null`) | Most concurrent requests each proxy replica sends the engine. Setting it turns the gate on; `null` turns it off. |
-| `admission_high_water` | 4 | Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves. |
-| `admission_max_queued` | 64 | Requests allowed to wait at the proxy; beyond it they get 503. |
-| `admission_max_wait_seconds` | 30 | How long a request waits for a slot before 503. |
+| `admission_mode` | `auto` | `auto`, `explicit`, or `off` -- see above. |
+| `admission_max_concurrent` | `8` (auto), required (explicit) | Most concurrent requests each proxy replica sends the engine. Used by `explicit`; for `auto` it is derived, unless it is an explicit backend. |
+| `admission_high_water` | 2 | Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves. |
+| `admission_max_queued` | 32 | Requests allowed to wait at the proxy; beyond it they get 503. |
+| `admission_max_wait_seconds` | 5 | How long a request waits for a slot before 503. |
 | `upstream_timeout_seconds` | `--upstream-timeout` | Time to first byte before the request fails. Edited in the same dialog because it is the other half of the same problem. |
+
+A `PATCH` that sends only the legacy `admission_max_concurrent` still works: a
+number maps to `explicit` and `null` to `off`. Sending `admission_mode` is the
+way to distinguish "automatic" from "off" on a backend with no ceiling, which
+`null` cannot express.
 
 The engine scraper (`--engine-scrape-interval`, default 2s) halves the gate's
 ceiling while the engine reports `high_water` or more requests waiting, and
@@ -184,18 +205,23 @@ their next snapshot poll.
 - **A pool still balances.** A request that finds its engine's gate full moves
   to an untried sibling without waiting, and only queues when there is nowhere
   else to go.
-- **Each replica has its own ceiling**, so N proxies admit up to N times
-  `admission_max_concurrent` between them. The engine's queue depth reflects all
-  of their traffic, so each backs off on what the others sent too.
+- **Each replica has its own ceiling**, so N proxies admit up to N times it
+  between them. The engine's queue depth reflects all of their traffic, so each
+  backs off on what the others sent too. This is why the automatic ceiling is
+  box capacity *divided by the replica count*, not the box capacity.
 - **Running requests are never cut off.** A lowered ceiling takes effect as
-  slots come free.
-- **An engine with no `/metrics`** keeps a fixed ceiling at
-  `admission_max_concurrent` -- still a concurrency cap, just not an adaptive one.
+  slots come free. A backend that gains a gate while requests are already in
+  flight seeds those requests as occupied slots, so the ceiling is never handed
+  out twice on a live swap.
+- **An engine that advertises no capacity** in `/metrics` keeps the measured
+  per-replica default as a fixed ceiling -- still an adaptive gate, just with a
+  conservative starting point.
 
-Start with `admission_high_water` at a few requests -- a small queue is an
+Prefer `auto`. Override with `explicit` only when you know the engine's real
+numbers: set `admission_high_water` at a few requests -- a small queue is an
 engine keeping its GPU busy, not one falling behind -- and
-`admission_max_concurrent` at roughly the engine's `--max-num-seqs` divided by
-the number of proxy replicas.
+`admission_max_concurrent` at what one engine session comfortably serves divided
+by the number of proxy replicas.
 
 **Seeing it work.** The Fleet page shows, per backend, the engine's own
 running/waiting counts and the gate's slots in use over its current ceiling

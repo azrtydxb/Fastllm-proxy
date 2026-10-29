@@ -466,6 +466,26 @@ E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin
 E curl -s --cacert /etc/fastllm/tls/ca.crt -XDELETE https://localhost:4001/admin/provider-models/3     # drop the model and its backends
 ```
 
+### Flow control is on by default
+
+Every backend now defaults to `admission_mode: auto` (migration 0059). On the
+next snapshot poll after this deploys, the two DGX vLLM engines serving the 35B
+gain an admission gate each without anyone setting one: the engine scraper
+detects them from `/metrics` and installs a per-replica ceiling of 8 (16
+comfortable sessions per box, divided by the two proxy replicas). Hosted
+providers are never gated — `auto` only fires for a detected vLLM/SGLang engine.
+Backends already carrying explicit numbers keep them (the migration marks them
+`explicit`), and an operator who wants a backend ungated sets `off`.
+
+```bash
+# See and change one backend's gate. Mode is one of auto, explicit, off;
+# admission_max_concurrent is required for explicit.
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPATCH https://localhost:4001/admin/backends/9 \
+  -H 'content-type: application/json' -d '{"admission_mode":"explicit","admission_max_concurrent":6}'
+E curl -s --cacert /etc/fastllm/tls/ca.crt -XPATCH https://localhost:4001/admin/backends/9 \
+  -H 'content-type: application/json' -d '{"admission_mode":"off"}'
+```
+
 ## Memory, and the classifier
 
 Both classifier models ship in the image, and the process that loads them needs

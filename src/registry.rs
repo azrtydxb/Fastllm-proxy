@@ -254,15 +254,24 @@ pub struct Backend {
     /// the *queue*, because a queue is the engine saying it is behind while
     /// `running` alone only says it is busy.
     engine_waiting: AtomicU32,
-    /// The admission gate in front of this backend, when its row sets one.
+    /// The admission gate in front of this backend, when it has one.
     ///
-    /// Built with the backend from its own settings, so changing them in the
-    /// admin API produces a new backend with a new gate -- the settings are
-    /// part of the identity key for exactly that reason (see `Interner`).
-    /// Fed by `crate::engine_scrape` from the engine's queue depth; a gated
-    /// backend that publishes no `/metrics` keeps a fixed ceiling at
-    /// `max_concurrent`, which is still a useful concurrency cap.
-    admission: Option<crate::admission::Admission>,
+    /// An `Explicit` gate is built here with the backend, from its own settings
+    /// -- which are part of the identity key, so changing them in the admin API
+    /// produces a new backend with a new gate (see `Interner`). An `Auto` gate
+    /// is installed later by `crate::engine_scrape` once it detects an engine,
+    /// which is why this is swapped rather than fixed at construction. Fed from
+    /// the engine's queue depth; a gated backend that publishes no `/metrics`
+    /// keeps a fixed ceiling at `max_concurrent`, still a useful concurrency
+    /// cap.
+    admission: arc_swap::ArcSwapOption<crate::admission::Admission>,
+    /// The mode this backend was built with. `Auto` is the one that permits a
+    /// later install; an operator's `Off` must never be overridden by detection.
+    admission_config: crate::admission::Config,
+    /// Held while the gate is installed so that installation and request
+    /// registration cannot interleave. See `InflightGuard`; nothing else takes
+    /// it, so it is uncontended except for the one install per backend.
+    admission_transition: Mutex<()>,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
     /// Times this backend has been taken out of rotation, for any reason.
@@ -380,7 +389,14 @@ impl Backend {
             engine_last_gen: AtomicU64::new(0),
             engine_last_kv_tokens: AtomicU32::new(0),
             engine_waiting: AtomicU32::new(0),
-            admission: def.admission.map(crate::admission::Admission::new),
+            admission: arc_swap::ArcSwapOption::from(match def.admission {
+                crate::admission::Config::Explicit(settings) => {
+                    Some(Arc::new(crate::admission::Admission::new(settings)))
+                }
+                crate::admission::Config::Auto | crate::admission::Config::Off => None,
+            }),
+            admission_config: def.admission,
+            admission_transition: Mutex::new(()),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             ejections_total: AtomicU64::new(0),
@@ -610,8 +626,44 @@ impl Backend {
     }
 
     /// The gate, if this backend has one.
-    pub fn admission(&self) -> Option<&crate::admission::Admission> {
-        self.admission.as_ref()
+    pub fn admission(&self) -> Option<Arc<crate::admission::Admission>> {
+        self.admission.load_full()
+    }
+
+    /// Install the automatically derived gate, once a scrape has confirmed this
+    /// backend is a self-hosted engine.
+    ///
+    /// Returns false, doing nothing, when the backend was not built on `auto`
+    /// (an operator's `explicit` or `off` is never overridden by detection) or
+    /// when a gate is already installed (the scrape runs every tick). The
+    /// transition lock is what makes the install and [`InflightGuard::begin`]
+    /// see each other: the gate is seeded with the requests already in flight,
+    /// so it does not admit a full ceiling on top of work the engine is already
+    /// doing.
+    pub fn enable_auto_admission(&self, settings: crate::admission::Settings) -> bool {
+        if self.admission_config != crate::admission::Config::Auto {
+            return false;
+        }
+        let _transition = self.admission_transition.lock();
+        if self.admission.load().is_some() {
+            return false;
+        }
+        let gate = Arc::new(crate::admission::Admission::new_with_in_flight(
+            settings,
+            self.inflight(),
+        ));
+        self.admission.store(Some(gate));
+        true
+    }
+
+    /// Register a request in flight and hand back the gate it must clear, if
+    /// any. Paired with [`InflightGuard`], which calls it and, on drop, returns
+    /// any seeded slot. Not an I/O path: one uncontended lock and two atomics.
+    fn begin_request(&self) -> Option<Arc<crate::admission::Admission>> {
+        let _transition = self.admission_transition.lock();
+        let gate = self.admission.load_full();
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        gate
     }
 
     pub fn requests_total(&self) -> u64 {
@@ -846,38 +898,66 @@ impl Backend {
 /// token has been streamed to the client — not when the upstream headers
 /// arrive. Getting this wrong makes every streaming backend look idle and
 /// collapses least-loaded routing into round-robin.
-pub struct InflightGuard(
-    Arc<Backend>,
-    /// The admission slot this request holds, when the backend is gated.
-    ///
-    /// Carried here rather than beside the guard because the two have exactly
-    /// the same lifetime and the guard is already moved into the response
-    /// body: a slot released at the end of *headers* would let the next
-    /// caller in while this one is still generating, which is the pressure
-    /// the gate exists to apply. `None` for an ungated backend -- a hosted
-    /// provider, or a local one the scraper has not reached yet.
-    ///
-    /// Never read, only dropped: releasing the slot *is* its job, and that
-    /// happens when the guard does.
+///
+/// It is also the point at which a request meets the admission gate, and the
+/// two have to agree across a live swap. A backend on `auto` has no gate until
+/// the scraper installs one, and installation must not hand a full ceiling out
+/// on top of requests already in flight. So [`begin`](Self::begin) registers
+/// the request and reads the gate under the backend's transition lock: an
+/// install either sees this request (and seeds it as an occupied slot) or this
+/// request sees the installed gate. Capturing the gate here rather than at
+/// dispatch is what closes that window -- a request that began ungated releases
+/// its seeded slot on drop instead of leaking it.
+pub struct InflightGuard {
+    backend: Arc<Backend>,
+    gate: Option<Arc<crate::admission::Admission>>,
+    dispatched: bool,
     #[allow(dead_code)]
-    Option<crate::admission::Permit>,
-);
+    permit: Option<crate::admission::Permit>,
+}
 
 impl InflightGuard {
     pub fn acquire(backend: Arc<Backend>) -> Self {
-        Self::with_permit(backend, None)
+        let mut guard = Self::begin(backend);
+        guard.mark_dispatched();
+        guard
     }
 
-    pub fn with_permit(backend: Arc<Backend>, permit: Option<crate::admission::Permit>) -> Self {
-        backend.inflight.fetch_add(1, Ordering::Relaxed);
-        backend.requests_total.fetch_add(1, Ordering::Relaxed);
-        Self(backend, permit)
+    pub fn begin(backend: Arc<Backend>) -> Self {
+        let gate = backend.begin_request();
+        Self {
+            backend,
+            gate,
+            dispatched: false,
+            permit: None,
+        }
+    }
+
+    pub fn gate(&self) -> Option<Arc<crate::admission::Admission>> {
+        self.gate.clone()
+    }
+
+    pub fn set_permit(&mut self, permit: Option<crate::admission::Permit>) {
+        self.permit = permit;
+    }
+
+    pub fn mark_dispatched(&mut self) {
+        if !self.dispatched {
+            self.backend.requests_total.fetch_add(1, Ordering::Relaxed);
+            self.dispatched = true;
+        }
     }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.0.inflight.fetch_sub(1, Ordering::Relaxed);
+        let _transition = self.backend.admission_transition.lock();
+        if self.gate.is_none() {
+            if let Some(gate) = self.backend.admission() {
+                gate.release_seed();
+            }
+        }
+        self.backend.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -1199,6 +1279,7 @@ model_list:
             prefix_cache_hits_total: None,
             running,
             waiting: 0,
+            batch_capacity: None,
             kv_cache: None,
             prompt_tokens_total: prompt,
             generation_tokens_total: gen,
@@ -1522,12 +1603,16 @@ model_list:
             api_base: "http://10.0.0.1:8000/v1".into(),
             upstream_model: "m".into(),
             upstream_timeout_seconds: timeout,
-            admission: gate.map(|max| crate::admission::Settings {
-                max_concurrent: max,
-                high_water: 4,
-                max_queued: 8,
-                max_wait_seconds: 5,
-            }),
+            admission: gate
+                .map(|max| {
+                    crate::admission::Config::Explicit(crate::admission::Settings {
+                        max_concurrent: max,
+                        high_water: 4,
+                        max_queued: 8,
+                        max_wait_seconds: 5,
+                    })
+                })
+                .unwrap_or(crate::admission::Config::Auto),
             ..Default::default()
         };
         let entries = |d: BackendDef| {
@@ -1563,6 +1648,51 @@ model_list:
             Registry::build_from_entries(entries(def(Some(300), Some(6))), &interner, Some(&after))
                 .unwrap();
         assert!(Arc::ptr_eq(&again.backends()[0], new));
+    }
+
+    #[test]
+    fn automatic_gate_install_counts_in_flight_and_respects_backend_mode() {
+        use crate::admission::{Config, Settings};
+        let interner = Interner::default();
+        let make = |mode| BackendDef {
+            api_base: "http://engine:8000/v1".into(),
+            upstream_model: "m".into(),
+            admission: mode,
+            ..Default::default()
+        };
+        let entries =
+            |def| std::iter::once(("m".to_string(), "http://engine:8000/v1".to_string(), def));
+        let registry =
+            Registry::build_from_entries(entries(make(Config::Auto)), &interner, None).unwrap();
+        let backend = Arc::clone(&registry.backends()[0]);
+        let request = InflightGuard::begin(Arc::clone(&backend));
+        let settings = Settings {
+            max_concurrent: 2,
+            high_water: 2,
+            max_queued: 4,
+            max_wait_seconds: 5,
+        };
+        assert!(backend.enable_auto_admission(settings));
+        let gate = backend.admission().unwrap();
+        assert_eq!(gate.status().in_use, 1);
+        let admitted = gate.try_admit().unwrap();
+        assert!(
+            gate.try_admit().is_none(),
+            "existing in-flight work must consume one slot"
+        );
+        drop(admitted);
+        drop(request);
+        assert!(
+            gate.try_admit().is_some(),
+            "a pre-gate request releases its seeded slot"
+        );
+
+        for mode in [Config::Off, Config::Explicit(settings)] {
+            let other = Registry::build_from_entries(entries(make(mode)), &interner, None).unwrap();
+            let b = &other.backends()[0];
+            assert!(!b.enable_auto_admission(settings));
+            assert_eq!(b.admission().is_some(), matches!(mode, Config::Explicit(_)));
+        }
     }
 
     #[test]

@@ -25,6 +25,23 @@ use crate::engine_metrics::ProbeError;
 use crate::registry::{now_ms, BackendUid};
 use crate::state::AppState;
 
+/// Only a successful parse of an engine's scheduler families can activate an
+/// automatic gate. A vendor 404, non-engine Prometheus body, or failed probe
+/// leaves the backend untouched -- so a hosted provider, which never answers
+/// with `vllm:`/`sglang:` families, is never gated by accident.
+///
+/// The capacity policy lives in [`crate::admission::auto_settings`]; this only
+/// supplies what the scrape learned, so the same numbers are unit-testable
+/// without a probe.
+fn auto_settings_from_probe(
+    probe: &Result<crate::engine_metrics::EngineLoad, ProbeError>,
+) -> Option<crate::admission::Settings> {
+    let Ok(load) = probe else {
+        return None;
+    };
+    Some(crate::admission::auto_settings(load.batch_capacity))
+}
+
 /// How long a backend that produced no reading sits out before being asked
 /// again. Long next to the scrape interval: this is detection, not monitoring,
 /// and the answer changes at most when someone restarts an engine.
@@ -129,6 +146,10 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
             Some(Detected::Retry { answered: true, .. })
         );
 
+        if let Some(settings) = auto_settings_from_probe(&load) {
+            backend.enable_auto_admission(settings);
+        }
+
         match load {
             // `running + waiting`: a request the engine has accepted but not
             // started is still a request this backend owes an answer for, and
@@ -209,5 +230,34 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_settings_from_probe;
+    use crate::engine_metrics::ProbeError;
+
+    #[test]
+    fn engine_capacity_and_provider_errors_select_expected_auto_settings() {
+        let measured = Ok(crate::engine_metrics::EngineLoad {
+            batch_capacity: Some(8),
+            ..Default::default()
+        });
+        assert_eq!(
+            auto_settings_from_probe(&measured).unwrap().max_concurrent,
+            4,
+            "a small reported batch divides across replicas and lowers the ceiling"
+        );
+        assert_eq!(
+            auto_settings_from_probe(&Ok(crate::engine_metrics::EngineLoad::default())),
+            Some(crate::admission::AUTO_FALLBACK),
+            "an engine with no advertised capacity gets the measured default"
+        );
+
+        // A hosted provider never answers with an engine family, so the probe
+        // fails and no gate is installed -- the whole point of "auto".
+        let hosted = Err(ProbeError::NotAnEngine("404".into()));
+        assert_eq!(auto_settings_from_probe(&hosted), None);
     }
 }

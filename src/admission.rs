@@ -35,6 +35,17 @@
 //! costs exactly one, the same as a small one. It bounds how many requests
 //! this replica has *in flight to one engine*, nothing else.
 //!
+//! ## On by default
+//!
+//! Every backend is [`Config::Auto`] unless an operator says otherwise, so the
+//! gate is not something anyone has to remember to switch on -- the deployment
+//! that most needs it is the one with nobody watching. `Auto` gates only what
+//! [`crate::engine_scrape`] has confirmed is a self-hosted vLLM/SGLang engine,
+//! so a hosted provider is never gated no matter what it answers, and a backend
+//! that has not been probed yet simply has no gate yet. The numbers come from
+//! [`auto_settings`]: the measured per-box session limit divided across
+//! replicas, lowered further only if the engine advertises a smaller batch.
+//!
 //! ## Per replica, deliberately
 //!
 //! Each proxy holds its own ceiling, so N replicas admit up to N times it.
@@ -57,10 +68,11 @@ type Debt = Arc<AtomicUsize>;
 /// How one backend's gate is tuned.
 ///
 /// Set per backend -- on the `model_backends` row, through
-/// `PATCH /admin/backends/{id}` and the Models page -- because the right
-/// numbers are a property of the engine: a 35B on one GPU and an embedding
-/// model on the same box want nothing like the same ceiling, and a hosted
-/// provider wants no gate at all. A backend with no settings has no gate.
+/// `PATCH /admin/backends/{id}` and the Models page. A backend defaults to
+/// [`Config::Auto`]: the gate turns itself on, with [`auto_settings`], once the
+/// scraper confirms the backend is a self-hosted vLLM/SGLang engine, and never
+/// for a hosted provider. An operator overrides the numbers with
+/// [`Config::Explicit`], or disables the gate outright with [`Config::Off`].
 ///
 /// All `u32` so the whole thing can sit in the backend's identity key and on
 /// the wire without conversions that could disagree.
@@ -82,6 +94,145 @@ pub struct Settings {
     pub max_queued: u32,
     /// How long a caller waits for a slot before it is refused.
     pub max_wait_seconds: u32,
+}
+
+/// Persisted per-backend choice, the `admission_mode` column.
+///
+/// The distinction the column exists for is `Auto` versus `Off`: both mean "no
+/// numbers of my own", but one wants a gate the moment an engine is detected
+/// and the other never wants one. An older `null` `admission_max_concurrent`
+/// could not tell them apart, which is why `Auto` is the default and a fresh
+/// backend is auto-gated rather than left ungated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(tag = "mode", content = "settings", rename_all = "snake_case")]
+pub enum Config {
+    #[default]
+    Auto,
+    Explicit(Settings),
+    Off,
+}
+
+/// Proxy replicas the deployment runs, used to divide a box-wide engine
+/// capacity into a per-replica ceiling.
+///
+/// A constant, not configuration: the ceiling is per replica and the division
+/// has to agree on every replica or their combined admission drifts from the
+/// box. Two is what `deploy/proxy.yaml` runs for the two DGX Sparks serving
+/// Qwen3.6-35B. Moving to a different replica count means changing this number,
+/// deliberately, alongside the manifest.
+pub const REPLICAS: u32 = 2;
+
+/// Concurrency one DGX box comfortably serves for the 35B, measured by the
+/// operator. Used both as the automatic ceiling when the engine reports no
+/// capacity *and* as a hard cap on a reported one -- see [`auto_settings`].
+pub const BOX_SESSIONS: u32 = 16;
+
+/// Starting defaults for an engine's automatic gate.
+///
+/// `max_concurrent` is [`BOX_SESSIONS`] over [`REPLICAS`]: 16 sessions is the
+/// measured comfortable limit for the 35B on one DGX box, and each of the two
+/// replicas holds its own share, so 8 each admits 16 between them. `high_water`
+/// is 2: an engine at capacity holds a small queue at all times and that is
+/// healthy, so only a queue that keeps growing should halve the ceiling. 32
+/// local waiters and a 5s wait bound proxy memory and caller latency without
+/// making a caller wait longer than a first byte typically takes.
+pub const AUTO_FALLBACK: Settings = Settings {
+    max_concurrent: per_replica_ceiling(BOX_SESSIONS, REPLICAS),
+    high_water: 2,
+    max_queued: 32,
+    max_wait_seconds: 5,
+};
+
+/// Divide a box-wide target among proxy replicas, rounding up so odd targets
+/// do not leave one session unused. At least one slot remains per replica.
+pub const fn per_replica_ceiling(box_capacity: u32, replicas: u32) -> u32 {
+    let replicas = if replicas < 1 { 1 } else { replicas };
+    box_capacity.saturating_add(replicas - 1) / replicas
+}
+
+/// The automatic gate for an engine, given what its `/metrics` reported about
+/// scheduler capacity (`vLLM max_num_seqs`, `SGLang max_running_requests`).
+///
+/// The reported figure is vLLM's *batching* ceiling, not the number of sessions
+/// the box serves well: its default `max_num_seqs` is 256, so trusting it
+/// directly would admit twenty times the measured comfortable limit and put the
+/// engine straight back into the overload this gate exists to prevent. It is
+/// therefore taken as an *upper bound* only -- the ceiling is the smaller of the
+/// engine's own capacity over [`REPLICAS`] and the measured per-replica default.
+/// An engine that reports a genuinely small batch (say 24) still lowers the
+/// ceiling; one that reports the stock 256 leaves it at the safe default.
+pub fn auto_settings(engine_capacity: Option<u32>) -> Settings {
+    let mut settings = AUTO_FALLBACK;
+    if let Some(capacity) = engine_capacity {
+        // A capacity of 0 means "not advertised"; never gate to nothing.
+        if capacity > 0 {
+            settings.max_concurrent = settings
+                .max_concurrent
+                .min(per_replica_ceiling(capacity, REPLICAS));
+        }
+    }
+    settings
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{auto_settings, per_replica_ceiling, Config, Settings, AUTO_FALLBACK, BOX_SESSIONS};
+
+    #[test]
+    fn automatic_explicit_and_off_states_round_trip_over_snapshot_json() {
+        let explicit = Settings {
+            max_concurrent: 11,
+            high_water: 2,
+            max_queued: 32,
+            max_wait_seconds: 5,
+        };
+        for state in [Config::Auto, Config::Explicit(explicit), Config::Off] {
+            let encoded = serde_json::to_string(&state).unwrap();
+            assert_eq!(serde_json::from_str::<Config>(&encoded).unwrap(), state);
+        }
+    }
+
+    /// The automatic ceiling is replica-aware: a 16-session box split across
+    /// two replicas admits 8 each, and an odd target rounds up so no session
+    /// goes unused.
+    #[test]
+    fn automatic_ceiling_divides_the_box_across_replicas() {
+        assert_eq!(per_replica_ceiling(BOX_SESSIONS, 2), 8);
+        assert_eq!(per_replica_ceiling(17, 2), 9);
+        // A degenerate replica count cannot divide by zero.
+        assert_eq!(per_replica_ceiling(8, 0), 8);
+        assert_eq!(AUTO_FALLBACK.max_concurrent, 8);
+    }
+
+    /// vLLM's `max_num_seqs` is a batching ceiling (stock default 256), not the
+    /// number of sessions the box serves well. A reported figure may lower the
+    /// ceiling but must never raise it above the measured per-replica default,
+    /// or the automatic gate would re-create the overload it exists to stop.
+    #[test]
+    fn engine_capacity_only_lowers_the_automatic_ceiling() {
+        assert_eq!(
+            auto_settings(Some(24)).max_concurrent,
+            8.min(per_replica_ceiling(24, 2)),
+            "a small engine batch lowers the ceiling"
+        );
+        assert_eq!(auto_settings(Some(24)).max_concurrent, 8);
+        assert_eq!(
+            auto_settings(Some(256)).max_concurrent,
+            AUTO_FALLBACK.max_concurrent,
+            "the stock vLLM batch does not raise the ceiling"
+        );
+        assert_eq!(
+            auto_settings(Some(4)).max_concurrent,
+            2,
+            "tiny batch honoured"
+        );
+        assert_eq!(
+            auto_settings(Some(0)).max_concurrent,
+            AUTO_FALLBACK.max_concurrent,
+            "an unset capacity is not a gate to zero"
+        );
+        assert_eq!(auto_settings(None), AUTO_FALLBACK);
+    }
 }
 
 impl Settings {
@@ -158,6 +309,9 @@ pub struct Admission {
     admitted: AtomicU64,
     refused_full: AtomicU64,
     refused_timed_out: AtomicU64,
+    /// How many pre-gate requests were seeded as occupied slots and still owe
+    /// their slot back. See `new_with_in_flight` and `release_seed`.
+    seeded: AtomicUsize,
     settings: Settings,
 }
 
@@ -221,7 +375,50 @@ impl Admission {
             admitted: AtomicU64::new(0),
             refused_full: AtomicU64::new(0),
             refused_timed_out: AtomicU64::new(0),
+            seeded: AtomicUsize::new(0),
             settings,
+        }
+    }
+
+    /// A gate installed on a backend that already has work in flight -- the
+    /// live swap from no gate to an automatic one.
+    ///
+    /// Those requests were admitted before the gate existed and hold no permit,
+    /// so they are seeded as occupied slots: the semaphore starts with
+    /// `ceiling - seeded` free rather than the full ceiling, and each one
+    /// releases its slot via [`release_seed`](Self::release_seed) on drop.
+    /// Without this the gate would hand out a *full* ceiling on top of the
+    /// requests already running, which is the overload it exists to prevent.
+    /// Capped at the ceiling: work beyond it is not seeded, and its release is
+    /// a no-op, so nothing leaks.
+    pub fn new_with_in_flight(settings: Settings, in_flight: usize) -> Self {
+        let ceiling = settings.max_concurrent();
+        let seeded = in_flight.min(ceiling);
+        let mut gate = Self::new(settings);
+        gate.sem = Arc::new(Semaphore::new(ceiling - seeded));
+        gate.seeded.store(seeded, Ordering::Relaxed);
+        gate
+    }
+
+    /// A seeded, pre-gate request has finished: give its borrowed slot back.
+    ///
+    /// A no-op once `seeded` is exhausted, which is how the requests beyond the
+    /// ceiling (never seeded) are ignored. Repays debt first, like every other
+    /// returned slot, so a ceiling that came down under load is not lifted
+    /// again by a request that never counted against it.
+    pub fn release_seed(&self) {
+        if self
+            .seeded
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            let repaid = self
+                .debt
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
+                .is_ok();
+            if !repaid {
+                self.sem.add_permits(1);
+            }
         }
     }
 
@@ -508,6 +705,63 @@ mod tests {
             gate.observe(100);
         }
         assert_eq!(gate.capacity(), 1);
+    }
+
+    #[tokio::test]
+    /// The live swap from "no gate" to "auto gate": in-flight requests must
+    /// start out consuming slots, so the gate never admits a full ceiling on
+    /// top of work the engine is already doing, and their slots must come back
+    /// when they finish rather than leak.
+    #[tokio::test]
+    async fn an_install_counts_in_flight_work_and_returns_its_slots() {
+        let gate = Admission::new_with_in_flight(settings(), 3);
+        assert_eq!(gate.capacity(), 8, "the ceiling is unchanged by the install");
+        assert_eq!(gate.status().in_use, 3, "three pre-gate requests are counted");
+
+        // Only five slots are free until the pre-gate work finishes.
+        let mut fresh = Vec::new();
+        for _ in 0..5 {
+            fresh.push(gate.try_admit().expect("five slots remain"));
+        }
+        assert!(
+            gate.try_admit().is_none(),
+            "the gate must not hand out more than ceiling minus in-flight"
+        );
+
+        gate.release_seed();
+        assert!(
+            gate.try_admit().is_some(),
+            "a pre-gate request ending frees its slot"
+        );
+
+        // Releasing more seeds than were seeded is a no-op: work beyond the
+        // ceiling was never counted and must not inflate the ceiling.
+        for _ in 0..10 {
+            gate.release_seed();
+        }
+        drop(fresh);
+        assert_eq!(
+            gate.sem.available_permits(),
+            8,
+            "the ceiling is exactly max_concurrent once everything is back"
+        );
+    }
+
+    /// A pool of in-flight work larger than the ceiling seeds only up to the
+    /// ceiling; the excess is not owed, so its ending cannot push permits
+    /// above `max_concurrent`.
+    #[tokio::test]
+    async fn more_in_flight_than_the_ceiling_cannot_over_release() {
+        let gate = Admission::new_with_in_flight(settings(), 20);
+        assert_eq!(gate.status().in_use, 8, "seeded up to the ceiling");
+        for _ in 0..50 {
+            gate.release_seed();
+        }
+        assert_eq!(
+            gate.sem.available_permits(),
+            8,
+            "releasing un-seeded work must not add permits"
+        );
     }
 
     #[tokio::test]

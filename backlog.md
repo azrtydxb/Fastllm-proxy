@@ -776,6 +776,24 @@ granted the fallback does not reach it, so it cannot widen anyone's access.
 Enforced by a partial unique index rather than convention, so "at most one
 model is the fallback" cannot drift into two.
 
+## Flow control ON by default for local engines — done (2026-10-29)
+
+The gate is no longer opt-in. A backend's `admission_mode` (migration 0059)
+defaults to `auto`: the proxy's engine scraper installs a gate the moment it
+detects a self-hosted vLLM/SGLang engine from `/metrics`, and never for a
+hosted provider, which does not answer with those metric families. `explicit`
+pins an operator's numbers; `off` disables the gate outright. The automatic
+ceiling is the measured per-box session limit divided across proxy replicas
+(16 / 2 = 8), lowered further only if the engine advertises a smaller batch
+(`vllm:cache_config_info{max_num_seqs=…}`); the stock vLLM batch (256) never
+raises it, because `max_num_seqs` is a batching ceiling, not a session count.
+A backend that gains a gate with requests already in flight seeds them as
+occupied slots, so a live swap never hands the ceiling out twice.
+
+Why it matters on kw: the two DGX Sparks serving the 35B had no gate
+configured, so vLLM's queue grew unbounded and the backends were ejected under
+load. They now carry a gate from the next snapshot poll after deploy.
+
 ## Flow control in front of local engines — done (2026-09-29)
 
 Per-backend admission gates (`src/admission.rs`), set on the `model_backends`
@@ -797,7 +815,9 @@ same engine. The gate's state and the engine's own running/waiting counts go to
 
 First built as a deployment-wide `fastllm.admission` config section, and moved
 before it shipped: the right numbers are a property of each engine, and an
-operator wants to change them without a redeploy. `File` mode has no gates.
+operator wants to change them without a redeploy. `File` mode backends default
+to `auto` too -- a self-hosted engine is gated, a hosted provider is not -- but
+`File` mode has no admin surface to override one.
 
 `tests/admission.rs` sets gates through the admin API against a real control
 plane and runs the same burst with a gate and without one against a fake engine,

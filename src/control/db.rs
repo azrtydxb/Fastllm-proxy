@@ -123,6 +123,31 @@ mod tests {
                 "usage:read *"
             ]
         );
+
+        let mode_default: String = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns
+             WHERE table_name = 'model_backends' AND column_name = 'admission_mode'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            mode_default.contains("auto"),
+            "unexpected default: {mode_default}"
+        );
+        let mode_check: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'model_backends'::regclass AND conname = 'model_backends_admission_mode_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for state in ["auto", "explicit", "off"] {
+            assert!(
+                mode_check.contains(state),
+                "{state} missing from {mode_check}"
+            );
+        }
     }
 
     #[tokio::test]

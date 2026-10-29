@@ -51,6 +51,7 @@
 //! not "the proxy never blocks."
 
 use fastllm_proxy::limiter::{Decision, Limiter, Limits};
+use fastllm_proxy::registry::InflightGuard;
 use fastllm_proxy::registry::Registry;
 use fastllm_proxy::routing::{FrontendModelDef, RequestFacts};
 use fastllm_proxy::snapshot::{hash_key, AuthError, KeyEntry, Principal, Snapshot};
@@ -140,6 +141,13 @@ const _VIRTUAL_MODEL_DECIDE_IS_SYNC_AND_TAKES_NO_HANDLE: DecideFn = FrontendMode
 /// changed to accept a handle instead of the raw forwarded bytes, this
 /// coercion fails to compile.
 const _TAIL_BUFFER_PUSH_IS_SYNC_AND_TAKES_NO_HANDLE: fn(&mut TailBuffer, &[u8]) = TailBuffer::push;
+
+/// Automatic gate installation coordinates with this synchronous request
+/// registration point. It must remain atomic-only and never acquire an I/O
+/// handle or await.
+const _INFLIGHT_BEGIN_IS_SYNC: fn(
+    std::sync::Arc<fastllm_proxy::registry::Backend>,
+) -> InflightGuard = InflightGuard::begin;
 
 /// Extract the source text of a top-level `fn <name>` from `source` by
 /// counting braces from its first `{`. Panics (failing the test loudly, not
@@ -281,6 +289,18 @@ fn tail_buffer_push_body_contains_no_await_or_io_tokens() {
     );
 
     assert_no_await_or_io_tokens(&body, "TailBuffer::push");
+}
+
+#[test]
+fn inflight_guard_registration_contains_no_await_or_io_tokens() {
+    let source = include_str!("../src/registry.rs");
+    let body = extract_fn_body(source, "pub fn begin(backend: Arc<Backend>) -> Self {");
+    assert_no_await_or_io_tokens(&body, "InflightGuard::begin");
+    let backend_registration = extract_fn_body(
+        source,
+        "fn begin_request(&self) -> Option<Arc<crate::admission::Admission>> {",
+    );
+    assert_no_await_or_io_tokens(&backend_registration, "Backend::begin_request");
 }
 
 /// The Anthropic frontend (`src/protocol/messages.rs`) puts translation on the

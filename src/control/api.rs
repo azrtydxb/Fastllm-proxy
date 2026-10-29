@@ -2012,9 +2012,8 @@ struct BackendView {
     /// Seconds this backend may take to send response headers; `None` is the
     /// deployment's `--upstream-timeout`.
     upstream_timeout_seconds: Option<i32>,
-    /// The admission gate (`crate::admission`). `None` is no gate; the three
-    /// tuning fields are always present so the UI can show what turning one
-    /// on would use. Same names `PATCH /admin/backends/{id}` takes.
+    /// Admission choice; automatic means it waits for engine detection.
+    admission_mode: String,
     admission_max_concurrent: Option<i32>,
     admission_high_water: i32,
     admission_max_queued: i32,
@@ -2157,6 +2156,7 @@ async fn list_models(
         String,      // p.auth_header
         Option<i32>, // mb.default_max_tokens
         Option<i32>, // mb.upstream_timeout_seconds
+        String,      // mb.admission_mode
         Option<i32>, // mb.admission_max_concurrent
         Vec<i32>,    // ARRAY[high_water, max_queued, max_wait_seconds]
     );
@@ -2168,7 +2168,7 @@ async fn list_models(
              COALESCE(mb.upstream_model, m.name), \
              mb.input_price_per_mtok, mb.output_price_per_mtok, \
              p.upstream_api_key IS NOT NULL, p.protocol, p.auth_header, mb.default_max_tokens, \
-             mb.upstream_timeout_seconds, mb.admission_max_concurrent, \
+             mb.upstream_timeout_seconds, mb.admission_mode, mb.admission_max_concurrent, \
              ARRAY[mb.admission_high_water, mb.admission_max_queued, \
                    mb.admission_max_wait_seconds] \
          FROM model_backends mb \
@@ -2208,6 +2208,7 @@ async fn list_models(
                                 auth_header,
                                 default_max_tokens,
                                 upstream_timeout_seconds,
+                                admission_mode,
                                 admission_max_concurrent,
                                 admission_tuning,
                             )| BackendView {
@@ -2223,6 +2224,7 @@ async fn list_models(
                                 auth_header: auth_header.clone(),
                                 default_max_tokens: *default_max_tokens,
                                 upstream_timeout_seconds: *upstream_timeout_seconds,
+                                admission_mode: admission_mode.clone(),
                                 admission_max_concurrent: *admission_max_concurrent,
                                 // Always three: the query builds the array.
                                 admission_high_water: admission_tuning[0],
@@ -3665,6 +3667,10 @@ struct PatchBackend {
     /// See `crate::admission`.
     #[serde(default, deserialize_with = "double_option")]
     admission_max_concurrent: Option<Option<i32>>,
+    /// `auto`, `explicit`, or `off`. When omitted, the legacy max field still
+    /// maps a number to explicit and null to off.
+    #[serde(default)]
+    admission_mode: Option<String>,
     /// Tuning for the gate. Plain options: these always have a value, so
     /// there is nothing to clear -- absent leaves them alone.
     #[serde(default)]
@@ -3681,6 +3687,24 @@ async fn patch_backend(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchBackend>,
 ) -> Result<StatusCode, ApiError> {
+    if body
+        .admission_mode
+        .as_deref()
+        .is_some_and(|m| !matches!(m, "auto" | "explicit" | "off"))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "admission_mode must be auto, explicit, or off",
+        ));
+    }
+    if body.admission_mode.as_deref() == Some("explicit")
+        && body.admission_max_concurrent.flatten().is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "explicit admission requires admission_max_concurrent",
+        ));
+    }
     for (name, value) in [
         ("input_price_per_mtok", body.input_price_per_mtok.flatten()),
         (
@@ -3714,7 +3738,7 @@ async fn patch_backend(
             "admission_max_concurrent",
             body.admission_max_concurrent.flatten(),
             1,
-            "; send null to turn the gate off",
+            "; use admission_mode \"off\" to turn the gate off",
         ),
         ("admission_high_water", body.admission_high_water, 1, ""),
         ("admission_max_queued", body.admission_max_queued, 0, ""),
@@ -3744,7 +3768,12 @@ async fn patch_backend(
            output_price_per_mtok    = CASE WHEN $6  THEN $7  ELSE output_price_per_mtok    END,
            default_max_tokens       = CASE WHEN $8  THEN $9  ELSE default_max_tokens       END,
            upstream_timeout_seconds = CASE WHEN $10 THEN $11 ELSE upstream_timeout_seconds END,
-           admission_max_concurrent = CASE WHEN $12 THEN $13 ELSE admission_max_concurrent END,
+           admission_max_concurrent = CASE
+             WHEN $17 THEN CASE WHEN $18 = 'explicit' THEN $13 ELSE NULL END
+             WHEN $12 THEN $13 ELSE admission_max_concurrent END,
+           admission_mode = CASE WHEN $17 THEN $18
+             WHEN $12 THEN CASE WHEN $13 IS NULL THEN 'off' ELSE 'explicit' END
+             ELSE admission_mode END,
            admission_high_water       = COALESCE($14, admission_high_water),
            admission_max_queued       = COALESCE($15, admission_max_queued),
            admission_max_wait_seconds = COALESCE($16, admission_max_wait_seconds)
@@ -3772,6 +3801,8 @@ async fn patch_backend(
     .bind(body.admission_high_water)
     .bind(body.admission_max_queued)
     .bind(body.admission_max_wait_seconds)
+    .bind(body.admission_mode.is_some())
+    .bind(body.admission_mode.as_deref().unwrap_or("auto"))
     .execute(&ctx.pool)
     .await
     .map_err(|e| db_error("backend update", &e))?;
@@ -8831,6 +8862,33 @@ mod policy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PATCH /admin/backends/{id}` must carry all three modes, and tell an
+    /// absent max from an explicit null: `explicit` needs a number, while
+    /// `auto` and `off` are complete without one.
+    #[test]
+    fn backend_patch_parses_each_admission_mode() {
+        let explicit: PatchBackend =
+            serde_json::from_value(serde_json::json!({"admission_mode": "explicit", "admission_max_concurrent": 9}))
+                .unwrap();
+        assert_eq!(explicit.admission_mode.as_deref(), Some("explicit"));
+        assert_eq!(explicit.admission_max_concurrent.flatten(), Some(9));
+
+        // auto and off need no ceiling, so the max stays absent.
+        for mode in ["auto", "off"] {
+            let p: PatchBackend =
+                serde_json::from_value(serde_json::json!({ "admission_mode": mode })).unwrap();
+            assert_eq!(p.admission_mode.as_deref(), Some(mode));
+            assert_eq!(p.admission_max_concurrent, None);
+        }
+
+        // The legacy numeric-only form still parses, and leaves mode absent so
+        // the handler maps a number to explicit and a null to off.
+        let legacy: PatchBackend =
+            serde_json::from_value(serde_json::json!({ "admission_max_concurrent": 4 })).unwrap();
+        assert_eq!(legacy.admission_mode, None);
+        assert_eq!(legacy.admission_max_concurrent.flatten(), Some(4));
+    }
 
     /// The gap that made the MCP gateway unusable end to end: every piece
     /// worked — schema, snapshot, routing, the screen — and the grant could
