@@ -142,11 +142,10 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 // overwrite it with the current one.
                 let stalled = backend.check_stall(
                     &load,
-                    // Ten seconds of silence at the default scrape rate, not
-                    // four: a long unchunked prefill or a graph capture
-                    // freezes every counter for a few seconds on an engine
-                    // that is working, and ejecting it for that is how a busy
-                    // GPU got taken out of rotation.
+                    // Keep at least five samples even when health checks use
+                    // a smaller threshold. Scheduler-step metrics distinguish
+                    // active long prefills from a wedge; the longer window
+                    // still requires sustained silence before ejection.
                     state.unhealthy_after.max(5),
                 );
                 backend.record_engine_inflight(&load, now_ms);
@@ -160,7 +159,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 if stalled {
                     debug!(
                         backend = %backend.api_base,
-                        "engine stalled: token counters unchanged"
+                        "engine stalled: all available progress signals frozen"
                     );
                 }
             }

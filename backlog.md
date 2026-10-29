@@ -968,3 +968,15 @@ Known limit, recorded in the module doc: the host is resolved once at write
 time and the proxy resolves again per request, so DNS rebinding beats the
 check for any name the operator does not itself control. Revisit the day an
 allowlist entry stops being the operator's own infrastructure.
+
+## Engine stall detection during long prefill — fixed (2026-10-29)
+
+The proxy previously treated unchanged prompt-token, generation-token and
+integer KV-cache values as a frozen engine. A long prefill can leave token
+totals unchanged between scrapes; the KV-cache percentage was also cast to an
+integer, usually zero. The detector now compares the actual KV-cache gauge and
+vLLM's `iteration_tokens_total_count` histogram count, which advances on engine
+steps during prefill and speculative decoding. It retains the requirement that
+counters have moved before it will call a later freeze a stall, so engines with
+naturally static counters such as TTS remain in rotation. A confirmed ejection
+logs the frozen metric names and duration.
