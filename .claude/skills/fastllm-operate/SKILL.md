@@ -14,7 +14,7 @@ description: Operate and diagnose the FastLLM deployment on the kw Kubernetes cl
 | Gateway VIP | `192.168.10.125`, alt `192.168.10.126` |
 | Admin VIP | `192.168.10.129:4001` (HTTPS, self-signed — use `-k`) |
 | Postgres dev VIP | `192.168.10.127:5432` |
-| Registry | `192.168.10.131` (Nexus, in the `nexus` namespace) |
+| Registry | `ant.kw.watteel.lab/oci-hosted` (kw Kuvryn Ant; nodes hold the pull credential) |
 | Manifests | `deploy/` — applied continuously, so they are the source of truth |
 
 ## Diagnose in dependency order
@@ -29,8 +29,8 @@ Work down. Each step is worthless until the one above it passes.
 2. **Workloads not scaled to zero** — a clean shutdown scales deployments and
    statefulsets to 0. Recover the intended count from
    `kubectl.kubernetes.io/last-applied-configuration` rather than assuming 1.
-3. **Registry up** — the image lives in-cluster. If `nexus/nexus` is scaled to
-   0, everything else is `ImagePullBackOff` for a reason that has nothing to do
+3. **Registry up** — the image lives on the kw Ant (`ant.kw.watteel.lab`). If it is
+   down, everything else is `ImagePullBackOff` for a reason that has nothing to do
    with the workload.
 4. **Postgres present** — the control plane reads its database URL from the
    `fastllm-db-shared` Secret (`uri`); the standalone `fastllm-pg` CNPG cluster

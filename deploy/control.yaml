@@ -87,7 +87,7 @@ spec:
           # anyone else installing this version gets.
           # `deployment.yaml` carries the same tag and must move at the same
           # time: the two planes share a schema.
-          image: 192.168.10.131/azrtydxb/fastllm-proxy/proxy:sha-f4878b2
+          image: ant.kw.watteel.lab/oci-hosted/azrtydxb/fastllm-proxy/proxy:sha-d4630e4
           imagePullPolicy: Always
           args:
             - --role=control
