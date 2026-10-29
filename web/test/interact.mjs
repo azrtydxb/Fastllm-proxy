@@ -297,8 +297,24 @@ await click(byText("+ Add rule"));
   await fill(labelled("ROLES (any of)"), "engineering");
   await fill(labelled("STREAM"), "true");
   await fill(labelled("PROMPT TOKENS ≥"), "256");
+  await fill(labelled("TTFT/BACKEND"), "180");
+  const firstTarget = labelled("FIRST TARGET");
+  const poolOption = [...(firstTarget?.options || [])].find((o) =>
+    o.textContent.includes("leastloaded-local"),
+  );
+  check(
+    "FIRST TARGET offers model pools",
+    !!poolOption && poolOption.parentElement?.label.startsWith("Pools"),
+  );
+  if (firstTarget && poolOption) await fill(firstTarget, poolOption.value);
+  check(
+    "inflight label uses the strict comparison it enforces",
+    !!labelled("INFLIGHT/BACKEND <"),
+  );
   await click(byText("Create rule"));
-  const call = lastCall("POST", "/rules");
+  const call = [...sent]
+    .reverse()
+    .find((r) => r.method === "POST" && r.path.endsWith("/rules"));
   check(
     "rule POST reaches /admin/frontend-models/{id}/rules",
     !!call,
@@ -315,11 +331,22 @@ await click(byText("+ Add rule"));
       Array.isArray(call.body.roles) &&
         call.body.roles[0] === "engineering" &&
         call.body.min_prompt_tokens === 256 &&
+        call.body.max_ttft_ms_per_backend === 180 &&
         call.body.stream === true,
       `body was ${JSON.stringify(call.body)}`,
     );
     check("position is sent", typeof call.body.position === "number");
   }
+  const firstTargetPost = [...sent].reverse().find(
+    (r) => r.method === "POST" && /\/admin\/rules\/[^/]+\/targets$/.test(r.path),
+  );
+  check(
+    "creating a rule with a pool first target posts model_pool_id",
+    firstTargetPost?.body?.model_pool_id ===
+      "00000000-0000-4000-8000-000000000030" &&
+      firstTargetPost.body.provider_model_id === undefined,
+    `sent ${JSON.stringify(firstTargetPost)}`,
+  );
 }
 
 // Renaming. The control renders a text cursor and looks live; before this it
@@ -365,10 +392,10 @@ await goto("models");
   }
 }
 
-// Adding a target. The field is `provider_model_id`; sending `model_id` is a
-// 422 the server rejects wholesale, and that is exactly what shipped for
-// several days after the rename -- every "+ target" button in the app was
-// dead and no check here noticed, because none of them clicked one.
+// Adding a provider-model target. The field is `provider_model_id`; sending
+// `model_id` is a 422 the server rejects wholesale, and that is exactly what
+// shipped for several days after the rename -- every "+ target" button in the
+// app was dead and no check here noticed, because none of them clicked one.
 await goto("routing");
 {
   sent.length = 0;
@@ -397,6 +424,73 @@ await goto("routing");
         typeof t.body.position === "number",
       );
     }
+  }
+}
+
+// Rule targets can also point at a named pool. Keep this assertion tied to
+// the rule's own picker and endpoint: Defaults uses the same component, but a
+// regression that drops pools from the rule picker must fail here.
+await goto("routing");
+{
+  sent.length = 0;
+  const addTargets = $("button").filter((b) =>
+    b.textContent.trim().toLowerCase().includes("+ target"),
+  );
+  const ruleAddTarget = addTargets[0];
+  check("rule target picker is available", !!ruleAddTarget);
+  if (ruleAddTarget) {
+    await click(ruleAddTarget);
+    const pick = $("select").find((el) =>
+      [...el.options].some((o) => o.textContent.includes("leastloaded-local")),
+    );
+    const opt = [...(pick?.options || [])].find((o) =>
+      o.textContent.includes("leastloaded-local"),
+    );
+    check(
+      "rule picker distinguishes pool choices",
+      !!opt && opt.parentElement?.label.startsWith("Pools"),
+    );
+    if (pick && opt) await fill(pick, opt.value);
+    await click(byText("add"));
+    const t = lastCall("POST", "/admin/rules/");
+    check(
+      "rule pool target POST uses model_pool_id",
+      !!t && t.path.endsWith("/targets") &&
+        t.body.model_pool_id === "00000000-0000-4000-8000-000000000030" &&
+        t.body.provider_model_id === undefined,
+      `sent ${JSON.stringify(t)}`,
+    );
+  }
+}
+
+// Defaults shares AddTarget, so it must retain the same pool option and wire
+// shape when adding a fallback target.
+await goto("routing");
+{
+  sent.length = 0;
+  const addTargets = $("button").filter((b) =>
+    b.textContent.trim().toLowerCase().includes("+ target"),
+  );
+  const defaultsAddTarget = addTargets[1];
+  check("Defaults target picker is available", !!defaultsAddTarget);
+  if (defaultsAddTarget) {
+    await click(defaultsAddTarget);
+    const pick = $("select").find((el) =>
+      [...el.options].some((o) => o.textContent.includes("leastloaded-local")),
+    );
+    const opt = [...(pick?.options || [])].find((o) =>
+      o.textContent.includes("leastloaded-local"),
+    );
+    if (pick && opt) await fill(pick, opt.value);
+    await click(byText("add"));
+    const t = lastCall("POST", "/admin/frontend-models/");
+    check(
+      "Defaults pool target POST uses model_pool_id",
+      !!t && t.path.endsWith("/defaults") &&
+        t.body.model_pool_id === "00000000-0000-4000-8000-000000000030" &&
+        t.body.provider_model_id === undefined,
+      `sent ${JSON.stringify(t)}`,
+    );
   }
 }
 

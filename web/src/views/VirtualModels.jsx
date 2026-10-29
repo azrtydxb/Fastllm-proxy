@@ -48,7 +48,7 @@ const CONDITION_LABELS = {
   stream: "stream =",
   min_budget_used_percent: "budget_used% ≥",
   max_budget_used_percent: "budget_used% ≤",
-  max_inflight_per_backend: "inflight/backend ≤",
+  max_inflight_per_backend: "inflight/backend <",
   min_request_cost_micros: "request cost ≥",
   max_request_cost_micros: "request cost ≤",
   after: "after",
@@ -505,6 +505,7 @@ export function VirtualModels({ onUnauthorised }) {
                 siblings: data.vms.filter((o) => o.id !== vm.id),
               }}
               models={data.models}
+              pools={data.pools}
               onError={setError}
               onDone={reload}
               onUnauthorised={onUnauthorised}
@@ -660,27 +661,7 @@ function AddTarget({ models, pools, onAdd }) {
         style={{ fontSize: 12 }}
       >
         <option value="">model or pool…</option>
-        <optgroup label="Pools — several models, one policy">
-          {(pools || []).map((p) => (
-            <option key={p.id} value={`pool:${p.id}`}>
-              {p.name} · {p.members.length} member
-              {p.members.length === 1 ? "" : "s"} ·{" "}
-              {p.policy || "weighted split"}
-            </option>
-          ))}
-        </optgroup>
-        <optgroup label="Provider models">
-          {models.map((m) => (
-            <option key={m.id} value={`model:${m.id}`}>
-              {m.name}
-              {m.backends.length === 0
-                ? " · no provider"
-                : m.backends.length > 1
-                  ? ` · ${m.backends.length} providers`
-                  : ` · ${m.backends[0].provider_name}`}
-            </option>
-          ))}
-        </optgroup>
+        <TargetOptions models={models} pools={pools} />
       </select>
       <Button
         variant="secondary"
@@ -703,6 +684,33 @@ function AddTarget({ models, pools, onAdd }) {
   );
 }
 
+function TargetOptions({ models, pools }) {
+  return (
+    <>
+      <optgroup label="Pools — several models, one policy">
+        {(pools || []).map((p) => (
+          <option key={p.id} value={`pool:${p.id}`}>
+            {p.name} · {p.members.length} member
+            {p.members.length === 1 ? "" : "s"} · {p.policy || "weighted split"}
+          </option>
+        ))}
+      </optgroup>
+      <optgroup label="Provider models">
+        {models.map((m) => (
+          <option key={m.id} value={`model:${m.id}`}>
+            {m.name}
+            {m.backends.length === 0
+              ? " · no provider"
+              : m.backends.length > 1
+                ? ` · ${m.backends.length} providers`
+                : ` · ${m.backends[0].provider_name}`}
+          </option>
+        ))}
+      </optgroup>
+    </>
+  );
+}
+
 /**
  * A rule builder over the conditions the routing engine actually evaluates.
  *
@@ -711,7 +719,7 @@ function AddTarget({ models, pools, onAdd }) {
  * which is the worst failure this screen can have: the rule looks configured
  * and never fires.
  */
-function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
+function AddRule({ vm, models, pools, onError, onDone, onUnauthorised }) {
   const [open, setOpen] = useState(false);
   const [c, setC] = useState({});
   const set = (patch) => setC({ ...c, ...patch });
@@ -756,6 +764,10 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
       match_condition.max_inflight_per_backend = Number(
         c.max_inflight_per_backend,
       );
+    if (c.max_ttft_ms_per_backend)
+      match_condition.max_ttft_ms_per_backend = Number(
+        c.max_ttft_ms_per_backend,
+      );
     // Typed in dollars, stored in micro-units — the unit every price in this
     // schema uses.
     if (c.min_request_cost)
@@ -788,8 +800,11 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
           ...match_condition,
         });
         if (c.model_id && c.action !== "deny" && c.action !== "jump") {
+          const [kind, id] = c.model_id.split(":");
           await api.post(`/admin/rules/${rule.id}/targets`, {
-            provider_model_id: c.model_id,
+            ...(kind === "pool"
+              ? { model_pool_id: id }
+              : { provider_model_id: id }),
             weight: 100,
             position: 0,
           });
@@ -926,10 +941,19 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
             onChange={(e) => set({ min_request_cost: e.target.value })}
           />
         </Field>
-        <Field label="INFLIGHT/BACKEND ≤">
+        <Field label="INFLIGHT/BACKEND <">
           <input
             value={c.max_inflight_per_backend || ""}
             onChange={(e) => set({ max_inflight_per_backend: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="TTFT/BACKEND < ms"
+          hint="time to first token; engine scrape when available, otherwise streaming proxy TTFT; unknown or older than 10s counts as eligible"
+        >
+          <input
+            value={c.max_ttft_ms_per_backend || ""}
+            onChange={(e) => set({ max_ttft_ms_per_backend: e.target.value })}
           />
         </Field>
         <Field label="FIRST TARGET">
@@ -938,16 +962,7 @@ function AddRule({ vm, models, onError, onDone, onUnauthorised }) {
             onChange={(e) => set({ model_id: e.target.value })}
           >
             <option value="">none yet</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.backends.length === 0
-                  ? " · no provider"
-                  : m.backends.length > 1
-                    ? ` · ${m.backends.length} providers`
-                    : ` · ${m.backends[0].provider_name}`}
-              </option>
-            ))}
+            <TargetOptions models={models} pools={pools} />
           </select>
         </Field>
         <Field label="HEADER NAME">
@@ -1183,22 +1198,23 @@ function DryRun({ vm, principals, state, setState, onError }) {
           </Muted>
         </div>
       )}
-      {/* The one condition a dry-run cannot answer. It runs on the control
-          plane, which builds a registry with no in-flight counters and no
-          engine scrape, so a spill rule always looks like it still matches.
+      {/* Conditions that a dry-run cannot answer. It runs on the control
+          plane, whose fresh registry has no live in-flight counters or
+          live TTFT samples, so these rules look eligible.
           Saying so beats letting an operator conclude their rule is broken. */}
       {result &&
         vm.rules.some(
           (r) =>
-            r.max_inflight_per_backend !== undefined &&
-            r.max_inflight_per_backend !== null,
+            (r.max_inflight_per_backend !== undefined &&
+              r.max_inflight_per_backend !== null) ||
+            (r.max_ttft_ms_per_backend !== undefined &&
+              r.max_ttft_ms_per_backend !== null),
         ) && (
           <div style={{ marginTop: 6 }}>
             <Muted style={{ color: "var(--warn-fg)" }}>
-              A rule here uses inflight/backend, which reads live load. The
-              dry-run runs on the control plane and cannot see it, so that rule
-              always evaluates as though every backend were idle — only real
-              traffic shows the spill.
+              A rule here uses live load or latency. The dry-run runs on the
+              control plane and cannot see those readings, so it evaluates
+              them as eligible — only real traffic shows the spill.
             </Muted>
           </div>
         )}
