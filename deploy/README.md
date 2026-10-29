@@ -474,6 +474,13 @@ gain an admission gate each without anyone setting one: the engine scraper
 detects them from `/metrics` and installs a per-replica ceiling of 8 (16
 comfortable sessions per box, divided by the two proxy replicas). Hosted
 providers are never gated — `auto` only fires for a detected vLLM/SGLang engine.
+The 8 is `16 / FASTLLM_ADMISSION_REPLICAS` (flag `--admission-replicas`,
+default 2). It must equal the number of proxy pods -- the proxy cannot count its
+siblings without a network call -- so change it whenever `replicas` changes. On
+a cluster managed by the operator the base manifests are ignored: set it in the
+`FastllmProxy` resource under `spec.proxy.pod.extraEnv`, as `deploy/fastllmproxy.yaml`
+does. With autoscaling on, the real count moves under the fixed number, so size
+it to the replica count you expect to run at load.
 Backends already carrying explicit numbers keep them (the migration marks them
 `explicit`), and an operator who wants a backend ungated sets `off`.
 

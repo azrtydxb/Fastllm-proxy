@@ -206,11 +206,17 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
       }
       values.admission_max_concurrent = n;
     }
-    const tuning = {
-      admission_high_water: wholeOrBlank(highWater, 1),
-      admission_max_queued: wholeOrBlank(queued, 0),
-      admission_max_wait_seconds: wholeOrBlank(wait, 0),
-    };
+    // Only an explicit gate has numbers of its own. The proxy derives an auto
+    // gate's numbers from the engine and ignores these columns, so offering
+    // (or sending) them for auto would be a setting that silently does nothing.
+    const tuning =
+      mode === "explicit"
+        ? {
+            admission_high_water: wholeOrBlank(highWater, 1),
+            admission_max_queued: wholeOrBlank(queued, 0),
+            admission_max_wait_seconds: wholeOrBlank(wait, 0),
+          }
+        : {};
     const bad = Object.entries({ ...values, ...tuning }).find(([, v]) =>
       Number.isNaN(v),
     );
@@ -219,7 +225,8 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
       return;
     }
     // The three tuning fields always have a value in the database; blank
-    // means "leave it", so they are only sent when filled in. Mode is always
+    // means "leave it", so they are only sent when filled in (explicit only,
+    // see above). Mode is always
     // sent, so switching auto -> off -> auto is not lost to a default.
     values.admission_mode = mode;
     for (const k of Object.keys(tuning)) {
@@ -246,8 +253,10 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
           back by one per scrape. Past <b>max queued</b> or <b>max wait</b>,
           callers get 503 with Retry-After. Each proxy replica has its own
           ceiling. <b>Auto</b> turns the gate on only for a detected self-hosted
-          engine (never a hosted provider) and derives the ceiling from the
-          engine. Changes apply within a snapshot poll.
+          engine (never a hosted provider) and derives every number from the
+          engine and the replica count, so it has no fields to set. Choose{" "}
+          <b>explicit</b> to set them yourself. Changes apply within a snapshot
+          poll.
         </Muted>
         {live?.admission && (
           <Row gap={16}>
@@ -292,7 +301,7 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
               />
             </Field>
           )}
-          {mode !== "off" && (
+          {mode === "explicit" && (
             <>
               <Field
                 label="High water"
