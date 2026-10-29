@@ -14,4 +14,4 @@ jobs:
     runs-on: arc-azrtydxb
     timeout-minutes: 10
     steps:
-      - uses: azrtydxb/ant-setup-action/cache-cleanup@549f7472cf26b0885441ed9f9a7fab0277545000 # v1
+      - uses: azrtydxb/ant-setup-action/cache-cleanup@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
