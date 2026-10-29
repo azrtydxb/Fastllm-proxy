@@ -812,7 +812,11 @@ mod tests {
         for step in 0..20 {
             gate.observe_at(100, start + SHRINK_COOLDOWN * step);
         }
-        assert_eq!(gate.capacity(), 1, "the floor is one, however deep the queue");
+        assert_eq!(
+            gate.capacity(),
+            1,
+            "the floor is one, however deep the queue"
+        );
     }
 
     /// The point of the change: a queue that simply *stays* deep is not
