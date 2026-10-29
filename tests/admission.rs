@@ -751,9 +751,15 @@ async fn a_detected_engine_is_gated_by_default() {
     }
 
     // The window closed with the gate still at 4, and it actually holds the
-    // engine back: four slots for a six-request burst, the surplus refused.
-    // The assertion is <= 4, not == 4, the same slack the sibling tests leave
-    // for the gate converging.
+    // engine back: four slots for a six-request burst. Unlike the sibling
+    // tests, whose `explicit` gate sets `max_queued` to 1, the automatic gate's
+    // queue is 32 with a 5s wait, so the surplus of a six-request burst *waits*
+    // and is served rather than refused -- and each request takes 2s, so the
+    // whole burst still finishes inside the wait. What proves the gate bounded
+    // it, then, is the engine's own peak, not a 503: the ungated control takes
+    // (nearly) the whole burst at once, so a peak of at most 4 is the gate
+    // holding and nothing else. The assertion is <= 4, not == 4, the same slack
+    // the sibling tests leave for the gate converging.
     engine.peak.store(0, Ordering::SeqCst);
     let (key, model) = (fx.key.clone(), fx.model.clone());
     let results = tokio::task::spawn_blocking(move || burst(port, &key, &model, 6))
@@ -764,8 +770,8 @@ async fn a_detected_engine_is_gated_by_default() {
         "the automatic gate should hold a drowning engine to its ceiling of 4"
     );
     assert!(
-        results.iter().any(|(s, ..)| *s == 503),
-        "the auto gate must refuse the surplus, not queue it in the engine: {results:?}"
+        results.iter().all(|(s, ..)| *s == 200),
+        "the auto gate's wait queue should serve a six-request burst it has room for: {results:?}"
     );
 }
 
