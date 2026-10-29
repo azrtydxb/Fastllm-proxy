@@ -35,9 +35,10 @@ pub struct EngineLoad {
     /// Cumulative generation tokens processed. Increments one per token
     /// decoded.
     pub generation_tokens_total: u64,
-    /// KV cache tokens in use (integer). `None` when the engine reports only
-    /// a percentage.
-    pub kv_cache_tokens: Option<u32>,
+    /// Cumulative scheduler iterations (`iteration_tokens_total_count` in
+    /// vLLM). Unlike request token totals, this advances on engine steps
+    /// during chunked prefill and speculative decoding.
+    pub engine_steps_total: Option<u64>,
     /// Prefix-cache lookups the engine has done, cumulative. `None` when it
     /// does not report them.
     ///
@@ -83,12 +84,19 @@ const KV_CACHE: &[&str] = &[
     "sglang:token_usage",
 ];
 /// Cumulative prompt tokens — used by the stall detector.
-const PROMPT_TOKENS_TOTAL: &[&str] = &["vllm:prompt_tokens_total", "sglang:prompt_tokens"];
+const PROMPT_TOKENS_TOTAL: &[&str] = &[
+    "vllm:prompt_tokens_total",
+    "sglang:prompt_tokens_total",
+    "sglang:prompt_tokens",
+];
 /// Cumulative generation tokens — used by the stall detector.
-const GENERATION_TOKENS_TOTAL: &[&str] =
-    &["vllm:generation_tokens_total", "sglang:generation_tokens"];
-/// KV cache tokens in use — a more precise variant of the percentage.
-const KV_CACHE_TOKENS: &[&str] = &["vllm:cache_usage_perc", "sglang:cache_usage"];
+const GENERATION_TOKENS_TOTAL: &[&str] = &[
+    "vllm:generation_tokens_total",
+    "sglang:generation_tokens_total",
+    "sglang:generation_tokens",
+];
+/// Histogram observation count: one increment per vLLM engine step.
+const ENGINE_STEPS_TOTAL: &[&str] = &["vllm:iteration_tokens_total_count"];
 
 /// Prefix-cache counters. vLLM names them outright; SGLang reports the rate as
 /// a gauge and the totals under its own prefix.
@@ -262,7 +270,7 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
         generation_tokens_total: read_family(body, GENERATION_TOKENS_TOTAL, false)
             .unwrap_or(0.0)
             .max(0.0) as u64,
-        kv_cache_tokens: read_family(body, KV_CACHE_TOKENS, false).map(|v| v.max(0.0) as u32),
+        engine_steps_total: read_family(body, ENGINE_STEPS_TOTAL, false).map(|v| v.max(0.0) as u64),
     })
 }
 
@@ -378,12 +386,14 @@ mod tests {
             "200 OK",
             "vllm:num_requests_running{engine=\"0\"} 3.0\n\
              vllm:num_requests_waiting{engine=\"0\"} 2.0\n\
-             vllm:kv_cache_usage_perc{engine=\"0\"} 0.42\n",
+             vllm:kv_cache_usage_perc{engine=\"0\"} 0.42\n\
+             vllm:iteration_tokens_total_count{engine=\"0\"} 123.0\n",
         );
         let load = engine_load(&client(), &base).await.unwrap();
         assert_eq!(load.running, 3);
         assert_eq!(load.waiting, 2);
         assert_eq!(load.kv_cache, Some(0.42));
+        assert_eq!(load.engine_steps_total, Some(123));
     }
 
     /// Parsed against the real thing: these lines are copied from the vLLM on
@@ -438,10 +448,23 @@ vllm:kv_cache_usage_perc{engine=\"1\"} 0.30
     /// SGLang names them differently, and a deployment may run either.
     #[test]
     fn sglangs_names_are_read_the_same_way() {
-        let body = "sglang:num_running_reqs 5.0\nsglang:num_queue_reqs 1.0\n";
+        let body = "\
+            sglang:num_running_reqs 5.0\n\
+            sglang:num_queue_reqs 1.0\n\
+            sglang:prompt_tokens_total 700.0\n\
+            sglang:generation_tokens_total 30.0\n\
+            sglang:token_usage 0.42\n";
         assert_eq!(super::read_family(body, super::RUNNING, false), Some(5.0));
         assert_eq!(super::read_family(body, super::WAITING, false), Some(1.0));
-        assert_eq!(super::read_family(body, super::KV_CACHE, true), None);
+        assert_eq!(
+            super::read_family(body, super::PROMPT_TOKENS_TOTAL, false),
+            Some(700.0)
+        );
+        assert_eq!(
+            super::read_family(body, super::GENERATION_TOKENS_TOTAL, false),
+            Some(30.0)
+        );
+        assert_eq!(super::read_family(body, super::KV_CACHE, true), Some(0.42));
     }
 
     /// `/metrics` is at the server root, not under the `/v1` an api_base ends
