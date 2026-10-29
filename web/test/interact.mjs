@@ -1171,17 +1171,26 @@ await goto("models");
     `found ${cells.length}`,
   );
   const offCell = cells.find((el) => el.textContent.trim() === "off");
-  check("an ungated backend reads off", !!offCell);
+  check("an opted-out backend reads off", !!offCell);
+  const autoCell = cells.find((el) => el.textContent.trim() === "auto");
+  check("a detected-engine backend reads auto", !!autoCell);
 
+  // The editor offers the three modes; an explicit gate carries a ceiling.
   sent.length = 0;
-  await click(offCell, "the flow control cell");
+  await click(autoCell, "an auto backend's flow control cell");
   const input = (label) =>
     $("label")
       .find((l) => l.textContent.startsWith(label))
       ?.querySelector("input");
+  check(
+    "the editor offers the three admission modes",
+    ["auto", "explicit", "off"].every((m) => !!byText(m)),
+  );
+  // Auto has no numeric fields of its own beyond tuning; explicit reveals one.
+  await click(byText("explicit"));
   const max = input("Max concurrent");
   check(
-    "the editor opens with the gate fields",
+    "choosing explicit reveals the max concurrent field",
     !!max && !!input("High water"),
   );
   await fill(max, "6");
@@ -1190,14 +1199,15 @@ await goto("models");
   const call = lastCall("PATCH", "/admin/backends/");
   check("saving flow control sends PATCH", !!call, "no PATCH was sent");
   check(
-    "the gate and timeout are sent as numbers",
-    call?.body?.admission_max_concurrent === 6 &&
+    "the mode and explicit ceiling are sent with the timeout",
+    call?.body?.admission_mode === "explicit" &&
+      call?.body?.admission_max_concurrent === 6 &&
       call?.body?.upstream_timeout_seconds === 240,
     JSON.stringify(call?.body),
   );
 
-  // Blank turns the gate off, and it has to be sent as null -- absent would
-  // leave it on, which is the opposite of what clearing the field means.
+  // Switching to off must send the mode explicitly: a numbers-only patch would
+  // leave the gate on, which is the opposite of what "off" means.
   sent.length = 0;
   await goto("models");
   const onCell = $("*").find(
@@ -1207,14 +1217,12 @@ await goto("models");
       el.textContent.includes("4/4"),
   );
   await click(onCell, "the gated backend's cell");
-  await fill(input("Max concurrent"), "");
+  await click(byText("off"));
   await click(byText("save"));
   const off = lastCall("PATCH", "/admin/backends/");
   check(
-    "clearing max concurrent turns the gate off",
-    off?.body &&
-      "admission_max_concurrent" in off.body &&
-      off.body.admission_max_concurrent === null,
+    "choosing off sends admission_mode off",
+    off?.body?.admission_mode === "off",
     JSON.stringify(off?.body),
   );
   check(
@@ -1228,11 +1236,30 @@ await goto("models");
           "Click to set flow control and the upstream timeout for this backend",
       );
       await click(c);
+      await click(byText("explicit"));
       await fill(input("Max concurrent"), "6,5");
       await click(byText("save"));
       return !lastCall("PATCH", "/admin/backends/");
     })(),
     "a malformed number was PATCHed",
+  );
+  check(
+    "an explicit gate without a ceiling is refused rather than sent",
+    await (async () => {
+      sent.length = 0;
+      await goto("models");
+      const c = $("*").find(
+        (el) =>
+          el.title ===
+          "Click to set flow control and the upstream timeout for this backend",
+      );
+      await click(c);
+      await click(byText("explicit"));
+      await fill(input("Max concurrent"), "");
+      await click(byText("save"));
+      return !lastCall("PATCH", "/admin/backends/");
+    })(),
+    "an explicit gate with no ceiling was PATCHed",
   );
 }
 

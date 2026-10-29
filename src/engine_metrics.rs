@@ -25,6 +25,8 @@ pub struct EngineLoad {
     pub running: u32,
     /// Requests it has accepted and not started.
     pub waiting: u32,
+    /// Configured scheduler batch capacity when an info metric exposes it.
+    pub batch_capacity: Option<u32>,
     /// KV cache in use, 0.0–1.0. `None` when the engine does not report it.
     pub kv_cache: Option<f32>,
     /// Cumulative prompt tokens processed. Increments during a prefill; zero
@@ -159,6 +161,31 @@ fn read_family(body: &str, names: &[&str], average: bool) -> Option<f64> {
     None
 }
 
+fn read_batch_capacity(body: &str) -> Option<u32> {
+    let mut maximum = 0u32;
+    let mut found = false;
+    for line in body.lines().filter(|line| {
+        line.starts_with("vllm:cache_config_info{") || line.starts_with("sglang:cache_config_info{")
+    }) {
+        let labels = line.split_once('{')?.1.split_once('}')?.0;
+        for key in ["max_num_seqs", "max_running_requests"] {
+            let prefix = format!("{key}=\"");
+            if let Some(raw) = labels
+                .split(',')
+                .find_map(|label| label.trim().strip_prefix(&prefix))
+            {
+                let raw = raw.split_once('"')?.0;
+                if let Ok(value) = raw.parse::<u32>() {
+                    maximum = maximum.max(value);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    found.then_some(maximum).filter(|n| *n > 0)
+}
+
 /// Why a probe did not produce a reading, and whether asking again could ever
 /// change the answer.
 ///
@@ -244,6 +271,7 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
     Ok(EngineLoad {
         running: running.max(0.0) as u32,
         waiting: read_family(body, WAITING, false).unwrap_or(0.0).max(0.0) as u32,
+        batch_capacity: read_batch_capacity(body),
         kv_cache: read_family(body, KV_CACHE, true).map(|v| v.clamp(0.0, 1.0) as f32),
         prefix_cache_queries_total: read_family(body, PREFIX_QUERIES, false)
             .map(|v| v.max(0.0) as u64),
@@ -436,6 +464,21 @@ vllm:kv_cache_usage_perc{engine=\"0\",model_name=\"nvidia/Qwen3.6-35B\"} 0.42
         // different family; counting it would triple the queue depth.
         assert_eq!(super::read_family(body, super::WAITING, false), Some(2.0));
         assert_eq!(super::read_family(body, super::KV_CACHE, true), Some(0.42));
+    }
+
+    #[test]
+    fn scheduler_capacity_is_read_from_engine_info_labels() {
+        let body = "vllm:cache_config_info{engine=\"0\",max_num_seqs=\"12\"} 1\n\
+                    vllm:cache_config_info{engine=\"1\",max_num_seqs=\"12\"} 1\n";
+        assert_eq!(super::read_batch_capacity(body), Some(12));
+        assert_eq!(
+            super::read_batch_capacity("sglang:cache_config_info{max_running_requests=\"20\"} 1\n"),
+            Some(20)
+        );
+        assert_eq!(
+            super::read_batch_capacity("vllm:num_requests_running 2\n"),
+            None
+        );
     }
 
     /// Tensor or data parallelism reports one sample per engine.

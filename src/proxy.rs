@@ -1178,7 +1178,12 @@ where
             // rather than adding to it. Reads an atomic the metrics scraper
             // filled, so the no-I/O rule still holds -- the awaiting is on a
             // semaphore, not on the network.
-            let permit = match backend.admission() {
+            // Register before reading the gate so a concurrent automatic
+            // install either sees this request in its seed or this request
+            // sees the installed gate.
+            let mut guard = InflightGuard::begin(Arc::clone(&backend));
+            let gate_for_request = guard.gate();
+            let permit = match gate_for_request {
                 Some(gate) => {
                     // Only wait when there is nowhere else to go. With an
                     // untried sibling left, a saturated engine is a reason to
@@ -1220,7 +1225,8 @@ where
 
             // The guard is taken before dispatch and moved into the response body,
             // so in-flight stays elevated for the whole generation.
-            let guard = InflightGuard::with_permit(Arc::clone(&backend), permit);
+            guard.set_permit(permit);
+            guard.mark_dispatched();
 
             let dispatch_started = std::time::Instant::now();
             let dispatch = state.client.request(upstream_req);

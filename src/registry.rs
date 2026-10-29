@@ -267,15 +267,27 @@ pub struct Backend {
     /// the *queue*, because a queue is the engine saying it is behind while
     /// `running` alone only says it is busy.
     engine_waiting: AtomicU32,
-    /// The admission gate in front of this backend, when its row sets one.
+    /// The admission gate in front of this backend, when it has one.
     ///
-    /// Built with the backend from its own settings, so changing them in the
-    /// admin API produces a new backend with a new gate -- the settings are
-    /// part of the identity key for exactly that reason (see `Interner`).
-    /// Fed by `crate::engine_scrape` from the engine's queue depth; a gated
-    /// backend that publishes no `/metrics` keeps a fixed ceiling at
-    /// `max_concurrent`, which is still a useful concurrency cap.
-    admission: Option<crate::admission::Admission>,
+    /// An `Explicit` gate is built here with the backend, from its own settings
+    /// -- which are part of the identity key, so changing them in the admin API
+    /// produces a new backend with a new gate (see `Interner`). An `Auto` gate
+    /// is installed later by `crate::engine_scrape` once it detects an engine,
+    /// which is why this is swapped rather than fixed at construction. Fed from
+    /// the engine's queue depth; a gated backend that publishes no `/metrics`
+    /// keeps a fixed ceiling at `max_concurrent`, still a useful concurrency
+    /// cap.
+    admission: arc_swap::ArcSwapOption<crate::admission::Admission>,
+    /// The mode this backend was built with. `Auto` is the one that permits a
+    /// later install; an operator's `Off` must never be overridden by detection.
+    admission_config: crate::admission::Config,
+    /// Held while the gate is installed so that installation and request
+    /// registration cannot interleave. See `InflightGuard`; nothing else takes
+    /// it. It is a `parking_lot` mutex held for a few instructions, but every
+    /// request takes it twice (begin and drop), so it is a per-backend point
+    /// of serialisation on the request path. How much that costs under load has
+    /// not been measured; see backlog.md before relying on it being free.
+    admission_transition: Mutex<()>,
     requests_total: AtomicU64,
     errors_total: AtomicU64,
     /// Times this backend has been taken out of rotation, for any reason.
@@ -408,7 +420,14 @@ impl Backend {
             engine_last_steps: AtomicU64::new(u64::MAX),
             stall_started_ms: AtomicU64::new(0),
             engine_waiting: AtomicU32::new(0),
-            admission: def.admission.map(crate::admission::Admission::new),
+            admission: arc_swap::ArcSwapOption::from(match def.admission {
+                crate::admission::Config::Explicit(settings) => {
+                    Some(Arc::new(crate::admission::Admission::new(settings)))
+                }
+                crate::admission::Config::Auto | crate::admission::Config::Off => None,
+            }),
+            admission_config: def.admission,
+            admission_transition: Mutex::new(()),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             ejections_total: AtomicU64::new(0),
@@ -735,8 +754,126 @@ impl Backend {
     }
 
     /// The gate, if this backend has one.
-    pub fn admission(&self) -> Option<&crate::admission::Admission> {
-        self.admission.as_ref()
+    pub fn admission(&self) -> Option<Arc<crate::admission::Admission>> {
+        self.admission.load_full()
+    }
+
+    /// Install the automatically derived gate, once a scrape has confirmed this
+    /// backend is a self-hosted engine.
+    ///
+    /// Returns false, doing nothing, when the backend was not built on `auto`
+    /// (an operator's `explicit` or `off` is never overridden by detection) or
+    /// when a gate is already installed (the scrape runs every tick). The
+    /// transition lock is what makes the install and [`InflightGuard::begin`]
+    /// see each other: the gate is seeded with the requests already in flight,
+    /// so it does not admit a full ceiling on top of work the engine is already
+    /// doing.
+    pub fn enable_auto_admission(&self, settings: crate::admission::Settings) -> bool {
+        if self.admission_config != crate::admission::Config::Auto {
+            return false;
+        }
+        let _transition = self.admission_transition.lock();
+        if self.admission.load().is_some() {
+            return false;
+        }
+        let gate = Arc::new(crate::admission::Admission::new_with_in_flight(
+            settings,
+            self.inflight(),
+        ));
+        self.admission.store(Some(gate));
+        true
+    }
+
+    /// Put an Auto gate back at its full ceiling once the engine can no longer
+    /// be heard, so a gate shrunk by overload does not stay shrunk forever.
+    ///
+    /// The gate recovers only from readings of an empty queue, and readings
+    /// only arrive from successful scrapes. When the engine restarts, loses
+    /// `/metrics` or stops being detected there are none, and a gate at one
+    /// slot would throttle a healthy engine indefinitely. Restoring is chosen
+    /// over removing the gate: it keeps the concurrency cap (a silent engine is
+    /// not licence to admit without bound), keeps the in-flight accounting the
+    /// existing permits rely on, and needs no re-seeding if scraping resumes --
+    /// the next successful reading simply drives the ceiling again. Only Auto
+    /// gates are touched; an operator's Explicit numbers are theirs.
+    ///
+    /// `only_if_silent` is for a failure that may be the overload itself: an
+    /// engine drowning in its own queue can time out `/metrics`, and widening
+    /// the gate then would feed the very queue that caused it. With it set the
+    /// gate is restored only once the last good reading has gone stale
+    /// (`ENGINE_FRESH_FOR`). Without it -- the endpoint answered and is not an
+    /// engine -- there is nothing to wait for.
+    pub fn restore_auto_admission(&self, now_ms: u64, only_if_silent: bool) -> bool {
+        if self.admission_config != crate::admission::Config::Auto {
+            return false;
+        }
+        if only_if_silent && self.engine_waiting(now_ms).is_some() {
+            return false;
+        }
+        match self.admission.load_full() {
+            Some(gate) => {
+                gate.restore_full();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether this is the engine `def` describes: the same address, model and
+    /// `model_backends` row, whatever else about the definition has changed.
+    fn same_engine(&self, api_base: &str, def: &BackendDef) -> bool {
+        self.api_base == api_base
+            && self.upstream_model == def.upstream_model
+            && self.backend_id == def.backend_id
+    }
+
+    /// Adopt the gate of the backend this one replaces, so a rebuild for an
+    /// unrelated edit (a price, a key rotation) does not forget it.
+    ///
+    /// The identity key (`Interner`) includes fields that have nothing to do
+    /// with the gate, so editing one mints a new `Backend`, and a new `Backend`
+    /// used to start with no gate: the shrink was forgotten, and requests still
+    /// running on the old object held permits the new gate had never heard of.
+    /// Sharing the old gate's `Arc` fixes both, because the permits and the
+    /// seeded-slot accounting live in the gate, not the backend: an old
+    /// `InflightGuard` keeps returning slots to the same semaphore the new
+    /// backend admits from.
+    ///
+    /// Only when the engine is the same (`api_base`, `upstream_model` and the
+    /// row, `backend_id`) and the gate mode is unchanged. A moved endpoint is a
+    /// different engine whose queue says nothing about the old one, and changed
+    /// explicit numbers are a new gate by definition. The backend's own
+    /// `inflight` counter is not carried: it feeds routing only, and it has
+    /// always started at zero on a rebuild.
+    fn adopt_gate_from(&self, previous: &Backend) {
+        if self.admission_config != previous.admission_config {
+            return;
+        }
+        if let Some(gate) = previous.admission() {
+            let _transition = self.admission_transition.lock();
+            self.admission.store(Some(gate));
+        }
+    }
+
+    /// Register a request in flight and hand back the gate it must clear, if
+    /// any. Paired with [`InflightGuard`], which calls it and, on drop, returns
+    /// any seeded slot. Not an I/O path: one short per-backend lock and two
+    /// atomics. The lock is shared by every request to this backend, so its
+    /// contention is unmeasured, not known to be nil.
+    ///
+    /// The count taken here includes requests that are still *waiting* at the
+    /// gate, because the guard is created before the gate is cleared. Gate
+    /// waiters therefore inflate [`Backend::inflight`], which least-loaded
+    /// routing reads, so a backend with a full wait queue looks busier than the
+    /// work it is doing. Known behaviour, deliberately left: it errs towards
+    /// sending new work to a sibling, which is what a saturated gate wants
+    /// anyway, and splitting the count would add a second atomic to the hot
+    /// path. Recorded in backlog.md.
+    fn begin_request(&self) -> Option<Arc<crate::admission::Admission>> {
+        let _transition = self.admission_transition.lock();
+        let gate = self.admission.load_full();
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        gate
     }
 
     pub fn requests_total(&self) -> u64 {
@@ -989,38 +1126,66 @@ impl Backend {
 /// token has been streamed to the client — not when the upstream headers
 /// arrive. Getting this wrong makes every streaming backend look idle and
 /// collapses least-loaded routing into round-robin.
-pub struct InflightGuard(
-    Arc<Backend>,
-    /// The admission slot this request holds, when the backend is gated.
-    ///
-    /// Carried here rather than beside the guard because the two have exactly
-    /// the same lifetime and the guard is already moved into the response
-    /// body: a slot released at the end of *headers* would let the next
-    /// caller in while this one is still generating, which is the pressure
-    /// the gate exists to apply. `None` for an ungated backend -- a hosted
-    /// provider, or a local one the scraper has not reached yet.
-    ///
-    /// Never read, only dropped: releasing the slot *is* its job, and that
-    /// happens when the guard does.
+///
+/// It is also the point at which a request meets the admission gate, and the
+/// two have to agree across a live swap. A backend on `auto` has no gate until
+/// the scraper installs one, and installation must not hand a full ceiling out
+/// on top of requests already in flight. So [`begin`](Self::begin) registers
+/// the request and reads the gate under the backend's transition lock: an
+/// install either sees this request (and seeds it as an occupied slot) or this
+/// request sees the installed gate. Capturing the gate here rather than at
+/// dispatch is what closes that window -- a request that began ungated releases
+/// its seeded slot on drop instead of leaking it.
+pub struct InflightGuard {
+    backend: Arc<Backend>,
+    gate: Option<Arc<crate::admission::Admission>>,
+    dispatched: bool,
     #[allow(dead_code)]
-    Option<crate::admission::Permit>,
-);
+    permit: Option<crate::admission::Permit>,
+}
 
 impl InflightGuard {
     pub fn acquire(backend: Arc<Backend>) -> Self {
-        Self::with_permit(backend, None)
+        let mut guard = Self::begin(backend);
+        guard.mark_dispatched();
+        guard
     }
 
-    pub fn with_permit(backend: Arc<Backend>, permit: Option<crate::admission::Permit>) -> Self {
-        backend.inflight.fetch_add(1, Ordering::Relaxed);
-        backend.requests_total.fetch_add(1, Ordering::Relaxed);
-        Self(backend, permit)
+    pub fn begin(backend: Arc<Backend>) -> Self {
+        let gate = backend.begin_request();
+        Self {
+            backend,
+            gate,
+            dispatched: false,
+            permit: None,
+        }
+    }
+
+    pub fn gate(&self) -> Option<Arc<crate::admission::Admission>> {
+        self.gate.clone()
+    }
+
+    pub fn set_permit(&mut self, permit: Option<crate::admission::Permit>) {
+        self.permit = permit;
+    }
+
+    pub fn mark_dispatched(&mut self) {
+        if !self.dispatched {
+            self.backend.requests_total.fetch_add(1, Ordering::Relaxed);
+            self.dispatched = true;
+        }
     }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.0.inflight.fetch_sub(1, Ordering::Relaxed);
+        let _transition = self.backend.admission_transition.lock();
+        if self.gate.is_none() {
+            if let Some(gate) = self.backend.admission() {
+                gate.release_seed();
+            }
+        }
+        self.backend.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -1224,7 +1389,19 @@ impl Registry {
                     // no stale settings with it — only the counters and health
                     // state it is kept for.
                     Some(live) => live,
-                    None => Arc::new(Backend::new(uid, api_base.clone(), &def)?),
+                    None => {
+                        let fresh = Backend::new(uid, api_base.clone(), &def)?;
+                        // Same engine, different incidental setting: keep the
+                        // gate and what it has learned. See `adopt_gate_from`.
+                        let mut predecessor = None;
+                        if let Some(p) = previous {
+                            predecessor = p.all.iter().find(|b| b.same_engine(&api_base, &def));
+                        }
+                        if let Some(old) = predecessor {
+                            fresh.adopt_gate_from(old);
+                        }
+                        Arc::new(fresh)
+                    }
                 };
                 by_uid.insert(uid, Arc::clone(&backend));
                 backend
@@ -1337,6 +1514,7 @@ model_list:
             prefix_cache_hits_total: None,
             running,
             waiting: 0,
+            batch_capacity: None,
             kv_cache: None,
             prompt_tokens_total: prompt,
             generation_tokens_total: gen,
@@ -1691,12 +1869,16 @@ model_list:
             api_base: "http://10.0.0.1:8000/v1".into(),
             upstream_model: "m".into(),
             upstream_timeout_seconds: timeout,
-            admission: gate.map(|max| crate::admission::Settings {
-                max_concurrent: max,
-                high_water: 4,
-                max_queued: 8,
-                max_wait_seconds: 5,
-            }),
+            admission: gate
+                .map(|max| {
+                    crate::admission::Config::Explicit(crate::admission::Settings {
+                        max_concurrent: max,
+                        high_water: 4,
+                        max_queued: 8,
+                        max_wait_seconds: 5,
+                    })
+                })
+                .unwrap_or(crate::admission::Config::Auto),
             ..Default::default()
         };
         let entries = |d: BackendDef| {
@@ -1732,6 +1914,197 @@ model_list:
             Registry::build_from_entries(entries(def(Some(300), Some(6))), &interner, Some(&after))
                 .unwrap();
         assert!(Arc::ptr_eq(&again.backends()[0], new));
+    }
+
+    /// Editing a price or rotating a key mints a new `Backend` (the identity key
+    /// covers them), and it used to start with no gate: the shrink was
+    /// forgotten and requests running on the old object held permits the new
+    /// gate had never heard of. The gate must follow the engine, not the
+    /// incidental settings.
+    #[test]
+    fn an_unrelated_edit_keeps_the_gate_its_shrink_and_its_permits() {
+        use crate::admission::{Config, Settings};
+        let interner = Interner::default();
+        let def = |input_price: Option<i64>, api_base: &str| BackendDef {
+            api_base: api_base.into(),
+            upstream_model: "m".into(),
+            input_price_per_mtok: input_price,
+            admission: Config::Auto,
+            ..Default::default()
+        };
+        let entries = |d: BackendDef| {
+            let base = d.api_base.clone();
+            std::iter::once(("m".to_string(), base, d))
+        };
+
+        let before = Registry::build_from_entries(
+            entries(def(None, "http://engine:8000/v1")),
+            &interner,
+            None,
+        )
+        .unwrap();
+        let old = Arc::clone(&before.backends()[0]);
+        assert!(old.enable_auto_admission(Settings {
+            max_concurrent: 4,
+            high_water: 2,
+            max_queued: 4,
+            max_wait_seconds: 0,
+        }));
+        let gate = old.admission().unwrap();
+        // One request running on the old object, holding a permit; then an
+        // overload halves the ceiling.
+        let mut running = InflightGuard::begin(Arc::clone(&old));
+        running.set_permit(gate.try_admit());
+        gate.observe(9);
+        assert_eq!(gate.capacity(), 2);
+
+        // A price edit: new uid, new object -- but the same engine.
+        let after = Registry::build_from_entries(
+            entries(def(Some(3), "http://engine:8000/v1")),
+            &interner,
+            Some(&before),
+        )
+        .unwrap();
+        let new = &after.backends()[0];
+        assert!(!Arc::ptr_eq(new, &old), "a price edit builds a new backend");
+        let carried = new.admission().expect("the gate follows the engine");
+        assert!(Arc::ptr_eq(&carried, &gate), "the very same gate");
+        assert_eq!(carried.capacity(), 2, "the shrink is remembered");
+        assert_eq!(
+            carried.status().in_use,
+            1,
+            "the request still running on the old object counts toward the gate"
+        );
+        drop(running);
+        assert_eq!(
+            carried.status().in_use,
+            0,
+            "and its slot comes back to the gate the new backend admits from"
+        );
+
+        // A different address is a different engine: it starts with no gate.
+        let moved = Registry::build_from_entries(
+            entries(def(Some(3), "http://other:8000/v1")),
+            &interner,
+            Some(&after),
+        )
+        .unwrap();
+        assert!(moved.backends()[0].admission().is_none());
+    }
+
+    /// A shrunk Auto gate recovers only from scrape readings. When the engine
+    /// goes quiet there are none, so the gate must be put back by the scraper's
+    /// failure path -- but not on a failure that may be the overload itself.
+    #[test]
+    fn a_silent_engine_gets_its_auto_gate_restored_but_an_overloaded_one_does_not() {
+        use crate::admission::{Config, Settings};
+        let interner = Interner::default();
+        let def = |mode| BackendDef {
+            api_base: "http://engine:8000/v1".into(),
+            upstream_model: "m".into(),
+            admission: mode,
+            ..Default::default()
+        };
+        let settings = Settings {
+            max_concurrent: 8,
+            high_water: 2,
+            max_queued: 4,
+            max_wait_seconds: 0,
+        };
+        let entries =
+            |d| std::iter::once(("m".to_string(), "http://engine:8000/v1".to_string(), d));
+        let registry =
+            Registry::build_from_entries(entries(def(Config::Auto)), &interner, None).unwrap();
+        let b = Arc::clone(&registry.backends()[0]);
+        assert!(b.enable_auto_admission(settings));
+        let gate = b.admission().unwrap();
+
+        // A good reading at t=1000ms with a deep queue: the gate halves.
+        b.record_engine_inflight(
+            &crate::engine_metrics::EngineLoad {
+                waiting: 9,
+                ..Default::default()
+            },
+            1_000,
+        );
+        gate.observe(9);
+        assert_eq!(gate.capacity(), 4);
+
+        // The scrape fails a moment later: the reading is still fresh, so this
+        // may be the engine too busy to answer. Leave the gate alone.
+        assert!(!b.restore_auto_admission(2_000, true));
+        assert_eq!(gate.capacity(), 4);
+
+        // Silent for longer than the reading stays fresh: put it back.
+        assert!(b.restore_auto_admission(1_000 + 60_000, true));
+        assert_eq!(
+            gate.capacity(),
+            8,
+            "a gate with no scrape behind it is whole"
+        );
+
+        // The endpoint answering "not an engine" does not wait for staleness.
+        gate.observe(9);
+        gate.observe_at(
+            9,
+            std::time::Instant::now() + crate::admission::SHRINK_COOLDOWN,
+        );
+        assert!(gate.capacity() < 8);
+        assert!(b.restore_auto_admission(2_000, false));
+        assert_eq!(gate.capacity(), 8);
+
+        // An operator's gate is never touched by the scraper.
+        let gated = def(Config::Explicit(settings));
+        let explicit = Registry::build_from_entries(entries(gated), &interner, None).unwrap();
+        let e = &explicit.backends()[0];
+        e.admission().unwrap().observe(9);
+        assert!(!e.restore_auto_admission(1_000 + 60_000, false));
+        assert_eq!(e.admission().unwrap().capacity(), 4);
+    }
+
+    #[test]
+    fn automatic_gate_install_counts_in_flight_and_respects_backend_mode() {
+        use crate::admission::{Config, Settings};
+        let interner = Interner::default();
+        let make = |mode| BackendDef {
+            api_base: "http://engine:8000/v1".into(),
+            upstream_model: "m".into(),
+            admission: mode,
+            ..Default::default()
+        };
+        let entries =
+            |def| std::iter::once(("m".to_string(), "http://engine:8000/v1".to_string(), def));
+        let registry =
+            Registry::build_from_entries(entries(make(Config::Auto)), &interner, None).unwrap();
+        let backend = Arc::clone(&registry.backends()[0]);
+        let request = InflightGuard::begin(Arc::clone(&backend));
+        let settings = Settings {
+            max_concurrent: 2,
+            high_water: 2,
+            max_queued: 4,
+            max_wait_seconds: 5,
+        };
+        assert!(backend.enable_auto_admission(settings));
+        let gate = backend.admission().unwrap();
+        assert_eq!(gate.status().in_use, 1);
+        let admitted = gate.try_admit().unwrap();
+        assert!(
+            gate.try_admit().is_none(),
+            "existing in-flight work must consume one slot"
+        );
+        drop(admitted);
+        drop(request);
+        assert!(
+            gate.try_admit().is_some(),
+            "a pre-gate request releases its seeded slot"
+        );
+
+        for mode in [Config::Off, Config::Explicit(settings)] {
+            let other = Registry::build_from_entries(entries(make(mode)), &interner, None).unwrap();
+            let b = &other.backends()[0];
+            assert!(!b.enable_auto_admission(settings));
+            assert_eq!(b.admission().is_some(), matches!(mode, Config::Explicit(_)));
+        }
     }
 
     #[test]

@@ -28,12 +28,44 @@
 //! off fast; recovery is cheap to get wrong, so return slowly, or the ceiling
 //! oscillates between drowning and idling.
 //!
+//! ## One halving per cooldown, not one per sample
+//!
+//! The decrease is multiplicative but not *repeatable at scrape rate*. The
+//! queue is engine-wide: both proxy replicas count against the same
+//! `num_requests_waiting`, so a queue that merely stays deep (a cold prefix
+//! cache, a neighbour on the GPU) reads as overload on every 2s scrape for as
+//! long as it lasts. Halving on each of those − 8 → 4 → 2 → 1 in about six
+//! seconds − drives every replica to a single slot on a queue that was never
+//! growing, and the boxes sit underused while recovery crawls back additively.
+//!
+//! So every halving, without exception, needs [`SHRINK_COOLDOWN`] to have
+//! passed since the previous one. The rule is on the *clock*, not on an
+//! "episode" boundary, on purpose: an earlier version let any reading below
+//! `high_water` end the episode, and a queue flickering 2,1,2,1 around
+//! `high_water = 2` then reopened an episode on every other scrape and took the
+//! gate 8 → 4 → 2 → 1 in the same six seconds. A flicker is exactly what a
+//! queue that is merely deep looks like, so it cannot be allowed to reset the
+//! brake. A genuinely worsening engine still gets backed off, at a deliberate
+//! pace of one halving per cooldown. Recovery is separate: only a queue
+//! drained to zero grows the ceiling back, one slot per scrape.
+//!
 //! ## What this is not
 //!
 //! It is not a rate limit ([`crate::limiter`] is), and it is not a fairness
 //! mechanism: permits are handed out in arrival order and a large request
 //! costs exactly one, the same as a small one. It bounds how many requests
 //! this replica has *in flight to one engine*, nothing else.
+//!
+//! ## On by default
+//!
+//! Every backend is [`Config::Auto`] unless an operator says otherwise, so the
+//! gate is not something anyone has to remember to switch on -- the deployment
+//! that most needs it is the one with nobody watching. `Auto` gates only what
+//! [`crate::engine_scrape`] has confirmed is a self-hosted vLLM/SGLang engine,
+//! so a hosted provider is never gated no matter what it answers, and a backend
+//! that has not been probed yet simply has no gate yet. The numbers come from
+//! [`auto_settings`]: the measured per-box session limit divided across
+//! replicas, lowered further only if the engine advertises a smaller batch.
 //!
 //! ## Per replica, deliberately
 //!
@@ -46,8 +78,8 @@
 //! and backs off on it.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Permits the ceiling was lowered by while they were in use, and which are
@@ -57,10 +89,11 @@ type Debt = Arc<AtomicUsize>;
 /// How one backend's gate is tuned.
 ///
 /// Set per backend -- on the `model_backends` row, through
-/// `PATCH /admin/backends/{id}` and the Models page -- because the right
-/// numbers are a property of the engine: a 35B on one GPU and an embedding
-/// model on the same box want nothing like the same ceiling, and a hosted
-/// provider wants no gate at all. A backend with no settings has no gate.
+/// `PATCH /admin/backends/{id}` and the Models page. A backend defaults to
+/// [`Config::Auto`]: the gate turns itself on, with [`auto_settings`], once the
+/// scraper confirms the backend is a self-hosted vLLM/SGLang engine, and never
+/// for a hosted provider. An operator overrides the numbers with
+/// [`Config::Explicit`], or disables the gate outright with [`Config::Off`].
 ///
 /// All `u32` so the whole thing can sit in the backend's identity key and on
 /// the wire without conversions that could disagree.
@@ -82,6 +115,187 @@ pub struct Settings {
     pub max_queued: u32,
     /// How long a caller waits for a slot before it is refused.
     pub max_wait_seconds: u32,
+}
+
+/// Persisted per-backend choice, the `admission_mode` column.
+///
+/// The distinction the column exists for is `Auto` versus `Off`: both mean "no
+/// numbers of my own", but one wants a gate the moment an engine is detected
+/// and the other never wants one. An older `null` `admission_max_concurrent`
+/// could not tell them apart, which is why `Auto` is the default and a fresh
+/// backend is auto-gated rather than left ungated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(tag = "mode", content = "settings", rename_all = "snake_case")]
+pub enum Config {
+    #[default]
+    Auto,
+    Explicit(Settings),
+    Off,
+}
+
+/// Proxy replicas assumed when nothing says otherwise, used to divide a
+/// box-wide engine capacity into a per-replica ceiling.
+///
+/// Two is what `deploy/proxy.yaml` runs for the two DGX Sparks serving
+/// Qwen3.6-35B. The proxy cannot discover its own replica count without a
+/// network call (and the request path makes none), so the operator states it
+/// with `--admission-replicas` / `FASTLLM_ADMISSION_REPLICAS`, which must match
+/// the number of proxy pods or the combined admission drifts from the box:
+/// too low and the box is over-admitted, too high and it idles.
+pub const DEFAULT_REPLICAS: u32 = 2;
+
+/// Concurrency one DGX box comfortably serves for the 35B, measured by the
+/// operator. Used both as the automatic ceiling when the engine reports no
+/// capacity *and* as a hard cap on a reported one -- see [`auto_settings`].
+pub const BOX_SESSIONS: u32 = 16;
+
+/// Starting defaults for an engine's automatic gate at [`DEFAULT_REPLICAS`];
+/// [`auto_settings`] recomputes the ceiling for the configured replica count.
+///
+/// `max_concurrent` is [`BOX_SESSIONS`] over [`DEFAULT_REPLICAS`]: 16 sessions is the
+/// measured comfortable limit for the 35B on one DGX box, and each of the two
+/// replicas holds its own share, so 8 each admits 16 between them. `high_water`
+/// is 2: an engine at capacity holds a small queue at all times and that is
+/// healthy, so only a queue that keeps growing should halve the ceiling. 32
+/// local waiters and a 5s wait bound proxy memory and caller latency without
+/// making a caller wait longer than a first byte typically takes.
+pub const AUTO_FALLBACK: Settings = Settings {
+    max_concurrent: per_replica_ceiling(BOX_SESSIONS, DEFAULT_REPLICAS),
+    high_water: 2,
+    max_queued: 32,
+    max_wait_seconds: 5,
+};
+
+/// How long one halving must stand before the gate may halve again while the
+/// engine's queue stays deep.
+///
+/// Ten seconds is deliberately several scrape intervals (the engine scraper
+/// ticks every 2s by default, so five of them at the default rate) on purpose:
+/// the queue depth is engine-wide, and both replicas see the same number, so a
+/// queue that is merely deep is not evidence the ceiling is still too high.
+/// Without the pause, back-to-back scrapes halve 8 → 4 → 2 → 1 in about six
+/// seconds on a queue that never grew, pinning every replica at one slot and
+/// leaving the box idle. One halving per cooldown, then this much patience,
+/// spends the decrease where a *worsening* engine earns it instead of where a
+/// steady queue merely repeats itself. The number is several scrapes' worth so
+/// it cannot fire twice off one stretch of queue that has not had time to
+/// respond to the first cut.
+pub const SHRINK_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Divide a box-wide target among proxy replicas, rounding up so odd targets
+/// do not leave one session unused. At least one slot remains per replica.
+pub const fn per_replica_ceiling(box_capacity: u32, replicas: u32) -> u32 {
+    let replicas = if replicas < 1 { 1 } else { replicas };
+    box_capacity.saturating_add(replicas - 1) / replicas
+}
+
+/// The automatic gate for an engine, given what its `/metrics` reported about
+/// scheduler capacity (`vLLM max_num_seqs`, `SGLang max_running_requests`).
+///
+/// The reported figure is vLLM's *batching* ceiling, not the number of sessions
+/// the box serves well: its default `max_num_seqs` is 256, so trusting it
+/// directly would admit twenty times the measured comfortable limit and put the
+/// engine straight back into the overload this gate exists to prevent. It is
+/// therefore taken as an *upper bound* only -- the ceiling is the smaller of the
+/// engine's own capacity over `replicas` and the measured per-replica default.
+/// `replicas` is the deployment's proxy replica count (`--admission-replicas`).
+/// An engine that reports a genuinely small batch (say 24) still lowers the
+/// ceiling; one that reports the stock 256 leaves it at the safe default.
+pub fn auto_settings(engine_capacity: Option<u32>, replicas: u32) -> Settings {
+    let mut settings = AUTO_FALLBACK;
+    settings.max_concurrent = per_replica_ceiling(BOX_SESSIONS, replicas);
+    if let Some(capacity) = engine_capacity {
+        // A capacity of 0 means "not advertised"; never gate to nothing.
+        if capacity > 0 {
+            settings.max_concurrent = settings
+                .max_concurrent
+                .min(per_replica_ceiling(capacity, replicas));
+        }
+    }
+    settings
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{
+        auto_settings, per_replica_ceiling, Config, Settings, AUTO_FALLBACK, BOX_SESSIONS,
+        DEFAULT_REPLICAS,
+    };
+
+    #[test]
+    fn automatic_explicit_and_off_states_round_trip_over_snapshot_json() {
+        let explicit = Settings {
+            max_concurrent: 11,
+            high_water: 2,
+            max_queued: 32,
+            max_wait_seconds: 5,
+        };
+        for state in [Config::Auto, Config::Explicit(explicit), Config::Off] {
+            let encoded = serde_json::to_string(&state).unwrap();
+            assert_eq!(serde_json::from_str::<Config>(&encoded).unwrap(), state);
+        }
+    }
+
+    /// The automatic ceiling is replica-aware: a 16-session box split across
+    /// two replicas admits 8 each, and an odd target rounds up so no session
+    /// goes unused.
+    #[test]
+    fn automatic_ceiling_divides_the_box_across_replicas() {
+        assert_eq!(per_replica_ceiling(BOX_SESSIONS, 2), 8);
+        assert_eq!(per_replica_ceiling(17, 2), 9);
+        // A degenerate replica count cannot divide by zero.
+        assert_eq!(per_replica_ceiling(8, 0), 8);
+        assert_eq!(AUTO_FALLBACK.max_concurrent, 8);
+    }
+
+    /// vLLM's `max_num_seqs` is a batching ceiling (stock default 256), not the
+    /// number of sessions the box serves well. A reported figure may lower the
+    /// ceiling but must never raise it above the measured per-replica default,
+    /// or the automatic gate would re-create the overload it exists to stop.
+    #[test]
+    fn engine_capacity_only_lowers_the_automatic_ceiling() {
+        assert_eq!(
+            auto_settings(Some(24), DEFAULT_REPLICAS).max_concurrent,
+            8.min(per_replica_ceiling(24, 2)),
+            "a small engine batch lowers the ceiling"
+        );
+        assert_eq!(auto_settings(Some(24), DEFAULT_REPLICAS).max_concurrent, 8);
+        assert_eq!(
+            auto_settings(Some(256), DEFAULT_REPLICAS).max_concurrent,
+            AUTO_FALLBACK.max_concurrent,
+            "the stock vLLM batch does not raise the ceiling"
+        );
+        assert_eq!(
+            auto_settings(Some(4), DEFAULT_REPLICAS).max_concurrent,
+            2,
+            "tiny batch honoured"
+        );
+        assert_eq!(
+            auto_settings(Some(0), DEFAULT_REPLICAS).max_concurrent,
+            AUTO_FALLBACK.max_concurrent,
+            "an unset capacity is not a gate to zero"
+        );
+        assert_eq!(auto_settings(None, DEFAULT_REPLICAS), AUTO_FALLBACK);
+    }
+
+    /// The replica count is configuration, not a constant: the same box split
+    /// across more proxies admits less per proxy, and one proxy takes it all.
+    #[test]
+    fn the_automatic_ceiling_follows_the_configured_replica_count() {
+        assert_eq!(auto_settings(None, 1).max_concurrent, 16);
+        assert_eq!(auto_settings(None, 2).max_concurrent, 8);
+        assert_eq!(auto_settings(None, 4).max_concurrent, 4);
+        assert_eq!(
+            auto_settings(Some(8), 4).max_concurrent,
+            2,
+            "the engine's own capacity is divided by the same count"
+        );
+        assert_eq!(
+            auto_settings(None, 0).max_concurrent,
+            16,
+            "never divides by zero"
+        );
+    }
 }
 
 impl Settings {
@@ -158,6 +372,15 @@ pub struct Admission {
     admitted: AtomicU64,
     refused_full: AtomicU64,
     refused_timed_out: AtomicU64,
+    /// How many pre-gate requests were seeded as occupied slots and still owe
+    /// their slot back. See `new_with_in_flight` and `release_seed`.
+    seeded: AtomicUsize,
+    /// When the ceiling was last halved; `None` before the first halving.
+    /// Guards the cooldown -- see [`SHRINK_COOLDOWN`] and `observe_at`. A
+    /// `Mutex` so the check and the stamp are one step: two observers racing
+    /// past a separate load and store could both halve. Only the scraper
+    /// touches it, never the request path.
+    last_halved: Mutex<Option<Instant>>,
     settings: Settings,
 }
 
@@ -221,7 +444,51 @@ impl Admission {
             admitted: AtomicU64::new(0),
             refused_full: AtomicU64::new(0),
             refused_timed_out: AtomicU64::new(0),
+            seeded: AtomicUsize::new(0),
+            last_halved: Mutex::new(None),
             settings,
+        }
+    }
+
+    /// A gate installed on a backend that already has work in flight -- the
+    /// live swap from no gate to an automatic one.
+    ///
+    /// Those requests were admitted before the gate existed and hold no permit,
+    /// so they are seeded as occupied slots: the semaphore starts with
+    /// `ceiling - seeded` free rather than the full ceiling, and each one
+    /// releases its slot via [`release_seed`](Self::release_seed) on drop.
+    /// Without this the gate would hand out a *full* ceiling on top of the
+    /// requests already running, which is the overload it exists to prevent.
+    /// Capped at the ceiling: work beyond it is not seeded, and its release is
+    /// a no-op, so nothing leaks.
+    pub fn new_with_in_flight(settings: Settings, in_flight: usize) -> Self {
+        let ceiling = settings.max_concurrent();
+        let seeded = in_flight.min(ceiling);
+        let mut gate = Self::new(settings);
+        gate.sem = Arc::new(Semaphore::new(ceiling - seeded));
+        gate.seeded.store(seeded, Ordering::Relaxed);
+        gate
+    }
+
+    /// A seeded, pre-gate request has finished: give its borrowed slot back.
+    ///
+    /// A no-op once `seeded` is exhausted, which is how the requests beyond the
+    /// ceiling (never seeded) are ignored. Repays debt first, like every other
+    /// returned slot, so a ceiling that came down under load is not lifted
+    /// again by a request that never counted against it.
+    pub fn release_seed(&self) {
+        if self
+            .seeded
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            let repaid = self
+                .debt
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |d| d.checked_sub(1))
+                .is_ok();
+            if !repaid {
+                self.sem.add_permits(1);
+            }
         }
     }
 
@@ -330,14 +597,47 @@ impl Admission {
     /// Called by [`crate::engine_scrape`] on its own timer, never from a
     /// request — the request path reads the consequence, not the metric.
     pub fn observe(&self, engine_waiting: u32) {
+        self.observe_at(engine_waiting, Instant::now());
+    }
+
+    /// [`observe`](Self::observe) with the clock injected, so tests can step
+    /// time across the cooldown deterministically without sleeping.
+    ///
+    /// A reading at or above `high_water` halves the ceiling only if
+    /// [`SHRINK_COOLDOWN`] has passed since the last halving (or there has
+    /// been none). The cooldown is the whole rule: readings below `high_water`
+    /// do not reset it, because a queue flickering around the threshold is a
+    /// queue that is merely deep, and letting each dip re-arm the brake is how
+    /// the gate went 8 → 4 → 2 → 1 in six seconds. A queue drained to exactly
+    /// zero earns one slot of capacity back; anything between zero and
+    /// `high_water` changes nothing.
+    pub fn observe_at(&self, engine_waiting: u32, now: Instant) {
         if engine_waiting >= self.settings.high_water {
-            self.shrink();
+            self.consider_shrink(now);
         } else if engine_waiting == 0 {
             // Only a genuinely drained queue earns capacity back. Growing
             // while anything is still waiting chases the ceiling back up
             // into the overload it just escaped.
             self.grow();
         }
+    }
+
+    /// Halve the ceiling if the cooldown since the last halving has passed.
+    fn consider_shrink(&self, now: Instant) {
+        let mut last = self
+            .last_halved
+            .lock()
+            .expect("admission shrink lock poisoned");
+        let due = match *last {
+            Some(at) => now.saturating_duration_since(at) >= SHRINK_COOLDOWN,
+            None => true,
+        };
+        if !due {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+        self.shrink();
     }
 
     /// Halve the ceiling, down to one.
@@ -373,6 +673,27 @@ impl Admission {
             self.sem.add_permits(1);
         }
         self.capacity.store(now + 1, Ordering::Relaxed);
+    }
+
+    /// Put the ceiling back at `max_concurrent` and forget the cooldown.
+    ///
+    /// For when the signal that drove the ceiling down is gone and will not be
+    /// back to bring it up: the engine restarted, lost `/metrics`, or is no
+    /// longer detected as an engine. Additive recovery needs readings of an
+    /// empty queue, and without scrapes there are none, so a gate shrunk to one
+    /// slot would stay there for good. Runs `grow` per missing slot rather than
+    /// storing a number, so debt owed by requests still in flight is forgiven
+    /// the same way it is on ordinary recovery and no slot is double counted.
+    /// Requests already admitted are untouched.
+    pub fn restore_full(&self) {
+        while self.capacity.load(Ordering::Relaxed) < self.settings.max_concurrent() {
+            self.grow();
+        }
+        let mut last = self
+            .last_halved
+            .lock()
+            .expect("admission shrink lock poisoned");
+        *last = None;
     }
 
     /// The live ceiling. For `/health`, the fleet report and tests.
@@ -464,9 +785,10 @@ mod tests {
         );
     }
 
-    /// The asymmetry the module header argues for, as behaviour: one
-    /// overloaded sample costs half the ceiling, one idle sample returns one
-    /// slot. Recovering from a single spike must take many good samples.
+    /// The asymmetry the module header argues for, as behaviour: an overloaded
+    /// sample halves the ceiling once, and recovery from that one cut is one
+    /// slot per drained sample. Repeated deep samples inside the cooldown do
+    /// not halve again -- tested separately.
     #[test]
     fn it_backs_off_fast_and_returns_slowly() {
         let gate = Admission::new(settings());
@@ -490,6 +812,34 @@ mod tests {
     /// A queue below the high-water mark is the engine working, not the
     /// engine drowning. Shrinking on it would starve a backend that is
     /// perfectly healthy and merely busy.
+    /// A gate shrunk by overload must be able to come back without any further
+    /// readings, and requests already running must neither be cut off nor
+    /// double-counted when it does.
+    #[test]
+    fn restore_full_returns_the_whole_ceiling_without_readings() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+        let held: Vec<_> = (0..8).map(|_| gate.try_admit().unwrap()).collect();
+        gate.observe_at(9, start);
+        gate.observe_at(9, start + SHRINK_COOLDOWN);
+        assert_eq!(gate.capacity(), 2, "shrunk with every slot in use");
+
+        gate.restore_full();
+        assert_eq!(gate.capacity(), 8, "back at the configured ceiling");
+        assert_eq!(gate.status().in_use, 8, "running requests still count");
+        assert!(gate.try_admit().is_none(), "no slot is double counted");
+        drop(held);
+        assert_eq!(gate.status().in_use, 0);
+        let again: Vec<_> = (0..8).filter_map(|_| gate.try_admit()).collect();
+        assert_eq!(again.len(), 8, "all eight slots are usable, no more");
+        assert!(gate.try_admit().is_none());
+
+        // And the cooldown is forgotten: the next deep queue halves at once.
+        drop(again);
+        gate.observe_at(9, start + SHRINK_COOLDOWN + Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 4);
+    }
+
     #[test]
     fn a_small_queue_changes_nothing() {
         let gate = Admission::new(settings());
@@ -504,10 +854,199 @@ mod tests {
     #[test]
     fn it_never_shrinks_below_the_floor() {
         let gate = Admission::new(settings());
-        for _ in 0..20 {
-            gate.observe(100);
+        let start = Instant::now();
+        // Cross the cooldown repeatedly so every observe that *may* halve
+        // does, and the ceiling still cannot go below one.
+        for step in 0..20 {
+            gate.observe_at(100, start + SHRINK_COOLDOWN * step);
         }
-        assert_eq!(gate.capacity(), 1);
+        assert_eq!(
+            gate.capacity(),
+            1,
+            "the floor is one, however deep the queue"
+        );
+    }
+
+    /// The point of the change: a queue that simply *stays* deep is not
+    /// evidence to halve again, because that queue is engine-wide and repeats
+    /// on every scrape. Many observes inside the cooldown must produce one cut.
+    #[test]
+    fn one_cooldown_halves_only_once_however_many_observes() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+
+        // The crossing halves at once...
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4, "the first deep reading halves");
+
+        // ...and stays halved for the whole cooldown, even one scrape short of
+        // the cooldown, however many samples arrive.
+        for step in 1..5 {
+            gate.observe_at(9, start + Duration::from_secs(step));
+        }
+        assert_eq!(
+            gate.capacity(),
+            4,
+            "still-deep scrapes inside the cooldown must not halve again"
+        );
+    }
+
+    /// A queue that is *still* deep after the cooldown has had time to answer
+    /// the first cut gets one more halving -- and only one.
+    #[test]
+    fn a_still_deep_queue_halves_again_after_the_cooldown() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4);
+
+        // Just before the cooldown: nothing.
+        gate.observe_at(9, start + SHRINK_COOLDOWN - Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 4, "cooldown not yet elapsed");
+
+        // At the cooldown: one further halving, and the cooldown restarts.
+        gate.observe_at(9, start + SHRINK_COOLDOWN);
+        assert_eq!(gate.capacity(), 2, "a worsening engine still backs off");
+
+        // The restarted cooldown holds until it too elapses.
+        gate.observe_at(9, start + SHRINK_COOLDOWN + Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 2, "the restarted cooldown applies");
+        gate.observe_at(9, start + SHRINK_COOLDOWN * 2);
+        assert_eq!(gate.capacity(), 1, "then one more, down to the floor");
+    }
+
+    /// The cooldown is on the clock, not on episode boundaries: a queue that
+    /// drains and returns inside the cooldown must not halve again. A drained
+    /// reading still earns its slot of recovery.
+    #[test]
+    fn a_dip_and_return_inside_the_cooldown_does_not_halve_again() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4);
+
+        gate.observe_at(0, start + Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 5, "recovery still proceeds additively");
+
+        gate.observe_at(9, start + Duration::from_secs(2));
+        assert_eq!(
+            gate.capacity(),
+            5,
+            "a fresh crossing inside the cooldown is not a new halving"
+        );
+
+        gate.observe_at(9, start + SHRINK_COOLDOWN);
+        assert_eq!(gate.capacity(), 2, "after the cooldown it halves again");
+    }
+
+    /// A queue flickering around `high_water` (2,1,2,1 with high_water = 2) is
+    /// the shape of a queue that is merely deep. It used to reopen an episode
+    /// every other scrape and take 8 -> 4 -> 2 -> 1 in about six seconds. At
+    /// most one halving per cooldown, however it flickers.
+    #[test]
+    fn an_oscillating_queue_halves_at_most_once_per_cooldown() {
+        let gate = Admission::new(Settings {
+            high_water: 2,
+            ..settings()
+        });
+        let start = Instant::now();
+
+        // Twelve seconds of scrapes every second, alternating 2,1,2,1...
+        // The first reading halves 8 -> 4 at t=0; the next opportunity is t=10.
+        let mut halvings = 0;
+        let mut last = gate.capacity();
+        for sec in 0..=12u64 {
+            let waiting = if sec % 2 == 0 { 2 } else { 1 };
+            gate.observe_at(waiting, start + Duration::from_secs(sec));
+            if gate.capacity() < last {
+                halvings += 1;
+            }
+            last = gate.capacity();
+        }
+        assert_eq!(
+            halvings, 2,
+            "t=0 and t=10 only: one halving per cooldown, not per crossing"
+        );
+        assert_eq!(gate.capacity(), 2, "8 -> 4 -> 2, never down to the floor");
+
+        // Within any window shorter than the cooldown there is never a second cut.
+        let gate = Admission::new(Settings {
+            high_water: 2,
+            ..settings()
+        });
+        for sec in 0..10u64 {
+            let waiting = if sec % 2 == 0 { 2 } else { 1 };
+            gate.observe_at(waiting, start + Duration::from_secs(sec));
+        }
+        assert_eq!(
+            gate.capacity(),
+            4,
+            "six seconds of flicker cost one halving"
+        );
+    }
+
+    /// The live swap from "no gate" to "auto gate": in-flight requests must
+    /// start out consuming slots, so the gate never admits a full ceiling on
+    /// top of work the engine is already doing, and their slots must come back
+    /// when they finish rather than leak.
+    #[tokio::test]
+    async fn an_install_counts_in_flight_work_and_returns_its_slots() {
+        let gate = Admission::new_with_in_flight(settings(), 3);
+        assert_eq!(
+            gate.capacity(),
+            8,
+            "the ceiling is unchanged by the install"
+        );
+        assert_eq!(
+            gate.status().in_use,
+            3,
+            "three pre-gate requests are counted"
+        );
+
+        // Only five slots are free until the pre-gate work finishes.
+        let mut fresh = Vec::new();
+        for _ in 0..5 {
+            fresh.push(gate.try_admit().expect("five slots remain"));
+        }
+        assert!(
+            gate.try_admit().is_none(),
+            "the gate must not hand out more than ceiling minus in-flight"
+        );
+
+        gate.release_seed();
+        assert!(
+            gate.try_admit().is_some(),
+            "a pre-gate request ending frees its slot"
+        );
+
+        // Releasing more seeds than were seeded is a no-op: work beyond the
+        // ceiling was never counted and must not inflate the ceiling.
+        for _ in 0..10 {
+            gate.release_seed();
+        }
+        drop(fresh);
+        assert_eq!(
+            gate.sem.available_permits(),
+            8,
+            "the ceiling is exactly max_concurrent once everything is back"
+        );
+    }
+
+    /// A pool of in-flight work larger than the ceiling seeds only up to the
+    /// ceiling; the excess is not owed, so its ending cannot push permits
+    /// above `max_concurrent`.
+    #[tokio::test]
+    async fn more_in_flight_than_the_ceiling_cannot_over_release() {
+        let gate = Admission::new_with_in_flight(settings(), 20);
+        assert_eq!(gate.status().in_use, 8, "seeded up to the ceiling");
+        for _ in 0..50 {
+            gate.release_seed();
+        }
+        assert_eq!(
+            gate.sem.available_permits(),
+            8,
+            "releasing un-seeded work must not add permits"
+        );
     }
 
     #[tokio::test]

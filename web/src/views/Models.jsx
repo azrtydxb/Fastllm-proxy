@@ -37,8 +37,10 @@ const BACKEND_COLS = [
   { label: "PROTOCOL", width: ".7fr" },
   { label: "CREDENTIAL", width: ".7fr" },
   { label: "MAX TOKENS", width: ".7fr", align: "right" },
-  // The admission gate: "off", or slots in use over the current ceiling,
-  // summed across proxy replicas. Click to set it and the upstream timeout.
+  // The admission gate: "auto" (a detected engine gets one), "max N" for an
+  // explicit ceiling, or "off". A live gate shows slots in use over its
+  // current ceiling, summed across proxy replicas. Click to set it and the
+  // upstream timeout.
   { label: "FLOW CONTROL", width: ".9fr" },
   { label: "", width: "80px", align: "right" },
 ];

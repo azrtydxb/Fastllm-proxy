@@ -780,6 +780,91 @@ granted the fallback does not reach it, so it cannot widen anyone's access.
 Enforced by a partial unique index rather than convention, so "at most one
 model is the fallback" cannot drift into two.
 
+## Flow control halves once per cooldown — done (2026-10-29)
+
+The gate used to halve its ceiling on *every* engine scrape while
+`num_requests_waiting >= high_water` (default scrape 2s). The queue is
+engine-wide -- both proxy replicas count against the same number -- so a queue
+that merely stayed deep (cold prefix cache, a neighbour on the GPU) read as
+overload on every scrape and collapsed the ceiling 8 → 4 → 2 → 1 in about six
+seconds, pinning each replica at one slot while recovery crawled back
+additively. The two DGX Sparks sat underused as a result.
+
+The first fix opened an *episode* on each crossing of `high_water` and halved
+once per episode, but any reading below `high_water` ended the episode, so a
+queue flickering 2,1,2,1 around `high_water = 2` took the gate 8 → 4 → 2 → 1 in
+the same six seconds. Review caught it. The rule is now on the clock alone:
+every halving needs `SHRINK_COOLDOWN` (10s, several scrape intervals) since the
+previous one, whatever the queue does between. A worsening engine still backs
+off, at one halving per cooldown; only a queue drained to zero earns a slot back
+per scrape. The floor is unchanged (`MIN_CONCURRENT = 1`), and it applies to
+`auto` and `explicit` gates alike. `observe` takes an injectable clock
+(`observe_at`) so the unit tests step across the cooldown with no sleeps; an
+oscillating-queue test asserts at most one halving per cooldown.
+
+## Auto-gate review fixes — done (2026-10-30)
+
+- **A silent engine no longer keeps a shrunk gate.** The scraper's failure path
+  restores an `auto` gate to its full ceiling (`Backend::restore_auto_admission`)
+  instead of leaving it at one slot until a restart. Restored, not removed, so
+  the concurrency cap and the permit accounting survive; "not an engine" acts at
+  once, an unanswered probe waits for the last reading to go stale so an
+  overloaded engine that times out `/metrics` is not widened into its own queue.
+- **A rebuild keeps the gate.** The registry identity key includes prices, keys
+  and timeouts, so editing one used to mint a backend with no gate: the shrink
+  was forgotten and running requests' permits belonged to a gate nobody used.
+  `Backend::adopt_gate_from` shares the old gate's `Arc` when address, model,
+  row and gate mode are unchanged. `AppState::apply_snapshot` is still the only
+  write path; the carry-over happens inside the registry rebuild it already does.
+- **Tuning fields are `explicit`-only.** An `auto` row cannot say whether its
+  high water / queue / wait were chosen or are the column defaults (4 / 64 / 30,
+  from migration 0054, which differ from the measured 2 / 32 / 5), so honouring
+  them would silently replace the measured defaults. The Models page now shows
+  them only for `explicit`. Honouring them needs nullable columns (a new
+  migration); not done.
+- **Replica count is configuration.** `--admission-replicas` /
+  `FASTLLM_ADMISSION_REPLICAS` (default 2) replaces the hardcoded constant, and
+  is wired into the Helm chart (from `proxy.replicas`), the manifests and the
+  operator CR's `extraEnv`.
+
+Known behaviour left as is:
+
+- **The per-backend `admission_transition` lock is unmeasured.** It is a short
+  `parking_lot` lock taken by every request at start and at drop. It was
+  described as uncontended with no measurement behind it; that claim is gone.
+  If profiling ever shows it, the install race it closes could be handled with
+  an epoch counter instead. Needs a benchmark before it is changed or defended.
+- **Gate waiters inflate `inflight()`.** `InflightGuard::begin` counts a request
+  before it clears the gate, so waiters count towards least-loaded routing. It
+  biases work towards siblings, which a saturated gate wants. A separate
+  "admitted" counter would fix it at the cost of a second atomic on the request
+  path.
+- **In-flight beyond the ceiling at install is not seeded as debt**, so a
+  backend that already had more running than the ceiling briefly over-admits.
+- **`auto` also gates non-chat vLLM engines** (embeddings, rerank) with a
+  chat-sized ceiling; set those to `off` or `explicit`.
+- **Migration 0059 turns previously `NULL` (ungated) rows into `auto`**, so
+  every detected self-hosted engine gains a gate on the first snapshot after
+  deploy.
+
+## Flow control ON by default for local engines — done (2026-10-29)
+
+The gate is no longer opt-in. A backend's `admission_mode` (migration 0059)
+defaults to `auto`: the proxy's engine scraper installs a gate the moment it
+detects a self-hosted vLLM/SGLang engine from `/metrics`, and never for a
+hosted provider, which does not answer with those metric families. `explicit`
+pins an operator's numbers; `off` disables the gate outright. The automatic
+ceiling is the measured per-box session limit divided across proxy replicas
+(16 / 2 = 8), lowered further only if the engine advertises a smaller batch
+(`vllm:cache_config_info{max_num_seqs=…}`); the stock vLLM batch (256) never
+raises it, because `max_num_seqs` is a batching ceiling, not a session count.
+A backend that gains a gate with requests already in flight seeds them as
+occupied slots, so a live swap never hands the ceiling out twice.
+
+Why it matters on kw: the two DGX Sparks serving the 35B had no gate
+configured, so vLLM's queue grew unbounded and the backends were ejected under
+load. They now carry a gate from the next snapshot poll after deploy.
+
 ## Flow control in front of local engines — done (2026-09-29)
 
 Per-backend admission gates (`src/admission.rs`), set on the `model_backends`
@@ -792,8 +877,10 @@ withdrew it. The health probe answered in 1.7ms throughout and never saw any of
 it.
 
 A gated backend gets a semaphore whose ceiling the existing engine scraper
-halves while `num_requests_waiting >= high_water` and grows by one when the
-queue drains. Surplus waits in the proxy, bounded, and is refused with 503 and
+halves once when `num_requests_waiting` crosses `high_water` (and again only
+after a cooldown, whatever the queue does in between; see the cooldown entry above) and
+grows by one when the queue drains. Surplus waits in the proxy, bounded, and is
+refused with 503 and
 `Retry-After`. A saturated engine hands off to an untried sibling without
 waiting; peer forwarding is skipped for it, since the peer would dispatch to the
 same engine. The gate's state and the engine's own running/waiting counts go to
@@ -801,7 +888,9 @@ same engine. The gate's state and the engine's own running/waiting counts go to
 
 First built as a deployment-wide `fastllm.admission` config section, and moved
 before it shipped: the right numbers are a property of each engine, and an
-operator wants to change them without a redeploy. `File` mode has no gates.
+operator wants to change them without a redeploy. `File` mode backends default
+to `auto` too -- a self-hosted engine is gated, a hosted provider is not -- but
+`File` mode has no admin surface to override one.
 
 `tests/admission.rs` sets gates through the admin API against a real control
 plane and runs the same burst with a gate and without one against a fake engine,

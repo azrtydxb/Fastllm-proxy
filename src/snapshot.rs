@@ -184,9 +184,8 @@ pub struct BackendDef {
     /// long-context engine legitimately needs more than the global budget for
     /// first-byte (e.g. a 100k-token prefill on a DGX Spark).
     pub upstream_timeout_seconds: Option<u64>,
-    /// The admission gate in front of this backend. `None` is no gate, which
-    /// is every backend until an operator sets one. See `crate::admission`.
-    pub admission: Option<crate::admission::Settings>,
+    /// Automatic, explicitly tuned, or deliberately disabled admission.
+    pub admission: crate::admission::Config,
     /// Prefix before the key, `Bearer` for the usual case. `None` sends the
     /// raw key, which is what the two providers above require.
     pub auth_scheme: Option<String>,
@@ -236,7 +235,7 @@ impl Default for BackendDef {
             extra_headers: Vec::new(),
             default_max_tokens: None,
             upstream_timeout_seconds: None,
-            admission: None,
+            admission: crate::admission::Config::Auto,
             input_price_per_mtok: None,
             output_price_per_mtok: None,
             backend_id: None,
@@ -521,8 +520,12 @@ pub struct WireBackendDef {
     pub upstream_timeout_seconds: Option<u64>,
     /// Absent from an older control plane, which is "no gate" -- the
     /// behaviour every backend had before gates existed.
+    /// Legacy-compatible settings payload; mode is sent separately so old
+    /// proxies can still read explicit settings while ignoring the new field.
     #[serde(default)]
     pub admission: Option<crate::admission::Settings>,
+    #[serde(default)]
+    pub admission_mode: Option<String>,
     #[serde(default)]
     pub input_price_per_mtok: Option<i64>,
     #[serde(default)]
@@ -958,7 +961,18 @@ impl Snapshot {
                             extra_headers: b.extra_headers.clone(),
                             default_max_tokens: b.default_max_tokens,
                             upstream_timeout_seconds: b.upstream_timeout_seconds,
-                            admission: b.admission,
+                            admission: match b.admission {
+                                crate::admission::Config::Explicit(settings) => Some(settings),
+                                _ => None,
+                            },
+                            admission_mode: Some(
+                                match b.admission {
+                                    crate::admission::Config::Auto => "auto",
+                                    crate::admission::Config::Explicit(_) => "explicit",
+                                    crate::admission::Config::Off => "off",
+                                }
+                                .to_string(),
+                            ),
                             input_price_per_mtok: b.input_price_per_mtok,
                             output_price_per_mtok: b.output_price_per_mtok,
                             backend_id: b.backend_id,
@@ -1152,7 +1166,19 @@ impl Snapshot {
                                 extra_headers: b.extra_headers,
                                 default_max_tokens: b.default_max_tokens,
                                 upstream_timeout_seconds: b.upstream_timeout_seconds,
-                                admission: b.admission,
+                                admission: match b.admission_mode.as_deref() {
+                                    Some("off") => crate::admission::Config::Off,
+                                    Some("explicit") => b
+                                        .admission
+                                        .map(crate::admission::Config::Explicit)
+                                        .unwrap_or(crate::admission::Config::Off),
+                                    Some("auto") => crate::admission::Config::Auto,
+                                    None => b
+                                        .admission
+                                        .map(crate::admission::Config::Explicit)
+                                        .unwrap_or(crate::admission::Config::Auto),
+                                    Some(_) => crate::admission::Config::Auto,
+                                },
                                 input_price_per_mtok: b.input_price_per_mtok,
                                 output_price_per_mtok: b.output_price_per_mtok,
                                 backend_id: b.backend_id,

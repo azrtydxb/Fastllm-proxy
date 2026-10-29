@@ -91,10 +91,12 @@ impl SnapshotSource for FileSource {
                 extra_headers: Vec::new(),
                 default_max_tokens: entry.litellm_params.default_max_tokens,
                 upstream_timeout_seconds: None,
-                // Never from a file: a gate is set per backend in the admin
-                // API and the Models page, where it can be seen and changed
-                // without a redeploy. `File` mode has neither, so no gates.
-                admission: None,
+                // Automatic, like a database backend: a self-hosted engine
+                // this file points at is gated once the scraper confirms it;
+                // a hosted provider never is. `File` mode has no admin surface
+                // to override it, so an operator who needs explicit numbers
+                // uses the control plane instead.
+                admission: crate::admission::Config::Auto,
                 // No database, so no attachment row to name, and nowhere in
                 // the file format to write a price. `File` mode prices
                 // nothing, which is all these three are for.

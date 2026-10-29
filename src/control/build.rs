@@ -128,14 +128,24 @@ fn flatten_for(
 ///
 /// The columns are CHECK-constrained non-negative, so the casts cannot wrap.
 pub(crate) fn admission_settings(
+    mode: &str,
     max_concurrent: Option<i32>,
     tuning: &[i32],
-) -> Option<crate::admission::Settings> {
+) -> crate::admission::Config {
+    if mode == "off" {
+        return crate::admission::Config::Off;
+    }
+    if mode != "explicit" {
+        return crate::admission::Config::Auto;
+    }
     let &[high_water, max_queued, max_wait_seconds] = tuning else {
-        return None;
+        return crate::admission::Config::Off;
     };
-    Some(crate::admission::Settings {
-        max_concurrent: max_concurrent? as u32,
+    let Some(max_concurrent) = max_concurrent else {
+        return crate::admission::Config::Off;
+    };
+    crate::admission::Config::Explicit(crate::admission::Settings {
+        max_concurrent: max_concurrent as u32,
         high_water: high_water as u32,
         max_queued: max_queued as u32,
         max_wait_seconds: max_wait_seconds as u32,
@@ -221,9 +231,9 @@ pub async fn build_snapshot_with(
         Option<i64>,
         Option<i64>,
         Option<i32>,
-        // admission_max_concurrent (NULL is no gate), then the three tuning
-        // columns as one array -- see `admission_settings`.
-        Option<i32>,
+        // Mode and optional max are encoded together to keep sqlx's decoded
+        // row within its 16-column tuple implementation.
+        String,
         Vec<i32>,
     );
     // One row per attachment (migration 0045), so a model served by two
@@ -243,7 +253,7 @@ pub async fn build_snapshot_with(
          mb.default_max_tokens, p.credential_kind, mb.id, \
          mb.input_price_per_mtok, mb.output_price_per_mtok, \
          mb.upstream_timeout_seconds, \
-         mb.admission_max_concurrent, \
+         mb.admission_mode || ':' || COALESCE(mb.admission_max_concurrent::text, ''), \
          ARRAY[mb.admission_high_water, mb.admission_max_queued, mb.admission_max_wait_seconds] \
          FROM model_backends mb \
          JOIN providers p ON p.id = mb.provider_id \
@@ -271,7 +281,7 @@ pub async fn build_snapshot_with(
             input_price,
             output_price,
             upstream_timeout,
-            admission_max_concurrent,
+            admission_meta,
             admission_tuning,
         ) in backend_rows.iter().filter(|(mid, ..)| mid == id)
         {
@@ -420,7 +430,10 @@ pub async fn build_snapshot_with(
                 extra_headers,
                 default_max_tokens: max_tokens.map(|n| n as u32),
                 upstream_timeout_seconds: upstream_timeout.map(|t| t as u64),
-                admission: admission_settings(*admission_max_concurrent, admission_tuning),
+                admission: {
+                    let (mode, max) = admission_meta.split_once(':').unwrap_or(("auto", ""));
+                    admission_settings(mode, max.parse().ok(), admission_tuning)
+                },
                 backend_id: Some(*backend_id),
                 input_price_per_mtok: *input_price,
                 output_price_per_mtok: *output_price,
@@ -1318,6 +1331,27 @@ async fn build_virtual_models(pool: &PgPool) -> anyhow::Result<HashMap<String, F
 mod tests {
     use super::*;
     use crate::control::test_support::TestCleanup;
+
+    #[test]
+    fn admission_database_modes_map_without_collapsing_auto_and_off() {
+        assert_eq!(
+            admission_settings("auto", None, &[4, 64, 30]),
+            crate::admission::Config::Auto
+        );
+        assert_eq!(
+            admission_settings("off", None, &[4, 64, 30]),
+            crate::admission::Config::Off
+        );
+        assert_eq!(
+            admission_settings("explicit", Some(9), &[3, 12, 7]),
+            crate::admission::Config::Explicit(crate::admission::Settings {
+                max_concurrent: 9,
+                high_water: 3,
+                max_queued: 12,
+                max_wait_seconds: 7,
+            })
+        );
+    }
 
     #[test]
     fn a_wildcard_resource_grants_every_model() {

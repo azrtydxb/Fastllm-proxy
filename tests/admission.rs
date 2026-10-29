@@ -363,12 +363,45 @@ impl Fixture {
             &self.cookie,
             &format!("/admin/backends/{}", self.backend_ids[backend]),
             serde_json::json!({
+                "admission_mode": "explicit",
                 "admission_max_concurrent": max_concurrent,
                 "admission_high_water": 4,
                 "admission_max_queued": 1,
                 "admission_max_wait_seconds": 1,
             }),
         );
+    }
+
+    /// Opt a backend out of admission, the control for the "no gate" case.
+    fn set_off(&self, backend: usize) {
+        admin(
+            "PATCH",
+            self.admin_port,
+            &self.cookie,
+            &format!("/admin/backends/{}", self.backend_ids[backend]),
+            serde_json::json!({ "admission_mode": "off" }),
+        );
+    }
+
+    /// The `admission_mode` the admin API reports for a backend.
+    fn mode(&self, backend: usize) -> String {
+        let models = admin(
+            "GET",
+            self.admin_port,
+            &self.cookie,
+            "/admin/provider-models",
+            serde_json::Value::Null,
+        );
+        models
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["backends"].as_array().unwrap().clone())
+            .find(|b| b["id"] == self.backend_ids[backend])
+            .expect("backend is listed")["admission_mode"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     fn metrics(&self, port: u16) -> String {
@@ -596,13 +629,19 @@ async fn a_gate_set_in_the_admin_api_shields_a_drowning_engine() {
     }
 }
 
-/// The control: same engine, same burst, no gate. The engine takes the lot.
+/// The control: same engine, same burst, an operator has turned the gate off.
+/// The engine takes the lot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires postgres"]
-async fn without_a_gate_the_engine_takes_the_whole_burst() {
+async fn an_opted_out_backend_is_ungated_and_takes_the_whole_burst() {
     let engine = Engine::reporting(50);
     let (port, admin_port) = (14851, 14852);
     let (_p, fx, _c) = setup(port, admin_port, &[(14853, Arc::clone(&engine))]).await;
+    // The engine serves vLLM metrics, so the default would gate it. `off` is
+    // the explicit opt-out the control needs -- and proof the default is not
+    // silently "no gate" any more.
+    fx.set_off(0);
+    assert_eq!(fx.mode(0), "off");
     engine.peak.store(0, Ordering::SeqCst);
 
     let (key, model) = (fx.key.clone(), fx.model.clone());
@@ -626,7 +665,113 @@ async fn without_a_gate_the_engine_takes_the_whole_burst() {
         !fx.metrics(port)
             .lines()
             .any(|l| l.starts_with("fastllm_admission_") && l.contains("127.0.0.1:14853/v1")),
-        "an ungated backend must not grow gate series"
+        "an opted-out backend must not grow gate series"
+    );
+}
+
+/// The default, end to end: a backend nobody configured is gated once the
+/// scraper detects a self-hosted engine. This is the behaviour that stops the
+/// two DGX vLLM backends drowning on kw the moment this deploys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires postgres"]
+async fn a_detected_engine_is_gated_by_default() {
+    let engine = Engine::reporting(50);
+    let (port, admin_port) = (14871, 14872);
+    let (_p, fx, _c) = setup(port, admin_port, &[(14873, Arc::clone(&engine))]).await;
+
+    assert_eq!(fx.mode(0), "auto", "a fresh backend defaults to auto");
+
+    // No PATCH: the only thing that turns this on is the engine scrape seeing
+    // the `vllm:` families and installing the gate. Deleting a run through the
+    // admin API cannot reproduce this, which is the point.
+    //
+    // The engine reports 50 waiting on every scrape. The gate halves once when
+    // the queue first crosses high water -- 8 -> 4 -- and then holds, because
+    // the queue merely *staying* deep is not evidence to halve again until the
+    // cooldown has passed. Detection latency is unbounded here, so the clock
+    // for "inside the cooldown" starts when the gate is *first seen*: from
+    // there it must settle at 4 and never reach 2, and it must do so well
+    // inside the 10s cooldown or the second halving would legitimately happen
+    // and the assertion would race it.
+    let detection_deadline = Instant::now() + Duration::from_secs(20);
+    let mut gate_seen_at: Option<Instant> = None;
+    loop {
+        let text = fx.metrics(port);
+        let series: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("127.0.0.1:14873/v1") && l.starts_with("fastllm_admission_"))
+            .collect();
+        let saw_gate = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_max_concurrent{"));
+        if saw_gate && gate_seen_at.is_none() {
+            gate_seen_at = Some(Instant::now());
+        }
+        if saw_gate {
+            assert!(
+                series.iter().any(
+                    |l| l.starts_with("fastllm_admission_max_concurrent{") && l.ends_with(" 8")
+                ),
+                "detection should install the default ceiling of 8:\n{}",
+                series.join("\n")
+            );
+        }
+        // The gate has done its one halving for this episode.
+        let settled_at_four = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 4"));
+        if saw_gate && settled_at_four {
+            break;
+        }
+        // And it has not halved a second time: the cooldown is longer than
+        // this window, so a two here means the hostile repeated halving is
+        // back. Checked before the break so a 2 fails loudly.
+        let halved_twice = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 2"));
+        assert!(
+            !halved_twice,
+            "the ceiling halved twice in one episode; the cooldown is not holding:\n{}",
+            series.join("\n")
+        );
+        // Detection itself gets a generous window; the settle assertion only
+        // has to beat the cooldown once the gate is there.
+        let deadline = gate_seen_at
+            .map(|at| at + Duration::from_secs(8))
+            .unwrap_or(detection_deadline);
+        assert!(
+            Instant::now() < deadline,
+            "a detected engine's ceiling never settled at 4; /metrics:\n{}",
+            text.lines()
+                .filter(|l| l.contains("admission"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The window closed with the gate still at 4, and it actually holds the
+    // engine back: four slots for a six-request burst. Unlike the sibling
+    // tests, whose `explicit` gate sets `max_queued` to 1, the automatic gate's
+    // queue is 32 with a 5s wait, so the surplus of a six-request burst *waits*
+    // and is served rather than refused -- and each request takes 2s, so the
+    // whole burst still finishes inside the wait. What proves the gate bounded
+    // it, then, is the engine's own peak, not a 503: the ungated control takes
+    // (nearly) the whole burst at once, so a peak of at most 4 is the gate
+    // holding and nothing else. The assertion is <= 4, not == 4, the same slack
+    // the sibling tests leave for the gate converging.
+    engine.peak.store(0, Ordering::SeqCst);
+    let (key, model) = (fx.key.clone(), fx.model.clone());
+    let results = tokio::task::spawn_blocking(move || burst(port, &key, &model, 6))
+        .await
+        .unwrap();
+    assert!(
+        engine.peak.load(Ordering::SeqCst) <= 4,
+        "the automatic gate should hold a drowning engine to its ceiling of 4"
+    );
+    assert!(
+        results.iter().all(|(s, ..)| *s == 200),
+        "the auto gate's wait queue should serve a six-request burst it has room for: {results:?}"
     );
 }
 

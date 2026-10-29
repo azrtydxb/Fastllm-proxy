@@ -286,20 +286,37 @@ split exists to prevent.
   differently and prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
   opt-in-visibly line the passthrough/translate split draws.
-- **The queue forms in the proxy, not in the engine** (flow control, set per
-  backend on the `model_backends` row; see `docs/operations/configuration.md`).
+- **The queue forms in the proxy, not in the engine** (flow control, per
+  backend on the `model_backends` row as `admission_mode` -- `auto`, `explicit`
+  or `off`; see `docs/operations/configuration.md`).
   vLLM accepts everything and queues the surplus itself, unbounded, which makes
-  every request slow rather than failing any. A backend with a gate carries it
-  in the snapshot like any other backend setting; the proxy's engine scraper
-  halves the gate's ceiling while the engine's `num_requests_waiting` sits at
-  or above its high-water mark, and grows it by one per scrape once the queue
-  drains. Requests past the ceiling wait in the proxy, bounded, and are refused
-  with 503 and `Retry-After` beyond that. The request path only awaits a
-  semaphore, so it still performs no I/O. Each replica holds its own ceiling --
-  sharing it would mean a network round trip per request -- and the engine's
-  queue depth, which already reflects every replica's traffic, is what keeps
-  them honest. Each gate's state rides the existing health report to the
-  control plane, which is how the Fleet and Models pages show it.
+  every request slow rather than failing any. The gate is **on by default**:
+  a backend left on `auto` carries a gate in the snapshot like any other
+  backend setting, and the proxy's engine scraper installs it the moment it
+  detects a self-hosted vLLM/SGLang engine from `/metrics`. A hosted provider
+  never answers with those metric families, so `auto` never gates one; a
+  not-yet-detected backend simply has no gate yet. The gate halves its ceiling
+  **once per cooldown**: every
+  halving of the ceiling needs 10 seconds (several scrape intervals) to have
+  passed since the previous one, whatever the queue does in between -- the queue
+  depth is engine-wide, so a queue that only *stays* deep, or flickers around
+  the high-water mark, is not evidence to keep halving, and halving per 2s scrape
+  drove every replica to one slot in seconds. It grows by one per scrape once the
+  queue has drained to zero. If the scrape stops answering or the endpoint stops
+  looking like an engine, an `auto` gate is restored to its full ceiling rather
+  than left shrunk, and a rebuild of the backend for an unrelated edit (a price,
+  a key) carries the gate and its permits over to the new backend object. Requests
+  past the
+  ceiling wait in the proxy, bounded, and are refused with 503 and
+  `Retry-After` beyond that. The request path only awaits a semaphore, so it
+  still performs no I/O. Each replica holds its own ceiling -- sharing it would
+  mean a network round trip per request -- and the engine's queue depth, which
+  already reflects every replica's traffic, is what keeps them honest. The
+  automatic ceiling is derived from the engine where it advertises capacity and
+  otherwise is the measured per-box limit divided across replicas
+  (`--admission-replicas`, default 2). Each gate's
+  state rides the existing health report to the control plane, which is how the
+  Fleet and Models pages show it.
 
 ## Behaviour notes
 

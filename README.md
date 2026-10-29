@@ -38,6 +38,7 @@ Clients point at `:4000`; the management UI is at `https://localhost:4001/`.
 - **81 providers, and any OpenAI-compatible endpoint** — see below.
 - **RBAC with real API keys.** Per-principal, per-model grants; keys hashed with SHA-256, passwords with Argon2id.
 - **Rate limits, token budgets and usage accounting**, enforced without a database call on the request path.
+- **An admission gate on by default.** vLLM queues the surplus itself, unbounded, which makes every request slow instead of failing any. A self-hosted vLLM/SGLang engine behind the proxy gets a per-backend gate automatically — the queue forms in the proxy instead, bounded, and callers past it get 503 with `Retry-After`. Hosted providers are never gated. See [protecting an engine from its own queue](docs/operations/configuration.md#protecting-an-engine-from-its-own-queue).
 - **Control plane / data plane split** by a runtime flag, so one image is a single container in a lab and a scaled deployment in Kubernetes.
 - **Reloads in place.** `SIGHUP` or a snapshot poll swaps the routing table atomically; in-flight generations are unaffected.
 

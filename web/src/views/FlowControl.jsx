@@ -91,12 +91,47 @@ export function EngineQueue({ live }) {
   );
 }
 
+/** The mode a backend's row carries, defaulting to automatic when absent. */
+export function admissionMode(backend) {
+  return backend.admission_mode ?? "auto";
+}
+
+/**
+ * A one-line summary of the admission choice for a backend row.
+ *
+ * `auto` shows the ceiling the gate would hold or does hold: the live fleet
+ * figure once the scraper has confirmed the engine, "—" until then, because
+ * the number is derived from the engine and is not known before detection.
+ * `explicit` always shows its configured number; `off` is just off.
+ */
+function modeLabel(backend, live) {
+  const mode = admissionMode(backend);
+  if (mode === "off") return { text: "off", tone: "off" };
+  if (mode === "explicit")
+    return { text: `max ${backend.admission_max_concurrent}`, tone: "on" };
+  const live_ceiling = live?.admission?.max_concurrent;
+  return {
+    text: live_ceiling != null ? `auto: ${live_ceiling}` : "auto",
+    tone: "auto",
+  };
+}
+
 /**
  * The flow-control cell on a backend row: live state, and a click to edit.
  */
 export function FlowControlCell({ backend, live, onSave }) {
   const [open, setOpen] = useState(false);
-  const on = backend.admission_max_concurrent !== null;
+  const mode = admissionMode(backend);
+  const { text, tone } = modeLabel(backend, live);
+  // Only an explicit gate has numbers of its own to show. An auto gate that is
+  // live still shows its doing (in use over ceiling); auto owns no figure.
+  const showLive = mode === "explicit" && live?.admission;
+  const colour =
+    tone === "off"
+      ? "var(--fg-5)"
+      : tone === "auto"
+        ? "var(--fg-4, var(--fg-3))"
+        : "var(--fg-3)";
   return (
     <>
       <span
@@ -104,19 +139,11 @@ export function FlowControlCell({ backend, live, onSave }) {
         title="Click to set flow control and the upstream timeout for this backend"
         style={{ cursor: "pointer", minWidth: 0 }}
       >
-        {on ? (
-          live?.admission ? (
-            <FlowStatus live={live} compact />
-          ) : (
-            <Mono
-              style={{ font: "400 12px var(--mono)", color: "var(--fg-3)" }}
-            >
-              max {backend.admission_max_concurrent}
-            </Mono>
-          )
+        {showLive ? (
+          <FlowStatus live={live} compact />
         ) : (
-          <Mono style={{ font: "400 12px var(--mono)", color: "var(--fg-5)" }}>
-            off
+          <Mono style={{ font: "400 12px var(--mono)", color: colour }}>
+            {text}
           </Mono>
         )}
       </span>
@@ -143,7 +170,22 @@ function wholeOrBlank(raw, min) {
   return Number.isInteger(n) && n >= min ? n : NaN;
 }
 
+const MODES = [
+  {
+    id: "auto",
+    label: "auto",
+    hint: "on once the scraper confirms a self-hosted engine; never for a hosted provider",
+  },
+  {
+    id: "explicit",
+    label: "explicit",
+    hint: "this replica sends at most the concurrent figure below",
+  },
+  { id: "off", label: "off", hint: "no gate; vLLM queues the surplus itself" },
+];
+
 function FlowControlEditor({ backend, live, onClose, onSave }) {
+  const [mode, setMode] = useState(admissionMode(backend));
   const [max, setMax] = useState(backend.admission_max_concurrent ?? "");
   const [highWater, setHighWater] = useState(backend.admission_high_water);
   const [queued, setQueued] = useState(backend.admission_max_queued);
@@ -154,26 +196,41 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
   const [problem, setProblem] = useState(null);
 
   const save = () => {
-    const values = {
-      admission_max_concurrent: wholeOrBlank(max, 1),
-      admission_high_water: wholeOrBlank(highWater, 1),
-      admission_max_queued: wholeOrBlank(queued, 0),
-      admission_max_wait_seconds: wholeOrBlank(wait, 0),
-      upstream_timeout_seconds: wholeOrBlank(timeout, 1),
-    };
-    const bad = Object.entries(values).find(([, v]) => Number.isNaN(v));
+    const values = { upstream_timeout_seconds: wholeOrBlank(timeout, 1) };
+    if (mode === "explicit") {
+      // An explicit gate needs a ceiling; blank would be a silent "off".
+      const n = wholeOrBlank(max, 1);
+      if (n === null || Number.isNaN(n)) {
+        setProblem("an explicit gate needs a whole max concurrent");
+        return;
+      }
+      values.admission_max_concurrent = n;
+    }
+    // Only an explicit gate has numbers of its own. The proxy derives an auto
+    // gate's numbers from the engine and ignores these columns, so offering
+    // (or sending) them for auto would be a setting that silently does nothing.
+    const tuning =
+      mode === "explicit"
+        ? {
+            admission_high_water: wholeOrBlank(highWater, 1),
+            admission_max_queued: wholeOrBlank(queued, 0),
+            admission_max_wait_seconds: wholeOrBlank(wait, 0),
+          }
+        : {};
+    const bad = Object.entries({ ...values, ...tuning }).find(([, v]) =>
+      Number.isNaN(v),
+    );
     if (bad) {
       setProblem(`${bad[0].replaceAll("_", " ")} must be a whole number`);
       return;
     }
     // The three tuning fields always have a value in the database; blank
-    // means "leave it", so they are only sent when filled in.
-    for (const k of [
-      "admission_high_water",
-      "admission_max_queued",
-      "admission_max_wait_seconds",
-    ]) {
-      if (values[k] === null) delete values[k];
+    // means "leave it", so they are only sent when filled in (explicit only,
+    // see above). Mode is always
+    // sent, so switching auto -> off -> auto is not lost to a default.
+    values.admission_mode = mode;
+    for (const k of Object.keys(tuning)) {
+      if (tuning[k] !== null) values[k] = tuning[k];
     }
     onSave(values);
   };
@@ -190,12 +247,16 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
         <Muted>
           vLLM accepts every request and queues the surplus itself, which makes
           every request slow instead of failing any. With a gate, each proxy
-          sends this engine at most <b>max concurrent</b> requests and holds the
-          rest here. While the engine reports <b>high water</b> or more requests
-          waiting, the ceiling halves; once its queue drains it grows back by
-          one per scrape. Past <b>max queued</b> or <b>max wait</b>, callers get
-          503 with Retry-After. Each proxy replica has its own ceiling. Changes
-          apply within a snapshot poll.
+          sends this engine at most the <b>max concurrent</b> ceiling and holds
+          the rest here. While the engine reports <b>high water</b> or more
+          requests waiting, the ceiling halves; once its queue drains it grows
+          back by one per scrape. Past <b>max queued</b> or <b>max wait</b>,
+          callers get 503 with Retry-After. Each proxy replica has its own
+          ceiling. <b>Auto</b> turns the gate on only for a detected self-hosted
+          engine (never a hosted provider) and derives every number from the
+          engine and the replica count, so it has no fields to set. Choose{" "}
+          <b>explicit</b> to set them yourself. Changes apply within a snapshot
+          poll.
         </Muted>
         {live?.admission && (
           <Row gap={16}>
@@ -204,35 +265,73 @@ function FlowControlEditor({ backend, live, onClose, onSave }) {
             <EngineQueue live={live} />
           </Row>
         )}
+        <Stack gap={6}>
+          <Label>Mode</Label>
+          <Row gap={8}>
+            {MODES.map((m) => (
+              <Button
+                key={m.id}
+                variant="small"
+                onClick={() => setMode(m.id)}
+                title={m.hint}
+                style={
+                  mode === m.id
+                    ? { outline: "2px solid var(--accent, #6cf)" }
+                    : undefined
+                }
+              >
+                {m.label}
+              </Button>
+            ))}
+          </Row>
+          <Muted style={{ font: "400 12px var(--mono)" }}>
+            {MODES.find((m) => m.id === mode)?.hint}
+          </Muted>
+        </Stack>
         <Grid cols={2} gap={12}>
-          <Field
-            label="Max concurrent"
-            hint="per proxy replica; blank turns the gate off"
-          >
-            <input
-              value={max}
-              placeholder="off"
-              onChange={(e) => setMax(e.target.value)}
-            />
-          </Field>
-          <Field
-            label="High water"
-            hint="engine queue depth that halves the ceiling"
-          >
-            <input
-              value={highWater}
-              onChange={(e) => setHighWater(e.target.value)}
-            />
-          </Field>
-          <Field
-            label="Max queued"
-            hint="callers waiting here before new ones get 503"
-          >
-            <input value={queued} onChange={(e) => setQueued(e.target.value)} />
-          </Field>
-          <Field label="Max wait (s)" hint="how long a caller waits for a slot">
-            <input value={wait} onChange={(e) => setWait(e.target.value)} />
-          </Field>
+          {mode === "explicit" && (
+            <Field
+              label="Max concurrent"
+              hint="per proxy replica; the ceiling this replica sends at most"
+            >
+              <input
+                value={max}
+                placeholder="required"
+                onChange={(e) => setMax(e.target.value)}
+              />
+            </Field>
+          )}
+          {mode === "explicit" && (
+            <>
+              <Field
+                label="High water"
+                hint="engine queue depth that halves the ceiling"
+              >
+                <input
+                  value={highWater}
+                  onChange={(e) => setHighWater(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="Max queued"
+                hint="callers waiting here before new ones get 503"
+              >
+                <input
+                  value={queued}
+                  onChange={(e) => setQueued(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="Max wait (s)"
+                hint="how long a caller waits for a slot"
+              >
+                <input
+                  value={wait}
+                  onChange={(e) => setWait(e.target.value)}
+                />
+              </Field>
+            </>
+          )}
           <Field
             label="Upstream timeout (s)"
             hint="time to first byte before the request fails; blank uses the deployment default"

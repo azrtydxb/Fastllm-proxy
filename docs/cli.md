@@ -156,6 +156,7 @@ machine.
 | `--health-interval`        | `10`             | Seconds between health sweeps                                                                                                                          |
 | `--health-timeout`         | `3`              | Seconds a probe may take before it counts as a failure                                                                                                 |
 | `--engine-scrape-interval` | `2`              | Seconds between reads of each backend's Prometheus `/metrics`, which is what `max_inflight_per_backend` counts against. `0` turns it off               |
+| `--admission-replicas`     | `2`              | Proxy replicas sharing each engine (env `FASTLLM_ADMISSION_REPLICAS`). Divides the measured 16-session box limit into each replica's automatic admission ceiling; set it to the real pod count. Not used by `explicit` gates |
 | `--health-report-interval` | `10`             | Seconds between health reports to the control plane. Backend health exists only in the data plane, so this is the only way the UI can see it           |
 | `--config-poll`            | `5`              | Seconds between snapshot refreshes. `0` disables the watch; in `File` mode `SIGHUP` is then the only reload                                            |
 

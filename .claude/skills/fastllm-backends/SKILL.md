@@ -20,6 +20,19 @@ power cycle. Measured: at 0.45, 72 GB used / 48 GB available while serving.
 Symptom to recognise: **ping works, SSH hangs at banner exchange.** That is
 memory starvation, not a network fault.
 
+## `--max-num-seqs` and the proxy's gate
+
+The proxy now puts an admission gate in front of every detected engine by
+default, with a per-replica ceiling of 8 (16 comfortable sessions per box over
+two replicas). `--max-num-seqs` is vLLM's *batching* knob as well as its queue
+bound, and the proxy reads it from `vllm:cache_config_info{max_num_seqs=…}` only
+as an upper bound — a value above 16 (the stock default is 256) does not raise
+the proxy's ceiling. Set it to what one box comfortably serves if you want the
+gate to track it; leaving it at the default is safe, the gate ignores the excess.
+
+A backend that should have no gate at all — an embedding model, say — needs
+`admission_mode: off` on its `model_backends` row; it is not off by default.
+
 ## sparkrun
 
 - `sparkrun stop <id>` **without `--cluster` silently fails** — it loses the

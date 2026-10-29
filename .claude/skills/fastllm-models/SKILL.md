@@ -20,7 +20,7 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 
 | Method | Path | Summary | Body fields |
 |---|---|---|---|
-| `PATCH` | `/admin/backends/{id}` | Change what one model costs, is called, and how it is protected at one provider. An explicit null clears a field; an absent field is left alone | `upstream_model`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `default_max_tokens`*, `upstream_timeout_seconds`*, `admission_max_concurrent`*, `options`, `admission_high_water`*, `admission_max_queued`*, `admission_max_wait_seconds`* |
+| `PATCH` | `/admin/backends/{id}` | Change what one model costs, is called, and how it is protected at one provider. An explicit null clears a field; an absent field is left alone | `upstream_model`*, `input_price_per_mtok`*, `output_price_per_mtok`*, `default_max_tokens`*, `upstream_timeout_seconds`*, `admission_max_concurrent`*, `admission_mode`*, `options`, `admission_high_water`*, `admission_max_queued`*, `admission_max_wait_seconds`* |
 | `DELETE` | `/admin/backends/{id}` | Detach one model from one provider. The model, its usage history and the provider itself are left alone | — |
 | `GET` | `/admin/fallback-model` | Read fallback-model | — |
 | `PUT` | `/admin/fallback-model` | Set fallback-model | `provider_model_id`* |
@@ -46,6 +46,15 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/...
 <!-- END GENERATED: endpoints -->
 
 ## Traps
+
+**Admission is on by default and a `null` no longer means "off".** Every
+backend defaults to `admission_mode: auto`: the proxy's engine scraper installs
+a gate when it detects a self-hosted vLLM/SGLang engine from `/metrics`, never
+for a hosted provider. `explicit` pins `admission_max_concurrent`, `off`
+disables the gate. The legacy numeric `admission_max_concurrent` still maps to
+`explicit`/`off` for back-compat, but only `admission_mode: "off"` can hold a
+hosted-looking backend with no ceiling off — absent is not "off". An explicit
+gate requires `admission_max_concurrent` or the PATCH is a 400.
 
 **A provider model and a frontend model may share a name, and normally do.**
 The frontend model wins during resolution, and migration 0034 gives every
