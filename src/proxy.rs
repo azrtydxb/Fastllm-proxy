@@ -1222,6 +1222,7 @@ where
             // so in-flight stays elevated for the whole generation.
             let guard = InflightGuard::with_permit(Arc::clone(&backend), permit);
 
+            let dispatch_started = std::time::Instant::now();
             let dispatch = state.client.request(upstream_req);
             // Per-backend override: a long-context self-hosted engine may
             // legitimately need more than the global budget for first-byte.
@@ -1404,7 +1405,8 @@ where
                                     streaming,
                                     received_at,
                                 )
-                                .on_backend(Arc::clone(&backend)),
+                                .on_backend(Arc::clone(&backend))
+                                .after_dispatch(dispatch_started),
                             ),
                         );
                         stamp_route_headers(&mut resp, &route_reason, candidate_model);
@@ -1477,7 +1479,8 @@ where
                                 streaming,
                                 received_at,
                             )
-                            .on_backend(Arc::clone(&backend)),
+                            .on_backend(Arc::clone(&backend))
+                            .after_dispatch(dispatch_started),
                             (&route_reason, candidate_model),
                         )
                         .await;
@@ -1493,7 +1496,8 @@ where
                                 streaming,
                                 received_at,
                             )
-                            .on_backend(Arc::clone(&backend)),
+                            .on_backend(Arc::clone(&backend))
+                            .after_dispatch(dispatch_started),
                         ),
                     );
                     // Marked for [`into_anthropic_response`]: the bytes are

@@ -90,6 +90,7 @@ Route on any of these:
 | _context window_                                | not a condition — a model whose declared `context_length` cannot hold the prompt plus the requested generation is automatically demoted down the chain |
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                                                                                               |
 | `max_inflight_per_backend`                      | how busy this rule's own targets are — the engine's own count where it publishes `/metrics`, so the ceiling holds across several proxies               |
+| `max_ttft_ms_per_backend`                    | TTFT for this rule's healthy targets; engine histogram deltas include all traffic, streaming proxy TTFT is the fallback; unknown or older-than-10s readings are eligible |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window, wrapping midnight                                                                                                                   |
 
 ```jsonc
@@ -97,6 +98,11 @@ Route on any of these:
 // "spill" mechanism — first-match-wins does the work.
 [{"position": 0, "max_inflight_per_backend": 2, "targets": ["local-qwen"]},
  {"position": 1,                                "targets": ["openrouter"]}]
+
+// Prefer the local DGX while any healthy backend's TTFT is below 180 ms;
+// an unknown or >10s-old sample keeps it eligible to recover.
+[{"position": 0, "max_ttft_ms_per_backend": 180, "targets": ["local-dgx"]},
+ {"position": 1,                                 "targets": ["openrouter"]}]
 
 // Batch work, labelled by the client, goes somewhere cheaper.
 {"position": 0, "headers": {"x-fastllm-tier": "batch"}, "targets": ["cheap"]}

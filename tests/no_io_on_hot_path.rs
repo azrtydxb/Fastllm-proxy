@@ -135,6 +135,14 @@ const _VIRTUAL_MODEL_RESOLVE_CANDIDATES_IS_SYNC_AND_TAKES_NO_HANDLE: ResolveCand
     FrontendModelDef::resolve_candidates;
 const _VIRTUAL_MODEL_DECIDE_IS_SYNC_AND_TAKES_NO_HANDLE: DecideFn = FrontendModelDef::decide;
 
+/// TTFT spill reads registry atomics directly, while first-byte fallback only
+/// records an atomic sample. Pin the helpers
+/// used by that request-path condition to a synchronous in-memory signature.
+const _FRESH_BACKEND_LATENCY_IS_SYNC_AND_TAKES_NO_HANDLE: fn(
+    &fastllm_proxy::registry::Backend,
+    u64,
+) -> Option<u64> = fastllm_proxy::registry::Backend::fresh_latency_us;
+
 /// Same reasoning again for `TailBuffer::push` (P3 usage accounting's
 /// per-frame side, `src/tail_buffer.rs`): were it `async fn`, or were it
 /// changed to accept a handle instead of the raw forwarded bytes, this
@@ -262,6 +270,13 @@ fn frontend_model_resolve_body_contains_no_await_or_io_tokens() {
     );
 
     assert_no_await_or_io_tokens(&body, "FrontendModelDef::decide");
+}
+
+#[test]
+fn fresh_backend_latency_read_contains_no_await_or_io_tokens() {
+    let source = include_str!("../src/registry.rs");
+    let body = extract_fn_body(source, "pub fn fresh_latency_us(&self, now_ms: u64)");
+    assert_no_await_or_io_tokens(&body, "Backend::fresh_latency_us");
 }
 
 /// `TailBuffer::push` (P3 usage accounting's per-frame side): a bounded

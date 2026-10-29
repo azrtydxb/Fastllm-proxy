@@ -248,6 +248,14 @@ pub struct Backend {
     engine_last_prompt: AtomicU64,
     engine_last_gen: AtomicU64,
     engine_last_kv_tokens: AtomicU32,
+    /// Last cumulative TTFT histogram values, used only by the scrape loop.
+    ttft_sum_us_total: AtomicU64,
+    ttft_count_total: AtomicU64,
+    /// Engine TTFT (preferred) and proxy-observed streaming TTFT fallback.
+    engine_ttft_us: AtomicU64,
+    engine_ttft_at_ms: AtomicU64,
+    proxy_ttft_us: AtomicU64,
+    pub(crate) proxy_ttft_at_ms: AtomicU64,
     /// Requests the engine has accepted and not started, as of the last
     /// scrape. Kept apart from `engine_inflight`, which folds it together
     /// with `running`: a ceiling wants the total, but admission control wants
@@ -280,6 +288,9 @@ pub struct Backend {
     /// backend that read as 0 µs would win every comparison and take the
     /// whole pool until its first request completed.
     latency_ewma_us: AtomicU64,
+    /// When the last completed request supplied the EWMA, for latency rules
+    /// to forget a slow node after spill traffic stops refreshing its sample.
+    pub(crate) latency_at_ms: AtomicU64,
     /// Whole-request wall time for requests this backend served.
     ///
     /// Lives here rather than in the telemetry module's per-model map because
@@ -291,6 +302,10 @@ pub struct Backend {
 }
 
 impl Backend {
+    /// Spill decisions stop using completed-request latency after ten seconds
+    /// without a new sample, so traffic that spilled can eventually return.
+    const LATENCY_FRESH_FOR_MS: u64 = 10_000;
+
     fn new(uid: BackendUid, api_base: String, def: &BackendDef) -> Result<Self> {
         let mut headers: Vec<(HeaderName, HeaderValue)> = Vec::new();
         if let Some(key) = def.api_key.as_deref() {
@@ -379,12 +394,19 @@ impl Backend {
             engine_last_prompt: AtomicU64::new(0),
             engine_last_gen: AtomicU64::new(0),
             engine_last_kv_tokens: AtomicU32::new(0),
+            ttft_sum_us_total: AtomicU64::new(0),
+            ttft_count_total: AtomicU64::new(0),
+            engine_ttft_us: AtomicU64::new(0),
+            engine_ttft_at_ms: AtomicU64::new(0),
+            proxy_ttft_us: AtomicU64::new(0),
+            proxy_ttft_at_ms: AtomicU64::new(0),
             engine_waiting: AtomicU32::new(0),
             admission: def.admission.map(crate::admission::Admission::new),
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             ejections_total: AtomicU64::new(0),
             latency_ewma_us: AtomicU64::new(0),
+            latency_at_ms: AtomicU64::new(0),
             duration: crate::telemetry::Histogram::new(),
         })
     }
@@ -586,6 +608,62 @@ impl Backend {
         self.inflight()
     }
 
+    /// Record a scrape's histogram delta. A reset or idle interval clears the
+    /// engine sample, because retaining it would claim the engine measured a
+    /// request in an interval where it did not.
+    pub fn record_engine_ttft(&self, load: &crate::engine_metrics::EngineLoad, now_ms: u64) {
+        let current = load.ttft_sum_seconds.zip(load.ttft_count);
+        let old_count = self.ttft_count_total.load(Ordering::Relaxed);
+        let old_sum_us = self.ttft_sum_us_total.load(Ordering::Relaxed);
+        let previous = (old_count > 0).then_some((old_sum_us as f64 / 1_000_000.0, old_count));
+        let current_us = current.map(|(sum, count)| ((sum * 1_000_000.0).round() as u64, count));
+        let delta = crate::engine_metrics::ttft_delta_mean_us(
+            previous,
+            current_us.map(|(sum, count)| (sum as f64 / 1_000_000.0, count)),
+        );
+        if let Some((sum_us, count)) = current_us {
+            self.ttft_sum_us_total.store(sum_us, Ordering::Relaxed);
+            self.ttft_count_total.store(count, Ordering::Relaxed);
+        } else {
+            self.ttft_sum_us_total.store(0, Ordering::Relaxed);
+            self.ttft_count_total.store(0, Ordering::Relaxed);
+        }
+        match delta {
+            Some(us) => {
+                self.engine_ttft_us.store(us.max(1), Ordering::Relaxed);
+                self.engine_ttft_at_ms
+                    .store(now_ms.max(1), Ordering::Relaxed);
+            }
+            None => {
+                self.engine_ttft_us.store(0, Ordering::Relaxed);
+                self.engine_ttft_at_ms.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record streaming TTFT without any I/O; this is only a fallback when an
+    /// engine has not produced a fresh histogram interval.
+    pub fn note_proxy_ttft_us(&self, us: u64, at_ms: u64) {
+        self.proxy_ttft_us.store(us.max(1), Ordering::Relaxed);
+        self.proxy_ttft_at_ms.store(at_ms.max(1), Ordering::Relaxed);
+    }
+
+    /// Prefer the engine-wide interval mean. Proxy TTFT is per-replica and
+    /// only includes streaming responses, but still captures queueing when an
+    /// engine does not publish its histogram.
+    pub fn ttft_for_limit(&self, now_ms: u64) -> Option<u64> {
+        const FRESH_MS: u64 = 10_000;
+        let engine_at = self.engine_ttft_at_ms.load(Ordering::Relaxed);
+        if engine_at != 0 && now_ms.saturating_sub(engine_at) <= FRESH_MS {
+            return Some(self.engine_ttft_us.load(Ordering::Relaxed));
+        }
+        let proxy_at = self.proxy_ttft_at_ms.load(Ordering::Relaxed);
+        if proxy_at != 0 && now_ms.saturating_sub(proxy_at) <= FRESH_MS {
+            return Some(self.proxy_ttft_us.load(Ordering::Relaxed));
+        }
+        None
+    }
+
     /// The engine's own queue depth at the last scrape, when that reading is
     /// still fresh.
     ///
@@ -639,6 +717,12 @@ impl Backend {
     /// estimate that is one sample stale is worth strictly less than the
     /// contention avoided.
     pub fn note_latency_us(&self, us: u64) {
+        self.note_latency_us_at(us, now_ms());
+    }
+
+    /// Variant with an explicit observation time so callers and tests can
+    /// preserve the sample's age without adding work to the routing path.
+    pub fn note_latency_us_at(&self, us: u64, at_ms: u64) {
         let prev = self.latency_ewma_us.load(Ordering::Relaxed);
         let next = if prev == 0 {
             us
@@ -647,6 +731,7 @@ impl Backend {
             prev - (prev >> 3) + (us >> 3)
         };
         self.latency_ewma_us.store(next, Ordering::Relaxed);
+        self.latency_at_ms.store(at_ms.max(1), Ordering::Relaxed);
     }
 
     /// The EWMA, or `None` when this backend has completed nothing yet.
@@ -658,6 +743,17 @@ impl Backend {
             0 => None,
             v => Some(v),
         }
+    }
+
+    /// The EWMA only while its sample is fresh enough for a spill decision.
+    /// After spill, no requests arrive to refresh the EWMA; expiry is what
+    /// lets the backend re-enter rotation and gather new evidence.
+    pub fn fresh_latency_us(&self, now_ms: u64) -> Option<u64> {
+        let at = self.latency_at_ms.load(Ordering::Relaxed);
+        if at == 0 || now_ms.saturating_sub(at) > Self::LATENCY_FRESH_FOR_MS {
+            return None;
+        }
+        self.latency_us()
     }
 
     /// Increment the error counter. Does not affect health — used for
@@ -1203,6 +1299,8 @@ model_list:
             prompt_tokens_total: prompt,
             generation_tokens_total: gen,
             kv_cache_tokens: kv,
+            ttft_sum_seconds: None,
+            ttft_count: None,
         }
     }
 
