@@ -1868,11 +1868,18 @@ model_list:
 
         // Silent for longer than the reading stays fresh: put it back.
         assert!(b.restore_auto_admission(1_000 + 60_000, true));
-        assert_eq!(gate.capacity(), 8, "a gate with no scrape behind it is whole");
+        assert_eq!(
+            gate.capacity(),
+            8,
+            "a gate with no scrape behind it is whole"
+        );
 
         // The endpoint answering "not an engine" does not wait for staleness.
         gate.observe(9);
-        gate.observe_at(9, std::time::Instant::now() + crate::admission::SHRINK_COOLDOWN);
+        gate.observe_at(
+            9,
+            std::time::Instant::now() + crate::admission::SHRINK_COOLDOWN,
+        );
         assert!(gate.capacity() < 8);
         assert!(b.restore_auto_admission(2_000, false));
         assert_eq!(gate.capacity(), 8);

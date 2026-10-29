@@ -40,7 +40,10 @@ fn auto_settings_from_probe(
     let Ok(load) = probe else {
         return None;
     };
-    Some(crate::admission::auto_settings(load.batch_capacity, replicas))
+    Some(crate::admission::auto_settings(
+        load.batch_capacity,
+        replicas,
+    ))
 }
 
 /// Whether a failed probe should put an Auto gate back at its full ceiling
@@ -265,7 +268,9 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            auto_settings_from_probe(&measured, 2).unwrap().max_concurrent,
+            auto_settings_from_probe(&measured, 2)
+                .unwrap()
+                .max_concurrent,
             4,
             "a small reported batch divides across replicas and lowers the ceiling"
         );
@@ -284,8 +289,14 @@ mod tests {
     #[test]
     fn the_configured_replica_count_reaches_the_automatic_ceiling() {
         let load = Ok(crate::engine_metrics::EngineLoad::default());
-        assert_eq!(auto_settings_from_probe(&load, 4).unwrap().max_concurrent, 4);
-        assert_eq!(auto_settings_from_probe(&load, 1).unwrap().max_concurrent, 16);
+        assert_eq!(
+            auto_settings_from_probe(&load, 4).unwrap().max_concurrent,
+            4
+        );
+        assert_eq!(
+            auto_settings_from_probe(&load, 1).unwrap().max_concurrent,
+            16
+        );
     }
 
     /// An endpoint that answers "not an engine" is a verdict and restores the
@@ -293,7 +304,11 @@ mod tests {
     /// and waits for the last reading to go stale.
     #[test]
     fn only_an_unanswered_probe_waits_for_staleness_before_restoring() {
-        assert!(!restore_only_if_silent(&ProbeError::NotAnEngine("404".into())));
-        assert!(restore_only_if_silent(&ProbeError::Unreachable("timeout".into())));
+        assert!(!restore_only_if_silent(&ProbeError::NotAnEngine(
+            "404".into()
+        )));
+        assert!(restore_only_if_silent(&ProbeError::Unreachable(
+            "timeout".into()
+        )));
     }
 }

@@ -290,7 +290,11 @@ mod config_tests {
             2,
             "the engine's own capacity is divided by the same count"
         );
-        assert_eq!(auto_settings(None, 0).max_concurrent, 16, "never divides by zero");
+        assert_eq!(
+            auto_settings(None, 0).max_concurrent,
+            16,
+            "never divides by zero"
+        );
     }
 }
 
@@ -974,7 +978,11 @@ mod tests {
             let waiting = if sec % 2 == 0 { 2 } else { 1 };
             gate.observe_at(waiting, start + Duration::from_secs(sec));
         }
-        assert_eq!(gate.capacity(), 4, "six seconds of flicker cost one halving");
+        assert_eq!(
+            gate.capacity(),
+            4,
+            "six seconds of flicker cost one halving"
+        );
     }
 
     /// The live swap from "no gate" to "auto gate": in-flight requests must
