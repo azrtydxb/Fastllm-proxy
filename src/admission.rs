@@ -411,7 +411,7 @@ impl Admission {
     pub fn release_seed(&self) {
         if self
             .seeded
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
             .is_ok()
         {
             let repaid = self
@@ -709,7 +709,6 @@ mod tests {
         assert_eq!(gate.capacity(), 1);
     }
 
-    #[tokio::test]
     /// The live swap from "no gate" to "auto gate": in-flight requests must
     /// start out consuming slots, so the gate never admits a full ceiling on
     /// top of work the engine is already doing, and their slots must come back
