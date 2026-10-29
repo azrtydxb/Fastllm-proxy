@@ -96,6 +96,13 @@ spec:
     pod:
       labels:
         app: fastllm-proxy
+      # The operator takes proxy env from here, not from deploy/deployment.yaml
+      # or the kubernetes/ base, which it ignores. Must equal `replicas` above:
+      # the automatic admission gate divides the 16-session box limit by it
+      # (16 / 2 = 8 per replica). Change both together.
+      extraEnv:
+        - name: FASTLLM_ADMISSION_REPLICAS
+          value: "2"
 
   # Verbatim from the `fastllm-proxy-config` ConfigMap the manifests created.
   # The operator mounts its own ConfigMap (`fastllm-proxy`) built from this,

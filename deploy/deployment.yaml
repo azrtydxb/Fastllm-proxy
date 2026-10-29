@@ -84,6 +84,14 @@ spec:
                 secretKeyRef: { name: fastllm-proxy-token, key: token }
             - name: FASTLLM_LOG
               value: info
+            # Proxy replicas sharing each engine. Divides the measured 16-session
+            # box limit into each replica's automatic admission ceiling (16 / 2 =
+            # 8). Keep it equal to `replicas` above: the proxy cannot count its
+            # siblings without a network call, so it is told. Too low
+            # over-admits the box, too high leaves it idle. Autoscaling the
+            # proxy changes the real count under this number.
+            - name: FASTLLM_ADMISSION_REPLICAS
+              value: "2"
           volumeMounts:
             - { name: config, mountPath: /etc/fastllm, readOnly: true }
             # Snapshot disk cache (default /var/lib/fastllm/snapshot.json).

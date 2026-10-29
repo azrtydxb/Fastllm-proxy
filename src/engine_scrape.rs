@@ -31,15 +31,29 @@ use crate::state::AppState;
 /// with `vllm:`/`sglang:` families, is never gated by accident.
 ///
 /// The capacity policy lives in [`crate::admission::auto_settings`]; this only
-/// supplies what the scrape learned, so the same numbers are unit-testable
-/// without a probe.
+/// supplies what the scrape learned and the configured replica count, so the
+/// same numbers are unit-testable without a probe.
 fn auto_settings_from_probe(
     probe: &Result<crate::engine_metrics::EngineLoad, ProbeError>,
+    replicas: u32,
 ) -> Option<crate::admission::Settings> {
     let Ok(load) = probe else {
         return None;
     };
-    Some(crate::admission::auto_settings(load.batch_capacity))
+    Some(crate::admission::auto_settings(load.batch_capacity, replicas))
+}
+
+/// Whether a failed probe should put an Auto gate back at its full ceiling
+/// right now, or only once the last reading has gone stale.
+///
+/// `Some(false)` -- the endpoint answered and is not an engine -- is a verdict
+/// that needs no waiting. `Some(true)` is a probe that got no usable answer:
+/// that can be an engine too busy to serve `/metrics`, the overload the gate is
+/// holding back, so the gate waits for the reading to age out first. See
+/// [`crate::registry::Backend::restore_auto_admission`] for why the gate is
+/// restored rather than removed.
+fn restore_only_if_silent(error: &ProbeError) -> bool {
+    matches!(error, ProbeError::Unreachable(_))
 }
 
 /// How long a backend that produced no reading sits out before being asked
@@ -81,7 +95,7 @@ enum Detected {
     },
 }
 
-pub fn spawn(state: Arc<AppState>, interval: Duration) {
+pub fn spawn(state: Arc<AppState>, interval: Duration, replicas: u32) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -93,12 +107,12 @@ pub fn spawn(state: Arc<AppState>, interval: Duration) {
         let mut known: HashMap<BackendUid, Detected> = HashMap::new();
         loop {
             ticker.tick().await;
-            sweep(&state, &mut known).await;
+            sweep(&state, &mut known, replicas).await;
         }
     });
 }
 
-async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>) {
+async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>, replicas: u32) {
     let now = now_ms();
     let backends: Vec<_> = state
         .registry
@@ -146,7 +160,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
             Some(Detected::Retry { answered: true, .. })
         );
 
-        if let Some(settings) = auto_settings_from_probe(&load) {
+        if let Some(settings) = auto_settings_from_probe(&load, replicas) {
             backend.enable_auto_admission(settings);
         }
 
@@ -185,6 +199,12 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                 }
             }
             Err(e) => {
+                // The gate recovers from readings of an empty queue, and a
+                // failed scrape supplies none -- nor will the next one for five
+                // minutes, or ever once the backend is settled. Without this a
+                // gate shrunk by overload stays shrunk after the engine
+                // restarts or loses `/metrics`.
+                backend.restore_auto_admission(now_ms(), restore_only_if_silent(&e));
                 // Answered, and it is not an engine: settle on the second such
                 // answer from a backend that is serving. Never answered: settle
                 // only once the deadline has passed, and mark the verdict as
@@ -235,7 +255,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
 
 #[cfg(test)]
 mod tests {
-    use super::auto_settings_from_probe;
+    use super::{auto_settings_from_probe, restore_only_if_silent};
     use crate::engine_metrics::ProbeError;
 
     #[test]
@@ -245,12 +265,12 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            auto_settings_from_probe(&measured).unwrap().max_concurrent,
+            auto_settings_from_probe(&measured, 2).unwrap().max_concurrent,
             4,
             "a small reported batch divides across replicas and lowers the ceiling"
         );
         assert_eq!(
-            auto_settings_from_probe(&Ok(crate::engine_metrics::EngineLoad::default())),
+            auto_settings_from_probe(&Ok(crate::engine_metrics::EngineLoad::default()), 2),
             Some(crate::admission::AUTO_FALLBACK),
             "an engine with no advertised capacity gets the measured default"
         );
@@ -258,6 +278,22 @@ mod tests {
         // A hosted provider never answers with an engine family, so the probe
         // fails and no gate is installed -- the whole point of "auto".
         let hosted = Err(ProbeError::NotAnEngine("404".into()));
-        assert_eq!(auto_settings_from_probe(&hosted), None);
+        assert_eq!(auto_settings_from_probe(&hosted, 2), None);
+    }
+
+    #[test]
+    fn the_configured_replica_count_reaches_the_automatic_ceiling() {
+        let load = Ok(crate::engine_metrics::EngineLoad::default());
+        assert_eq!(auto_settings_from_probe(&load, 4).unwrap().max_concurrent, 4);
+        assert_eq!(auto_settings_from_probe(&load, 1).unwrap().max_concurrent, 16);
+    }
+
+    /// An endpoint that answers "not an engine" is a verdict and restores the
+    /// gate at once; a probe that got no answer might be the overload itself
+    /// and waits for the last reading to go stale.
+    #[test]
+    fn only_an_unanswered_probe_waits_for_staleness_before_restoring() {
+        assert!(!restore_only_if_silent(&ProbeError::NotAnEngine("404".into())));
+        assert!(restore_only_if_silent(&ProbeError::Unreachable("timeout".into())));
     }
 }

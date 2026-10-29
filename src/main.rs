@@ -92,6 +92,15 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     engine_scrape_interval: u64,
 
+    /// How many proxy replicas share each engine, for the automatic admission
+    /// gate: the measured per-box session limit is divided by this to get each
+    /// replica's ceiling. Must match the number of proxy pods -- the proxy
+    /// cannot count its siblings without a network call on the request path --
+    /// or the replicas together admit more or less than the box can serve.
+    /// Does not affect `explicit` gates, whose numbers are already per replica.
+    #[arg(long, default_value_t = 2, env = "FASTLLM_ADMISSION_REPLICAS")]
+    admission_replicas: u32,
+
     /// Seconds to wait for upstream response headers. Does not bound generation.
     #[arg(long, default_value_t = 120)]
     upstream_timeout: u64,
@@ -1727,6 +1736,7 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
         fastllm_proxy::engine_scrape::spawn(
             Arc::clone(&state),
             Duration::from_secs(cli.engine_scrape_interval),
+            cli.admission_replicas.max(1),
         );
     }
     // Unconditional, unlike `reconcile::spawn` -- every role that reaches

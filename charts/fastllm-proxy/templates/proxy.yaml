@@ -90,6 +90,11 @@ spec:
               value: {{ range $i, $k := (keys $.Values.otel.headers | sortAlpha) }}{{ if $i }},{{ end }}{{ $k }}={{ get $.Values.otel.headers $k }}{{ end }}
             {{- end }}
             {{- end }}
+            # Divides the measured 16-session box limit into each replica's
+            # automatic admission ceiling. Follows `proxy.replicas`; under an
+            # HPA the real count moves, so set replicas to the count expected
+            # at load.
+            - {name: FASTLLM_ADMISSION_REPLICAS, value: {{ .Values.proxy.replicas | quote }}}
             - {name: FASTLLM_LOG, value: info}
           volumeMounts:
             # A restarted proxy reads its last-known-good snapshot from here
