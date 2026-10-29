@@ -50,10 +50,13 @@ jobs:
       # the binary, sets RUSTC_WRAPPER and points SCCACHE_WEBDAV_* at the Kuvryn Ant
       # sccache feed with the job's short-lived OIDC token.
       SECRET_LEN_TEST: ${{ secrets.SECRET_LEN_TEST }}
-    # A sibling service container, reachable by its service name — not
-    # localhost, which is the `test` container's own loopback, not the
-    # runner's. Same Postgres major version the shared cluster runs in
-    # production (deploy/control.yaml points at it via `fastllm-db-shared`).
+    # Same Postgres major version the shared cluster runs in production
+    # (deploy/control.yaml points at it via `fastllm-db-shared`). Where it is
+    # reachable depends on the runner mode: on the ARC kubernetes runners it is
+    # a sidecar in the job pod, on localhost; on dind it is a sibling
+    # container, reached by its service name. `Wait for Postgres` finds out
+    # which and exports PG_HOST. Service options are ignored on the kubernetes
+    # runners, so readiness is that step's job rather than a health check.
     services:
       postgres:
         image: postgres:17
@@ -61,8 +64,6 @@ jobs:
           POSTGRES_USER: fastllm
           POSTGRES_PASSWORD: fastllm
           POSTGRES_DB: fastllm
-        options: >-
-          --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: ant
@@ -137,6 +138,24 @@ jobs:
         run: cargo clippy -p fastllm-operator --all-targets -- -D warnings
       - name: Test (operator)
         run: cargo test -p fastllm-operator --locked
+      # Only the tiers that run database tests wait; a PR never touches Postgres.
+      - name: Wait for Postgres
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          # The rust image has no pg_isready. The postgres image only listens on
+          # TCP once its init is done, so an accepted connection means ready.
+          while :; do
+            for host in localhost postgres; do
+              if timeout 3 bash -c "</dev/tcp/$host/5432" 2>/dev/null; then
+                echo "Postgres is up on $host"
+                echo "PG_HOST=$host" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            done
+            sleep 2
+          done
       # The database tests are `#[ignore]`d by default so `cargo test` stays
       # database-free everywhere else (a laptop with no Postgres running,
       # `cargo build --no-default-features`). Here, with a real Postgres
@@ -145,7 +164,7 @@ jobs:
         # Service-backed (Postgres) integration tier: nightly/manual only, never on PR.
         if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
-          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          DATABASE_URL: postgres://fastllm:fastllm@${{ env.PG_HOST }}:5432/fastllm
           # Every process that talks to Postgres takes a whole *pool*, not a
           # connection. `cargo test` runs each test binary's tests in parallel
           # and several binaries at once, and each spawned proxy plus each
@@ -204,7 +223,7 @@ jobs:
       - name: Test (classifier)
         if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
-          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          DATABASE_URL: postgres://fastllm:fastllm@${{ env.PG_HOST }}:5432/fastllm
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: cargo test --features "control classifier" --locked -- --include-ignored
@@ -214,7 +233,7 @@ jobs:
       - name: Full suite + coverage (release tags)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
-          DATABASE_URL: postgres://fastllm:fastllm@postgres:5432/fastllm
+          DATABASE_URL: postgres://fastllm:fastllm@${{ env.PG_HOST }}:5432/fastllm
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: |
