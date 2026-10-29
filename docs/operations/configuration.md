@@ -183,7 +183,7 @@ the ceiling at 8.
 |---|---|---|
 | `admission_mode` | `auto` | `auto`, `explicit`, or `off` -- see above. |
 | `admission_max_concurrent` | `8` (auto), required (explicit) | Most concurrent requests each proxy replica sends the engine. Used by `explicit`; for `auto` it is derived, unless it is an explicit backend. |
-| `admission_high_water` | 2 | Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves. |
+| `admission_high_water` | 2 | Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves -- once, at the start of an overload episode; see below. |
 | `admission_max_queued` | 32 | Requests allowed to wait at the proxy; beyond it they get 503. |
 | `admission_max_wait_seconds` | 5 | How long a request waits for a slot before 503. |
 | `upstream_timeout_seconds` | `--upstream-timeout` | Time to first byte before the request fails. Edited in the same dialog because it is the other half of the same problem. |
@@ -193,14 +193,23 @@ number maps to `explicit` and `null` to `off`. Sending `admission_mode` is the
 way to distinguish "automatic" from "off" on a backend with no ceiling, which
 `null` cannot express.
 
-The engine scraper (`--engine-scrape-interval`, default 2s) halves the gate's
-ceiling while the engine reports `high_water` or more requests waiting, and
-raises it by one per scrape once that queue has drained to zero. Requests past
-the ceiling wait at the proxy, up to `max_queued` of them for up to
-`max_wait_seconds`; beyond that they get **503 with `Retry-After`** and
-`"type": "backend_overloaded"`. That is deliberately not 429: it is a statement
-about the backend, not the caller's quota. Changes reach running proxies on
-their next snapshot poll.
+The engine scraper (`--engine-scrape-interval`, default 2s) reacts to the
+engine's own queue. When `num_requests_waiting` crosses `high_water` it halves
+the gate's ceiling **once** -- the start of an *overload episode*. It does not
+halve again on the next scrape however deep the queue is: the queue depth is
+engine-wide and both replicas see the same figure, so a queue that merely
+*stays* deep would otherwise halve away to one slot within a few seconds and
+leave the box idle. While the queue stays at or above `high_water`, one further
+halving is allowed only after a **10-second cooldown** has passed (several
+scrape intervals), and the cooldown restarts after it -- so a genuinely
+worsening engine is still backed off, at a deliberate pace rather than the
+scrape rate. The episode ends when the queue drops back below `high_water`, and
+a queue drained to zero then earns ceiling back one slot per scrape until
+`max_concurrent`. Requests past the ceiling wait at the proxy, up to
+`max_queued` of them for up to `max_wait_seconds`; beyond that they get **503
+with `Retry-After`** and `"type": "backend_overloaded"`. That is deliberately
+not 429: it is a statement about the backend, not the caller's quota. Changes
+reach running proxies on their next snapshot poll.
 
 - **A pool still balances.** A request that finds its engine's gate full moves
   to an untried sibling without waiting, and only queues when there is nowhere

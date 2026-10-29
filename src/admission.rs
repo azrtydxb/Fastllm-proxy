@@ -28,6 +28,22 @@
 //! off fast; recovery is cheap to get wrong, so return slowly, or the ceiling
 //! oscillates between drowning and idling.
 //!
+//! ## One halving per episode, not one per sample
+//!
+//! The decrease is multiplicative but not *repeatable at scrape rate*. The
+//! queue is engine-wide: both proxy replicas count against the same
+//! `num_requests_waiting`, so a queue that merely stays deep (a cold prefix
+//! cache, a neighbour on the GPU) reads as overload on every 2s scrape for as
+//! long as it lasts. Halving on each of those − 8 → 4 → 2 → 1 in about six
+//! seconds − drives every replica to a single slot on a queue that was never
+//! growing, and the boxes sit underused while recovery crawls back additively.
+//! So a crossing of `high_water` opens an *episode*: one halving, then nothing
+//! more until [`SHRINK_COOLDOWN`] has passed. If the queue is still deep after
+//! that, one further halving is allowed and the cooldown restarts — a genuinely
+//! worsening engine still gets backed off, just at a deliberate pace rather
+//! than the scrape rate. The episode ends, and additive recovery resumes, when
+//! the queue drops back below `high_water`.
+//!
 //! ## What this is not
 //!
 //! It is not a rate limit ([`crate::limiter`] is), and it is not a fairness
@@ -57,8 +73,8 @@
 //! and backs off on it.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Permits the ceiling was lowered by while they were in use, and which are
@@ -142,6 +158,22 @@ pub const AUTO_FALLBACK: Settings = Settings {
     max_queued: 32,
     max_wait_seconds: 5,
 };
+
+/// How long one halving must stand before the gate may halve again while the
+/// engine's queue stays deep.
+///
+/// Ten seconds is deliberately several scrape intervals (the engine scraper
+/// ticks every 2s by default, so five of them at the default rate) on purpose:
+/// the queue depth is engine-wide, and both replicas see the same number, so a
+/// queue that is merely deep is not evidence the ceiling is still too high.
+/// Without the pause, back-to-back scrapes halve 8 → 4 → 2 → 1 in about six
+/// seconds on a queue that never grew, pinning every replica at one slot and
+/// leaving the box idle. One halving per episode, then this much patience,
+/// spends the decrease where a *worsening* engine earns it instead of where a
+/// steady queue merely repeats itself. The number is several scrapes' worth so
+/// it cannot fire twice off one stretch of queue that has not had time to
+/// respond to the first cut.
+pub const SHRINK_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// Divide a box-wide target among proxy replicas, rounding up so odd targets
 /// do not leave one session unused. At least one slot remains per replica.
@@ -314,7 +346,27 @@ pub struct Admission {
     /// How many pre-gate requests were seeded as occupied slots and still owe
     /// their slot back. See `new_with_in_flight` and `release_seed`.
     seeded: AtomicUsize,
+    /// The shrink episode: whether the engine's queue is currently at or above
+    /// `high_water`, and when the ceiling was last halved. Guards the
+    /// once-per-episode decrease -- see [`SHRINK_COOLDOWN`] and `observe_at`.
+    /// A `Mutex` rather than atomics because the two must move together: a
+    /// halving that read `overloaded` false and then stored a fresh timestamp
+    /// could race another, and the request path never touches this.
+    shrink: Mutex<ShrinkEpisode>,
     settings: Settings,
+}
+
+/// The state behind [`SHRINK_COOLDOWN`]: is the queue deep, and when did the
+/// ceiling last come down.
+#[derive(Debug)]
+struct ShrinkEpisode {
+    /// True while `num_requests_waiting` is at or above `high_water`. Set on
+    /// the crossing that opens an episode, cleared when the queue falls back
+    /// below, which is what makes the next crossing a *new* episode that may
+    /// halve again at once.
+    overloaded: bool,
+    /// When the ceiling was last halved. `None` before the first episode.
+    last_halved: Option<Instant>,
 }
 
 /// What a gate is doing right now. Serialised into the fleet health report,
@@ -378,6 +430,10 @@ impl Admission {
             refused_full: AtomicU64::new(0),
             refused_timed_out: AtomicU64::new(0),
             seeded: AtomicUsize::new(0),
+            shrink: Mutex::new(ShrinkEpisode {
+                overloaded: false,
+                last_halved: None,
+            }),
             settings,
         }
     }
@@ -529,14 +585,60 @@ impl Admission {
     /// Called by [`crate::engine_scrape`] on its own timer, never from a
     /// request — the request path reads the consequence, not the metric.
     pub fn observe(&self, engine_waiting: u32) {
+        self.observe_at(engine_waiting, Instant::now());
+    }
+
+    /// [`observe`](Self::observe) with the clock injected, so tests can step
+    /// time across the cooldown deterministically without sleeping.
+    ///
+    /// An *episode* is one stretch of the engine's queue at or above
+    /// `high_water`. Its first sample halves the ceiling; further samples do
+    /// nothing until [`SHRINK_COOLDOWN`] has elapsed, and then allow exactly
+    /// one more halving (restarting the cooldown) if the queue is still deep.
+    /// The queue falling below `high_water` ends the episode, so the next
+    /// crossing is a fresh one that may halve again at once — and a queue that
+    /// has drained to zero also earns capacity back.
+    pub fn observe_at(&self, engine_waiting: u32, now: Instant) {
         if engine_waiting >= self.settings.high_water {
-            self.shrink();
-        } else if engine_waiting == 0 {
-            // Only a genuinely drained queue earns capacity back. Growing
-            // while anything is still waiting chases the ceiling back up
-            // into the overload it just escaped.
-            self.grow();
+            self.consider_shrink(now);
+        } else {
+            // Below `high_water` the episode is over, whatever the ceiling
+            // did. Clearing here, rather than on the drained exactly-zero
+            // reading, means the crossing that opens the *next* episode always
+            // sees `overloaded` false and gets its halving.
+            self.shrink
+                .lock()
+                .expect("admission shrink lock poisoned")
+                .overloaded = false;
+            if engine_waiting == 0 {
+                // Only a genuinely drained queue earns capacity back. Growing
+                // while anything is still waiting chases the ceiling back up
+                // into the overload it just escaped.
+                self.grow();
+            }
         }
+    }
+
+    /// Halve the ceiling once for this episode, or again if the cooldown has
+    /// passed while the queue stayed deep.
+    fn consider_shrink(&self, now: Instant) {
+        let mut episode = self.shrink.lock().expect("admission shrink lock poisoned");
+        if episode.overloaded {
+            // Same episode: only the cooldown can authorise another halving.
+            let due = episode
+                .last_halved
+                .is_some_and(|last| now.saturating_duration_since(last) >= SHRINK_COOLDOWN);
+            if !due {
+                return;
+            }
+        }
+        // A new episode halves at once; a still-deep one halves on the
+        // cooldown. Either way the timestamp restarts, so the next halving in
+        // this episode waits a further cooldown.
+        episode.overloaded = true;
+        episode.last_halved = Some(now);
+        drop(episode);
+        self.shrink();
     }
 
     /// Halve the ceiling, down to one.
@@ -663,9 +765,10 @@ mod tests {
         );
     }
 
-    /// The asymmetry the module header argues for, as behaviour: one
-    /// overloaded sample costs half the ceiling, one idle sample returns one
-    /// slot. Recovering from a single spike must take many good samples.
+    /// The asymmetry the module header argues for, as behaviour: an overloaded
+    /// sample halves the ceiling once, and recovery from that one cut is one
+    /// slot per drained sample. Repeated deep samples inside one episode do
+    /// not halve again -- that is the cooldown, tested separately.
     #[test]
     fn it_backs_off_fast_and_returns_slowly() {
         let gate = Admission::new(settings());
@@ -703,10 +806,84 @@ mod tests {
     #[test]
     fn it_never_shrinks_below_the_floor() {
         let gate = Admission::new(settings());
-        for _ in 0..20 {
-            gate.observe(100);
+        let start = Instant::now();
+        // Cross the cooldown repeatedly so every observe that *may* halve
+        // does, and the ceiling still cannot go below one.
+        for step in 0..20 {
+            gate.observe_at(100, start + SHRINK_COOLDOWN * step);
         }
-        assert_eq!(gate.capacity(), 1);
+        assert_eq!(gate.capacity(), 1, "the floor is one, however deep the queue");
+    }
+
+    /// The point of the change: a queue that simply *stays* deep is not
+    /// evidence to halve again, because that queue is engine-wide and repeats
+    /// on every scrape. Many observes inside one episode must produce one cut.
+    #[test]
+    fn one_episode_halves_only_once_however_many_observes() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+
+        // The crossing halves at once...
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4, "the episode opens with a halving");
+
+        // ...and stays halved for the whole episode, even one scrape short of
+        // the cooldown, however many samples arrive.
+        for step in 1..5 {
+            gate.observe_at(9, start + Duration::from_secs(step));
+        }
+        assert_eq!(
+            gate.capacity(),
+            4,
+            "still-deep scrapes inside the cooldown must not halve again"
+        );
+    }
+
+    /// A queue that is *still* deep after the cooldown has had time to answer
+    /// the first cut gets one more halving -- and only one.
+    #[test]
+    fn a_still_deep_queue_halves_again_after_the_cooldown() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4);
+
+        // Just before the cooldown: nothing.
+        gate.observe_at(9, start + SHRINK_COOLDOWN - Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 4, "cooldown not yet elapsed");
+
+        // At the cooldown: one further halving, and the cooldown restarts.
+        gate.observe_at(9, start + SHRINK_COOLDOWN);
+        assert_eq!(gate.capacity(), 2, "a worsening engine still backs off");
+
+        // The restarted cooldown holds until it too elapses.
+        gate.observe_at(9, start + SHRINK_COOLDOWN + Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 2, "the restarted cooldown applies");
+        gate.observe_at(9, start + SHRINK_COOLDOWN * 2);
+        assert_eq!(gate.capacity(), 1, "then one more, down to the floor");
+    }
+
+    /// The episode ends when the queue drains below high water, so a *new*
+    /// episode halves again at once even though the cooldown from the old one
+    /// has not passed.
+    #[test]
+    fn a_new_episode_after_the_queue_drains_halves_again() {
+        let gate = Admission::new(settings());
+        let start = Instant::now();
+        gate.observe_at(9, start);
+        assert_eq!(gate.capacity(), 4);
+
+        // Queue back under high water: episode over, one slot recovered.
+        gate.observe_at(0, start + Duration::from_secs(1));
+        assert_eq!(gate.capacity(), 5, "the episode ended and recovery began");
+
+        // A fresh crossing well inside the old cooldown halves at once.
+        gate.observe_at(9, start + Duration::from_secs(2));
+        assert_eq!(
+            gate.capacity(),
+            2,
+            "a new episode is not held back by the previous cooldown"
+        );
     }
 
     /// The live swap from "no gate" to "auto gate": in-flight requests must

@@ -685,13 +685,16 @@ async fn a_detected_engine_is_gated_by_default() {
     // the `vllm:` families and installing the gate. Deleting a run through the
     // admin API cannot reproduce this, which is the point.
     //
-    // The engine reports 50 waiting on every scrape, and a queue past high
-    // water halves the ceiling on each sample, so the automatic ceiling keeps
-    // halving from its default of 8 until it pins at the floor of 1. Wait for
-    // that settled value rather than sampling an intermediate one: how many
-    // halvings have happened by the time the gate first appears is a race
-    // against the scraper's interval, not something this test can fix.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // The engine reports 50 waiting on every scrape. The gate halves once when
+    // the queue first crosses high water -- 8 -> 4 -- and then holds, because
+    // the queue merely *staying* deep is not evidence to halve again until the
+    // cooldown has passed. Detection latency is unbounded here, so the clock
+    // for "inside the cooldown" starts when the gate is *first seen*: from
+    // there it must settle at 4 and never reach 2, and it must do so well
+    // inside the 10s cooldown or the second halving would legitimately happen
+    // and the assertion would race it.
+    let detection_deadline = Instant::now() + Duration::from_secs(20);
+    let mut gate_seen_at: Option<Instant> = None;
     loop {
         let text = fx.metrics(port);
         let series: Vec<&str> = text
@@ -701,9 +704,9 @@ async fn a_detected_engine_is_gated_by_default() {
         let saw_gate = series
             .iter()
             .any(|l| l.starts_with("fastllm_admission_max_concurrent{"));
-        let pinned = series
-            .iter()
-            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 1"));
+        if saw_gate && gate_seen_at.is_none() {
+            gate_seen_at = Some(Instant::now());
+        }
         if saw_gate {
             assert!(
                 series.iter().any(
@@ -713,12 +716,32 @@ async fn a_detected_engine_is_gated_by_default() {
                 series.join("\n")
             );
         }
-        if saw_gate && pinned {
+        // The gate has done its one halving for this episode.
+        let settled_at_four = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 4"));
+        if saw_gate && settled_at_four {
             break;
         }
+        // And it has not halved a second time: the cooldown is longer than
+        // this window, so a two here means the hostile repeated halving is
+        // back. Checked before the break so a 2 fails loudly.
+        let halved_twice = series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 2"));
+        assert!(
+            !halved_twice,
+            "the ceiling halved twice in one episode; the cooldown is not holding:\n{}",
+            series.join("\n")
+        );
+        // Detection itself gets a generous window; the settle assertion only
+        // has to beat the cooldown once the gate is there.
+        let deadline = gate_seen_at
+            .map(|at| at + Duration::from_secs(8))
+            .unwrap_or(detection_deadline);
         assert!(
             Instant::now() < deadline,
-            "a detected engine was never gated down to the floor; /metrics:\n{}",
+            "a detected engine's ceiling never settled at 4; /metrics:\n{}",
             text.lines()
                 .filter(|l| l.contains("admission"))
                 .collect::<Vec<_>>()
@@ -727,18 +750,18 @@ async fn a_detected_engine_is_gated_by_default() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // And it actually holds the engine back: the automatic ceiling has pinned
-    // at the floor, so the engine sees far fewer concurrent requests than the
-    // burst sent. A one-request allowance keeps this off the exact figure the
-    // gate is only converging on, the same slack the sibling test leaves.
+    // The window closed with the gate still at 4, and it actually holds the
+    // engine back: four slots for a six-request burst, the surplus refused.
+    // The assertion is <= 4, not == 4, the same slack the sibling tests leave
+    // for the gate converging.
     engine.peak.store(0, Ordering::SeqCst);
     let (key, model) = (fx.key.clone(), fx.model.clone());
     let results = tokio::task::spawn_blocking(move || burst(port, &key, &model, 6))
         .await
         .unwrap();
     assert!(
-        engine.peak.load(Ordering::SeqCst) <= 2,
-        "the automatic gate should hold a drowning engine to its pinned ceiling"
+        engine.peak.load(Ordering::SeqCst) <= 4,
+        "the automatic gate should hold a drowning engine to its ceiling of 4"
     );
     assert!(
         results.iter().any(|(s, ..)| *s == 503),

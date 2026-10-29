@@ -291,8 +291,15 @@ split exists to prevent.
   detects a self-hosted vLLM/SGLang engine from `/metrics`. A hosted provider
   never answers with those metric families, so `auto` never gates one; a
   not-yet-detected backend simply has no gate yet. The gate halves its ceiling
-  while the engine's `num_requests_waiting` sits at or above its high-water
-  mark, and grows it by one per scrape once the queue drains. Requests past the
+  **once per overload episode**: the crossing of the engine's
+  `num_requests_waiting` high-water mark opens an episode with one halving, and
+  further deep scrapes do nothing until a cooldown (10s, several scrape
+  intervals) has passed -- the queue depth is engine-wide, so a queue that only
+  *stays* deep is not evidence to keep halving, and halving on each 2s scrape
+  drove every replica to one slot in seconds. After the cooldown a still-deep
+  queue earns one more halving; the episode ends when the queue falls back
+  below high water, and it then grows by one per scrape once drained. Requests
+  past the
   ceiling wait in the proxy, bounded, and are refused with 503 and
   `Retry-After` beyond that. The request path only awaits a semaphore, so it
   still performs no I/O. Each replica holds its own ceiling -- sharing it would

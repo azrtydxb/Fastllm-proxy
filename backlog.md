@@ -776,6 +776,27 @@ granted the fallback does not reach it, so it cannot widen anyone's access.
 Enforced by a partial unique index rather than convention, so "at most one
 model is the fallback" cannot drift into two.
 
+## Flow control halves once per overload episode — done (2026-10-29)
+
+The gate used to halve its ceiling on *every* engine scrape while
+`num_requests_waiting >= high_water` (default scrape 2s). The queue is
+engine-wide -- both proxy replicas count against the same number -- so a queue
+that merely stayed deep (cold prefix cache, a neighbour on the GPU) read as
+overload on every scrape and collapsed the ceiling 8 → 4 → 2 → 1 in about six
+seconds, pinning each replica at one slot while recovery crawled back
+additively. The two DGX Sparks sat underused as a result.
+
+Now the crossing of `high_water` opens an *episode*: one halving, then nothing
+more until a 10-second cooldown (`SHRINK_COOLDOWN`, several scrape intervals)
+has elapsed. A queue still deep after the cooldown earns exactly one further
+halving and the cooldown restarts, so a genuinely worsening engine is still
+backed off -- just at a deliberate pace rather than the scrape rate. The
+episode ends when the queue drops below `high_water`, and a drained queue then
+grows one slot per scrape as before. The floor is unchanged
+(`MIN_CONCURRENT = 1`), and it applies to `auto` and `explicit` gates alike.
+`observe` now takes an injectable clock (`observe_at`) so the unit tests step
+across the cooldown deterministically, with no sleeps.
+
 ## Flow control ON by default for local engines — done (2026-10-29)
 
 The gate is no longer opt-in. A backend's `admission_mode` (migration 0059)
@@ -806,8 +827,10 @@ withdrew it. The health probe answered in 1.7ms throughout and never saw any of
 it.
 
 A gated backend gets a semaphore whose ceiling the existing engine scraper
-halves while `num_requests_waiting >= high_water` and grows by one when the
-queue drains. Surplus waits in the proxy, bounded, and is refused with 503 and
+halves once when `num_requests_waiting` crosses `high_water` (and again only
+after a cooldown while the queue stays deep; see the episode entry above) and
+grows by one when the queue drains. Surplus waits in the proxy, bounded, and is
+refused with 503 and
 `Retry-After`. A saturated engine hands off to an untried sibling without
 waiting; peer forwarding is skipped for it, since the peer would dispatch to the
 same engine. The gate's state and the engine's own running/waiting counts go to
