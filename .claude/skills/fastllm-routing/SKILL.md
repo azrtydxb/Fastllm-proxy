@@ -27,10 +27,11 @@ curl -sk -b /tmp/ck https://192.168.10.129:4001/admin/frontend-models
 which rule decided" without changing anything. Use it before and after any
 change here — it is how you check a rule does what you meant.
 
-**It cannot evaluate `max_inflight_per_backend`.** The dry-run runs on the
-control plane, whose registry has no in-flight counters and no engine scrape,
-so every backend looks idle and a spill rule always reports as still matching.
-Only real traffic exercises that condition.
+**It cannot evaluate `max_inflight_per_backend` or
+`max_ttft_ms_per_backend`.** The dry-run runs on the control plane, whose
+fresh registry has no live counters or TTFT samples.
+Unknown readings count as eligible, so only real traffic exercises either
+condition.
 
 <!-- BEGIN GENERATED: endpoints -->
 
@@ -91,6 +92,10 @@ targets unpriced means no cost, and the rule declines.
 **A rule's targets are an ordered failover chain.** No policy, no weighted
 split — tried in the order written. `POST /admin/rules/{id}/targets` takes
 either `provider_model_id` **or** `model_pool_id`, never both.
+In Admin Routing, both the new-rule `FIRST TARGET` field and the rule/Defaults
+`+ target` pickers show pools in a separate labelled group and send
+`model_pool_id` when one is selected. This lets a rule start with a local pool
+and continue to a cloud model as its next target.
 
 **A pool** (`/admin/model-pools`) is a named group of provider models with one
 policy: `cache-affinity`, `least-loaded`, `lowest-latency`, `round-robin`, or unset
@@ -134,10 +139,15 @@ depends on backend health the rule author cannot see.
 prefix the backend router hashes, so a multi-turn conversation stays on one side
 of a canary instead of flipping per request.
 
-**`max_inflight_per_backend` is the only condition that is not a pure function
-of the request.** It reads live in-flight counters, so two identical requests a
-second apart can route differently. That is the price of local/cloud spillover;
-the field is named for the mechanism rather than the intent for that reason.
+**Load and latency conditions are not pure functions of the request.**
+`max_inflight_per_backend` reads live in-flight counters and
+`max_ttft_ms_per_backend` reads mean TTFT from engine histogram scrape deltas,
+falling back to streaming proxy TTFT when no fresh engine reading exists. It
+does not use whole-request duration, so long generations with prompt first
+tokens do not trigger spill. A missing or older-than-ten-second reading counts
+as eligible, allowing a backend without traffic to recover. Non-streaming proxy
+responses do not create fallback TTFT samples. The `lowest-latency` pool policy
+continues using its separate whole-request EWMA.
 
 **It counts the engine's requests, not this proxy's.** Each proxy scrapes every
 backend's Prometheus `/metrics` every two seconds

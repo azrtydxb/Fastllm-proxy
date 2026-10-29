@@ -1,11 +1,11 @@
-//! Per-proxy scraping of engine load, for `max_inflight_per_backend`.
+//! Per-proxy scraping of engine load and TTFT for routing conditions.
 //!
 //! The control plane already reads `/metrics` during its provider sweep, but
 //! that runs once a minute and lands in Postgres — fine for the providers page,
 //! useless for a routing decision. So each proxy reads its own backends here,
 //! every couple of seconds, into the same `Backend` the router already holds.
 //! The request path still touches nothing but an atomic; see
-//! `Backend::inflight_for_limit`.
+//! `Backend::inflight_for_limit` and `Backend::ttft_for_limit`.
 //!
 //! Only self-hosted engines have this to offer, and which ones those are is
 //! detected rather than configured. Every backend is asked; one that does not
@@ -149,6 +149,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>)
                     state.unhealthy_after.max(5),
                 );
                 backend.record_engine_inflight(&load, now_ms);
+                backend.record_engine_ttft(&load, now_ms);
                 // The gate reacts to the engine's own queue, and this is where
                 // that number arrives. Fed after recording so the gate and the
                 // counters describe the same sample.

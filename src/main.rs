@@ -85,8 +85,8 @@ struct Cli {
     #[arg(long, default_value_t = 3)]
     health_timeout: u64,
 
-    /// Seconds between reads of each backend's `/metrics`, which is what
-    /// `max_inflight_per_backend` counts against when a backend publishes it.
+    /// Seconds between reads of each backend's `/metrics`, used for engine
+    /// inflight and TTFT histogram deltas in routing rules.
     /// `0` turns the scrape off and leaves that ceiling on this replica's own
     /// count, which under-counts whenever more than one proxy is running.
     #[arg(long, default_value_t = 2)]

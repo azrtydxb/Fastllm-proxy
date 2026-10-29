@@ -223,13 +223,13 @@ impl BudgetMatch {
 
 /// How busy this rule's own targets are.
 ///
-/// The one condition here that is **not** a pure function of the request: it
-/// reads live in-flight counters, so two identical requests a second apart can
+/// These conditions are **not** pure functions of the request: they read live
+/// in-flight counters and per-backend latency, so two identical requests a second apart can
 /// legitimately route differently and prefix affinity stops meaning anything
 /// for the traffic it diverts. That is the price of burst-to-cloud, and it is
 /// worth paying knowingly rather than by accident — which is why the field is
-/// named for the mechanism (`max_inflight_per_backend`) rather than for the
-/// intent ("spill").
+/// named for their mechanisms (`max_inflight_per_backend` and
+/// `max_ttft_ms_per_backend`) rather than for the intent ("spill").
 ///
 /// Expressed as a ceiling on the rule's *own* targets so that spilling is
 /// written as ordinary first-match-wins ordering:
@@ -245,6 +245,11 @@ impl BudgetMatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadMatch {
     pub max_inflight_per_backend: Option<u32>,
+    /// Time-to-first-token ceiling in milliseconds, per healthy backend.
+    /// TTFT reflects queueing and prefill; generation duration after the first
+    /// token must not make a backend look overloaded. Unknown or stale samples
+    /// count as eligible so a backend can recover after spill traffic stops.
+    pub max_ttft_ms_per_backend: Option<u64>,
 }
 
 impl LoadMatch {
@@ -253,9 +258,13 @@ impl LoadMatch {
     /// and one busy node still has room, and requiring every node to be under
     /// the limit would spill while capacity sat unused.
     fn matches(&self, targets: &[WeightedTarget], registry: &Registry) -> bool {
-        let Some(ceiling) = self.max_inflight_per_backend else {
+        let inflight_ceiling = self.max_inflight_per_backend;
+        let ttft_ceiling_us = self
+            .max_ttft_ms_per_backend
+            .map(|ms| ms.saturating_mul(1000));
+        if inflight_ceiling.is_none() && ttft_ceiling_us.is_none() {
             return true;
-        };
+        }
         // The engine's own count where it is fresh, this replica's otherwise —
         // see `Backend::inflight_for_limit`. Read once here rather than per
         // backend, so every candidate in one decision is judged against the
@@ -264,7 +273,13 @@ impl LoadMatch {
         targets.iter().any(|t| {
             registry.pool(&t.model).is_some_and(|pool| {
                 pool.iter().any(|b| {
-                    b.is_healthy() && (b.inflight_for_limit(now_ms) as u64) < u64::from(ceiling)
+                    b.is_healthy()
+                        && inflight_ceiling.is_none_or(|ceiling| {
+                            (b.inflight_for_limit(now_ms) as u64) < u64::from(ceiling)
+                        })
+                        && ttft_ceiling_us.is_none_or(|ceiling| {
+                            b.ttft_for_limit(now_ms).is_none_or(|us| us < ceiling)
+                        })
                 })
             })
         })
@@ -450,6 +465,8 @@ pub struct MatchConditionJson {
     pub max_budget_used_percent: Option<u8>,
     #[serde(default)]
     pub max_inflight_per_backend: Option<u32>,
+    #[serde(default)]
+    pub max_ttft_ms_per_backend: Option<u64>,
     /// `"HH:MM"`, in the timezone `utc_offset_minutes` describes.
     #[serde(default)]
     pub after: Option<String>,
@@ -565,6 +582,7 @@ impl MatchConditionJson {
             },
             load: LoadMatch {
                 max_inflight_per_backend: self.max_inflight_per_backend,
+                max_ttft_ms_per_backend: self.max_ttft_ms_per_backend,
             },
             time: TimeMatch {
                 after_minute: self.after.as_deref().and_then(parse_hhmm),
@@ -631,8 +649,8 @@ impl CostMatch {
         let Some(cost) = estimated else {
             return false;
         };
-        !self.min_micros.is_some_and(|min| cost < min)
-            && !self.max_micros.is_some_and(|max| cost > max)
+        self.min_micros.is_none_or(|min| cost >= min)
+            && self.max_micros.is_none_or(|max| cost <= max)
     }
 }
 
@@ -2227,6 +2245,7 @@ mod tests {
             RuleConditions {
                 load: LoadMatch {
                     max_inflight_per_backend: Some(2),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2252,6 +2271,76 @@ mod tests {
         );
     }
 
+    /// Spill removes the backend's traffic, so its TTFT sample eventually
+    /// becomes unknown again; otherwise the rule could never recover.
+    #[test]
+    fn a_slow_backend_recovers_when_its_latency_sample_ages_out() {
+        let reg = registry_with(&["local"]);
+        let rule = rule_with(
+            RuleConditions {
+                load: LoadMatch {
+                    max_ttft_ms_per_backend: Some(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "local",
+        );
+        let headers = HeaderMap::new();
+        let backend = &reg.pool("local").unwrap()[0];
+        assert!(
+            rule.matches(&facts_with(None, 0, None, &headers), &reg),
+            "a backend without a TTFT sample is eligible"
+        );
+        let now = crate::registry::now_ms();
+        backend.note_proxy_ttft_us(150_000, now);
+        assert!(!rule.matches(&facts_with(None, 0, None, &headers), &reg));
+
+        backend.proxy_ttft_at_ms.store(
+            now.saturating_sub(10_001),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert!(rule.matches(&facts_with(None, 0, None, &headers), &reg));
+    }
+
+    #[test]
+    fn long_generation_with_low_ttft_does_not_spill() {
+        let reg = registry_with(&["local"]);
+        let rule = rule_with(
+            RuleConditions {
+                load: LoadMatch {
+                    max_ttft_ms_per_backend: Some(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "local",
+        );
+        let backend = &reg.pool("local").unwrap()[0];
+        let now = crate::registry::now_ms();
+        // A long request-duration EWMA used to incorrectly eject this node;
+        // its 40 ms TTFT shows the engine is accepting work promptly.
+        backend.note_latency_us_at(300_000_000, now);
+        backend.note_proxy_ttft_us(40_000, now);
+        assert!(rule.matches(&facts_with(None, 0, None, &HeaderMap::new()), &reg));
+    }
+
+    #[test]
+    fn non_streaming_response_does_not_record_proxy_ttft_on_backend() {
+        let reg = registry_with(&["local"]);
+        let backend = Arc::clone(&reg.pool("local").unwrap()[0]);
+        let telemetry = Arc::new(crate::telemetry::Telemetry::new());
+        let mut timing = crate::telemetry::RequestTiming::new(
+            &telemetry,
+            "local",
+            false,
+            std::time::Instant::now(),
+        )
+        .on_backend(backend.clone());
+        timing.first_byte();
+        assert_eq!(backend.ttft_for_limit(crate::registry::now_ms()), None);
+    }
+
     /// The whole point of scraping the engine: the ceiling counts everything
     /// reaching the backend, not just what this replica sent. Here the replica
     /// has sent nothing and the rule still declines, because the engine says
@@ -2264,6 +2353,7 @@ mod tests {
             RuleConditions {
                 load: LoadMatch {
                     max_inflight_per_backend: Some(2),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2315,6 +2405,7 @@ mod tests {
                     RuleConditions {
                         load: LoadMatch {
                             max_inflight_per_backend: Some(1),
+                            ..Default::default()
                         },
                         ..Default::default()
                     },

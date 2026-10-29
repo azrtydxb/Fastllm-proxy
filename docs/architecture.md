@@ -273,13 +273,16 @@ split exists to prevent.
   answer with one rule name rather than a trace. Modifiers (a usage `tag`, a
   target-selection `policy`) are fields on a routing rule, never separate
   passes.
-- **Two routing conditions are deliberately non-deterministic.**
+- **Load and time-dependent routing conditions are deliberately
+  non-deterministic.**
   `max_inflight_per_backend` reads live in-flight counters — the engine's own,
   scraped from its Prometheus `/metrics` by each proxy in the background, so
   the ceiling means the same thing however many proxies are running, falling
   back to this replica's count for a backend that publishes none (which is
-  detected by asking, not configured) — and the
-  time-window conditions read the clock, so identical requests can route
+  detected by asking, not configured) — `max_ttft_ms_per_backend` reads
+  each healthy backend's engine histogram delta, falling back to streaming
+  proxy observations; an absent or older-than-ten-second sample is unknown.
+  The time-window conditions read the clock, so identical requests can route
   differently and prefix affinity stops applying to the traffic they divert. Every other
   condition is a pure function of the request. This is the same
   opt-in-visibly line the passthrough/translate split draws.

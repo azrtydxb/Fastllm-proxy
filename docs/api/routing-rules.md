@@ -17,6 +17,7 @@ list is a **fallback chain**, not just a split.
 | `headers`                                       | exact header values, all must match                                                   | request                |
 | `min/max_budget_used_percent`                   | how much of the caller's budget is spent                                              | snapshot               |
 | `max_inflight_per_backend`                      | how busy this rule's own targets are                                                  | **live cluster state** |
+| `max_ttft_ms_per_backend`                    | TTFT for healthy targets; unknown or >10s old is eligible | **live backend state** |
 | `class`                                         | which prompt class the classifier assigned — see [semantic routing](../classifier.md) |
 | `min/max_request_cost_micros`                   | what this request would cost, at the cheapest model this frontend model can reach     | **prices**             |
 | `after`, `before`, `days`, `utc_offset_minutes` | wall-clock window                                                                     | **clock**              |
@@ -70,6 +71,21 @@ backend gets exactly one more question if it later passes a health probe.
 Anything not detected as an engine falls back to this replica's own count, and
 so does a backend whose last reading has gone stale, so the condition degrades
 to its old behaviour rather than to "idle".
+
+**What `max_ttft_ms_per_backend` measures.** It uses the mean of newly
+completed requests from the engine's TTFT histogram, computed from consecutive
+`/metrics` scrape deltas. vLLM reports
+`vllm:time_to_first_token_seconds_sum` and `_count`; SGLang reports the
+corresponding `sglang:time_to_first_token_seconds_sum` and `_count`. This
+engine-wide reading includes traffic from every proxy and non-streaming calls.
+When that reading is unavailable, the proxy uses its own streaming-only time
+from dispatch to the first response body chunk; buffered non-streaming
+responses never create fallback samples. At least one healthy target must
+have a fresh reading strictly below the millisecond ceiling. No reading,
+including one older than ten seconds, counts as eligible. A zero-request scrape
+or counter reset supplies no engine sample, and expiry lets a spilled backend
+re-enter the rule. The `lowest-latency` pool policy continues using its separate
+whole-request EWMA, so long generations do not affect this spill condition.
 
 ## What a rule does when it matches
 
@@ -138,6 +154,11 @@ at it as a single target:
 // Any number of rules can then point at it.
 {"position": 0, "class": "code", "targets": ["leastloaded-gemma", "gpt-5"]}
 ```
+
+In the Admin Routing screen, both a rule's `+ target` picker and the Defaults
+`+ target` picker offer pools alongside provider models. Pools appear in their
+own labelled group; choosing one sends `model_pool_id`, while choosing a
+provider model sends `provider_model_id`.
 
 Every policy here reads how busy or how warm a member is _now_. Cost is
 deliberately not among them: a price is fixed, so a pool set to "cheapest"
@@ -231,10 +252,9 @@ lives. The prompt **class is supplied, not computed**, so this tells you what a
 `coding` prompt would do, not whether some particular prompt is coding —
 `POST /admin/prompt-classes/evaluate` answers that one.
 
-And **`max_inflight_per_backend` cannot be evaluated here at all.** The dry-run
-runs on the control plane, whose registry has no in-flight counters and no
-engine scrape, so every backend looks idle and a spill rule always reports as
-still matching. A local-then-spill chain will therefore dry-run as "rule 0,
-local" no matter how loaded the hardware is, while real traffic spills
-correctly. Only real traffic exercises that condition; `GET /admin/fleet` and
-the providers page show the live load the proxies are actually reading.
+Neither **`max_inflight_per_backend` nor `max_ttft_ms_per_backend` can be
+evaluated here.** The dry-run runs on the control plane, whose registry has no
+live in-flight counters or TTFT samples. Unknown readings
+count as eligible, so a spill rule can report as matching even when real
+traffic spills. Only real traffic exercises these conditions; `GET
+/admin/fleet` and the providers page show the live backend state.

@@ -10429,6 +10429,7 @@ mod tests {
                 tag: None,
                 match_condition: MatchConditionJson {
                     roles: vec!["canary".into()],
+                    max_ttft_ms_per_backend: Some(250),
                     ..Default::default()
                 },
             }),
@@ -10475,6 +10476,10 @@ mod tests {
             published.rules[0].conditions.caller.roles,
             ["canary".to_string()].into_iter().collect()
         );
+        assert_eq!(
+            published.rules[0].conditions.load.max_ttft_ms_per_backend,
+            Some(250)
+        );
         assert_eq!(published.rules[0].targets[0].model, primary_name);
         assert_eq!(published.default_targets[0].model, secondary_name);
 
@@ -10485,6 +10490,10 @@ mod tests {
         let listed_vm = listed.0.iter().find(|v| v.name == vm_name).unwrap();
         assert_eq!(listed_vm.rules.len(), 1);
         assert_eq!(listed_vm.rules[0].targets[0].model, primary_name);
+        assert_eq!(
+            listed_vm.rules[0].match_condition.max_ttft_ms_per_backend,
+            Some(250)
+        );
         assert_eq!(listed_vm.default_targets[0].model, secondary_name);
 
         // Deleting the frontend model cascades its rules and targets, and the

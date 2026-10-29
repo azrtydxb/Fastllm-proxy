@@ -398,10 +398,11 @@ returning a real 413 to a real client, a `jump` whose tag reached
 `usage_events`, and a local-then-spill chain that spilled to the cloud when
 both Sparks reported their engines at the ceiling.
 
-**One limit worth knowing.** A dry-run cannot evaluate
-`max_inflight_per_backend`: it runs on the control plane, whose registry has no
-in-flight counters and no engine scrape, so every backend looks idle and a
-spill rule always reports as still matching. Only real traffic exercises it.
+**One limit worth knowing.** A dry-run cannot evaluate the live readings for
+`max_inflight_per_backend` or `max_ttft_ms_per_backend`: it runs on the
+control plane, whose fresh registry has neither in-flight counters nor live
+TTFT samples. Unknown readings count as eligible, so only
+real traffic exercises either spill condition.
 
 ## Multi-provider support
 
@@ -677,6 +678,9 @@ Done:
 - **Capacity spill** (`max_inflight_per_backend`), expressed as a ceiling on a
   rule's own targets so spilling is ordinary first-match-wins ordering rather
   than a second mechanism.
+- **TTFT spill** (`max_ttft_ms_per_backend`), using per-engine histogram
+  deltas (streaming proxy observations as fallback) and forgetting samples
+  older than ten seconds so a spilled backend can recover without new traffic.
 - **Time windows** (`after`/`before`/`days`/`utc_offset_minutes`), with
   midnight wrap-around.
 - Write-time validation, so a malformed condition is a 400 rather than a rule

@@ -439,6 +439,7 @@ impl Telemetry {
 /// one predictable branch per frame until the first byte is out.
 pub struct RequestTiming {
     start: std::time::Instant,
+    dispatch_start: std::time::Instant,
     telemetry: Arc<Telemetry>,
     model: Option<Arc<ModelMetrics>>,
     awaiting_first_byte: bool,
@@ -461,6 +462,7 @@ impl RequestTiming {
     ) -> Self {
         Self {
             start,
+            dispatch_start: start,
             model: telemetry.model(model),
             telemetry: Arc::clone(telemetry),
             awaiting_first_byte: true,
@@ -472,6 +474,11 @@ impl RequestTiming {
 
     pub fn on_backend(mut self, backend: Arc<crate::registry::Backend>) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    pub fn after_dispatch(mut self, dispatch_start: std::time::Instant) -> Self {
+        self.dispatch_start = dispatch_start;
         self
     }
 
@@ -502,6 +509,12 @@ impl RequestTiming {
         self.telemetry.ttft.record_us(us);
         if let Some(m) = &self.model {
             m.ttft.record_us(us);
+        }
+        if let Some(b) = &self.backend {
+            b.note_proxy_ttft_us(
+                self.dispatch_start.elapsed().as_micros() as u64,
+                crate::registry::now_ms(),
+            );
         }
     }
 
@@ -535,6 +548,14 @@ impl RequestTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_streaming_response_never_records_proxy_ttft() {
+        let telemetry = Arc::new(Telemetry::new());
+        let mut timing = RequestTiming::new(&telemetry, "model", false, std::time::Instant::now());
+        timing.first_byte();
+        assert_eq!(timing.ttft_ms(), None);
+    }
 
     #[test]
     fn a_rejection_counts_as_both_its_reason_and_an_outcome() {

@@ -33,6 +33,10 @@ pub struct EngineLoad {
     /// Cumulative generation tokens processed. Increments one per token
     /// decoded.
     pub generation_tokens_total: u64,
+    /// Cumulative TTFT histogram sum (seconds), when the engine reports it.
+    pub ttft_sum_seconds: Option<f64>,
+    /// Cumulative TTFT histogram count, when the engine reports it.
+    pub ttft_count: Option<u64>,
     /// Cumulative scheduler iterations (`iteration_tokens_total_count` in
     /// vLLM). Unlike request token totals, this advances on engine steps
     /// during chunked prefill and speculative decoding.
@@ -76,6 +80,14 @@ impl EngineLoad {
 /// freshness before believing any of this.
 const RUNNING: &[&str] = &["vllm:num_requests_running", "sglang:num_running_reqs"];
 const WAITING: &[&str] = &["vllm:num_requests_waiting", "sglang:num_queue_reqs"];
+const TTFT_SUM: &[&str] = &[
+    "vllm:time_to_first_token_seconds_sum",
+    "sglang:time_to_first_token_seconds_sum",
+];
+const TTFT_COUNT: &[&str] = &[
+    "vllm:time_to_first_token_seconds_count",
+    "sglang:time_to_first_token_seconds_count",
+];
 const KV_CACHE: &[&str] = &[
     "vllm:kv_cache_usage_perc",
     "vllm:gpu_cache_usage_perc",
@@ -242,8 +254,31 @@ pub async fn engine_load(client: &Upstream, api_base: &str) -> Result<EngineLoad
         generation_tokens_total: read_family(body, GENERATION_TOKENS_TOTAL, false)
             .unwrap_or(0.0)
             .max(0.0) as u64,
+        ttft_sum_seconds: read_family(body, TTFT_SUM, false),
+        ttft_count: read_family(body, TTFT_COUNT, false).map(|v| v.max(0.0) as u64),
         engine_steps_total: read_family(body, ENGINE_STEPS_TOTAL, false).map(|v| v.max(0.0) as u64),
     })
+}
+
+/// Mean TTFT for requests completed since the previous scrape. A reset means
+/// the engine restarted; it establishes a new baseline but cannot provide a
+/// reading for the interval. An idle interval is unknown, never zero latency.
+pub fn ttft_delta_mean_us(
+    previous: Option<(f64, u64)>,
+    current: Option<(f64, u64)>,
+) -> Option<u64> {
+    let (Some((old_sum, old_count)), Some((sum, count))) = (previous, current) else {
+        return None;
+    };
+    if !old_sum.is_finite() || !sum.is_finite() || sum < old_sum || count < old_count {
+        return None;
+    }
+    let delta_count = count - old_count;
+    let delta_sum = sum - old_sum;
+    if delta_count == 0 || delta_sum < 0.0 {
+        return None;
+    }
+    Some((delta_sum * 1_000_000.0 / delta_count as f64).round() as u64)
 }
 
 /// `http://host:8000/v1` -> `http://host:8000`.
@@ -261,6 +296,22 @@ fn metrics_origin(api_base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{engine_load, ProbeError};
+
+    #[test]
+    fn ttft_scrape_deltas_handle_idle_intervals_and_engine_restarts() {
+        assert_eq!(
+            super::ttft_delta_mean_us(Some((2.0, 4)), Some((3.5, 7))),
+            Some(500_000)
+        );
+        assert_eq!(
+            super::ttft_delta_mean_us(Some((2.0, 4)), Some((2.0, 4))),
+            None
+        );
+        assert_eq!(
+            super::ttft_delta_mean_us(Some((2.0, 4)), Some((0.2, 1))),
+            None
+        );
+    }
 
     /// A tiny server that answers every request with one canned body, so the
     /// classification below is exercised over real HTTP rather than against a

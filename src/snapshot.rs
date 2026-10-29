@@ -631,6 +631,8 @@ pub struct WireRoutingRule {
     #[serde(default)]
     pub max_inflight_per_backend: Option<u32>,
     #[serde(default)]
+    pub max_ttft_ms_per_backend: Option<u64>,
+    #[serde(default)]
     pub after_minute: Option<u16>,
     #[serde(default)]
     pub before_minute: Option<u16>,
@@ -1012,6 +1014,7 @@ impl Snapshot {
                             min_budget_used_percent: r.conditions.budget.min_used_percent,
                             max_budget_used_percent: r.conditions.budget.max_used_percent,
                             max_inflight_per_backend: r.conditions.load.max_inflight_per_backend,
+                            max_ttft_ms_per_backend: r.conditions.load.max_ttft_ms_per_backend,
                             after_minute: r.conditions.time.after_minute,
                             before_minute: r.conditions.time.before_minute,
                             days: r.conditions.time.days.clone(),
@@ -1214,6 +1217,7 @@ impl Snapshot {
                                         },
                                         load: LoadMatch {
                                             max_inflight_per_backend: r.max_inflight_per_backend,
+                                            max_ttft_ms_per_backend: r.max_ttft_ms_per_backend,
                                         },
                                         time: TimeMatch {
                                             after_minute: r.after_minute,
@@ -1571,6 +1575,24 @@ mod tests {
                 ..Default::default()
             }],
         });
+        snap.frontend_models.insert(
+            "latency-route".into(),
+            crate::routing::FrontendModelDef {
+                name: "latency-route".into(),
+                rules: vec![crate::routing::RoutingRule {
+                    conditions: crate::routing::RuleConditions {
+                        load: LoadMatch {
+                            max_ttft_ms_per_backend: Some(250),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    targets: vec![crate::routing::WeightedTarget::model("qwen3", 100)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
 
         let json = serde_json::to_string(&snap.to_wire()).unwrap();
         let wire: WireSnapshot = serde_json::from_str(&json).unwrap();
@@ -1618,6 +1640,13 @@ mod tests {
         assert_eq!(
             model.backends[0].api_key.as_deref(),
             Some("upstream-secret")
+        );
+        assert_eq!(
+            round_tripped.frontend_models["latency-route"].rules[0]
+                .conditions
+                .load
+                .max_ttft_ms_per_backend,
+            Some(250)
         );
     }
 
