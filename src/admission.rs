@@ -176,7 +176,9 @@ pub fn auto_settings(engine_capacity: Option<u32>) -> Settings {
 
 #[cfg(test)]
 mod config_tests {
-    use super::{auto_settings, per_replica_ceiling, Config, Settings, AUTO_FALLBACK, BOX_SESSIONS};
+    use super::{
+        auto_settings, per_replica_ceiling, Config, Settings, AUTO_FALLBACK, BOX_SESSIONS,
+    };
 
     #[test]
     fn automatic_explicit_and_off_states_round_trip_over_snapshot_json() {
@@ -715,8 +717,16 @@ mod tests {
     #[tokio::test]
     async fn an_install_counts_in_flight_work_and_returns_its_slots() {
         let gate = Admission::new_with_in_flight(settings(), 3);
-        assert_eq!(gate.capacity(), 8, "the ceiling is unchanged by the install");
-        assert_eq!(gate.status().in_use, 3, "three pre-gate requests are counted");
+        assert_eq!(
+            gate.capacity(),
+            8,
+            "the ceiling is unchanged by the install"
+        );
+        assert_eq!(
+            gate.status().in_use,
+            3,
+            "three pre-gate requests are counted"
+        );
 
         // Only five slots are free until the pre-gate work finishes.
         let mut fresh = Vec::new();

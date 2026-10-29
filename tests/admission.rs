@@ -691,7 +691,10 @@ async fn a_detected_engine_is_gated_by_default() {
             .lines()
             .filter(|l| l.contains("127.0.0.1:14873/v1") && l.starts_with("fastllm_admission_"))
             .collect();
-        if series.iter().any(|l| l.starts_with("fastllm_admission_max_concurrent{")) {
+        if series
+            .iter()
+            .any(|l| l.starts_with("fastllm_admission_max_concurrent{"))
+        {
             // The engine reports 50 waiting, past high water, so the automatic
             // ceiling has already halved from its default of 8.
             assert!(
@@ -706,7 +709,10 @@ async fn a_detected_engine_is_gated_by_default() {
         assert!(
             Instant::now() < deadline,
             "a detected engine was never automatically gated; /metrics:\n{}",
-            text.lines().filter(|l| l.contains("admission")).collect::<Vec<_>>().join("\n")
+            text.lines()
+                .filter(|l| l.contains("admission"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         std::thread::sleep(Duration::from_millis(200));
     }

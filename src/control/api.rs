@@ -8868,9 +8868,10 @@ mod tests {
     /// `auto` and `off` are complete without one.
     #[test]
     fn backend_patch_parses_each_admission_mode() {
-        let explicit: PatchBackend =
-            serde_json::from_value(serde_json::json!({"admission_mode": "explicit", "admission_max_concurrent": 9}))
-                .unwrap();
+        let explicit: PatchBackend = serde_json::from_value(
+            serde_json::json!({"admission_mode": "explicit", "admission_max_concurrent": 9}),
+        )
+        .unwrap();
         assert_eq!(explicit.admission_mode.as_deref(), Some("explicit"));
         assert_eq!(explicit.admission_max_concurrent.flatten(), Some(9));
 
