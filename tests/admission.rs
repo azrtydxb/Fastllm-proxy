@@ -706,10 +706,9 @@ async fn a_detected_engine_is_gated_by_default() {
             .any(|l| l.starts_with("fastllm_admission_capacity{") && l.ends_with(" 1"));
         if saw_gate {
             assert!(
-                series
-                    .iter()
-                    .any(|l| l.starts_with("fastllm_admission_max_concurrent{")
-                        && l.ends_with(" 8")),
+                series.iter().any(
+                    |l| l.starts_with("fastllm_admission_max_concurrent{") && l.ends_with(" 8")
+                ),
                 "detection should install the default ceiling of 8:\n{}",
                 series.join("\n")
             );
