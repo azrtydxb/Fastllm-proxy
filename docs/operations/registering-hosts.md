@@ -59,14 +59,23 @@ A port probe is what you do on a host with no service registry; a cluster has
 one, and guessing at ports when something can tell you is how an engine on a
 port nobody thought of stays invisible.
 
-**Exposed is the whole criterion**, which is why there is no label to apply and
-no annotation to remember. A NodePort, a LoadBalancer and a hostPort are
-reachable from outside the cluster by definition; a ClusterIP is not, and so is
-never a candidate — not refused, simply not exposed, which is the answer the
-operator already gave by choosing that type. Whether a candidate is a _model_ is
-then settled the same way it is for every other source: by asking it for
-`/v1/models`. A cluster that exposes Postgres and an ingress and no engines
-registers nothing.
+**Pods are found by what they publish; Services are opt-in.** A hostPort or a
+host-network pod is reachable from outside the cluster by definition and needs
+no annotation. A Service is a candidate only if it carries one of:
+
+- `fastllm.io/advertise: <url>` — register exactly that address. This is the
+  way to publish a ClusterIP Service.
+- `fastllm.io/discover: "true"` — derive the address from the Service's
+  LoadBalancer ingress IP (every port) or NodePort, with `--advertise`.
+
+An unannotated Service is skipped without any probe. This is a change from
+earlier releases, which probed every LoadBalancer: on a cluster that exposes
+databases and TLS-only agents that sent plain-HTTP `GET /models` to each of
+them every cycle and filled their logs with handshake errors. **A LoadBalancer
+engine that used to be found automatically must now be annotated
+`fastllm.io/discover: "true"`**, or it stops registering. Whether a candidate
+is a _model_ is then settled the same way it is for every other source: by
+asking it for `/v1/models`.
 
 Under `--kubernetes`, `--scan-ports` defaults to nothing. Pass it explicitly to
 have both.

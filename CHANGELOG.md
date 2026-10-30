@@ -8,6 +8,17 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Changed
+
+- **Behaviour change: Kubernetes Service discovery is opt-in.** The node agent
+  used to turn every LoadBalancer Service into candidates and send each a
+  plain-HTTP `GET /models` every cycle, which filled the logs of unrelated
+  TLS services with handshake errors. A Service is now a candidate only with
+  `fastllm.io/advertise` or `fastllm.io/discover: "true"`. LoadBalancer
+  engines that were auto-discovered must now be annotated
+  `fastllm.io/discover: "true"` or they stop registering. Pod discovery
+  (hostPort, host network) is unchanged.
+
 ### Fixed
 
 - **A rebooted host comes back into its pools.** Discovery drops a host's

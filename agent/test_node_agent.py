@@ -171,6 +171,82 @@ class Discovery(unittest.TestCase):
         self.assertEqual(agent.LABEL_OF[url], "gx10-48f4")
 
 
+class ServiceOptIn(unittest.TestCase):
+    def setUp(self):
+        agent.LABEL_OF.clear()
+        self._kube_get, self._node_addresses = agent.kube_get, agent.node_addresses
+
+    def tearDown(self):
+        agent.kube_get, agent.node_addresses = self._kube_get, self._node_addresses
+
+    def candidates(self, services, pods=(), nodes=None):
+        listing = {
+            "/api/v1/pods": {"items": list(pods)},
+            "/api/v1/services": {"items": services},
+        }
+        agent.kube_get = lambda path, timeout: listing[path]
+        agent.node_addresses = lambda a, t: nodes or {}
+        return agent.kube_candidates(args())
+
+    @staticmethod
+    def lb(name, annotations=None, ports=(7443, 443)):
+        return {
+            "metadata": {
+                "name": name,
+                "namespace": "n",
+                "annotations": annotations or {},
+            },
+            "spec": {"type": "LoadBalancer", "ports": [{"port": p} for p in ports]},
+            "status": {"loadBalancer": {"ingress": [{"ip": "10.0.0.9"}]}},
+        }
+
+    # Breaks if an unannotated LoadBalancer is probed again: that is how
+    # Sera's TLS ports were sent plain HTTP every cycle.
+    def test_unannotated_loadbalancer_is_skipped(self):
+        self.assertEqual(self.candidates([self.lb("sera")]), [])
+
+    # Breaks if the discover annotation stops deriving URLs from the ingress.
+    def test_discover_annotation_derives_loadbalancer_urls(self):
+        svc = self.lb("engine", {"fastllm.io/discover": "true"}, ports=(8000, 8001))
+        self.assertEqual(
+            self.candidates([svc]),
+            ["http://10.0.0.9:8000/v1", "http://10.0.0.9:8001/v1"],
+        )
+        self.assertEqual(agent.LABEL_OF["http://10.0.0.9:8000/v1"], "engine")
+
+    # Breaks if anything other than the exact string "true" opts in.
+    def test_discover_must_be_true(self):
+        svc = self.lb("engine", {"fastllm.io/discover": "false"})
+        self.assertEqual(self.candidates([svc]), [])
+
+    # Breaks if an advertise-annotated ClusterIP Service stops being used.
+    def test_advertise_clusterip_service_is_included(self):
+        url = "http://e.work.svc:8000/v1"
+        svc = {
+            "metadata": {
+                "name": "e",
+                "namespace": "work",
+                "annotations": {"fastllm.io/advertise": url},
+            },
+            "spec": {"type": "ClusterIP", "ports": [{"port": 8000}]},
+        }
+        self.assertEqual(self.candidates([svc]), [url])
+
+    # Breaks if opt-in leaks into pod discovery, which needs no annotation.
+    def test_pod_hostport_discovery_is_unaffected(self):
+        pod = {
+            "metadata": {"name": "p", "namespace": "n"},
+            "spec": {
+                "nodeName": "gx10",
+                "containers": [{"ports": [{"containerPort": 8000, "hostPort": 8000}]}],
+            },
+        }
+        found = self.candidates(
+            [self.lb("sera")], pods=[pod], nodes={"gx10": "10.0.0.5"}
+        )
+        self.assertEqual(found, ["http://10.0.0.5:8000/v1"])
+
+
 class StaleModel(unittest.TestCase):
     # Breaks if a model the engine stopped listing keeps naming its provider.
     def test_an_empty_answer_forgets_the_model(self):

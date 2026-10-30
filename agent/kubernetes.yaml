@@ -6,13 +6,15 @@
 # guessing at ports when something can tell you is how an engine on a port
 # nobody thought of stays invisible.
 #
-# *Exposed* is the whole criterion, which is why there is no label to apply and
-# no annotation to remember. A NodePort, a LoadBalancer and a hostPort are
-# reachable from outside the cluster by definition; a ClusterIP is not, and so
-# is never a candidate. Whether a candidate is a *model* is then settled the
-# same way it is for every other source — by asking it for `/v1/models`. A
-# cluster that exposes Postgres and an ingress and no engines registers
-# nothing.
+# Pods are found by what they publish: a hostPort or a host-network pod is
+# reachable from outside the cluster by definition, so needs no annotation.
+# Services are opt-in. A Service is a candidate only with the annotation
+# `fastllm.io/advertise: <url>` (that address is registered) or
+# `fastllm.io/discover: "true"` (the address is derived from its LoadBalancer
+# ingress or NodePort). An unannotated Service -- a database, a registry, a
+# TLS-only agent -- is skipped without a probe. Whether a candidate is a
+# *model* is then settled the same way it is for every other source: by asking
+# it for `/v1/models`. A cluster with no engines registers nothing.
 #
 # This is deliberately a Deployment and not a DaemonSet. The agent reads the
 # API and registers addresses that are cluster-wide; one copy answers for the

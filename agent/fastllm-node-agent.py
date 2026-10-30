@@ -210,12 +210,18 @@ def kube_candidates(args):
     has one, and it knows exactly which ports are reachable from outside --
     so ask it, and probe only those.
 
-    *Exposed* is the whole criterion, and it is why this needs no label or
-    annotation to opt in. A NodePort, a LoadBalancer and a hostPort are
-    reachable from outside the cluster by definition; a ClusterIP is not. So a
-    ClusterIP-only Service is never a candidate -- not refused, simply not
-    exposed, which is the same answer the operator already gave by choosing
-    that type.
+    Opting in is the whole criterion for a *Service*. A Service is a
+    candidate only if it carries `fastllm.io/advertise` (that URL is used) or
+    `fastllm.io/discover: "true"` (the address is derived from its LoadBalancer
+    ingress or NodePort). Everything else is skipped without a probe. Deriving
+    an address from every LoadBalancer was the earlier rule, and on a cluster
+    that exposes databases, registries and TLS-only agents it sent a plain-HTTP
+    `GET /models` to each of them every cycle -- noise in their logs, and a
+    probe nobody asked for. Exposure says a port is reachable, not that an
+    engine listens on it, so the operator says so.
+
+    Pods are unchanged: a hostPort or host-network pod is still found without
+    an annotation.
 
     That matters because what gets registered is a destination for *someone
     else's* traffic. This agent dials out, but a proxy elsewhere later dials
@@ -247,7 +253,11 @@ def kube_candidates(args):
         meta = svc.get("metadata") or {}
         # An explicit address wins over anything inferred, for the Service
         # whose reachable address this agent would get wrong.
-        override = (meta.get("annotations") or {}).get("fastllm.io/advertise")
+        annotations = meta.get("annotations") or {}
+        override = annotations.get("fastllm.io/advertise")
+        # Opt-in: no annotation, no candidate, and so no probe.
+        if not override and annotations.get("fastllm.io/discover") != "true":
+            continue
         node = service_node(svc, pods)
         for port in spec.get("ports") or []:
             if override:
