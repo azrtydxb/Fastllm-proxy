@@ -316,16 +316,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
 
-      # Every build gets an immutable sha- tag. The moving `main` tag and a
-      # semver tag are only added when the ref actually warrants them, so a
-      # workflow_dispatch on a branch cannot quietly redefine what `:main` is.
+      # Every build gets an immutable sha- tag. The semver tag is added on a
+      # release by `retag-ant`, copied from this image rather than rebuilt.
       - name: Compute tags
         id: meta
         run: |
           {
             echo "tags<<EOF"
             echo "${IMAGE}:sha-${GITHUB_SHA::7}"
-            [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${IMAGE}:${GITHUB_REF_NAME#v}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           # The operator image is tagged from the same commit, so it needs the
@@ -344,27 +342,6 @@ jobs:
       - name: Set up the BuildKit sidecar builder
         id: builder
         uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
-
-      # GHCR as well as the private registry, but only for a tagged release.
-      # Every commit to main pushes to zot because this cluster deploys from
-      # it continuously; publishing every commit publicly would make "latest"
-      # mean "whatever landed most recently", which is the drift that already
-      # cost this project a downgraded control plane.
-
-      - name: Log in to GHCR
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Public tags
-        if: startsWith(github.ref, 'refs/tags/v')
-        id: public
-        run: |
-          v="${GITHUB_REF#refs/tags/}"
-          echo "tags=ghcr.io/${GITHUB_REPOSITORY,,}:${v},ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_OUTPUT"
 
       # build-push-action v7, not v6. v6 treats a cache-from ref that does not
       # exist as fatal — "failed to configure registry cache importer: ...
@@ -386,7 +363,6 @@ jobs:
       # Skip the images that already exist for this commit.
       - name: Already published?
         id: published
-        if: github.ref_type != 'tag'
         env:
           SHORT: ${{ steps.meta.outputs.short }}
           PROXY: ${{ env.IMAGE }}
@@ -451,6 +427,36 @@ jobs:
           tags: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator:${{ steps.meta.outputs.short }}
           cache-from: ${{ steps.ant-cache-2.outputs.cache-from }}
           cache-to: ${{ steps.ant-cache-2.outputs.cache-to }}
+
+  # The release's Ant semver tag (proxy:0.3.6) is the main build's image under
+  # a second name: copy it, do not rebuild. sha- tags are immutable in Ant, so a
+  # rebuild of the tagged commit fails with "immutable content conflicts".
+  retag-ant:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: arc-azrtydxb
+    timeout-minutes: 10
+    steps:
+      - name: Log in to Kuvryn Ant (GitHub OIDC)
+        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        with:
+          docker-login: "true"
+          required: "true"
+          go: "false"
+          cargo: "false"
+          pip: "false"
+      - name: Add the semver tag to the main-built image
+        run: |
+          set -euo pipefail
+          src="${IMAGE}:sha-${GITHUB_SHA::7}"
+          dst="${IMAGE}:${GITHUB_REF_NAME#v}"
+          if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
+            echo "::error::$src does not exist. The main build of this commit must publish it before the tag; re-run the main CI run for ${GITHUB_SHA::7}, then re-run this job."
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$dst" "$src"
+          docker buildx imagetools inspect "$dst"
+        env:
+          IMAGE: ${{ env.IMAGE }}
 
   # ---------------------------------------------------------------- release
   #
