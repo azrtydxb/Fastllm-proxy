@@ -8,6 +8,8 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+## 0.3.6 — 2026-10-30
+
 ### Changed
 
 - **Behaviour change: Kubernetes Service discovery is opt-in.** The node agent
