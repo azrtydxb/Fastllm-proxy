@@ -20,9 +20,28 @@ source for _why_ anything is the way it is; this file is the summary.
   engines that were auto-discovered must now be annotated
   `fastllm.io/discover: "true"` or they stop registering. Pod discovery
   (hostPort, host network) is unchanged.
+- **Behaviour change: the admission gate is on by default.** Every
+  engine-backed backend now gets an auto-tuned gate (migration 0059 adds the
+  auto / explicit / off modes). The gate divides its limit across
+  `--admission-replicas` / `FASTLLM_ADMISSION_REPLICAS` (default 2), so two
+  proxies no longer each admit the full engine capacity. It halves at most
+  once per 10s cooldown, so one burst of errors cannot collapse it to the
+  floor, and it is restored when the engine goes silent or stops being
+  detected. Tuning fields apply only in explicit mode.
+- **Spill on high time-to-first-token.** `max_ttft_ms_per_backend` moves
+  traffic to the next target when the local backend's TTFT is above the
+  limit. It reads TTFT from the engine's histogram and falls back to the
+  proxy's own measurement when the engine exposes none.
 
 ### Fixed
 
+- **The stall detector no longer ejects healthy backends under load.** It
+  now judges liveness from the engine's step counter and the exact KV-cache
+  gauge, which keep moving while a busy engine is still working.
+- **A routing rule's first target can be a model pool.** The FIRST TARGET
+  picker in the console offered only provider models, so a spill rule could
+  not keep the local pool as its first choice without editing it through the
+  API.
 - **A rebooted host comes back into its pools.** Discovery drops a host's
   attachment while the host is down and creates a new one when it returns.
   Before this fix, a pool member that named that attachment was deleted
