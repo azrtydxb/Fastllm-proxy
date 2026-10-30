@@ -34,8 +34,12 @@ jobs:
     timeout-minutes: 120
     # The runner image ships no Rust, so the toolchain comes from a container —
     # same base as the Dockerfile, so CI and the image agree on the compiler.
+    # trixie specifically: the prebuilt onnxruntime that `ort-sys` fetches for the
+    # `--all-features` release-tag build needs glibc >= 2.38 and libstdc++ 14
+    # (`__isoc23_strtol`, `__cxa_call_terminate`); bookworm fails to link it on
+    # aarch64, and that step runs only on tags, so it surfaced as a failed release.
     container:
-      image: rust:1-bookworm
+      image: rust:1-trixie
     env:
       # Kept in the workspace so the cargo config written below lands somewhere
       # predictable and writable. It is no longer cached — dependency sources
