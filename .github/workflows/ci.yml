@@ -433,6 +433,7 @@ jobs:
   # rebuild of the tagged commit fails with "immutable content conflicts".
   retag-ant:
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, ui]
     runs-on: arc-azrtydxb
     timeout-minutes: 10
     steps:
