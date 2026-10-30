@@ -12,12 +12,18 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      integration:
+        description: "Run the service-backed integration tier (Postgres, classifier). Always on when dispatched on main."
+        type: boolean
+        default: false
 
-# A newer push supersedes an older run of the same ref — but only for PRs.
-# On main and tags every commit publishes an image, so those runs finish.
+# A newer push supersedes an older run of the same ref — but only for PRs and
+# manual runs on a feature branch. On main and tags every commit publishes an
+# image, so those runs finish.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main') }}
 
 env:
   # Pushes go to the authoritative Kuvryn Ant (OKE) with a GitHub OIDC docker
@@ -144,7 +150,7 @@ jobs:
         run: cargo test -p fastllm-operator --locked
       # Only the tiers that run database tests wait; a PR never touches Postgres.
       - name: Wait for Postgres
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) || startsWith(github.ref, 'refs/tags/v') }}
         timeout-minutes: 3
         shell: bash
         run: |
@@ -166,7 +172,7 @@ jobs:
       # alongside, `--include-ignored` actually runs them.
       - name: Test (with database)
         # Service-backed (Postgres) integration tier: nightly/manual only, never on PR.
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) }}
         env:
           DATABASE_URL: postgres://fastllm:fastllm@${{ env.PG_HOST }}:5432/fastllm
           # Every process that talks to Postgres takes a whole *pool*, not a
@@ -189,7 +195,7 @@ jobs:
       # waiting. HF_HOME pins the cache somewhere actions/cache can see.
       - name: Cache the classifier model
         # Integration (nightly/manual) and full (release tag) tiers only; never on PR.
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) || startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .hf-cache
@@ -203,7 +209,7 @@ jobs:
       # five-minute test failure that looks like a flake. A warm cache makes
       # this a no-op.
       - name: Fetch the classifier model
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) || startsWith(github.ref, 'refs/tags/v') }}
         env:
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: |
@@ -222,10 +228,10 @@ jobs:
           print(f"classifier model ready at {p}")
           PY
       - name: Clippy (classifier)
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) }}
         run: cargo clippy --all-targets --features "control classifier-tier2" -- -D warnings
       - name: Test (classifier)
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) }}
         env:
           DATABASE_URL: postgres://fastllm:fastllm@${{ env.PG_HOST }}:5432/fastllm
           FASTLLM_DATABASE_MAX_CONNECTIONS: "2"
@@ -234,6 +240,14 @@ jobs:
       # Full tier (v* release tags): the whole feature matrix including the
       # `#[ignore]`d service-backed tests, under coverage instrumentation.
       # The test run is the gate; coverage reporting is best-effort.
+      # Prebuilt binary instead of compiling cargo-llvm-cov from source every
+      # tag. Best-effort as before: without it the suite runs, uncovered.
+      - name: Install cargo-llvm-cov (release tags)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        continue-on-error: true
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-llvm-cov
       - name: Full suite + coverage (release tags)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
@@ -242,7 +256,6 @@ jobs:
           HF_HOME: ${{ github.workspace }}/.hf-cache
         run: |
           rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --locked 2>/dev/null || true
           if command -v cargo-llvm-cov >/dev/null 2>&1; then
             cargo llvm-cov --all-features --locked --lcov --output-path lcov.info -- --include-ignored
           else
@@ -291,8 +304,11 @@ jobs:
         run: npm run build
 
   publish:
-    # Only what lands on main or a tag becomes an image; a PR just gets tested.
-    if: github.event_name != 'pull_request'
+    # Only main becomes a Ant image. A branch dispatch or PR is tested and
+    # nothing more; a tag is published by the release-* jobs, and its sha- tag
+    # already exists from the main build (immutable in Ant, so rebuilding it
+    # fails with "immutable content conflicts" and turned every tag run red).
+    if: github.ref == 'refs/heads/main'
     needs: [test, ui]
     runs-on: arc-azrtydxb
     timeout-minutes: 60
