@@ -245,7 +245,7 @@ jobs:
       - name: Install cargo-llvm-cov (release tags)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         continue-on-error: true
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
         with:
           tool: cargo-llvm-cov
       - name: Full suite + coverage (release tags)
