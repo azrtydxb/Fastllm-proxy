@@ -47,6 +47,8 @@ WORKDIR /src
 # Cross toolchain for $TARGETARCH. When the target is the build machine's own
 # architecture nothing extra is installed and the native gcc links. The rust
 # target and compiler variables land in /xenv.sh, sourced by the build step.
+# pkg-config variables carry the target suffix so that build scripts, which run
+# on the build machine, keep resolving the build machine's own libraries.
 RUN set -eu; \
     case "$TARGETARCH" in \
       amd64) triple=x86_64-unknown-linux-gnu;  gnu=x86-64-linux-gnu;  cross=amd64; multiarch=x86_64-linux-gnu ;; \
@@ -62,8 +64,8 @@ RUN set -eu; \
       apt-get install -y --no-install-recommends "g++-$gnu" "libc6-dev-$cross-cross" "libssl-dev:$cross"; \
       rm -rf /var/lib/apt/lists/*; \
       cc="$gnu-gcc"; cxx="$gnu-g++"; \
-      echo "export PKG_CONFIG_ALLOW_CROSS=1" >> /xenv.sh; \
-      echo "export PKG_CONFIG_PATH=/usr/lib/$multiarch/pkgconfig" >> /xenv.sh; \
+      echo "export PKG_CONFIG_ALLOW_CROSS_$cvar=1" >> /xenv.sh; \
+      echo "export PKG_CONFIG_PATH_$cvar=/usr/lib/$multiarch/pkgconfig" >> /xenv.sh; \
     fi; \
     rustup target add "$triple"; \
     { echo "export RUST_TARGET=$triple"; \
