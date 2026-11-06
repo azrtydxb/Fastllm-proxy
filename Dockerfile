@@ -49,23 +49,27 @@ WORKDIR /src
 # target and compiler variables land in /xenv.sh, sourced by the build step.
 RUN set -eu; \
     case "$TARGETARCH" in \
-      amd64) triple=x86_64-unknown-linux-gnu;  gnu=x86-64-linux-gnu;  cross=amd64 ;; \
-      arm64) triple=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; cross=arm64 ;; \
+      amd64) triple=x86_64-unknown-linux-gnu;  gnu=x86-64-linux-gnu;  cross=amd64; multiarch=x86_64-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; cross=arm64; multiarch=aarch64-linux-gnu ;; \
       *) echo "unsupported TARGETARCH $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     tvar=$(echo "$triple" | tr 'a-z-' 'A-Z_'); cvar=$(echo "$triple" | tr '-' '_'); \
+    : > /xenv.sh; \
     if [ "$TARGETARCH" = "$BUILDARCH" ]; then cc=gcc; cxx=g++; \
     else \
+      dpkg --add-architecture "$cross"; \
       apt-get update; \
-      apt-get install -y --no-install-recommends "g++-$gnu" "libc6-dev-$cross-cross"; \
+      apt-get install -y --no-install-recommends "g++-$gnu" "libc6-dev-$cross-cross" "libssl-dev:$cross"; \
       rm -rf /var/lib/apt/lists/*; \
       cc="$gnu-gcc"; cxx="$gnu-g++"; \
+      echo "export PKG_CONFIG_ALLOW_CROSS=1" >> /xenv.sh; \
+      echo "export PKG_CONFIG_PATH=/usr/lib/$multiarch/pkgconfig" >> /xenv.sh; \
     fi; \
     rustup target add "$triple"; \
     { echo "export RUST_TARGET=$triple"; \
       echo "export CARGO_TARGET_${tvar}_LINKER=$cc"; \
       echo "export CC_$cvar=$cc"; \
-      echo "export CXX_$cvar=$cxx"; } > /xenv.sh
+      echo "export CXX_$cvar=$cxx"; } >> /xenv.sh
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
