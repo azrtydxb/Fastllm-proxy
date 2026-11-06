@@ -455,7 +455,7 @@ jobs:
   #
   # A tag builds both architectures in one job on a GitHub-hosted runner. The
   # arm64 half is cross-compiled by the Dockerfiles, not emulated (the previous
-  # attempt emulated amd64 with QEMU and rustc segfaulted before compiling
+  # attempt emulated amd64 and rustc segfaulted before compiling
   # anything).
 
   release:
