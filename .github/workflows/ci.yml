@@ -75,9 +75,9 @@ jobs:
           POSTGRES_PASSWORD: fastllm
           POSTGRES_DB: fastllm
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - id: ant
-        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action@v1
         with:
           build-cache: "true"
           sccache: "true"
@@ -196,7 +196,7 @@ jobs:
       - name: Cache the classifier model
         # Integration (nightly/manual) and full (release tag) tiers only; never on PR.
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.integration)) || startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@v6
         with:
           path: .hf-cache
           key: hf-potion-code-16m
@@ -245,7 +245,7 @@ jobs:
       - name: Install cargo-llvm-cov (release tags)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         continue-on-error: true
-        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
       - name: Full suite + coverage (release tags)
@@ -264,7 +264,7 @@ jobs:
           fi
       - name: Upload coverage (release tags)
         if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: lcov.info
@@ -273,7 +273,7 @@ jobs:
       # to tell whether it is earning its keep.
       - name: sccache stats
         if: always()
-        uses: azrtydxb/ant-setup-action/cache-stats@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action/cache-stats@v1
 
   # A separate job with its own container, so the Rust job stays Node-free —
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
@@ -284,8 +284,8 @@ jobs:
     container:
       image: node:22-bookworm-slim
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
       # npm resolves through Kuvryn Ant (azrtydxb/ant-setup-action below).
       - name: Install
         working-directory: web
@@ -313,8 +313,8 @@ jobs:
     runs-on: arc-azrtydxb
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
 
       # Every build gets an immutable sha- tag. The semver tag is added on a
       # release by `retag-ant`, copied from this image rather than rebuilt.
@@ -341,7 +341,7 @@ jobs:
       # builder gave.
       - name: Set up the BuildKit sidecar builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
+        uses: azrtydxb/.github/actions/setup-builder@main
 
       # build-push-action v7, not v6. v6 treats a cache-from ref that does not
       # exist as fatal — "failed to configure registry cache importer: ...
@@ -349,7 +349,7 @@ jobs:
       # went away. v7 tolerates it, which is what novamem does against an
       # identically missing cache.
       - name: Log in to Kuvryn Ant (GitHub OIDC)
-        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action@v1
         with:
           docker-login: "true"
           required: "true"
@@ -377,7 +377,7 @@ jobs:
           done
 
       - id: ant-cache-1
-        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action@v1
         with:
           build-cache: "true"
           cache-name: proxy
@@ -389,7 +389,7 @@ jobs:
           pip: "false"
       - name: Build & push (arm64 → Kuvryn Ant)
         if: steps.published.outputs.proxy != 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           builder: ${{ steps.builder.outputs.name }}
           context: .
@@ -402,7 +402,7 @@ jobs:
           cache-to: ${{ steps.ant-cache-1.outputs.cache-to }}
 
       - id: ant-cache-2
-        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action@v1
         with:
           build-cache: "true"
           cache-name: operator
@@ -417,7 +417,7 @@ jobs:
       # rather than getting its own workflow.
       - name: Build & push the operator (arm64 → Kuvryn Ant)
         if: steps.published.outputs.operator != 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           builder: ${{ steps.builder.outputs.name }}
           context: .
@@ -438,7 +438,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Log in to Kuvryn Ant (GitHub OIDC)
-        uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+        uses: azrtydxb/ant-setup-action@v1
         with:
           docker-login: "true"
           required: "true"
@@ -480,9 +480,9 @@ jobs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -490,10 +490,10 @@ jobs:
       # The runner pod's own BuildKit sidecar (linux/arm64).
       - name: Local arm64 builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
+        uses: azrtydxb/.github/actions/setup-builder@main
       - name: Proxy (arm64, digest only)
         id: proxy
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           context: .
           builder: ${{ steps.builder.outputs.name }}
@@ -501,7 +501,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (arm64, digest only)
         id: operator
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: operator/Dockerfile
@@ -512,8 +512,8 @@ jobs:
   agent:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
       # The node agent is standard library only, and so are its tests.
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
@@ -536,18 +536,18 @@ jobs:
     timeout-minutes: 30
     permissions: { contents: read, packages: write, id-token: write }
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: builder
-        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
+        uses: azrtydxb/.github/actions/setup-builder@main
       - name: Node agent (${{ matrix.arch }}, digest only)
         id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: agent/Dockerfile
@@ -564,7 +564,7 @@ jobs:
           case "$DIGEST" in sha256:*) ;; *) echo "no digest from the build" >&2; exit 1 ;; esac
           mkdir -p "$RUNNER_TEMP/agent-digest"
           printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/agent-digest/${{ matrix.arch }}"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         with:
           name: agent-digest-${{ matrix.arch }}
           path: ${{ runner.temp }}/agent-digest/
@@ -578,12 +578,12 @@ jobs:
     timeout-minutes: 15
     permissions: { contents: read, packages: write, id-token: write }
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           pattern: agent-digest-*
           merge-multiple: true
           path: ${{ runner.temp }}/agent-digest
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -614,9 +614,9 @@ jobs:
       proxy: ${{ steps.proxy.outputs.digest }}
       operator: ${{ steps.operator.outputs.digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: azrtydxb/ant-setup-action@37005b6568d80864a713c00ceafef6cda19fcde4 # v1
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: actions/checkout@v7
+      - uses: azrtydxb/ant-setup-action@v1
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -625,10 +625,10 @@ jobs:
       # amd64 itself, so there is nothing to reach out to.
       - name: Local amd64 builder
         id: builder
-        uses: azrtydxb/.github/actions/setup-builder@a6fb8e66bd50b411a1f20b826567ef320aec469b # main
+        uses: azrtydxb/.github/actions/setup-builder@main
       - name: Proxy (amd64, digest only)
         id: proxy
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           context: .
           builder: ${{ steps.builder.outputs.name }}
@@ -636,7 +636,7 @@ jobs:
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
       - name: Operator (amd64, digest only)
         id: operator
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: operator/Dockerfile
@@ -651,7 +651,7 @@ jobs:
     timeout-minutes: 15
     permissions: { contents: read, packages: write, id-token: write }
     steps:
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
