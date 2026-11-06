@@ -36,7 +36,7 @@ permissions: write-all
 
 jobs:
   test:
-    runs-on: arc-azrtydxb
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     # The runner image ships no Rust, so the toolchain comes from a container —
     # same base as the Dockerfile, so CI and the image agree on the compiler.
@@ -279,7 +279,7 @@ jobs:
   # the same reason the Dockerfile builds the UI in a dedicated stage rather
   # than shelling out to npm from a build.rs.
   ui:
-    runs-on: arc-azrtydxb
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
       image: node:22-bookworm-slim
@@ -310,7 +310,7 @@ jobs:
     # fails with "immutable content conflicts" and turned every tag run red).
     if: github.ref == 'refs/heads/main'
     needs: [test, ui]
-    runs-on: arc-azrtydxb
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -332,16 +332,12 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGE }}
 
-      # The runner pod's own rootless BuildKit sidecar, for the runner's
-      # platform (linux/arm64). Its buildkitd.toml (azrty-infra, ConfigMap
-      # arc-k8s-config) already pulls Docker Hub through the Kuvryn Ant mirror and
-      # trusts the home Nexus CA, so nothing needs configuring here. BuildKit is
-      # current there, so a cache-from ref that does not exist yet is a warning,
-      # not the fatal "failed to configure registry cache importer" an old
-      # builder gave.
-      - name: Set up the BuildKit sidecar builder
-        id: builder
-        uses: azrtydxb/.github/actions/setup-builder@main
+      # One builder, both platforms, no emulation: the Dockerfile cross-compiles
+      # the Rust build on the runner's own architecture. BuildKit is current, so a
+      # cache-from ref that does not exist yet is a warning, not the fatal
+      # "failed to configure registry cache importer" an old builder gave.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       # build-push-action v7, not v6. v6 treats a cache-from ref that does not
       # exist as fatal — "failed to configure registry cache importer: ...
@@ -381,21 +377,18 @@ jobs:
         with:
           build-cache: "true"
           cache-name: proxy
-          arch-suffix: arm64
+          arch-suffix: multi
           sccache: "false"
           go: "false"
           npm: "false"
           cargo: "false"
           pip: "false"
-      - name: Build & push (arm64 → Kuvryn Ant)
+      - name: Build & push (amd64 + arm64 → Kuvryn Ant)
         if: steps.published.outputs.proxy != 'true'
         uses: docker/build-push-action@v7
         with:
-          builder: ${{ steps.builder.outputs.name }}
           context: .
-          # arm64 only: every node in kw is arm64, and a Rust release build
-          # under QEMU is not worth the wall clock.
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: ${{ steps.ant-cache-1.outputs.cache-from }}
@@ -406,7 +399,7 @@ jobs:
         with:
           build-cache: "true"
           cache-name: operator
-          arch-suffix: arm64
+          arch-suffix: multi
           sccache: "false"
           go: "false"
           npm: "false"
@@ -415,14 +408,13 @@ jobs:
       # The operator is a second image on the same release cycle. Small and
       # fast to build — no UI stage, no classifier models — so it rides along
       # rather than getting its own workflow.
-      - name: Build & push the operator (arm64 → Kuvryn Ant)
+      - name: Build & push the operator (amd64 + arm64 → Kuvryn Ant)
         if: steps.published.outputs.operator != 'true'
         uses: docker/build-push-action@v7
         with:
-          builder: ${{ steps.builder.outputs.name }}
           context: .
           file: operator/Dockerfile
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.REGISTRY }}/azrtydxb/fastllm-proxy/operator:${{ steps.meta.outputs.short }}
           cache-from: ${{ steps.ant-cache-2.outputs.cache-from }}
@@ -434,7 +426,7 @@ jobs:
   retag-ant:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
-    runs-on: arc-azrtydxb
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Log in to Kuvryn Ant (GitHub OIDC)
@@ -461,24 +453,17 @@ jobs:
 
   # ---------------------------------------------------------------- release
   #
-  # A tag builds each architecture on a runner that *is* that architecture and
-  # merges the two digests into one manifest. The previous attempt emulated
-  # amd64 with QEMU and rustc segfaulted before compiling anything — there is
-  # an amd64 runner, so there was never a reason to emulate.
-  #
-  # Split into three jobs rather than one `platforms: linux/amd64,linux/arm64`
-  # because the two legs run on different machines; `push-by-digest` is what
-  # lets them be assembled afterwards.
+  # A tag builds both architectures in one job on a GitHub-hosted runner. The
+  # arm64 half is cross-compiled by the Dockerfiles, not emulated (the previous
+  # attempt emulated amd64 with QEMU and rustc segfaulted before compiling
+  # anything).
 
-  release-arm64:
+  release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui]
-    runs-on: arc-azrtydxb
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions: { contents: read, packages: write, id-token: write }
-    outputs:
-      proxy: ${{ steps.proxy.outputs.digest }}
-      operator: ${{ steps.operator.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
       - uses: azrtydxb/ant-setup-action@v1
@@ -487,27 +472,43 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # The runner pod's own BuildKit sidecar (linux/arm64).
-      - name: Local arm64 builder
-        id: builder
-        uses: azrtydxb/.github/actions/setup-builder@main
-      - name: Proxy (arm64, digest only)
-        id: proxy
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Proxy (amd64 + arm64)
         uses: docker/build-push-action@v7
         with:
           context: .
-          builder: ${{ steps.builder.outputs.name }}
-          platforms: linux/arm64
-          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
-      - name: Operator (arm64, digest only)
-        id: operator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fastllm-proxy:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fastllm-proxy:latest
+      - name: Operator (amd64 + arm64)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: operator/Dockerfile
-          builder: ${{ steps.builder.outputs.name }}
-          platforms: linux/arm64
-          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fastllm-operator:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fastllm-operator:latest
+      # Both architectures, asserted rather than assumed: a manifest that
+      # claims an architecture it does not carry is worse than one that
+      # never claimed it.
+      - name: Verify both manifests
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for image in fastllm-proxy fastllm-operator; do
+            archs=$(docker buildx imagetools inspect --raw "ghcr.io/${OWNER}/${image}:${VERSION}" \
+                    | grep -o '"architecture": *"[a-z0-9]*"' | sort -u)
+            echo "$archs"
+            echo "$archs" | grep -q 'arm64'
+            echo "$archs" | grep -q 'amd64'
+          done
 
   agent:
     runs-on: ubuntu-latest
@@ -518,21 +519,11 @@ jobs:
       - name: Node agent tests
         run: python3 -m unittest discover -s agent -v
 
-  # The node agent, one architecture per runner on that runner's BuildKit
-  # sidecar, pushed by digest; release-agent-manifest joins the two under the
-  # release tags. One multi-platform build would need a builder node for the
-  # other architecture.
+  # The node agent: python:3-slim plus a script, one multi-platform build.
   release-agent:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, ui, agent]
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            runner: arc-azrtydxb
-          - arch: amd64
-            runner: arc-azrtydxb-amd64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions: { contents: read, packages: write, id-token: write }
     steps:
@@ -543,139 +534,29 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: builder
-        uses: azrtydxb/.github/actions/setup-builder@main
-      - name: Node agent (${{ matrix.arch }}, digest only)
-        id: build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Node agent (amd64 + arm64)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: agent/Dockerfile
-          builder: ${{ steps.builder.outputs.name }}
-          platforms: linux/${{ matrix.arch }}
+          platforms: linux/amd64,linux/arm64
           # As before the split: the image was built on the docker driver, which
           # attaches no provenance attestation.
           provenance: false
-          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-node-agent",push-by-digest=true,name-canonical=true,push=true
-      - name: Record the digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          case "$DIGEST" in sha256:*) ;; *) echo "no digest from the build" >&2; exit 1 ;; esac
-          mkdir -p "$RUNNER_TEMP/agent-digest"
-          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/agent-digest/${{ matrix.arch }}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: agent-digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/agent-digest/
-          if-no-files-found: error
-          retention-days: 1
-
-  release-agent-manifest:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-agent]
-    runs-on: arc-azrtydxb
-    timeout-minutes: 15
-    permissions: { contents: read, packages: write, id-token: write }
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: agent-digest-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/agent-digest
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Assemble and verify the node agent manifest
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fastllm-node-agent:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fastllm-node-agent:latest
+      - name: Verify the node agent manifest
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/fastllm-node-agent
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          dir="$RUNNER_TEMP/agent-digest"
-          docker buildx imagetools create \
-            -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" \
-            "${IMAGE}@$(cat "$dir/arm64")" "${IMAGE}@$(cat "$dir/amd64")"
           archs=$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" \
                   | grep -o '"architecture": *"[a-z0-9]*"' | sort -u)
           echo "$archs"
           echo "$archs" | grep -q 'arm64'
           echo "$archs" | grep -q 'amd64'
-
-  release-amd64:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, ui]
-    runs-on: arc-azrtydxb-amd64
-    timeout-minutes: 60
-    permissions: { contents: read, packages: write, id-token: write }
-    outputs:
-      proxy: ${{ steps.proxy.outputs.digest }}
-      operator: ${{ steps.operator.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: azrtydxb/ant-setup-action@v1
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Built natively on the runner pod's own BuildKit sidecar: this runner is
-      # amd64 itself, so there is nothing to reach out to.
-      - name: Local amd64 builder
-        id: builder
-        uses: azrtydxb/.github/actions/setup-builder@main
-      - name: Proxy (amd64, digest only)
-        id: proxy
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          builder: ${{ steps.builder.outputs.name }}
-          platforms: linux/amd64
-          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-proxy",push-by-digest=true,name-canonical=true,push=true
-      - name: Operator (amd64, digest only)
-        id: operator
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: operator/Dockerfile
-          builder: ${{ steps.builder.outputs.name }}
-          platforms: linux/amd64
-          outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/fastllm-operator",push-by-digest=true,name-canonical=true,push=true
-
-  release-manifest:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-arm64, release-amd64]
-    runs-on: arc-azrtydxb
-    timeout-minutes: 15
-    permissions: { contents: read, packages: write, id-token: write }
-    steps:
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Assemble and verify both manifests
-        env:
-          OWNER: ${{ github.repository_owner }}
-          VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          assemble() {
-            local image="ghcr.io/${OWNER}/$1" arm="$2" amd="$3"
-            docker buildx imagetools create \
-              -t "${image}:${VERSION}" -t "${image}:latest" \
-              "${image}@${arm}" "${image}@${amd}"
-            # Both architectures, asserted rather than assumed: a manifest that
-            # claims an architecture it does not carry is worse than one that
-            # never claimed it.
-            local archs
-            archs=$(docker buildx imagetools inspect --raw "${image}:${VERSION}" \
-                    | grep -o '"architecture": *"[a-z0-9]*"' | sort -u)
-            echo "$archs"
-            echo "$archs" | grep -q 'arm64'
-            echo "$archs" | grep -q 'amd64'
-          }
-          assemble fastllm-proxy "${{ needs.release-arm64.outputs.proxy }}" "${{ needs.release-amd64.outputs.proxy }}"
-          assemble fastllm-operator "${{ needs.release-arm64.outputs.operator }}" "${{ needs.release-amd64.outputs.operator }}"
