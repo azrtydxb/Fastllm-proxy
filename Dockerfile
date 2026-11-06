@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 #
-# Built natively on the arm64 runners rather than under QEMU: the kw cluster is
-# arm64 throughout, and emulating a Rust release build with LTO is far slower
-# than it is worth.
+# Multi-platform (linux/amd64, linux/arm64) without emulation: every stage that
+# runs a command is pinned to $BUILDPLATFORM and the Rust build cross-compiles
+# to $TARGETARCH. The final stage only COPYs, so nothing runs under QEMU.
 
 # The management UI's build (P4). A separate stage, not a `build.rs` that
 # shells out to `npm` from the Rust build — see `src/control/ui.rs` and
@@ -12,7 +12,7 @@
 # `web/dist/`, which the `build` stage below copies in before compiling —
 # `rust-embed` reads whatever is on disk under `web/dist/` at that point,
 # nothing more.
-FROM node:26-bookworm-slim AS web
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
@@ -39,8 +39,39 @@ RUN npm run build
 # ships, so linking it there fails on symbols like `_M_replace_cold` and
 # `__cxa_call_terminate`. The runtime stage below must match: a binary linked
 # against trixie's libstdc++ will not start on bookworm.
-FROM rust:1-trixie AS build
+FROM --platform=$BUILDPLATFORM rust:1-trixie AS build
+ARG TARGETARCH
+ARG BUILDARCH
 WORKDIR /src
+
+# Cross toolchain for $TARGETARCH. When the target is the build machine's own
+# architecture nothing extra is installed and the native gcc links. The rust
+# target and compiler variables land in /xenv.sh, sourced by the build step.
+# pkg-config variables carry the target suffix so that build scripts, which run
+# on the build machine, keep resolving the build machine's own libraries.
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu;  gnu=x86-64-linux-gnu;  cross=amd64; multiarch=x86_64-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; cross=arm64; multiarch=aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    tvar=$(echo "$triple" | tr 'a-z-' 'A-Z_'); cvar=$(echo "$triple" | tr '-' '_'); \
+    : > /xenv.sh; \
+    if [ "$TARGETARCH" = "$BUILDARCH" ]; then cc=gcc; cxx=g++; \
+    else \
+      dpkg --add-architecture "$cross"; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends "g++-$gnu" "libc6-dev-$cross-cross" "libssl-dev:$cross"; \
+      rm -rf /var/lib/apt/lists/*; \
+      cc="$gnu-gcc"; cxx="$gnu-g++"; \
+      echo "export PKG_CONFIG_ALLOW_CROSS_$cvar=1" >> /xenv.sh; \
+      echo "export PKG_CONFIG_PATH_$cvar=/usr/lib/$multiarch/pkgconfig" >> /xenv.sh; \
+    fi; \
+    rustup target add "$triple"; \
+    { echo "export RUST_TARGET=$triple"; \
+      echo "export CARGO_TARGET_${tvar}_LINKER=$cc"; \
+      echo "export CC_$cvar=$cc"; \
+      echo "export CXX_$cvar=$cxx"; } >> /xenv.sh
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -110,21 +141,16 @@ ADD --chmod=0644 https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/to
 # Cache mounts are not part of the resulting layer, so the binary has to be
 # copied out of the target directory inside the same step that produced it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked --features "control classifier-tier2" \
- && cp target/release/fastllm-proxy /usr/local/bin/fastllm-proxy
+    --mount=type=cache,target=/src/target,id=fastllm-target-${TARGETARCH},sharing=locked \
+    . /xenv.sh \
+ && cargo build --release --locked --target "$RUST_TARGET" --features "control classifier-tier2" \
+ && cp "target/$RUST_TARGET/release/fastllm-proxy" /usr/local/bin/fastllm-proxy
 
-FROM debian:trixie-slim
-
-# ca-certificates is what makes an `https://` api_base work: the proxy prefers
-# the system root store and only falls back to its bundled copy. Unpinned on
-# purpose: Debian drops old versions from the mirrors, so a pin rots into a
-# build that cannot run anywhere.
-# hadolint ignore=DL3008
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin fastllm
+# Distroless cc (Debian 13, the same libstdc++ and libssl as the build stage),
+# so the final stage needs no RUN. It carries the system root store that makes
+# an `https://` api_base work (the proxy prefers it and only falls back to its
+# bundled copy) and the nonroot user, uid 65532.
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=build /usr/local/bin/fastllm-proxy /usr/local/bin/fastllm-proxy
 COPY --from=build /usr/local/share/fastllm/classifier /usr/local/share/fastllm/classifier
