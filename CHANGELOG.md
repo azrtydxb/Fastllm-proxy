@@ -8,6 +8,16 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Changed
+
+- **Automatic admission gates are tunable, and wait longer.** New flags
+  `--admission-box-sessions` (16), `--admission-max-queued` (64) and
+  `--admission-max-wait-seconds` (30), each with a `FASTLLM_ADMISSION_*` env.
+  The built-in wait for an automatic gate was 5s (32 queued), shorter than one
+  generation holds its permit, so a saturated gate refused nearly every queued
+  caller with `TimedOut` instead of serving it when a slot freed. Behaviour
+  change: automatic gates now queue up to 64 callers for up to 30s.
+
 ## 0.3.6 — 2026-10-30
 
 ### Changed

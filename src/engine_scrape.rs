@@ -31,18 +31,18 @@ use crate::state::AppState;
 /// with `vllm:`/`sglang:` families, is never gated by accident.
 ///
 /// The capacity policy lives in [`crate::admission::auto_settings`]; this only
-/// supplies what the scrape learned and the configured replica count, so the
-/// same numbers are unit-testable without a probe.
+/// supplies what the scrape learned and the configured tuning, so the same
+/// numbers are unit-testable without a probe.
 fn auto_settings_from_probe(
     probe: &Result<crate::engine_metrics::EngineLoad, ProbeError>,
-    replicas: u32,
+    tuning: &crate::admission::AutoTuning,
 ) -> Option<crate::admission::Settings> {
     let Ok(load) = probe else {
         return None;
     };
-    Some(crate::admission::auto_settings(
+    Some(crate::admission::auto_settings_tuned(
         load.batch_capacity,
-        replicas,
+        tuning,
     ))
 }
 
@@ -98,7 +98,7 @@ enum Detected {
     },
 }
 
-pub fn spawn(state: Arc<AppState>, interval: Duration, replicas: u32) {
+pub fn spawn(state: Arc<AppState>, interval: Duration, tuning: crate::admission::AutoTuning) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -110,12 +110,16 @@ pub fn spawn(state: Arc<AppState>, interval: Duration, replicas: u32) {
         let mut known: HashMap<BackendUid, Detected> = HashMap::new();
         loop {
             ticker.tick().await;
-            sweep(&state, &mut known, replicas).await;
+            sweep(&state, &mut known, &tuning).await;
         }
     });
 }
 
-async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>, replicas: u32) {
+async fn sweep(
+    state: &Arc<AppState>,
+    known: &mut HashMap<BackendUid, Detected>,
+    tuning: &crate::admission::AutoTuning,
+) {
     let now = now_ms();
     let backends: Vec<_> = state
         .registry
@@ -163,7 +167,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>,
             Some(Detected::Retry { answered: true, .. })
         );
 
-        if let Some(settings) = auto_settings_from_probe(&load, replicas) {
+        if let Some(settings) = auto_settings_from_probe(&load, tuning) {
             backend.enable_auto_admission(settings);
         }
 
@@ -259,6 +263,7 @@ async fn sweep(state: &Arc<AppState>, known: &mut HashMap<BackendUid, Detected>,
 #[cfg(test)]
 mod tests {
     use super::{auto_settings_from_probe, restore_only_if_silent};
+    use crate::admission::AutoTuning;
     use crate::engine_metrics::ProbeError;
 
     #[test]
@@ -268,14 +273,17 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            auto_settings_from_probe(&measured, 2)
+            auto_settings_from_probe(&measured, &AutoTuning::with_replicas(2))
                 .unwrap()
                 .max_concurrent,
             4,
             "a small reported batch divides across replicas and lowers the ceiling"
         );
         assert_eq!(
-            auto_settings_from_probe(&Ok(crate::engine_metrics::EngineLoad::default()), 2),
+            auto_settings_from_probe(
+                &Ok(crate::engine_metrics::EngineLoad::default()),
+                &AutoTuning::with_replicas(2)
+            ),
             Some(crate::admission::AUTO_FALLBACK),
             "an engine with no advertised capacity gets the measured default"
         );
@@ -283,20 +291,69 @@ mod tests {
         // A hosted provider never answers with an engine family, so the probe
         // fails and no gate is installed -- the whole point of "auto".
         let hosted = Err(ProbeError::NotAnEngine("404".into()));
-        assert_eq!(auto_settings_from_probe(&hosted, 2), None);
+        assert_eq!(
+            auto_settings_from_probe(&hosted, &AutoTuning::with_replicas(2)),
+            None
+        );
     }
 
     #[test]
     fn the_configured_replica_count_reaches_the_automatic_ceiling() {
         let load = Ok(crate::engine_metrics::EngineLoad::default());
         assert_eq!(
-            auto_settings_from_probe(&load, 4).unwrap().max_concurrent,
+            auto_settings_from_probe(&load, &AutoTuning::with_replicas(4))
+                .unwrap()
+                .max_concurrent,
             4
         );
         assert_eq!(
-            auto_settings_from_probe(&load, 1).unwrap().max_concurrent,
+            auto_settings_from_probe(&load, &AutoTuning::with_replicas(1))
+                .unwrap()
+                .max_concurrent,
             16
         );
+    }
+
+    /// The operator's box-session, queue and wait settings reach the gate the
+    /// scraper installs; before they were flags the wait was a fixed 5s that
+    /// refused callers at saturation (`TimedOut`) however briefly.
+    #[test]
+    fn the_configured_session_queue_and_wait_limits_reach_the_automatic_gate() {
+        let load = Ok(crate::engine_metrics::EngineLoad::default());
+        let tuning = AutoTuning {
+            replicas: 2,
+            box_sessions: 48,
+            max_queued: 128,
+            max_wait_seconds: 90,
+        };
+        let settings = auto_settings_from_probe(&load, &tuning).unwrap();
+        assert_eq!(settings.max_concurrent, 24);
+        assert_eq!(settings.max_queued, 128);
+        assert_eq!(settings.max_wait_seconds, 90);
+        // An engine reporting a smaller batch still lowers it.
+        let small = Ok(crate::engine_metrics::EngineLoad {
+            batch_capacity: Some(8),
+            ..Default::default()
+        });
+        assert_eq!(
+            auto_settings_from_probe(&small, &tuning)
+                .unwrap()
+                .max_concurrent,
+            4
+        );
+    }
+
+    /// The default wait outlasts one reasoning generation's queue turn: a gate
+    /// that refuses after 5s turns every saturated moment into a 503.
+    #[test]
+    fn the_default_wait_is_longer_than_a_few_seconds() {
+        let settings = auto_settings_from_probe(
+            &Ok(crate::engine_metrics::EngineLoad::default()),
+            &AutoTuning::with_replicas(2),
+        )
+        .unwrap();
+        assert!(settings.max_wait_seconds >= 30);
+        assert!(settings.max_queued >= 64);
     }
 
     /// An endpoint that answers "not an engine" is a verdict and restores the

@@ -101,6 +101,27 @@ struct Cli {
     #[arg(long, default_value_t = 2, env = "FASTLLM_ADMISSION_REPLICAS")]
     admission_replicas: u32,
 
+    /// Sessions one engine serves comfortably, for the automatic admission
+    /// gate: divided by `--admission-replicas` to get each replica's ceiling,
+    /// and also the most an engine's own reported batch size may raise it to.
+    /// The default is the figure measured for the 35B on one DGX Spark; raise
+    /// it for an engine that serves more (idle KV cache and an empty queue at
+    /// the current ceiling say it can).
+    #[arg(long, default_value_t = fastllm_proxy::admission::BOX_SESSIONS, env = "FASTLLM_ADMISSION_BOX_SESSIONS")]
+    admission_box_sessions: u32,
+
+    /// Callers an automatic gate lets wait for a slot before refusing new ones
+    /// (the `Full` refusal).
+    #[arg(long, default_value_t = fastllm_proxy::admission::AUTO_FALLBACK.max_queued, env = "FASTLLM_ADMISSION_MAX_QUEUED")]
+    admission_max_queued: u32,
+
+    /// Seconds a caller waits at an automatic gate for a slot before it is
+    /// refused (the `TimedOut` refusal). A permit is held for a whole
+    /// generation, so this should be longer than a typical one's first-token
+    /// wait, not shorter.
+    #[arg(long, default_value_t = fastllm_proxy::admission::AUTO_FALLBACK.max_wait_seconds, env = "FASTLLM_ADMISSION_MAX_WAIT_SECONDS")]
+    admission_max_wait_seconds: u32,
+
     /// Seconds to wait for upstream response headers. Does not bound generation.
     #[arg(long, default_value_t = 120)]
     upstream_timeout: u64,
@@ -1736,7 +1757,12 @@ async fn serve_proxy(cli: &Cli, state: Arc<AppState>) -> Result<()> {
         fastllm_proxy::engine_scrape::spawn(
             Arc::clone(&state),
             Duration::from_secs(cli.engine_scrape_interval),
-            cli.admission_replicas.max(1),
+            fastllm_proxy::admission::AutoTuning {
+                replicas: cli.admission_replicas.max(1),
+                box_sessions: cli.admission_box_sessions.max(1),
+                max_queued: cli.admission_max_queued,
+                max_wait_seconds: cli.admission_max_wait_seconds,
+            },
         );
     }
     // Unconditional, unlike `reconcile::spawn` -- every role that reaches
