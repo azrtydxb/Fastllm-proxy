@@ -156,14 +156,16 @@ pub const BOX_SESSIONS: u32 = 16;
 /// measured comfortable limit for the 35B on one DGX box, and each of the two
 /// replicas holds its own share, so 8 each admits 16 between them. `high_water`
 /// is 2: an engine at capacity holds a small queue at all times and that is
-/// healthy, so only a queue that keeps growing should halve the ceiling. 32
-/// local waiters and a 5s wait bound proxy memory and caller latency without
-/// making a caller wait longer than a first byte typically takes.
+/// healthy, so only a queue that keeps growing should halve the ceiling. 64
+/// local waiters and a 30s wait bound proxy memory and caller latency. The wait
+/// was 5s, which is shorter than one reasoning generation holds its permit: at
+/// saturation nearly every queued caller timed out ("TimedOut", Retry-After 30)
+/// instead of being served a few seconds later when a slot freed.
 pub const AUTO_FALLBACK: Settings = Settings {
     max_concurrent: per_replica_ceiling(BOX_SESSIONS, DEFAULT_REPLICAS),
     high_water: 2,
-    max_queued: 32,
-    max_wait_seconds: 5,
+    max_queued: 64,
+    max_wait_seconds: 30,
 };
 
 /// How long one halving must stand before the gate may halve again while the
@@ -189,6 +191,41 @@ pub const fn per_replica_ceiling(box_capacity: u32, replicas: u32) -> u32 {
     box_capacity.saturating_add(replicas - 1) / replicas
 }
 
+/// What an operator may tune about the automatic gate without turning it
+/// `explicit` on every backend: how many proxy replicas share an engine, how
+/// many sessions one engine serves, and how long and how many callers may wait
+/// here before being refused.
+///
+/// The defaults are the measured ones for the two DGX Sparks serving the 35B.
+/// A different engine (a faster box, a smaller model, more KV cache than the
+/// batch uses) wants different numbers, and the wait bound matters on its own:
+/// a permit is held for a whole generation, so a caller allowed to wait only a
+/// few seconds is refused whenever the gate is saturated, however briefly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoTuning {
+    /// Proxy replicas sharing each engine (`--admission-replicas`).
+    pub replicas: u32,
+    /// Sessions one engine serves comfortably, divided across replicas
+    /// (`--admission-box-sessions`). Also the cap on a reported capacity.
+    pub box_sessions: u32,
+    /// Callers allowed to wait per gate (`--admission-max-queued`).
+    pub max_queued: u32,
+    /// Seconds a caller waits for a slot (`--admission-max-wait-seconds`).
+    pub max_wait_seconds: u32,
+}
+
+impl AutoTuning {
+    /// The measured defaults at `replicas` proxy pods.
+    pub const fn with_replicas(replicas: u32) -> Self {
+        Self {
+            replicas,
+            box_sessions: BOX_SESSIONS,
+            max_queued: AUTO_FALLBACK.max_queued,
+            max_wait_seconds: AUTO_FALLBACK.max_wait_seconds,
+        }
+    }
+}
+
 /// The automatic gate for an engine, given what its `/metrics` reported about
 /// scheduler capacity (`vLLM max_num_seqs`, `SGLang max_running_requests`).
 ///
@@ -202,14 +239,21 @@ pub const fn per_replica_ceiling(box_capacity: u32, replicas: u32) -> u32 {
 /// An engine that reports a genuinely small batch (say 24) still lowers the
 /// ceiling; one that reports the stock 256 leaves it at the safe default.
 pub fn auto_settings(engine_capacity: Option<u32>, replicas: u32) -> Settings {
+    auto_settings_tuned(engine_capacity, &AutoTuning::with_replicas(replicas))
+}
+
+/// [`auto_settings`] with the operator's tuning applied.
+pub fn auto_settings_tuned(engine_capacity: Option<u32>, tuning: &AutoTuning) -> Settings {
     let mut settings = AUTO_FALLBACK;
-    settings.max_concurrent = per_replica_ceiling(BOX_SESSIONS, replicas);
+    settings.max_concurrent = per_replica_ceiling(tuning.box_sessions, tuning.replicas);
+    settings.max_queued = tuning.max_queued;
+    settings.max_wait_seconds = tuning.max_wait_seconds;
     if let Some(capacity) = engine_capacity {
         // A capacity of 0 means "not advertised"; never gate to nothing.
         if capacity > 0 {
             settings.max_concurrent = settings
                 .max_concurrent
-                .min(per_replica_ceiling(capacity, replicas));
+                .min(per_replica_ceiling(capacity, tuning.replicas));
         }
     }
     settings

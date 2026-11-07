@@ -27,7 +27,7 @@ Idempotent — seeds `providers`/`provider_models` **and the `auth:` block** (a 
 
 Everything a backend row can hold is carried across, not just the address:
 
-| from the file        | into `providers`/`provider_models`                                                                                                                                                                                                                                 |
+| from the file        | into `providers`/`provider_models`                                                                                                                                                                                                                    |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `api_base`           | the address, trailing slash trimmed                                                                                                                                                                                                                   |
 | `model`              | `upstream_model`. A transport prefix (`openai/`, `vllm/`, `openrouter/`) is stripped; a wire-format prefix (`anthropic/`, `gemini/`) only when the backend speaks that protocol, so an OpenRouter id like `anthropic/claude-sonnet-4` survives intact |
@@ -42,14 +42,14 @@ load-balanced pool.
 
 The `auth:` block carries its enforcement, not only its identity:
 
-| from the file | into the database                                                                              |
-| ------------- | ---------------------------------------------------------------------------------------------- |
-| `key`         | `api_keys.hash` (SHA-256) plus a display prefix. Never stored in plaintext, never printed back |
-| `name`        | a `service_account` principal, and a role `import:<name>` holding just that key's grants       |
-| `provider_models`      | one `model:invoke` grant per model; `['*']` becomes allow-all                                  |
-| `expires_at`  | the key's expiry                                                                               |
-| `limits`      | the `limits` row — `requests_per_min`, `tokens_per_min`                                        |
-| `budget`      | the `budgets` row, as a `monthly` window, because the file format has no window to carry       |
+| from the file     | into the database                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| `key`             | `api_keys.hash` (SHA-256) plus a display prefix. Never stored in plaintext, never printed back |
+| `name`            | a `service_account` principal, and a role `import:<name>` holding just that key's grants       |
+| `provider_models` | one `model:invoke` grant per model; `['*']` becomes allow-all                                  |
+| `expires_at`      | the key's expiry                                                                               |
+| `limits`          | the `limits` row — `requests_per_min`, `tokens_per_min`                                        |
+| `budget`          | the `budgets` row, as a `monthly` window, because the file format has no window to carry       |
 
 `budget.tokens_used` is written when the row is created and never on a
 re-import. Once a budget is in the database it advances from real usage, and
@@ -164,11 +164,11 @@ page (the FLOW CONTROL cell of each backend row) or with
 `PATCH /admin/backends/{id}` -- never in a config file, because the right numbers
 are a property of the engine, and changing them must not need a redeploy.
 
-| `admission_mode` | Meaning |
-|---|---|
+| `admission_mode` | Meaning                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `auto` (default) | The gate turns itself on, with numbers derived from the engine (see below; the tuning fields do not apply), the moment the engine scraper detects a self-hosted vLLM/SGLang engine from `/metrics`. A hosted provider (OpenRouter, Anthropic, …) never answers with those metric families, so `auto` never gates one; a backend not yet detected simply has no gate until it is. |
-| `explicit` | The gate is on now, with `admission_max_concurrent` and the tuning fields below. The numbers are yours, not derived. |
-| `off` | No gate, whatever the scrape finds. vLLM queues the surplus itself. |
+| `explicit`       | The gate is on now, with `admission_max_concurrent` and the tuning fields below. The numbers are yours, not derived.                                                                                                                                                                                                                                                             |
+| `off`            | No gate, whatever the scrape finds. vLLM queues the surplus itself.                                                                                                                                                                                                                                                                                                              |
 
 The automatic ceiling, `auto` only, is the smaller of the measured per-box
 session limit divided across proxy replicas (16 / 2 = **8** for the two DGX
@@ -176,27 +176,39 @@ Sparks serving Qwen3.6-35B; the replica count is `--admission-replicas` /
 `FASTLLM_ADMISSION_REPLICAS`, default 2, and must equal the number of proxy
 pods) and the engine's own reported capacity
 (`vllm:cache_config_info{max_num_seqs=…}`, `sglang:…{max_running_requests=…}`)
-divided across replicas. The engine figure is a *batching* ceiling -- vLLM's
+divided across replicas. The engine figure is a _batching_ ceiling -- vLLM's
 stock default is 256 -- so it is only ever allowed to **lower** the ceiling,
 never to raise it past the measured limit; advertising the stock batch leaves
 the ceiling at 8.
 
-| Field | Default | Meaning |
-|---|---|---|
-| `admission_mode` | `auto` | `auto`, `explicit`, or `off` -- see above. |
-| `admission_max_concurrent` | `8` (auto), required (explicit) | Most concurrent requests each proxy replica sends the engine. Used by `explicit`; for `auto` it is derived. |
-| `admission_high_water` | 2 | `explicit` only. Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves, at most once per 10-second cooldown; see below. |
-| `admission_max_queued` | 32 | `explicit` only. Requests allowed to wait at the proxy; beyond it they get 503. |
-| `admission_max_wait_seconds` | 5 | `explicit` only. How long a request waits for a slot before 503. |
-| `upstream_timeout_seconds` | `--upstream-timeout` | Time to first byte before the request fails. Edited in the same dialog because it is the other half of the same problem. |
+| Field                        | Default                         | Meaning                                                                                                                                        |
+| ---------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admission_mode`             | `auto`                          | `auto`, `explicit`, or `off` -- see above.                                                                                                     |
+| `admission_max_concurrent`   | `8` (auto), required (explicit) | Most concurrent requests each proxy replica sends the engine. Used by `explicit`; for `auto` it is derived.                                    |
+| `admission_high_water`       | 2                               | `explicit` only. Engine queue depth (`vllm:num_requests_waiting`) at which the ceiling halves, at most once per 10-second cooldown; see below. |
+| `admission_max_queued`       | 32                              | `explicit` only. Requests allowed to wait at the proxy; beyond it they get 503.                                                                |
+| `admission_max_wait_seconds` | 5                               | `explicit` only. How long a request waits for a slot before 503.                                                                               |
+| `upstream_timeout_seconds`   | `--upstream-timeout`            | Time to first byte before the request fails. Edited in the same dialog because it is the other half of the same problem.                       |
 
-The three tuning fields apply to `explicit` gates only. An `auto` gate always
-starts from the built-in defaults shown (high water 2, 32 queued, 5s wait): the
-database columns hold a value for every row, so an `auto` row cannot say
-whether its numbers were chosen or merely defaulted, and honouring them would
-silently replace the measured defaults with the column defaults (4 / 64 / 30).
-The Models page therefore shows the fields only in `explicit` mode. To tune a
-backend, make it `explicit`.
+The three tuning fields apply to `explicit` gates only. An `auto` gate starts
+from process-wide settings, not from the database row: the columns hold a value
+for every row, so an `auto` row cannot say whether its numbers were chosen or
+merely defaulted, and honouring them would silently replace the measured
+defaults with the column defaults (4 / 64 / 30). The Models page therefore
+shows the fields only in `explicit` mode. To tune one backend, make it
+`explicit`; to tune every `auto` gate, set the flags below.
+
+| Flag (env)                                                            | Default | Meaning for `auto` gates                                                                                                                                                                                                      |
+| --------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--admission-replicas` (`FASTLLM_ADMISSION_REPLICAS`)                 | 2       | Proxy pods sharing each engine.                                                                                                                                                                                               |
+| `--admission-box-sessions` (`FASTLLM_ADMISSION_BOX_SESSIONS`)         | 16      | Sessions one engine serves comfortably; divided by the replicas for each replica's ceiling.                                                                                                                                   |
+| `--admission-max-queued` (`FASTLLM_ADMISSION_MAX_QUEUED`)             | 64      | Callers allowed to wait per gate; past it, `Full` (503).                                                                                                                                                                      |
+| `--admission-max-wait-seconds` (`FASTLLM_ADMISSION_MAX_WAIT_SECONDS`) | 30      | How long a caller waits for a slot; past it, `TimedOut` (503). A permit is held for a whole generation, so a wait of a few seconds refuses nearly every caller while the gate is saturated. It was 5 before these were flags. |
+
+Watch `fastllm_admission_refused_*` (or the Fleet page) against the engine's own
+`num_requests_running`/`waiting`: refusals while the engine is idle mean the
+box-sessions figure is below what the engine serves, not that the engine is
+overloaded.
 
 A `PATCH` that sends only the legacy `admission_max_concurrent` still works: a
 number maps to `explicit` and `null` to `off`. Sending `admission_mode` is the
@@ -208,7 +220,7 @@ engine's own queue. When `num_requests_waiting` is at or above `high_water` it
 halves the gate's ceiling, but **every halving needs a 10-second cooldown
 (`SHRINK_COOLDOWN`, several scrape intervals) to have passed since the previous
 one**, however the queue behaves in between. The queue depth is engine-wide and
-both replicas see the same figure, so a queue that merely *stays* deep -- or
+both replicas see the same figure, so a queue that merely _stays_ deep -- or
 flickers around `high_water` -- would otherwise halve away to one slot within a
 few seconds and leave the box idle. A genuinely worsening engine is still backed
 off, at one halving per cooldown rather than one per scrape. Only a queue
@@ -226,7 +238,7 @@ their next snapshot poll.
 - **Each replica has its own ceiling**, so N proxies admit up to N times it
   between them. The engine's queue depth reflects all of their traffic, so each
   backs off on what the others sent too. This is why the automatic ceiling is
-  box capacity *divided by the replica count*, not the box capacity.
+  box capacity _divided by the replica count_, not the box capacity.
 - **Running requests are never cut off.** A lowered ceiling takes effect as
   slots come free. A backend that gains a gate while requests are already in
   flight seeds those requests as occupied slots, so the ceiling is never handed
@@ -281,15 +293,15 @@ running/waiting counts and the gate's slots in use over its current ceiling
 The Models page shows the same in each backend's FLOW CONTROL cell. For
 dashboards, `/metrics` carries:
 
-| Series | Type | Meaning |
-|---|---|---|
-| `fastllm_backend_engine_requests{state="running"\|"waiting"}` | gauge | What the engine itself reports, when fresh. |
-| `fastllm_admission_max_concurrent` | gauge | The configured ceiling. |
-| `fastllm_admission_capacity` | gauge | The current ceiling; below the configured one while the engine is behind. |
-| `fastllm_admission_in_use` | gauge | Slots held by requests in progress. |
-| `fastllm_admission_queued` | gauge | Requests waiting at the gate. |
-| `fastllm_admission_admitted_total` | counter | Requests let through. |
-| `fastllm_admission_refused_total{reason="full"\|"timed_out"}` | counter | Refused at once (queue full, or moved to a sibling) or after waiting. |
+| Series                                                        | Type    | Meaning                                                                   |
+| ------------------------------------------------------------- | ------- | ------------------------------------------------------------------------- |
+| `fastllm_backend_engine_requests{state="running"\|"waiting"}` | gauge   | What the engine itself reports, when fresh.                               |
+| `fastllm_admission_max_concurrent`                            | gauge   | The configured ceiling.                                                   |
+| `fastllm_admission_capacity`                                  | gauge   | The current ceiling; below the configured one while the engine is behind. |
+| `fastllm_admission_in_use`                                    | gauge   | Slots held by requests in progress.                                       |
+| `fastllm_admission_queued`                                    | gauge   | Requests waiting at the gate.                                             |
+| `fastllm_admission_admitted_total`                            | counter | Requests let through.                                                     |
+| `fastllm_admission_refused_total{reason="full"\|"timed_out"}` | counter | Refused at once (queue full, or moved to a sibling) or after waiting.     |
 
 All are labelled `api_base` and `model`, per replica; sum across replicas for
 the fleet.
