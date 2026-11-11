@@ -8,6 +8,13 @@ source for _why_ anything is the way it is; this file is the summary.
 
 ## Unreleased
 
+### Removed
+
+- **`FastllmSnapshotStale` alert** (`deploy/monitoring.yaml`). The snapshot age
+  is the time since its content last changed, so an untouched deployment fired
+  it every 15 minutes while healthy. A replica stuck on an old snapshot is still
+  caught by `FastllmReplicasDisagreeOnSnapshot`.
+
 ### Changed
 
 - **Automatic admission gates are tunable, and wait longer.** New flags

@@ -53,6 +53,10 @@ Most are self-describing from their `# HELP` text. Five are not obvious:
 - **`fastllm_snapshot_age_seconds` compares two machines' clocks**, since the
   stamp is the control plane's. It is clamped at zero rather than going
   negative on skew, which would read as a broken exporter.
+  It is the time since the snapshot's content last changed, so it grows
+  without bound on a deployment nobody is reconfiguring and is not alerted on;
+  a replica that stops applying snapshots shows instead as
+  `FastllmReplicasDisagreeOnSnapshot` (`max != min` of `fastllm_snapshot_version`).
 
 - **`fastllm_cache_total{kind="hit"|"miss"|"store"}` counts three things, not
   two.** A miss that is never stored is a response the cache declined to keep —

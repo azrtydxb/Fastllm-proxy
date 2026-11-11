@@ -52,14 +52,6 @@ spec:
             summary: "Proxy replicas are serving different snapshot versions"
             description: "A replica has stopped applying snapshots. Check its logs for 'registry rebuild failed'."
 
-        - alert: FastllmSnapshotStale
-          expr: fastllm_snapshot_age_seconds > 900
-          for: 5m
-          labels: { severity: warning }
-          annotations:
-            summary: "A proxy's snapshot has not changed in 15 minutes"
-            description: "Age is the time since the last content change, so this is only meaningful on a deployment that changes often; treat it as a hint, not a page."
-
         # A backend leaving rotation is normal; leaving repeatedly is not.
         - alert: FastllmBackendFlapping
           expr: increase(fastllm_backend_ejections_total[30m]) > 6
