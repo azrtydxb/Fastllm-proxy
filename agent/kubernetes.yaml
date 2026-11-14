@@ -113,7 +113,9 @@ spec:
             - { name: ca, mountPath: /etc/fastllm, readOnly: true }
           resources:
             requests: { cpu: 10m, memory: 64Mi }
-            limits: { cpu: 200m, memory: 128Mi }
+            # Averages ~10m but works in short bursts: at 200m the cgroup throttled
+            # 54-64% of its periods.
+            limits: { cpu: 1000m, memory: 128Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

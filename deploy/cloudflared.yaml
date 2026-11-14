@@ -69,7 +69,10 @@ spec:
                     app: cloudflared
       containers:
         - name: cloudflared
-          image: cloudflare/cloudflared:latest
+          # Pinned to a release and its digest: :latest moved under the Deployment
+          # on every pod restart. Bump both together.
+          image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
+          imagePullPolicy: IfNotPresent
           # --no-autoupdate because a connector that restarts itself to upgrade
           # does so outside any rollout, at a moment nothing here chose.
           #
